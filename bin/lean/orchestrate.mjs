@@ -111,6 +111,7 @@ import { renderAlerts } from "../stats/render.mjs";
 import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
 import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
+import { makeCapWait } from "./capwait.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -245,7 +246,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
@@ -271,6 +272,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const holds = limits ?? memoryLimits(now);
   const heldUntil = () => { try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
   let tripped = saved?.breaker ?? null;
+  let pfAll = false, pfRemote = false, pfNoted = new Set(); // #4866: lane preflight holds
   let opHeld = new Set(); // #4592: operator-held issues this pass (the batch `hold` file is the authority)
   const opHeldHit = new Set(); // held issues that were pending this pass
   // #4376: operator cancel (the batch `cancel` file through `getCancelled`); persisted, but the file stays the authority.
@@ -289,6 +291,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
   let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
+  const capWait = makeCapWait({ now }); // #4909: a lane refused for capacity waits for a free slot, recorded as queue time
   let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
@@ -505,9 +508,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
         } else if (cap && Number.isInteger(cap.free)) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
+          if (capWait.blocked(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
           if (capAdmits >= cap.free && remoteRun.size < remoteMax) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
-        if (p.where === "remote" && remoteRun.size < remoteMax) { remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
+        if (p.where === "remote" && remoteRun.size < remoteMax) { capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
         if (p.where === "remote" && !remote.fallbackLocal) return false;
         if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
@@ -554,8 +558,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
-      ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
+      ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
+      ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
@@ -621,6 +626,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (row.outcome === "deferred") {
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
+      let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
+      if (r?.code === "sandbox.capacity") {
+        capWait.refused(n);
+        try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
+      }
       if (!pol.capped) {
         if (!pol.host) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
         // A usage limit is held per account; the hold, not a per-issue delay, gates the retry, so a lane on another
@@ -629,7 +639,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pol.hold) {
           try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
         }
-        requeue(n, delayMs); done(); save();
+        requeue(n, capGated && !pol.hold ? 0 : delayMs); done(); save();
         update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s${pol.hold ? " (admissions held)" : ""}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
         return;
       }
@@ -740,8 +750,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
     const pl = placed.get(n);
     placed.delete(n);
+    const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
-    const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    const rec = { startedAt: now(), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     runRecs.set(n, rec); notBefore.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
@@ -751,13 +762,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let gone = null;
       if (dispatchCheck && !cancelled && !pf?.closed && !pf?.parked) {
         try { gone = (await dispatchCheck(n)) ?? null; } catch { gone = null; }
-        if (!["merged", "invalid"].includes(gone?.outcome)) gone = null;
+        if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
       else if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
-      else if (gone) r = { terminalReason: gone.outcome, pr: Number.isInteger(gone.pr) ? gone.pr : null, cost_usd: 0, detail: `skipped at dispatch: ${gone.detail ?? gone.outcome}` };
+      else if (gone) r = { terminalReason: gone.outcome, ...(gone.outcome === "deferred" && gone.code ? { code: gone.code } : {}), pr: Number.isInteger(gone.pr) ? gone.pr : null, cost_usd: 0, detail: `skipped at dispatch: ${gone.detail ?? gone.outcome}` };
       // #4389: a parked post-deploy follow-up starts no lane; it ends awaiting-promotion|awaiting-precondition, re-checked next batch.
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
@@ -1059,7 +1070,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       refreshHeld();
       await refreshBlocked();
       checkGates();
+      // #4866: lane preflight. A failing check holds admission (all lanes, or only remote ones by its scope), says why once per batch,
+      // and is re-checked every pass so the batch resumes on its own; it is not an engine-error, so the breaker never sees it.
+      pfAll = false; pfRemote = false;
+      if (preflight && !tripped && !cancelled && !holdUntil && pending.length) {
+        let fails = [];
+        try { fails = (await preflight()) ?? []; } catch { fails = []; }
+        for (const f of fails) { if (f.scope === "remote") pfRemote = true; else pfAll = true; }
+        const keys = new Set(fails.map((f) => `${f.code}|${f.detail}`));
+        for (const f of fails) if (!pfNoted.has(`${f.code}|${f.detail}`)) update({ issue: null, outcome: "preflight", code: f.code, detail: `${f.code}: ${f.detail}; admissions paused until it clears` });
+        if (pfNoted.size && !keys.size) update({ issue: null, outcome: "preflight", detail: "preflight cleared; admissions resumed" });
+        pfNoted = keys;
+      }
       const isReady = (n) => {
+        if (pfAll || (pfRemote && isRemote(n))) return false;
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
@@ -1140,6 +1164,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if ((getAdded || getRequeued) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
+      if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
@@ -1151,6 +1176,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
+      else if (pending.length && (pfAll || pfRemote)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
       else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
@@ -1240,6 +1266,15 @@ export function formatTable(rows) {
  * #4169 batch-report line: wait time per phase summed over the rows' lane `waits` ({phase: ms}), and the heavy-step
  * semaphore queue: `now` live from `heavyStats.queued`, `max` the longest queue a lane of this batch saw. Null when nothing waited or queued.
  */
+/**
+ * #4908: the lane's phase ledger for its batch row, plus `queue_wait` (the admission wait the batch saw; it precedes the lane
+ * clock, so the other phases still sum to `wall_ms`). Null without a ledger.
+ */
+export function phasesOf(r, rec) {
+  if (!r?.phases || typeof r.phases !== "object" || !Object.keys(r.phases).length) return null;
+  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs) } } : {}), ...r.phases };
+}
+
 export function formatWaitSummary(rows, heavyStats = null) {
   const by = {};
   for (const r of rows ?? []) for (const [p, ms] of Object.entries(r?.waits ?? {})) if (Number.isFinite(ms) && ms >= 0) by[p] = (by[p] ?? 0) + ms;

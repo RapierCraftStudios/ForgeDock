@@ -754,8 +754,40 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "invalid"], [2, "merged"]]);
   });
 
+  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease; an expired or unreadable one runs, and the issue's own open lane PR runs (#4931)", async () => {
+    const mk = (issue, opts) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[a.length - 1] === "body") { if (opts.body instanceof Error) throw opts.body; return opts.body ?? "{}"; }
+      if (a[0] === "issue") return issue;
+      if (a.includes("open")) { if (opts.open instanceof Error) throw opts.open; return opts.open ?? "[]"; }
+      return "[]";
+    } });
+    const lease = (until) => JSON.stringify({ body: `x\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 9, lease: { by: "core_1", until, host: "sbx", pid: 1 } })}\n-->` });
+    const OPEN = '{"state":"OPEN"}';
+    const held = await mk(OPEN, { body: lease(Date.now() + 600000) })(9);
+    assert.equal(held.outcome, "deferred"); assert.equal(held.code, "lease.held"); assert.match(held.detail, /leased by core_1 until \d{4}-/);
+    assert.equal(await mk(OPEN, { body: lease(Date.now() - 1000) })(9), null, "expired lease: run");
+    // #4931: an open feat/issue-9-lean PR is this issue's own lane (ci.red / base.conflict recovery, a relaunch after
+    // engine-error or ci-pending resumes it), never another lane's: the lane runs
+    assert.equal(await mk(OPEN, { open: '[{"number":4919}]' })(9), null, "own open lane PR: run (resume it)");
+    assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
+    assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
+  });
+  it("#4920 a deferred dispatch check launches no lane and no sandbox, and a restarted batch (new orchestrate) defers again", async () => {
+    for (const round of [1, 2]) { // round 2: a fresh orchestrate call = a daemon restart; the answer is read from GitHub each time
+      const { now, sleep } = fakeClock();
+      let launched = 0;
+      const rows = await orchestrate({ issues: [5], readBody: async () => "", now, sleep, maxDeferrals: 1,
+        remote: { max: 1, place: () => ({ where: "remote", reason: "heavy" }) },
+        dispatchCheck: async () => ({ outcome: "deferred", code: "lease.held", detail: "issue 5 leased by core_1 until 2999-01-01T00:00:00.000Z" }),
+        runOne: async () => { launched++; return { terminalReason: "merged", cost_usd: 0 }; } });
+      assert.equal(launched, 0, `round ${round}: no lane, no sandbox`);
+      assert.equal(rows[0].outcome, "deferred", `round ${round}`);
+    }
+  });
   it("makeDispatchCheck: merged head-branch PR, closed issue, open issue, unreadable answers fail open", async () => {
-    const mk = (issue, prs, events = "") => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+    const mk = (issue, prs, events = "", { body = "{}", open = "[]" } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[a.length - 1] === "body") return body; // #4920: the lease lookup
+      if (a[0] === "pr" && a.includes("open")) return open; // #4920: the open lane PR lookup
       if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason"]); if (issue instanceof Error) throw issue; return issue; }
       if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);

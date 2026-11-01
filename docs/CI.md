@@ -55,11 +55,13 @@ In your repository: **Settings → Secrets and variables → Actions → Variabl
 
 The workflow reports its verdict as the `forge/deploy-gate` commit status on the PR head:
 
-| Newest trusted marker on the PR | `forge/deploy-gate` |
+| Newest counted trusted marker on the PR | `forge/deploy-gate` |
 |---|---|
-| `FORGE:GATE_PASS` | success |
-| `FORGE:GATE_FAILURE` | failure |
+| `FORGE:GATE_PASS` (final staging-review verdict for the current head) | success |
+| `FORGE:GATE_FAILURE` (for the current head, or naming no head) | failure |
 | none | pending, at any age |
+
+A pass counts only when it is the review's final verdict (`FORGE:GATE_PASS:TYPE=staging-review`) and its `**Head**:` line is the PR's current head. The review's pre-dispatch gate posts an earlier, plain `GATE_PASS` before any reviewer has run, and that one does not count. A push to staging after the review leaves the status pending until a delta review passes the new head.
 
 A posted marker re-runs the check, so the status follows the review. The workflow's own job check is not the gate. It stays green while a review runs, so the staging review's CI read is not blocked by the gate it is about to satisfy.
 

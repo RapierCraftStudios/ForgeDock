@@ -23,7 +23,9 @@ import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/ev
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
+import { normalizeKindModes } from "./lean/conformance.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
+import { otherLaneOwner } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
@@ -113,6 +115,17 @@ export function readConformanceMode(cwd = process.cwd()) {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.conformance ?? "").trim();
     return ["shadow", "enforce"].includes(v) ? v : undefined;
   } catch { return undefined; }
+}
+/** forge.yaml `engine.conformance_kinds`: `"code=mode, code=mode"` (flat: the reader has no third level), mode enforce|shadow; invalid entries are dropped, undefined when none is left. */
+export function readConformanceKinds(cwd = process.cwd()) {
+  try {
+    const k = normalizeKindModes(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.conformance_kinds);
+    return Object.keys(k).length ? k : undefined;
+  } catch { return undefined; }
+}
+/** forge.yaml `engine.conformance_mutation` (off|report, #4913): rerun each evidence test with the change reverted; undefined (off) when absent or invalid. */
+export function readConformanceMutation(cwd = process.cwd()) {
+  try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.conformance_mutation ?? "").trim() === "report" ? "report" : undefined; } catch { return undefined; }
 }
 /** forge.yaml `engine.review_incomplete` (needs-human|degraded, #4160); undefined when absent or invalid (the core defaults to needs-human). */
 export function readReviewIncomplete(cwd = process.cwd()) {
@@ -940,7 +953,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1578,6 +1591,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
+  const { formatLedgerSummary } = await import("./lean/phaseledger.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
@@ -1611,7 +1625,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -1650,7 +1664,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const bud = exec.budget ?? {};
       const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0,
         ...(Number.isFinite(exec.unreachableWindowMin) ? { unreachableWindowMs: exec.unreachableWindowMin * 60000 } : {}),
-        ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
+        ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
+        logTail: (h) => { try { return readFileSync(batch.logFile(h.issue), "utf8").slice(-4000); } catch { return ""; } } }); // #4866: a clone failure in the lane log types sandbox.clone
       remoteStop = remoteLanes.stopLane;
       lanes = withPlacement(remoteLanes);
       {
@@ -1813,11 +1828,19 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     try { const { readLocalRuns } = await import("./stats/local-source.mjs"); history = laneHistory(readLocalRuns(dir), repo); } catch { history = {}; }
     estimate = async (n, { body }) => estimateLaneMinutes({ labels: await labelNames(n), body, history });
   }
+  // #4866: lane preflight (pool auth/version, PATH shim loops, gh fields): failing checks hold admission, re-checked each pass.
+  let preflight = deps.preflight === undefined ? null : deps.preflight;
+  if (deps.preflight === undefined && !testDeps) {
+    const laneCheck = await import("./lean/lanecheck.mjs");
+    const hostIo = await laneCheck.hostLaneIo({ env });
+    preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
+  }
   let rows;
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
+      ...(preflight ? { preflight } : {}),
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
@@ -1875,6 +1898,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
+  report.push(formatLedgerSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows
   const precheckLine = formatPrecheckSummary(rows); // #4331
   if (precheckLine) report.push(precheckLine);
   const firstPassLine = formatFirstPassSummary(rows); // #4362
@@ -1937,6 +1961,11 @@ export function makeDispatchCheck({ gh, repo }) {
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
+    // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
+    // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
+    // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
+    if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
 }
@@ -2036,7 +2065,8 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }) });
+  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
+    ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
   if (!d.running) return d;
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });

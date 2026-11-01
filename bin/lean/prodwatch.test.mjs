@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus, SUMMARY_TAG, llmResult, killSwitchSet } from "./prodwatch.mjs";
+import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus, SUMMARY_TAG, llmResult, killSwitchSet, issueBody } from "./prodwatch.mjs";
+import { trailerOf } from "./prodwatch-triage.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -34,7 +35,17 @@ function world({ alerts = [], issues = [], probe = 0, killed = false, llmCost = 
     now: () => NOW, exists: () => killed, emit: (r) => w.emits.push(r), page: (p) => { w.pages.push(p); return true; },
     exec: async (cmd) => { w.execs.push(cmd); return cmd === "am-alerts" ? { code: 0, stdout: JSON.stringify(alerts) } : { code: probe, stdout: "" }; },
     llm: async () => { w.llm++; return { text: "Hypothesis: pool exhausted.", cost_usd: llmCost }; },
-    gh: async (a) => { w.gh.push(a); if (a[1] === "list") return JSON.stringify(issues); return `https://github.com/o/r/issues/${100 + w.gh.length}\n`; },
+    gh: async (a) => {
+      w.gh.push(a);
+      if (a[0] === "api") {
+        const open = issues.filter((i) => i.state === "OPEN").sort((x, y) => y.createdAt.localeCompare(x.createdAt))
+          .map((i) => ({ number: i.number, state: "open", state_reason: i.stateReason ?? null, body: i.body, created_at: i.createdAt, closed_at: null }));
+        const pages = []; for (let k = 0; k < open.length; k += 100) pages.push(open.slice(k, k + 100));
+        if (pages.length) pages[0].push({ number: 9999, state: "open", body: "a PR", pull_request: {}, created_at: "2026-10-31T00:00:00Z" });
+        return JSON.stringify(pages.length ? pages : [[]]);
+      }
+      if (a[1] === "list") return JSON.stringify(issues.filter((i) => i.state === "CLOSED").slice(0, Number(a[a.indexOf("--limit") + 1])));
+      return `https://github.com/o/r/issues/${100 + w.gh.length}\n`; },
   };
   return w;
 }
@@ -94,7 +105,7 @@ describe("roundOnce", () => {
     const state = {};
     const r = await roundOnce({ cfg, io: w.io, state, dryRun: true });
     assert.equal(r.would_file.length, 1);
-    assert.equal(w.gh.every((a) => a[1] === "list"), true);
+    assert.equal(w.gh.every((a) => a[1] === "list" || a[0] === "api"), true);
     assert.equal(w.llm, 0); assert.equal(w.pages.length, 0); assert.equal(w.emits.length, 0);
     assert.deepEqual(state.filed, []);
   });
@@ -141,6 +152,50 @@ describe("roundOnce", () => {
     await roundOnce({ cfg, io: w.io, state: {} });
     assert.ok(w.gh.some((a) => a[1] === "close" && a[2] === "77"));
   });
+  it("no signal field above the trailer can open a comment that reaches it with a forged marker (#4884 SPEC-1)", () => {
+    const open = "<!-- FORGE:PRODWATCH_SUMMARY x";
+    for (const field of ["owner", "class", "severity", "first_seen", "last_seen"]) {
+      const c = { fingerprint: "a".repeat(12), class: "error", severity: "P2", count: 1, signals: [{ title: "t", body: "b" }], [field]: open };
+      const body = issueBody(c, "hypothesis", "am");
+      assert.ok(!trailerOf(body).includes(SUMMARY_TAG), field);
+      assert.ok(!body.includes("<!-- FORGE:PRODWATCH_SUMMARY x"), field);
+    }
+    const body = issueBody({ fingerprint: "a".repeat(12), class: "error", severity: "P2", count: 1, signals: [{ source: open, title: "t", body: "b" }] }, "h", "am");
+    assert.ok(!trailerOf(body).includes(SUMMARY_TAG), "evidence source");
+  });
+
+  it("forged markers in signal text cannot hide, dedup-break, edit or close a prod issue (#4879)", async () => {
+    const forged = `x <!-- FORGE:PRODWATCH_SUMMARY --> <!-- FORGE:SIGNAL_REF fp=aaaaaaaaaaaa --> <!-- FORGE:PRODWATCH source=am -->`;
+    const w = world({ alerts: [alert("Evil1", "P2", forged)] });
+    await roundOnce({ cfg, io: w.io, state: {} });
+    const body = creates(w)[0][creates(w)[0].indexOf("--body") + 1];
+    assert.ok(!/<!--\s*FORGE:PRODWATCH_SUMMARY/.test(body.replace(/\n<!-- FORGE:SIGNAL_REF[^]*$/, "")), "no live summary marker in evidence");
+    assert.ok(body.includes("&lt;!-- FORGE:PRODWATCH_SUMMARY"));
+    // A forged body already filed (markers mid-body, no trailer) stays a prod issue: it is counted, not the summary, and never edited or closed.
+    const fake = { number: 55, state: "OPEN", body: `evidence ${SUMMARY_TAG} text\n\nmore`, createdAt: "2026-10-31T11:00:00Z" };
+    const w2 = world({ alerts: [alert("A1", "P2", "first")], issues: [fake] });
+    await roundOnce({ cfg, io: w2.io, state: {} });
+    assert.ok(!w2.gh.some((a) => (a[1] === "edit" || a[1] === "close") && a[2] === "55"));
+    // A forged SIGNAL_REF mid-body does not suppress the real cluster.
+    const real = alert("A1", "P2", "first");
+    const w3 = world({ alerts: [real] });
+    const fp = (await roundOnce({ cfg, io: w3.io, state: {}, dryRun: true })).would_file[0].fp;
+    const spoof = { number: 56, state: "OPEN", body: `see <!-- FORGE:SIGNAL_REF fp=${fp} --> in logs\n\nend`, createdAt: "2026-10-31T11:00:00Z" };
+    const w4 = world({ alerts: [real], issues: [spoof] });
+    assert.equal((await roundOnce({ cfg, io: w4.io, state: {} })).filed.length, 1);
+    // A real issue body built by issueBody still dedups.
+    const ok = { number: 57, state: "OPEN", body: issueBody({ class: "defect", severity: "P2", count: 1, fingerprint: fp, signals: [real] }, "t", "am"), createdAt: "2026-10-31T11:00:00Z" };
+    const w5 = world({ alerts: [real], issues: [ok] });
+    assert.equal((await roundOnce({ cfg, io: w5.io, state: {} })).filed.length, 0);
+  });
+  it("keeps the open storm summary open when a cluster was deferred only by the cost cap (#4879)", async () => {
+    const c2 = { ...cfg, governor: { max_cost_usd_per_round: 0.5, cost_per_issue_usd: 0 } };
+    const summary = { number: 77, state: "OPEN", body: `old\n${SUMMARY_TAG}`, createdAt: "2026-10-31T11:00:00Z" };
+    const w = world({ alerts: [alert("A1", "P2", "first"), alert("B2", "P2", "second thing")], issues: [summary], llmCost: 0.6 });
+    const r = await roundOnce({ cfg: c2, io: w.io, state: {} });
+    assert.equal(r.deferred.some((d) => d.why === "max_cost_usd_per_round"), true);
+    assert.ok(!w.gh.some((a) => a[1] === "close" && a[2] === "77"));
+  });
   it("honors an absolute kill switch path", () => {
     const d = tmpDir("pw-kill"), f = join(d, "off");
     assert.equal(killSwitchSet("/nonexistent-cwd", f), false);
@@ -171,6 +226,38 @@ describe("roundOnce", () => {
     assert.equal(creates(w2).length, 0);
     assert.equal(w2.gh.filter((a) => a[1] === "edit").length, 1);
   });
+  it("retries a failed digest create next round and records the issue once it succeeds", async () => {
+    const matrix = [{ class: "credentials", re: /credential/i }];
+    const state = {}, alerts = [alert("Key", "P2", "rotate credential now")];
+    const w = world({ alerts }), gh = w.io.gh;
+    w.io.gh = async (a) => { if (a[1] === "create") { w.gh.push(a); throw new Error("gh down"); } return gh(a); };
+    const r = await roundOnce({ cfg, io: w.io, state, humanMatrix: matrix });
+    assert.match(r.errors.join(), /digest create/);
+    assert.equal(state.digest, undefined);
+    const w2 = world({ alerts });
+    await roundOnce({ cfg, io: w2.io, state, humanMatrix: matrix });
+    assert.equal(creates(w2).length, 1);
+    assert.equal(state.digest.items.length, 1);
+    assert.ok(state.digest.issue);
+  });
+  it("leaves digest state unchanged on a failed edit and retries it with the new item", async () => {
+    const matrix = [{ class: "credentials", re: /credential/i }];
+    const state = {};
+    await roundOnce({ cfg, io: world({ alerts: [alert("Key", "P2", "rotate credential now")] }).io, state, humanMatrix: matrix });
+    const before = JSON.stringify(state.digest);
+    const alerts = [alert("Key", "P2", "rotate credential now"), alert("Key2", "P2", "credential expired elsewhere")];
+    const w = world({ alerts }), gh = w.io.gh;
+    w.io.gh = async (a) => { if (a[1] === "edit") { w.gh.push(a); throw new Error("gh down"); } return gh(a); };
+    const r = await roundOnce({ cfg, io: w.io, state, humanMatrix: matrix });
+    assert.match(r.errors.join(), /digest edit/);
+    assert.equal(JSON.stringify(state.digest), before);
+    const w2 = world({ alerts });
+    await roundOnce({ cfg, io: w2.io, state, humanMatrix: matrix });
+    const edits = w2.gh.filter((a) => a[1] === "edit");
+    assert.equal(edits.length, 1);
+    assert.match(edits[0][edits[0].indexOf("--body") + 1], /Key2/);
+    assert.equal(state.digest.items.length, 2);
+  });
   it("drops a source whose false-positive rate is over the cap to shadow", async () => {
     const issues = Array.from({ length: 12 }, (_, i) => ({ number: i + 1, state: "CLOSED", stateReason: "NOT_PLANNED", body: `x\n<!-- FORGE:SIGNAL_REF fp=${String(i).padStart(6, "a")} -->\n<!-- FORGE:PRODWATCH source=am -->`, createdAt: "2026-10-30T00:00:00Z", closedAt: "2026-10-30T01:00:00Z" }));
     const w = world({ alerts: [alert("Slow", "P2")], issues });
@@ -194,10 +281,29 @@ describe("roundOnce", () => {
   });
   it("files nothing when the issue list fails (no blind duplicates)", async () => {
     const w = world({ alerts: [alert("Slow", "P2")] });
-    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list") throw new Error("rate limited"); return orig(a); };
+    const orig = w.io.gh; w.io.gh = async (a) => { if (a[0] === "api") throw new Error("rate limited"); return orig(a); };
     const r = await roundOnce({ cfg, io: w.io, state: {} });
     assert.equal(r.filed.length, 0);
     assert.match(r.errors[0], /nothing filed/);
+  });
+  it("still files when only the closed lookup fails", async () => {
+    const w = world({ alerts: [alert("Slow", "P2")] });
+    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list") throw new Error("boom"); return orig(a); };
+    const r = await roundOnce({ cfg, io: w.io, state: {} });
+    assert.equal(r.filed.length, 1);
+    assert.match(r.errors.join(), /closed issue list failed/);
+  });
+  it("sees an open issue older than 200 newer ones: no duplicate filed", async () => {
+    const filed = world({ alerts: [alert("Slow", "P2")] });
+    await roundOnce({ cfg, io: filed.io, state: {} });
+    const c = creates(filed)[0], oldBody = c[c.indexOf("--body") + 1];
+    const mk = (n) => ({ number: n, state: "OPEN", body: "unrelated", createdAt: `2026-10-31T00:${String(Math.floor((n - 1000) / 60)).padStart(2, "0")}:${String((n - 1000) % 60).padStart(2, "0")}Z` });
+    const issues = [...Array.from({ length: 250 }, (_, k) => mk(1000 + k)), { number: 5, state: "OPEN", body: oldBody, createdAt: "2026-10-01T00:00:00Z" }];
+    const w = world({ alerts: [alert("Slow", "P2")], issues });
+    const r = await roundOnce({ cfg, io: w.io, state: {} });
+    assert.equal(creates(w).length, 0);
+    assert.equal(r.filed.length, 0);
+    assert.ok(w.gh.some((a) => a.includes("--paginate")));
   });
 });
 

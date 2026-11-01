@@ -5,7 +5,7 @@
 #
 # The builder decides fold-vs-defer (judgment, build.md B2.0); this script does the mechanics for the items
 # that stay deferred: trusted lookup (claim marker <!-- FORGE:DEFERRED_ISSUE: #M --> on the parent, then a state-all search) of a follow-up carrying
-# <!-- FORGE:DEFERRED_FROM: #N -->, append the missing items (exact path match; a closed one is reopened), or create ONE issue
+# <!-- FORGE:DEFERRED_FROM: #N -->, append the missing items (exact path match; a closed one is reopened only if completed, not resolved by a person, and given new items), or create ONE issue
 # with a checklist, claim it on the parent and re-check once for a concurrent lower-numbered duplicate.
 # Items are grouped by class (engineering | post-deploy | external | ops, #4664): one follow-up per class per parent, each
 # labelled `followup:<class>`, carrying `<!-- FORGE:DEFERRED_CLASS: <class> -->` (absent = engineering, for older issues) and the
@@ -142,14 +142,22 @@ search_nums() {
   | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" "$JQ_PRE"'
       [.items[] | select(trusted) | select((.body // "") | contains($m)) | .number] | sort | .[]' 2>/dev/null
 }
-verify_num() { # number -> `number<TAB>state` when a trusted, non-PR issue of class $CLS carries the marker; empty when not (a 404 is "not it")
+verify_num() { # number -> `number<TAB>state` when a trusted, non-PR issue of class $CLS carries the marker (a closed one only if completed and not resolved by a person); empty when not (a 404 is "not it")
   local out rc
   out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
   if [ "$rc" -ne 0 ]; then grep -qE '404|Not Found|410' "$TMP/verr" 2>/dev/null && return 0; return 1; fi
-  printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" --arg cls "$CLS" "$JQ_PRE"'
+  out=$(printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" --arg cls "$CLS" "$JQ_PRE"'
       select(.pull_request == null) | select(trusted) | select((.body // "") | contains($m))
       | select((((.body // "") | capture("FORGE:DEFERRED_CLASS: (?<c>[a-z-]+)") | .c) // "engineering") == $cls)
-      | "\(.number)\t\(.state)"' 2>/dev/null
+      | select(.state != "closed" or .state_reason == "completed")
+      | "\(.number)\t\(.state)"' 2>/dev/null) || return 1
+  # #4924: a closed tracker was resolved on purpose when a person had the last word (fold, supersede, invalid): not reusable.
+  case "$out" in *$'\t'closed)
+    local last
+    last=$(gh api "repos/${REPO}/issues/$1/comments?per_page=100" 2>/dev/null | jq -r 'if type == "array" and length > 0 then (last | .user.type // "") else "" end' 2>/dev/null) || return 1
+    [ -z "$last" ] || [ "$last" = "Bot" ] || out="" ;;
+  esac
+  printf '%s' "$out"
 }
 CANON=""; CSTATE=""
 pick_verified() { # numbers... ; sets CANON/CSTATE from the first verified one; non-zero only when a fetch failed
@@ -323,10 +331,15 @@ append_items() { # number state ; non-zero = failure
     else
       gh issue edit "$num" -R "$REPO" --body-file "$TMP/newbody" >/dev/null 2>&1 || return 1
     fi
-  fi
-  if [ "$state" = "closed" ]; then
-    if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue reopen $num" >&2
-    else gh issue reopen "$num" -R "$REPO" >/dev/null 2>&1 || return 1; fi
+    # #4924: reopen only for new items, and say why.
+    if [ "$state" = "closed" ]; then
+      if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue reopen $num" >&2
+      else
+        gh issue reopen "$num" -R "$REPO" >/dev/null 2>&1 || return 1
+        gh issue comment "$num" -R "$REPO" --body "$(printf '<!-- FORGE:FOLLOWUP_REOPENED -->\nReopened by the run of #%s%s: it deferred new items not yet tracked here:\n\n%s' "$PARENT" "${FORGE_RUN_ID:+ (run \`$FORGE_RUN_ID\`)}" "$(cat "$TMP/add")")" >/dev/null 2>&1 \
+          || echo "file-deferred-followups: warning: could not post reopen comment on #${num}" >&2
+      fi
+    fi
   fi
   return 0
 }

@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -43,6 +43,10 @@ const NO_BUDGET = { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd
 const ledgerIn = (root, { pid = process.pid, host = HOST } = {}) => (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n, host, pid });
 
 describe("execution config (#4253)", () => {
+  it("warm_sandboxes: positive integer kept, default 0 omitted (#4912)", () => {
+    assert.equal(parseExecution({ mode: "remote", warm_sandboxes: "2" }).warmSandboxes, 2);
+    for (const v of [undefined, "0", "-1", "x", "1.5"]) assert.ok(!("warmSandboxes" in parseExecution({ mode: "remote", ...(v === undefined ? {} : { warm_sandboxes: v }) })));
+  });
   it("pool is a known sandbox provider (#4546)", () => {
     assert.ok(SANDBOX_PROVIDERS.includes("pool"));
     assert.equal(parseExecution({ mode: "hybrid", max_remote: "1", provider: "pool" }).provider, "pool");
@@ -127,6 +131,8 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
   it("unreachable: classifies transport errors and parses the window key", () => {
     for (const e of [new TypeError("fetch failed"), Object.assign(new Error("x"), { code: "ECONNRESET" }), Object.assign(new Error("x"), { status: 502 }), Object.assign(new Error("x"), { name: "AbortError" })]) assert.equal(isTransportError(e), true);
     for (const e of [new Error("boom"), Object.assign(new Error("HTTP 404"), { status: 404 })]) assert.equal(isTransportError(e), false);
+    for (const t of ["fatal: git clone timed out after 300s", "git clone failed: early EOF"]) assert.equal(isCloneFailure(t), true); // #4866
+    for (const t of ["clone of repo ok", "", null]) assert.equal(isCloneFailure(t), false);
     assert.equal(parseExecution({}).unreachableWindowMin, undefined); // providerLanes defaults it to 5 min
     assert.equal(parseExecution({ unreachable_window_min: "2" }).unreachableWindowMin, 2);
   });

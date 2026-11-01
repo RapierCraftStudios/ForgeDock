@@ -13,9 +13,9 @@ import { makeLedger } from "./ledger.mjs";
 import { writeIndex } from "./guards.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
-import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
+import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -24,7 +24,7 @@ const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -1117,6 +1117,16 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
   });
 
+  it("a doc the docs round edits outside the deliverables is an implied deliverable (no scope_creep); an unrelated extra file still is", async () => {
+    for (const [extra, code] of [[[], null], [["src/billing.js"], "conformance.scope_creep"]]) {
+      const w = dworld([STALE, { ok: true, output: "OK" }], { changed: ["src/foo.js", "test/foo.test.js"] });
+      const inner = w.io.docsFreshness;
+      w.io.docsFreshness = async (x) => { const r = await inner(x); if (r?.ok && !w.changed.includes("devdocs/modules/lean.md")) w.changed = [...w.changed, "devdocs/modules/lean.md", ...extra]; return r; };
+      const r = await run(w);
+      if (code) assert.equal(r.code, code); else assert.equal(r.terminalReason, "merged");
+    }
+  });
+
   it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
     const w = dworld([STALE]);
     const r = await run(w);
@@ -1330,6 +1340,18 @@ describe("conformance shadow mode (the default)", () => {
       assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
       assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
+    }
+  });
+  it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: v });
+      w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
+      const r = await run(w, { conformance });
+      assert.equal(r.code, ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
+      assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
+      assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);
     }
   });
   it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
@@ -3790,6 +3812,45 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  const NONFF = "To github.com:o/r.git\n ! [rejected] feat/issue-7-lean -> feat/issue-7-lean (non-fast-forward)\nerror: failed to push some refs";
+  const ownerProbe = (w, { open = [], body = "" } = {}) => { // answers #4920's lane-owner lookups only
+    const g0 = w.io.gh;
+    w.io.gh = async (a, o) => {
+      if (a[0] === "pr" && a[1] === "list" && a[a.indexOf("--limit") + 1] === "5") return JSON.stringify(open);
+      if (a[0] === "issue" && a[1] === "view" && a[a.length - 1] === "body") return JSON.stringify({ body });
+      return g0(a, o);
+    };
+    return w;
+  };
+  it("#4920 non-ff push with another lane's open PR ends deferred (lease held), not needs-human", async () => {
+    const w = ownerProbe(world({ pushErrors: [NONFF] }), { open: [{ number: 4919 }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "lease.held");
+    assert.match(r.detail, /non-fast-forward.*PR #4919 is open on feat\/issue-7-lean/);
+  });
+  it("#4920 non-ff push while another lane holds a live lease ends deferred", async () => {
+    const lease = { v: 1, issue: 7, lease: { by: "core_sbx_1_ab12", until: Date.now() + 600000, host: "sbx", pid: 1 } };
+    const w = ownerProbe(world({ pushErrors: [NONFF] }), { body: `x\n<!-- FORGE:STATE\n${JSON.stringify(lease)}\n-->` });
+    const r = await run(w);
+    assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
+  });
+  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
+    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+    assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
+  });
+  it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {
+    const ids = [];
+    for (let i = 0; i < 2; i++) { const w = world(); w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } }; await run(w, { pid: 1, hostName: "sbx" }); ids.push(w.leaseWrites.find((x) => x.lease)?.lease.by); }
+    assert.ok(ids[0] && ids[1] && ids[0] !== ids[1], `${ids}`);
+    assert.match(ids[0], /^core_sbx_1_[0-9a-f]{6}$/);
+    const w = world(); w.leaseWrites = []; let reads = 0;
+    w.io.projector = { readState: async () => (++reads === 1 ? null : { v: 1, lease: { by: "core_sbx_1_other", until: Date.now() + 600000 } }), writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const r = await run(w, { pid: 1, hostName: "sbx" });
+    assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease-held");
+    assert.equal(w.builderCalls?.length ?? 0, 0);
+  });
+
   it("#4118 a rerun reuses a local lane branch with unpushed commits instead of resetting it to the base", async () => {
     const w = world();
     const git0 = w.io.git;
@@ -4062,6 +4123,41 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(w.files[`${WT}/.forge-lean/contract.json`].trim(), contractJson(CONTRACT), "the engine writes the frozen contract into the worktree");
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+  });
+  it("recovery lane replays accepted supersedes amendment (#4899)", async () => {
+    const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
+    const state = { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] };
+    const mk = (st) => ({ body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, st)}`, author_association: "OWNER", user: { type: "User", login: "op" } });
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk(state)] });
+    assert.equal((await run(w, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, "merged");
+    const posted = w.comments.find((c) => c.includes("FORGE:AMENDMENT-STATE"));
+    assert.ok(posted, "the recovery lane re-applies the prior supersedes and posts it");
+    assert.deepEqual(parseAmendmentsComment(posted).amendments, [sup]);
+    // a state bound to another contract hash is ignored
+    const w2 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk({ ...state, contract: "000000000000" })] });
+    await run(w2, { recover: { code: "ci.red", attempt: 1 } });
+    assert.ok(!w2.comments.some((c) => c.includes("FORGE:AMENDMENT-STATE")));
+  });
+  it("#4899 recovery lane keeps enforcing a guard that was not superseded", async () => {
+    const mkGuard = (issue) => ({ v: 1, issue, pr: issue * 10, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: `guard ${issue}` });
+    const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
+    const prior = { body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] })}`, author_association: "OWNER", user: { type: "User", login: "op" } };
+    const dir = tmpDir("guard-recover-");
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), prior], baseFiles: { ":src/foo.js": "old" } });
+    w.io.runCommand = async () => ({ rc: 1, output: "guard test failed" });
+    await run(w, { dir, worktreeRoot: dir, recover: { code: "ci.red", attempt: 1 }, loadGuards: async () => [mkGuard(4785), mkGuard(9)] });
+    const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner").map((c) => c[4])]);
+    assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");
+    assert.doesNotMatch(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#4785\\"/, "precheck does not report the superseded #4785");
+  });
+  it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
+    const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
+    assert.deepEqual(parseAmendmentsComment(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });
+    assert.equal(parseAmendmentsComment(renderAmendments([], {})), null);
+    const frozen = { requirements: [], deliverables: [] };
+    const eff = applyAmendments(frozen, am).contract;
+    assert.deepEqual((eff.supersedes ?? []).map((s) => s.guard), ["#1"]);
+    assert.equal(applyAmendments(frozen, []).contract.supersedes, undefined);
   });
   const scoped = (body = ISSUE_BODY) => contractHash(scopeText({ title: "foo breaks", body: `${body}\n\n<!-- FORGE:STATE {"v":1} -->` }, []));
   it("#4265 a rerun recovers a contract frozen from the current issue scope (engine annotations aside)", async () => {
@@ -6542,6 +6638,42 @@ describe("resume digest in builder prompts (#4400)", () => {
     assert.ok(p.indexOf("Recovery pass (ci.red)") >= 0 && p.indexOf("Recovery pass (ci.red)") < p.indexOf("Resume digest of the last run"), p);
   });
 
+  describe("#4901 FORGE:DECISION after the contract froze", () => {
+    const dec = (t, who = BOT) => ({ body: `<!-- FORGE:DECISION {"v":1} -->\n## Decision\n${t}`, ...who });
+    const CONTRACT_C = { body: frozen().body, ...BOT };
+    const NOBODY = { author: { login: "rando" }, authorAssociation: "NONE" };
+    const withDecisions = (viewComments) => world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozen()], issueBodies: [body], viewComments });
+
+    it("reviewerPrompt keeps trusted FORGE:DECISION comments, drops other FORGE: records and untrusted decisions", () => {
+      const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "", comments: [dec("deliver the nightly timer"), dec("evil override", NOBODY),
+        { body: "<!-- FORGE:STATE\n{}\n-->", ...BOT }, { body: "<!-- FORGE:TRAJECTORY -->\nt", ...BOT }, { body: "<!-- FORGE:FACTS -->\nf", ...BOT }] });
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /evil override|FORGE:STATE|FORGE:TRAJECTORY|FORGE:FACTS/);
+    });
+
+    it("decisionNote: only trusted decisions after the last contract; recovery records skipped", () => {
+      const n = decisionNote([dec("old, before contract"), CONTRACT_C, dec("declare supersedes X"), dec("untrusted", NOBODY), { body: "<!-- FORGE:DECISION -->\n## Decision: recovery pass for `ci.red` (attempt 1)", ...BOT }]);
+      assert.match(n, /declare supersedes X/);
+      assert.doesNotMatch(n, /old, before contract|untrusted|recovery pass/);
+      assert.equal(decisionNote([CONTRACT_C]), "");
+    });
+
+    it("a requeued lane with a frozen contract gives the builder a newer trusted decision, not an untrusted or older one", async () => {
+      const w = withDecisions([dec("older decision"), CONTRACT_C, dec("deliver the nightly timer"), dec("untrusted override", NOBODY), { body: factsRec, ...BOT }]);
+      await run(w);
+      const p = builders(w)[0][4];
+      assert.match(p, /Binding decisions posted after the contract froze/);
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /untrusted override|older decision/);
+    });
+
+    it("context_pack off still passes the decision", async () => {
+      const w = withDecisions([CONTRACT_C, dec("deliver the nightly timer")]);
+      await run(w, { contextPack: { mode: "off" } });
+      assert.match(builders(w)[0][4], /deliver the nightly timer/);
+    });
+  });
+
   it("a first run gets no digest; context_pack off gives none; the contract quotes are unchanged", async () => {
     const first = world({ issueBodies: [body], viewComments: [{ body: factsRec, ...BOT }] });
     await run(first);
@@ -6886,5 +7018,53 @@ describe("block rules: a check timeout is not a block (#4589)", () => {
   it("tells the builder rc 124 is host load, never a human block", async () => {
     const { blockCorrectionPrompt } = await import("./prompts.mjs");
     assert.match(blockCorrectionPrompt("x"), /times out \(rc 124\) is host load, never a block/);
+  });
+});
+
+describe("per-kind conformance modes (engine.conformance_kinds)", () => {
+  const CREEP = ["src/foo.js", "src/billing.js", "test/foo.test.js"];
+  const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+  const blockedNothingMerged = (w) => { assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.ok(w.edits.some((e) => e.includes("needs-human"))); };
+  it("a shadow kind in an enforce lane is recorded, not blocking; the lane merges", async () => {
+    const w = world({ changed: CREEP, reviews: [conf({}, CONTRACT, CREEP)] });
+    const r = await run(w, { conformance: "enforce", conformanceKinds: { "conformance.scope_creep": "shadow" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
+  });
+
+  it("an enforce kind in a shadow lane blocks (scope creep is recorded-only in shadow by default)", async () => {
+    const w = world({ changed: CREEP });
+    const r = await run(w, { conformance: "shadow", conformanceKinds: { "conformance.scope_creep": "enforce" } });
+    assert.equal(r.code, "conformance.scope_creep"); assert.equal(reviewers(w).length, 0);
+    blockedNothingMerged(w);
+  });
+
+  it("an enforce lane without kinds still blocks scope creep (unchanged default)", async () => {
+    const w = world({ changed: CREEP });
+    assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
+  });
+});
+
+describe("mutation check (engine.conformance_mutation, #4913)", () => {
+  const MC = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "test/foo.test.js", change: "t", requirements: ["R1"] }] };
+  const setup = (rc) => {
+    const w = world({ contract: MC, result: { status: "fixed", summary: "s", evidence: [], tests: [], validation: [{ id: "V1", exit: 0 }] } });
+    w.cmds = []; w.io.runCommand = async (a) => { w.cmds.push(a.command); return { rc: a.command.includes("--test") && w.cmds.length > 0 ? rc : 0, output: "" }; };
+    return w;
+  };
+  const applied = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "apply").length;
+  it("off (default): no revert, no extra command", async () => {
+    const w = setup(0); await run(w, { conformance: "shadow" });
+    assert.equal(applied(w), 0); assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "checkout" && c[2] === "HEAD"));
+  });
+  it("report: a vacuous test is recorded (shadow kind), the lane still merges, the tree is restored", async () => {
+    const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report" });
+    assert.equal(r.terminalReason, "merged"); assert.equal(applied(w), 1);
+    const seq = w.calls.filter((c) => c[0] === "git" && (c[1] === "apply" || (c[1] === "reset" && c[3] === "--hard"))).map((c) => c[1]);
+    assert.deepEqual(seq, ["apply", "reset"]);
+  });
+  it("report with the kind set to enforce blocks on a survivor", async () => {
+    const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report", conformanceKinds: { "conformance.mutation_survived": "enforce" } });
+    assert.equal(r.code, "conformance.mutation_survived"); assert.equal(w.merges.length, 0);
   });
 });

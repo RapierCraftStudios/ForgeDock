@@ -69,6 +69,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
   const p = (id) => `/sandboxes/${encodeURIComponent(id)}`;
   return {
     async launch(spec) { const r = await call("POST", "/sandboxes", spec); if (!r.ok) throw fail("launch", r); return r.data ?? {}; },
+    /** #4912: hand the lane to a ready warm sandbox. 200/201 = claimed; 204/404/405 (none ready, or a pool without warm sandboxes) = null. */
+    async claim(spec) { const r = await call("POST", "/sandboxes/claim", spec); if (r.status === 200 || r.status === 201) return r.data ?? {}; if (r.status === 204 || r.status === 404 || r.status === 405) return null; throw fail("claim", r); },
     async status(id) {
       const r = await call("GET", p(id));
       if (r.status === 404) return "gone";
@@ -185,16 +187,21 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const li = args.indexOf("--lane");
       const resultFile = `/result/${issue}.json`;
       const relayEnv = relays.length ? { CS_RELAY_COMMANDS: relayCommandNames(relay).join(","), CS_RELAY_CAPS: relays.join(","), ...(await prefetchEnv(issue)) } : {};
+      const warm = Number.isInteger(settings.warmSandboxes) && settings.warmSandboxes > 0 ? settings.warmSandboxes : 0;
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
+        ...(warm ? { warm } : {}), // #4912: the pool agent keeps this many warm sandboxes for the repo
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
         // The host's git identity: without it the lane image falls back to a placeholder author that fails DCO.
         env: { ...gitIdentityEnv(gitIdentity(), laneEnv ?? {}), ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}), ...relayEnv }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
         command: ["forgedock", "run-issue", String(issue), ...args, "--result-file", resultFile], result_file: resultFile,
       };
       const startedAt = now();
-      await transport.launch(spec);
+      // #4912: a ready warm sandbox first; none, an error or a transport without claim is the cold start.
+      let claimed = null;
+      if (warm && typeof transport.claim === "function") { try { claimed = await transport.claim(spec); } catch { claimed = null; } }
+      if (!claimed) await transport.launch(spec);
       return { provider: name, id, issue, startedAt, minutes: 0 };
     },
     async status(h) {

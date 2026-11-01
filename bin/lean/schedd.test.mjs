@@ -586,12 +586,14 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       for (const bad of ["msg-token", "sess", "CLAUDE_CODE_", session, wrapper]) assert.equal(raw.includes(bad), false, `${bad} not pinned`);
       await withRoot(h, async () => {
         await capture(() => orchestrateFromCli(["--set-env", id, "MY_VAR=1"], h.client));
-        await assert.rejects(() => orchestrateFromCli(["--set-env", id, "GH_TOKEN=abc"], h.client), /never stored in batch state/); // #4787
+        // A value no env var can hold by chance: "abc" matched GITHUB_SHA on a CI push run (8b70782b...068abc...).
+        const secret = "gh-token-value-never-pinned";
+        await assert.rejects(() => orchestrateFromCli(["--set-env", id, `GH_TOKEN=${secret}`], h.client), /never stored in batch state/); // #4787
         assert.equal(openBatch(h.root, id).readPlan().env.MY_VAR, "1");
         const { lines } = await capture(() => orchestrateFromCli(["--show-env", id], h.client));
         assert.equal(/GH_TOKEN/.test(lines.join("\n")), false);
         assert.match(lines.join("\n"), /^MY_VAR=1$/m);
-        assert.equal(lines.join("\n").includes("abc"), false);
+        assert.equal(lines.join("\n").includes(secret), false);
         await capture(() => orchestrateFromCli(["--unset-env", id, "MY_VAR"], h.client));
         assert.equal("MY_VAR" in openBatch(h.root, id).readPlan().env, false);
         await assert.rejects(() => orchestrateFromCli(["--set-env", id, "NOEQUALS"], h.client), /KEY=VAL/);

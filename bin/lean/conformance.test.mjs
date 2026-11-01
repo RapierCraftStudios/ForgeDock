@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified } from "./conformance.mjs";
+import { vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -81,6 +81,27 @@ describe("#4655 multi-requirement amendment references", () => {
     assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
     assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
   });
+  it("supersede-guard guards[] expands to per-guard supersedes", () => {
+    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.contract.supersedes, [{ guard: "#4879", why: "x" }, { guard: "#4838", why: "x" }]);
+    assert.equal(a.applied.length, 2);
+  });
+  it("synonym kinds and a supersedes amendment with guards[] expand alike; an invalid guard id is reported", () => {
+    for (const kind of ["supersede", "supersedes-guard", "supersedes"]) {
+      const a = applyAmendments(C, [{ kind, guards: ["4879", "#4838"], why: "x" }]);
+      assert.deepEqual(a.problems, [], kind);
+      assert.deepEqual(a.contract.supersedes.map((s) => s.guard), ["#4879", "#4838"], kind);
+    }
+    const bad = applyAmendments(C, [{ kind: "supersedes", guards: ["#4879", "abc"], why: "x" }]);
+    assert.equal(bad.problems.length, 1);
+    assert.match(bad.problems[0], /needs guard/);
+    assert.deepEqual(bad.contract.supersedes.map((s) => s.guard), ["#4879"]);
+    assert.match(applyAmendments(C, [{ kind: "supersede-guard", guards: [], why: "x" }]).problems[0], /needs guard/);
+  });
+  it("an unrelated unknown kind is still rejected with the valid-kinds message", () => {
+    assert.match(applyAmendments(C, [{ kind: "supersede-everything", guards: ["#1"], why: "w" }]).problems[0], /unknown kind 'supersede-everything'; valid kinds are/);
+  });
 });
 
 describe("#4574 amendment slips", () => {
@@ -141,6 +162,9 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 127, output: "bash: pytest: command not found" } } })), [], "CI-verified head: like a validate left to CI");
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 0, output: "" } } })), [], "a passing rerun counts as passed");
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError: 1 !== 2" } } })), ["conformance.unimplemented"]);
+    // #4906: a rerun that timed out (rc 124) is infrastructure, never conformance.unimplemented
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 124, output: "(timed out)" } } })), ["env.validate_timeout"]);
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 124, output: "" } } })), [], "CI-verified head covers a timed-out rerun");
     const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
     assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
   });
@@ -838,5 +862,133 @@ describe("decision amendments (#4695)", () => {
   });
   it("a decision without choice or anchors is an incomplete amendment", () => {
     assert.match(amend({ choice: "" }).problems[0], /needs decision/);
+  });
+});
+
+describe("implied docs-freshness deliverable", () => {
+  const base = ["src/scrape.js"], after = [...base, "src/search.js", "docs/guide.md", "src/extra.js"];
+  it("a doc path newly added by a freshness fix round becomes an add-deliverable amendment, a code file does not", () => {
+    const am = impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: true });
+    assert.deepEqual(am, [{ kind: "add-deliverable", path: "docs/guide.md", why: "docs freshness rule" }]);
+  });
+  it("applied, the doc passes conformance and an unrelated out-of-contract file in the same round is still scope_creep", () => {
+    const am = impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: true });
+    const { contract } = applyAmendments(C, am, ISSUE);
+    const pc = precheck({ contract, changedFiles: ["src/scrape.js", "src/search.js", "docs/guide.md", "src/extra.js"], result: null });
+    const creep = pc.failures.filter((f) => f.kind === "scope_creep").map((f) => f.detail).join();
+    assert.match(creep, /src\/extra\.js/); assert.doesNotMatch(creep, /docs\/guide\.md/);
+  });
+  it("only prose files under a docs directory are implied: build, dependency, agent-instruction and spec files stay scope_creep", () => {
+    const bad = ["requirements.txt", "CMakeLists.txt", "CLAUDE.md", "AGENTS.md", "commands/work-on.md", ".claude/agents/x.md", "notes.txt", "docs/run.sh"];
+    const good = ["devdocs/modules/lean.md", "doc/api.rst", "packages/web/docs/setup.mdx"];
+    const am = impliedDocDeliverables({ before: base, after: [...base, ...bad, ...good], contract: C, wasFailing: true, nowOk: true });
+    assert.deepEqual(am.map((a) => a.path), good);
+  });
+  it("nothing is implied unless the rule failed before the round and passes after, or when the doc was already changed or covered", () => {
+    assert.deepEqual(impliedDocDeliverables({ before: base, after, contract: C, wasFailing: false, nowOk: true }), []);
+    assert.deepEqual(impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: false }), []);
+    assert.deepEqual(impliedDocDeliverables({ before: [...base, "docs/guide.md"], after, contract: C, wasFailing: true, nowOk: true }), []);
+  });
+});
+
+import { normalizeKindModes, blockingFailures, unverifiedRequirements, KIND_MODES } from "./conformance.mjs";
+
+describe("per-kind modes and requirement evidence", () => {
+  const f = (code) => ({ code });
+  const ALLOW = ["conformance.unimplemented"];
+  it("normalizeKindModes keeps valid entries from a map or the flat forge.yaml string", () => {
+    assert.deepEqual(KIND_MODES, ["enforce", "shadow"]);
+    assert.deepEqual(normalizeKindModes({ "a.b": "shadow", c: "bogus", d: "enforce" }), { "a.b": "shadow", d: "enforce" });
+    assert.deepEqual(normalizeKindModes("a.b=shadow, c.d = enforce, x=nope"), { "a.b": "shadow", "c.d": "enforce" });
+    assert.deepEqual(normalizeKindModes(null), {});
+  });
+  it("a shadow kind is recorded and an enforce kind blocks, in either lane mode", () => {
+    const kinds = { "k.shadow": "shadow", "k.enforce": "enforce" };
+    for (const shadow of [true, false]) {
+      const r = blockingFailures([f("k.shadow"), f("k.enforce")], { shadow, kinds });
+      assert.deepEqual([r.block.map((x) => x.code), r.record.map((x) => x.code)], [["k.enforce"], ["k.shadow"]]);
+    }
+  });
+  it("kinds without their own mode follow the lane: enforce blocks all, shadow only the allowlist", () => {
+    assert.equal(blockingFailures([f("x"), f("conformance.unimplemented")], { shadow: false }).block.length, 2);
+    const r = blockingFailures([f("x"), f("conformance.unimplemented")], { shadow: true, allow: ALLOW });
+    assert.deepEqual([r.block.map((x) => x.code), r.record.map((x) => x.code)], [["conformance.unimplemented"], ["x"]]);
+    assert.equal(blockingFailures([f("conformance.unimplemented")], { shadow: true, allow: ALLOW, kinds: { "conformance.unimplemented": "shadow" } }).block.length, 0);
+  });
+  it("a deliver requirement with no executed evidence test is unverified, with its id", () => {
+    const c = {
+      requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "deliver" }, { id: "R3", disposition: "deliver" }, { id: "R4", disposition: "defer" }, { id: "R5", disposition: "deliver", verify: "out_of_band" }],
+      deliverables: [{ id: "D1", path: "src/a.js", requirements: ["R1"] }, { id: "D2", path: "test/a.test.js", requirements: ["R1"] }, { id: "D3", path: "test/b.test.js", requirements: ["R2"] }],
+      validate: [{ id: "V1", command: "node --test test/a.test.js" }, { id: "V2", command: "node --test test/b.test.js" }],
+    };
+    const u = (o) => unverifiedRequirements(c, o).map((x) => x.id);
+    assert.deepEqual(u({ runs: [{ id: "V1", exit: 0 }, { id: "V2", exit: 1 }] }), ["R2", "R3"]);
+    assert.deepEqual(u({ runs: [{ id: "V1", exit: 1 }], reruns: { V1: { rc: 0 }, V2: { rc: 0 } } }), ["R3"]);
+    assert.deepEqual(u({ runs: [], ciCovered: ["V1", "V2"] }), ["R3"]);
+    assert.deepEqual(u({ runs: [{ id: "V1", exit: 0 }, { id: "V2", exit: 0 }], reruns: { V2: { rc: 1 } } }), ["R2", "R3"]);
+  });
+  it("formatShadowSummary adds per-kind shares only when rows carry kinds", () => {
+    const rows = [{ conformance: { mode: "shadow", would: "nonconforming", kinds: ["a.b"] } }, { conformance: { mode: "shadow", would: "conforms", kinds: [] } }];
+    assert.match(formatShadowSummary(rows), /; per kind: a\.b 1\/2 \(50%\)$/);
+    assert.doesNotMatch(formatShadowSummary([{ conformance: { mode: "shadow", would: "conforms" } }]), /per kind/);
+  });
+});
+
+import { mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED } from "./conformance.mjs";
+
+describe("mutation check (#4913)", () => {
+  const c = {
+    requirements: [{ id: "R1", quote: "q1", disposition: "deliver" }, { id: "R2", quote: "q2", disposition: "deliver" }, { id: "R3", quote: "q3", disposition: "deliver", verify: "out_of_band", evidence: "job" }],
+    deliverables: [{ id: "D1", path: "test/a.test.js", requirements: ["R1", "R3"] }, { id: "D2", path: "src/b.js", requirements: ["R2"] }],
+    validate: [{ id: "V1", command: "node --test test/a.test.js" }],
+  };
+  const green = { runs: [{ id: "V1", exit: 0 }] };
+  it("targets only deliver requirements whose evidence test ran green", () => {
+    assert.deepEqual(mutationTargets(c, green), [{ id: "R1", commands: [{ id: "V1", command: "node --test test/a.test.js" }] }]);
+    assert.deepEqual(mutationTargets(c, { runs: [{ id: "V1", exit: 1 }] }), []);
+  });
+  it("only a survivor fails; killed and skipped never do", () => {
+    const f = mutationFailures([{ id: "R1", command: "x", status: "survived" }, { id: "R2", command: "y", status: "killed" }, { id: "R4", command: "z", status: "skipped" }]);
+    assert.equal(f.length, 1); assert.equal(f[0].code, MUTATION_SURVIVED); assert.match(f[0].detail, /^R1 /);
+  });
+  const harness = (o = {}) => {
+    const calls = [], fs = { writeFileSync() {}, rmSync() {} };
+    let restored = false;
+    const git = async (a) => { calls.push(a.join(" ")); if (a[0] === "reset") restored = true; if (a[0] === "status") return restored ? (o.stillDirty ?? "") : (o.dirty ?? ""); if (a[0] === "apply" && o.applyFails) throw new Error("no"); return "patch"; };
+    const runCommand = async () => { calls.push("run"); if (o.throws) throw new Error("boom"); return { rc: o.rc ?? 0 }; };
+    const targets = mutationTargets(c, green);
+    return { calls, go: () => runMutationCheck({ targets, files: ["src/b.js", "test/a.test.js"], base: "origin/staging", git, runCommand, cwd: "/w", fs, tmp: "/t" }) };
+  };
+  it("reverts only non-test files, reruns, then restores from HEAD (reset + clean of those paths)", async () => {
+    const h = harness(); const r = await h.go();
+    assert.deepEqual(r.results.map((x) => x.status), ["survived"]);
+    assert.ok(h.calls.some((x) => x.startsWith("diff --binary origin/staging...HEAD -- src/b.js") && !x.includes("test/a")));
+    assert.deepEqual(h.calls.filter((x) => /^(apply|run|reset|clean)/.test(x)), ["apply -R --whitespace=nowarn /t/mutation-" + process.pid + ".patch", "run", "reset -q --hard HEAD", "clean -fdq -- src/b.js"]);
+  });
+  it("a failing rerun is killed; the tree is restored even when the command throws", async () => {
+    assert.equal((await harness({ rc: 1 }).go()).results[0].status, "killed");
+    const h = harness({ throws: true }); assert.equal((await h.go()).results[0].status, "skipped");
+    assert.equal(h.calls.at(-1), "status --porcelain -- src/b.js");
+  });
+  it("a dirty tree or a failed revert skips without running anything or restoring", async () => {
+    for (const o of [{ dirty: " M src/b.js" }, { applyFails: true }]) { const h = harness(o); const r = await h.go(); assert.deepEqual(r.results, []); assert.ok(r.skipped); assert.ok(!h.calls.includes("run") && !h.calls.some((x) => x.startsWith("reset"))); }
+  });
+  it("#4931: a tree still dirty after the restore throws instead of returning (never push the reverted change)", async () => {
+    await assert.rejects(harness({ stillDirty: "?? src/b.js" }).go(), /could not restore the worktree: \?\? src\/b\.js/);
+  });
+  it("#4931: a real repo whose change deleted a non-test file is fully restored", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { writeFileSync, existsSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpDir } = await import("../tests/_tmp.mjs");
+    const d = tmpDir("mut-");
+    const g = (...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
+    g("init", "-q", "-b", "main"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base");
+    g("checkout", "-qb", "lane"); writeFileSync(join(d, "a.js"), "a2\n"); g("rm", "-q", "b.js"); g("add", "a.js"); g("commit", "-qm", "change");
+    const r = await runMutationCheck({ targets: [{ id: "R1", commands: [{ id: "V1", command: "t" }] }], files: ["a.js", "b.js"], base: "main",
+      git: async (a) => g(...a), runCommand: async () => ({ rc: 1 }), cwd: d, tmp: d });
+    assert.equal(r.skipped, "", r.skipped); assert.equal(r.results[0].status, "killed");
+    assert.equal(readFileSync(join(d, "a.js"), "utf8"), "a2\n"); assert.equal(existsSync(join(d, "b.js")), false);
+    assert.equal(g("status", "--porcelain").trim(), "");
   });
 });

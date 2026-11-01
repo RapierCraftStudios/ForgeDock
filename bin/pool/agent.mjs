@@ -10,6 +10,7 @@ import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
+import { makeWarm } from "./warm.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -60,7 +61,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
   // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
-  const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : undefined);
+  const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : warm.byAlias(id)); // #4912: a claimed warm sandbox also answers to its lane id
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
   const maxLifeMs = (cfg.max_lifetime_s ?? 6 * 3600) * 1000;
   const keepExitedMs = (cfg.keep_exited_s ?? 2 * 3600) * 1000;
@@ -99,6 +100,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     const existing = own(spec.id);
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
+    if (Number.isInteger(spec.warm)) warm.configure({ spec, cpus, mem_gb, limit, n: spec.warm }); // #4912: the lane's execution.warm_sandboxes sizes the repo's pool
     const c = capacity();
     if (c.paused || c.cpus_free < cpus || c.mem_free_gb < mem_gb) return { status: 503, body: { error: "no capacity", capacity: c }, retryAfter: 60 };
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
@@ -108,6 +110,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const dir = join(stateDir, "sandboxes", name);
     mkdirSync(join(dir, "result"), { recursive: true });
     mkdirSync(join(dir, "out"), { recursive: true });
+    if (spec.claim_dir) mkdirSync(join(dir, "claim"), { recursive: true });
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
@@ -147,6 +150,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         // --memory-swap above --memory lets a rare spike page out instead of being OOM-killed (swap deal).
         "--cpus", String(laneCpus), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
         "--env-file", envFile, ...laneNet, ...work,
+        ...(spec.claim_dir ? ["-v", `${join(dir, "claim")}:/claim`] : []), // #4912: warm sandboxes receive their lane here
         "-v", `cs-cache-${cacheKey}:/cache`, "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
         spec.image ?? image, ...spec.command.map(String),
       ]);
@@ -164,6 +168,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
 
   const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}) });
+
+  const warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
 
   async function refresh(r) {
     if (r.state === "exited") return r;
@@ -200,7 +206,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (r.docker) { await docker.remove(dindName(r.name)); await docker.removeVolume(workVolume(r.name)); }
     try { await docker.wipe(r.dir, image); } catch (e) { log.warn?.(`wipe ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
     rmSync(r.dir, { recursive: true, force: true });
-    delete sb()[id];
+    delete sb()[r.id];
     store.save();
     // Written once, after the sandbox is really gone (a teardown that throws and is retried must not log it twice).
     if (history) { try { appendFileSync(join(stateDir, "usage-history.jsonl"), history + "\n"); } catch { /* best effort */ } }
@@ -218,6 +224,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const known = new Set(Object.values(sb()).flatMap((r) => [r.name, dindName(r.name)]));
     for (const name of await docker.listLabelled(LABEL)) if (!known.has(name)) { await docker.remove(name); log.info?.(`removed orphan container ${name}`); }
     await sampleUsage();
+    await warm.maintain(maxLifeMs);
     if (pendingResize && capacity().active === 0) {
       const r = await resize(pendingResize);
       log.info?.(`pending resize applied: HTTP ${r.status} ${JSON.stringify(r.body)}`);
@@ -250,7 +257,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const r = own(id);
     const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized" } };
-    const path = `/agent/relay/${encodeURIComponent(id)}${rid ? `/${encodeURIComponent(rid)}` : ""}`;
+    const lane = r.alias ?? r.id; // #4935: a claimed warm sandbox posts under its warm id, but the router queue and the dispatcher use the lane id
+    const path = `/agent/relay/${encodeURIComponent(lane)}${rid ? `/${encodeURIComponent(rid)}` : ""}`;
     const x = rid ? await call(cfg.router_url, "GET", path, { token: cfg.token, timeoutMs: 20000 })
       : await call(cfg.router_url, "POST", path, { token: cfg.token, timeoutMs: 20000, body: { argv: (await readJson(req, 32 * 1024))?.argv } });
     return { status: x.status, body: x.data };
@@ -366,7 +374,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const routes = [
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
-    [route("POST", "/sandboxes"), async (_p, body) => launch(body ?? {})],
+    [route("POST", "/sandboxes"), async (_p, body) => { const r = await launch(body ?? {}); if (Number.isInteger(body?.spec?.warm)) warm.replenish().catch((e) => log.warn?.(`warm replenish: ${e.message}`)); return r; }],
+    [route("GET", "/warm"), async () => ({ status: 200, body: { warm: warm.list() } })],
+    [route("POST", "/warm"), async (_p, body) => { const r = warm.configure({ ...(body ?? {}), n: body?.n }); await warm.replenish(); return { status: 200, body: { ...r, warm: warm.list() } }; }],
+    [route("POST", "/warm/claim"), async (_p, body) => warm.claim(body ?? {})],
     [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
     [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
     [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
@@ -411,7 +422,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
   }
 
-  return { handle, launch, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
+  return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
 }
 
 /**
