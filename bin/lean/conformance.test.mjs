@@ -933,3 +933,43 @@ describe("per-kind modes and requirement evidence", () => {
     assert.doesNotMatch(formatShadowSummary([{ conformance: { mode: "shadow", would: "conforms" } }]), /per kind/);
   });
 });
+
+import { mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED } from "./conformance.mjs";
+
+describe("mutation check (#4913)", () => {
+  const c = {
+    requirements: [{ id: "R1", quote: "q1", disposition: "deliver" }, { id: "R2", quote: "q2", disposition: "deliver" }, { id: "R3", quote: "q3", disposition: "deliver", verify: "out_of_band", evidence: "job" }],
+    deliverables: [{ id: "D1", path: "test/a.test.js", requirements: ["R1", "R3"] }, { id: "D2", path: "src/b.js", requirements: ["R2"] }],
+    validate: [{ id: "V1", command: "node --test test/a.test.js" }],
+  };
+  const green = { runs: [{ id: "V1", exit: 0 }] };
+  it("targets only deliver requirements whose evidence test ran green", () => {
+    assert.deepEqual(mutationTargets(c, green), [{ id: "R1", commands: [{ id: "V1", command: "node --test test/a.test.js" }] }]);
+    assert.deepEqual(mutationTargets(c, { runs: [{ id: "V1", exit: 1 }] }), []);
+  });
+  it("only a survivor fails; killed and skipped never do", () => {
+    const f = mutationFailures([{ id: "R1", command: "x", status: "survived" }, { id: "R2", command: "y", status: "killed" }, { id: "R4", command: "z", status: "skipped" }]);
+    assert.equal(f.length, 1); assert.equal(f[0].code, MUTATION_SURVIVED); assert.match(f[0].detail, /^R1 /);
+  });
+  const harness = (o = {}) => {
+    const calls = [], fs = { writeFileSync() {}, rmSync() {} };
+    const git = async (a) => { calls.push(a.join(" ")); if (a[0] === "status") return o.dirty ?? ""; if (a[0] === "apply" && o.applyFails) throw new Error("no"); return "patch"; };
+    const runCommand = async () => { calls.push("run"); if (o.throws) throw new Error("boom"); return { rc: o.rc ?? 0 }; };
+    const targets = mutationTargets(c, green);
+    return { calls, go: () => runMutationCheck({ targets, files: ["src/b.js", "test/a.test.js"], base: "origin/staging", git, runCommand, cwd: "/w", fs, tmp: "/t" }) };
+  };
+  it("reverts only non-test files, reruns, then restores from HEAD", async () => {
+    const h = harness(); const r = await h.go();
+    assert.deepEqual(r.results.map((x) => x.status), ["survived"]);
+    assert.ok(h.calls.some((x) => x.startsWith("diff --binary origin/staging...HEAD -- src/b.js") && !x.includes("test/a")));
+    assert.deepEqual(h.calls.filter((x) => /^(apply|run|checkout)/.test(x)).map((x) => x.split(" ")[0]), ["apply", "run", "checkout"]);
+  });
+  it("a failing rerun is killed; the tree is restored even when the command throws", async () => {
+    assert.equal((await harness({ rc: 1 }).go()).results[0].status, "killed");
+    const h = harness({ throws: true }); assert.equal((await h.go()).results[0].status, "skipped");
+    assert.equal(h.calls.at(-1), "checkout HEAD -- src/b.js");
+  });
+  it("a dirty tree or a failed revert skips without running anything or restoring", async () => {
+    for (const o of [{ dirty: " M src/b.js" }, { applyFails: true }]) { const h = harness(o); const r = await h.go(); assert.deepEqual(r.results, []); assert.ok(r.skipped); assert.ok(!h.calls.includes("run") && !h.calls.some((x) => x.startsWith("checkout"))); }
+  });
+});

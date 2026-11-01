@@ -10,6 +10,8 @@
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
 import { activationFailures } from "./activation.mjs";
+import * as nodeFs from "node:fs";
+import { tmpdir } from "node:os";
 
 export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
@@ -1027,18 +1029,84 @@ export function blockingFailures(failures, { shadow = false, kinds = null, allow
  * @returns {{id: string, reason: string}[]}
  */
 export function unverifiedRequirements(contract, { runs = [], reruns = null, ciCovered = [] } = {}) {
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
+    const tests = evidenceTests(contract, r);
+    if (!tests.length) { out.push({ id: r.id, reason: "no test deliverable linked to the requirement" }); continue; }
+    if (!greenEvidence(contract, tests, { runs, reruns, ciCovered }).length) out.push({ id: r.id, reason: `no executed passing validate runs its test (${tests.join(", ")})` });
+  }
+  return out;
+}
+
+const evidenceTests = (contract, r) => (contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path));
+/** The validate commands that name one of `tests` and ran green (the engine's rerun, else the builder's result, else CI). */
+function greenEvidence(contract, tests, { runs = [], reruns = null, ciCovered = [] } = {}) {
   const green = (v) => {
     const rerun = reruns?.[v.id];
     if (rerun) return rerun.rc === 0;
     return (Array.isArray(runs) ? runs : []).some((x) => x?.id === v.id && x.exit === 0) || ciCovered.includes(v.id);
   };
+  return (contract.validate ?? []).filter((v) => tests.some((t) => String(v.command).includes(t) || String(v.command).includes(t.split("/").pop())) && green(v));
+}
+
+/** #4913 engine.conformance_mutation: the failure code of an evidence test that still passes with the change reverted. */
+export const MUTATION_SURVIVED = "conformance.mutation_survived";
+
+/**
+ * Deliver requirements whose executed evidence test can be mutation-checked: one row per requirement id with the green
+ * evidence commands and the non-test files of the diff (the change to revert). Out-of-band requirements and requirements
+ * with no green evidence are skipped; with no non-test file changed there is nothing to revert.
+ * @returns {{id: string, commands: {id: string, command: string}[]}[]}
+ */
+export function mutationTargets(contract, evidence = {}) {
   const out = [];
   for (const r of contract?.requirements ?? []) {
     if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
-    const tests = (contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path));
-    if (!tests.length) { out.push({ id: r.id, reason: "no test deliverable linked to the requirement" }); continue; }
-    const ran = (contract.validate ?? []).some((v) => tests.some((t) => String(v.command).includes(t) || String(v.command).includes(t.split("/").pop())) && green(v));
-    if (!ran) out.push({ id: r.id, reason: `no executed passing validate runs its test (${tests.join(", ")})` });
+    const tests = evidenceTests(contract, r);
+    const commands = tests.length ? greenEvidence(contract, tests, evidence).map((v) => ({ id: v.id, command: String(v.command) })) : [];
+    if (commands.length) out.push({ id: r.id, commands });
   }
   return out;
+}
+
+/** conformance.mutation_survived rows: a result still green with the change reverted. A skipped or killed result never fails. */
+export function mutationFailures(results) {
+  return (results ?? []).filter((x) => x?.status === "survived").map((x) => ({
+    code: MUTATION_SURVIVED, kind: "mutation_survived",
+    detail: `${x.id} evidence test passes with the change reverted (\`${x.command}\`, exit 0): it does not prove the requirement`,
+  }));
+}
+
+/**
+ * Rerun each target's evidence commands with the diff's non-test files reverted to the merge base (git apply -R of the
+ * non-test diff), then restore them from HEAD in a finally. The commits stay in HEAD, so no work is lost. A dirty tree,
+ * a failed revert, a timeout (124) or a missing runner (127) is skipped, never a failure.
+ * @returns {{results: {id: string, command: string, status: "survived"|"killed"|"skipped", note?: string}[], skipped: string, ms: number}}
+ */
+export async function runMutationCheck({ targets, files, base, git, runCommand, cwd, env, capMs = 120000, tmp = tmpdir(), fs = nodeFs, now = Date.now }) {
+  const t0 = now(), results = [];
+  const nonTest = (files ?? []).filter((f) => !isTestPath(f));
+  const skip = (note) => ({ results, skipped: note, ms: now() - t0 });
+  if (!targets?.length) return skip("");
+  if (!nonTest.length) return skip("no non-test file changed");
+  if (String(await git(["status", "--porcelain"]).catch(() => "x")).trim()) return skip("working tree not clean");
+  const patch = `${tmp}/mutation-${process.pid}.patch`;
+  let reverted = false;
+  try {
+    fs.writeFileSync(patch, await git(["diff", "--binary", `${base}...HEAD`, "--", ...nonTest]));
+    try { await git(["apply", "-R", "--whitespace=nowarn", patch]); reverted = true; } catch { return skip("could not revert the change"); }
+    for (const t of targets) for (const c of t.commands) {
+      const left = capMs - (now() - t0);
+      if (left <= 0) { results.push({ id: t.id, command: c.command, status: "skipped", note: "over the cap" }); continue; }
+      let r;
+      try { r = await runCommand({ command: c.command, cwd, timeoutMs: left, env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+      const rc = Number.isInteger(r?.rc) ? r.rc : 1;
+      results.push({ id: t.id, command: c.command, status: rc === 124 || rc === 127 ? "skipped" : rc === 0 ? "survived" : "killed" });
+    }
+  } finally {
+    if (reverted) await git(["checkout", "HEAD", "--", ...nonTest]).catch(() => { /* best effort */ });
+    try { fs.rmSync(patch, { force: true }); } catch { /* best effort */ }
+  }
+  return { results, skipped: "", ms: now() - t0 };
 }

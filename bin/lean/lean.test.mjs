@@ -7044,3 +7044,27 @@ describe("per-kind conformance modes (engine.conformance_kinds)", () => {
     assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
   });
 });
+
+describe("mutation check (engine.conformance_mutation, #4913)", () => {
+  const MC = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "test/foo.test.js", change: "t", requirements: ["R1"] }] };
+  const setup = (rc) => {
+    const w = world({ contract: MC, result: { status: "fixed", summary: "s", evidence: [], tests: [], validation: [{ id: "V1", exit: 0 }] } });
+    w.cmds = []; w.io.runCommand = async (a) => { w.cmds.push(a.command); return { rc: a.command.includes("--test") && w.cmds.length > 0 ? rc : 0, output: "" }; };
+    return w;
+  };
+  const applied = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "apply").length;
+  it("off (default): no revert, no extra command", async () => {
+    const w = setup(0); await run(w, { conformance: "shadow" });
+    assert.equal(applied(w), 0); assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "checkout" && c[2] === "HEAD"));
+  });
+  it("report: a vacuous test is recorded (shadow kind), the lane still merges, the tree is restored", async () => {
+    const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report" });
+    assert.equal(r.terminalReason, "merged"); assert.equal(applied(w), 1);
+    const seq = w.calls.filter((c) => c[0] === "git" && (c[1] === "apply" || (c[1] === "checkout" && c[2] === "HEAD"))).map((c) => c[1]);
+    assert.deepEqual(seq, ["apply", "checkout"]);
+  });
+  it("report with the kind set to enforce blocks on a survivor", async () => {
+    const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report", conformanceKinds: { "conformance.mutation_survived": "enforce" } });
+    assert.equal(r.code, "conformance.mutation_survived"); assert.equal(w.merges.length, 0);
+  });
+});
