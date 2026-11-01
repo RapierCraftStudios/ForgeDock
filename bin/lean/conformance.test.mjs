@@ -978,19 +978,17 @@ describe("mutation check (#4913)", () => {
   });
   it("#4931: a real repo whose change deleted a non-test file is fully restored", async () => {
     const { execFileSync } = await import("node:child_process");
-    const { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } = await import("node:fs");
+    const { writeFileSync, existsSync, readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { tmpdir: td } = await import("node:os");
-    const d = mkdtempSync(join(td(), "mut-"));
+    const { tmpDir } = await import("../tests/_tmp.mjs");
+    const d = tmpDir("mut-");
     const g = (...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
-    try {
-      g("init", "-q", "-b", "main"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base");
-      g("checkout", "-qb", "lane"); writeFileSync(join(d, "a.js"), "a2\n"); g("rm", "-q", "b.js"); g("add", "a.js"); g("commit", "-qm", "change");
-      const r = await runMutationCheck({ targets: [{ id: "R1", commands: [{ id: "V1", command: "t" }] }], files: ["a.js", "b.js"], base: "main",
-        git: async (a) => g(...a), runCommand: async () => ({ rc: 1 }), cwd: d, tmp: d });
-      assert.equal(r.skipped, "", r.skipped); assert.equal(r.results[0].status, "killed");
-      assert.equal(readFileSync(join(d, "a.js"), "utf8"), "a2\n"); assert.equal(existsSync(join(d, "b.js")), false);
-      assert.equal(g("status", "--porcelain").trim(), "");
-    } finally { rmSync(d, { recursive: true, force: true }); }
+    g("init", "-q", "-b", "main"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base");
+    g("checkout", "-qb", "lane"); writeFileSync(join(d, "a.js"), "a2\n"); g("rm", "-q", "b.js"); g("add", "a.js"); g("commit", "-qm", "change");
+    const r = await runMutationCheck({ targets: [{ id: "R1", commands: [{ id: "V1", command: "t" }] }], files: ["a.js", "b.js"], base: "main",
+      git: async (a) => g(...a), runCommand: async () => ({ rc: 1 }), cwd: d, tmp: d });
+    assert.equal(r.skipped, "", r.skipped); assert.equal(r.results[0].status, "killed");
+    assert.equal(readFileSync(join(d, "a.js"), "utf8"), "a2\n"); assert.equal(existsSync(join(d, "b.js")), false);
+    assert.equal(g("status", "--porcelain").trim(), "");
   });
 });
