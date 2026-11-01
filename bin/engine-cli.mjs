@@ -1961,8 +1961,10 @@ export function makeDispatchCheck({ gh, repo }) {
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
-    // #4920: a live lease or an open lane PR from another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox
-    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n }).catch(() => null) : null;
+    // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
+    // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
+    // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
