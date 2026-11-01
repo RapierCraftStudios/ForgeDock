@@ -9,7 +9,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
-import { readHeavy, liveLaneCap } from "../engine-cli.mjs";
+import { readHeavy, liveLaneCap, readAdmission } from "../engine-cli.mjs";
 
 // Injected pids, clock and host: `live` is the set of pids the registry sees as alive; `mem` the MemAvailable in MB.
 const world = ({ mem = 12000, cores = 4, swapFree = 0 } = {}) => {
@@ -347,4 +347,18 @@ describe("docs name the #4725 / #4777 config keys", () => {
       assert.ok(ex.includes(key), `forge.yaml.example lacks ${key}`);
     });
   }
+});
+
+describe("batch lane cap reads the repo's admission config, not process.cwd() (#4827)", () => {
+  it("runBatch passes its cwd to readAdmission for liveLaneCap", () => {
+    const src = readFileSync(new URL("../engine-cli.mjs", import.meta.url), "utf8");
+    assert.match(src, /liveLaneCap\(orch\.globalParallel \?\? null, \{ cfg: readAdmission\(cwd\) \}\)/);
+  });
+  it("a repo's lane_mem_mb override lowers the cap when read from that repo", () => {
+    const dir = tmpDir("lanecap-");
+    writeFileSync(join(dir, "forge.yaml"), "engine:\n  lane_mem_mb: 8192\n");
+    const host = { cores: () => 64, memAvailableMb: () => 10000 };
+    assert.equal(liveLaneCap(null, { cfg: readAdmission(dir), host })(), 1);
+    assert.ok(liveLaneCap(null, { cfg: readAdmission(tmpDir("lanecap-empty-")), host })() > 1);
+  });
 });
