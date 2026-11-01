@@ -4,6 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseAutoMode, parseAutoModeFlag, parsePollS, selectChildren, readChildList, hostListFields, liveElsewhere, joinsDecomposed, addsEpicChildren, DEFAULT_POLL_S } from "./autochildren.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 describe("#4965 modes", () => {
   it("default is decomposed; unknown yaml values fall back; the flag rejects them", () => {
@@ -81,10 +82,9 @@ describe("#4965 readers", () => {
 describe("#4965 forge.yaml and resume", () => {
   it("readAutoChildren reads auto_add_children and its poll; defaults keep today's behaviour", async () => {
     const { readAutoChildren } = await import("../engine-cli.mjs");
-    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-    const d = mkdtempSync(join(tmpdir(), "ac-"));
+    const d = tmpDir("ac-");
     assert.equal(readAutoChildren(d).mode, "decomposed");
     assert.equal(readAutoChildren(d).pollS, 120);
     writeFileSync(join(d, "forge.yaml"), "orchestration:\n  auto_add_children: epic\n  auto_add_children_poll_s: 30\n");
@@ -96,9 +96,8 @@ describe("#4965 forge.yaml and resume", () => {
     const { orchestrateFromCli } = await import("../engine-cli.mjs");
     const fs = await import("node:fs");
     const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-    process.env.FORGEDOCK_SCHED_DIR = fs.mkdtempSync(join(tmpdir(), "ac-sched-"));
-    const work = fs.mkdtempSync(join(tmpdir(), "acb-")), root = join(work, "batches"), launches = join(work, "launches");
+    process.env.FORGEDOCK_SCHED_DIR = tmpDir("ac-sched-");
+    const work = tmpDir("acb-"), root = join(work, "batches"), launches = join(work, "launches");
     fs.writeFileSync(launches, "");
     const stub = join(work, "stub.mjs");
     fs.writeFileSync(stub, `import { appendFileSync, writeFileSync } from "node:fs";
