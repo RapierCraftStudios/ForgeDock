@@ -15,7 +15,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -7066,5 +7066,21 @@ describe("mutation check (engine.conformance_mutation, #4913)", () => {
   it("report with the kind set to enforce blocks on a survivor", async () => {
     const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report", conformanceKinds: { "conformance.mutation_survived": "enforce" } });
     assert.equal(r.code, "conformance.mutation_survived"); assert.equal(w.merges.length, 0);
+  });
+});
+
+describe("investigation verdict for the reviewer (#4959)", () => {
+  it("investigationVerdict reads the Verdict line", () => {
+    assert.equal(investigationVerdict("**Verdict**: validated\n**Confidence**: high"), "VALIDATED");
+    assert.equal(investigationVerdict("**Verdict**: CONFIRMED"), "CONFIRMED");
+    assert.equal(investigationVerdict("no verdict"), null);
+    assert.equal(investigationVerdict(null), null);
+  });
+  it("reviewerPrompt carries the verdict block and rubric rule, and is unchanged without it", () => {
+    const args = { issue: { number: 7, title: "t", body: "b" }, contract: {}, result: {}, files: [], diff: "x" };
+    assert.ok(reviewerPrompt({ ...args, investigationVerdict: "VALIDATED" }).includes("<investigation_verdict>VALIDATED</investigation_verdict>"));
+    assert.ok(!reviewerPrompt(args).includes("</investigation_verdict>"));
+    assert.ok(reviewerPrompt({ ...args, investigationVerdict: "VALIDATED" }).includes("is not a failing row"));
+    assert.ok(!REVIEW_RUBRIC.includes("is not a failing row"));
   });
 });

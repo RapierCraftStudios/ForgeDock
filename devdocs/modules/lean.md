@@ -2276,3 +2276,13 @@ Cite: #4894.
 
 `autochildren.mjs` (pure, no LLM) backs `orchestration.auto_add_children: off | decomposed | epic | all` (default `decomposed`, today's behaviour) and `forgedock orchestrate --auto-children <mode> [--epic N]`. Both flags live in `plan.argv`, so `--resume` keeps the mode. In `epic`/`all`, `drainChildren` in `orchestrate.mjs` runs beside `drainAdds`, at most once per `auto_add_children_poll_s` (default 120) with one `gh issue list` per pass. It adds open children (`**Parent**: #P` line or GitHub sub-issues) of every batch issue and every `--epic` root, including ones filed after the batch started. `needs-human` children and issues another live batch of the repo holds are left out. Each pass posts one decision and one `added` row listing the children and edges. `off` also stops the decomposed-lane join; `decomposed` and `epic` keep it. `decomposed` makes no list call.
 Cite: #4965.
+
+## Entry 2026-11-01 — Staging pre-dispatch scales to ~300 PRs (#4960)
+
+`review-staging-pre.sh scope` reads each bundle PR in its own subshell (`scope_one_pr`), `FORGE_SCOPE_PARALLELISM` at a time (default 8), through `gh_retry`, and merges the per-PR result files in PR order. A read that still fails degrades that PR only: no commits are credited (they stay unreviewed, so review widens), it is listed in `scope.json` `degraded_prs`, and scope stays `scoped`. Global failures (git log/diff, missing `trusted-comments.sh`, empty PR list) still set `full`. Progress goes to stderr every 25 PRs and per phase; `review-prepare.sh` prints a line per phase (index, slices). Rationale: `devdocs/decisions/4960-review-staging-scope-degrade-per-pr.md`.
+Cite: #4960.
+
+## Entry 2026-11-01 — Reviewer sees the investigation verdict; generated requirements.txt is untracked
+
+`lean.mjs` reads `.forge-lean/investigation.md` at the reviewer call and passes `investigationVerdict(md)` (the `**Verdict**:` word, `prompts.mjs`) to `reviewerPrompt`, which renders an `<investigation_verdict>` block plus `VERDICT_RULE`: a validation/finding-verdict criterion is met by the recorded verdict with a regression or repro test in the diff (no prose needed), and a gap the reviewer calls minor is not a failing row. The prompt is byte-identical without a verdict, and the rule stays out of the shared `REVIEW_RUBRIC` (builder token cap). `untrackToolState` takes `keep` (contract deliverable paths, from `keepPaths()` at both call sites) and also untracks an added `requirements*.txt` when the base is a Poetry/uv project (`strayGenerated`, `toolstate.mjs`), the base tracks none, and the path is not in `keep`. `conformance.mjs` row logic is unchanged.
+Cite: #4959.
