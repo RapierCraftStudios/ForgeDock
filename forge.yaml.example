@@ -334,6 +334,14 @@ branches:
 #   work_on_review_model: sonnet
 #   work_on_review_max_turns: 120
 #   review_pr_staging_max_turns: 80
+#   # Host admission (#4105) and the implicit local lane cap (#4777). Unless
+#   # enabled: false, local lanes are capped at
+#   # max(1, min(cores / lane_cpu_reservation, (MemAvailable - min_free_mem_mb) / lane_mem_mb)),
+#   # below --parallel on a small host; remote sandbox lanes are exempt.
+#   admission:
+#     min_free_mem_mb: 2048
+#     lane_cpu_reservation: 1   # cores reserved per local lane
+#     lane_mem_mb: 2048         # memory reserved per local lane
 #   # Context pack (#4275): before the plan call the core compiles the issue's
 #   # links, prior attempts, reverted/decided PRs on the same symbols and repo-fact
 #   # pointers into a budgeted pack, posted as FORGE:CONTEXT and logged as
@@ -408,8 +416,11 @@ branches:
 #   # In-batch recovery (#4267): recovery lanes per issue for a mechanical
 #   # needs-human (ci.red, base.conflict, ...). A recovery that does not merge
 #   # is labelled needs-human again with its evidence. Default 1; 0 disables.
+#   # Mechanical codes (base.conflict, env.*, conflicting ci-pending) have their
+#   # own budget (#4725), default 2, never below max_attempts.
 #   recovery:
 #     max_attempts: 1
+#     mechanical_max_attempts: 2
 #
 #   # Parked-PR base sync (#4525): a needs-human PR whose base moved is merged
 #   # with the base while the batch runs. Clean or pure two-sided list-addition

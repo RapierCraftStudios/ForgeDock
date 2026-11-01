@@ -337,3 +337,14 @@ describe("validation steps and the local lane cap (#4777)", () => {
     assert.equal(liveLaneCap(3, { cfg: { enabled: false }, host: { cores: () => 8, memAvailableMb: () => 64000 } })(), 3);
   });
 });
+
+describe("docs name the #4725 / #4777 config keys", () => {
+  const root = new URL("../../", import.meta.url);
+  const cfg = readFileSync(new URL("docs/CONFIG.md", root), "utf8"), ex = readFileSync(new URL("forge.yaml.example", root), "utf8");
+  for (const key of ["mechanical_max_attempts", "lane_cpu_reservation", "lane_mem_mb"]) {
+    it(`${key} is in docs/CONFIG.md and forge.yaml.example`, () => {
+      assert.ok(cfg.includes(key), `docs/CONFIG.md lacks ${key}`);
+      assert.ok(ex.includes(key), `forge.yaml.example lacks ${key}`);
+    });
+  }
+});
