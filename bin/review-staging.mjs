@@ -454,9 +454,19 @@ const TEST_GATE_NOTE = {
   BLOCK: (r) => `> **Test Gate: BLOCK (override/advisory)**: Runtime failures were detected but deploy is proceeding. Reason: ${r}. Filed \`test-failure\` issues track the failures.`,
 };
 
+/** Checks that never count as CI failures: each only reports this review's own gate marker or the lean gate summary. */
+export const CI_EXCLUDED_CHECKS = ["forgedock/verify", "forge/deploy-gate", "Check for FORGE gate markers"];
+
+const parseChecks = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
+
+/** Failing (fail/cancel) checks outside CI_EXCLUDED_CHECKS. */
+export function countFailingChecks(checks) {
+  return checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && (k?.bucket === "fail" || k?.bucket === "cancel")).length;
+}
+
 /** Phase 8 verdict from the deterministic inputs (CI, test gate, CONFIRMED CRITICAL/HIGH). */
 export function stagingVerdict({ ciFailing, testGateInvalid, confirmedCritical, confirmedHigh }) {
-  if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify and forge/deploy-gate excluded)` };
+  if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify, forge/deploy-gate and the gate-marker check excluded)` };
   if (testGateInvalid) return { verdict: "BLOCK DEPLOY", why: "test-gate result missing/invalid (fail closed)" };
   if (confirmedCritical > 0) return { verdict: "BLOCK DEPLOY", why: `${confirmedCritical} CONFIRMED CRITICAL finding(s)` };
   if (confirmedHigh > 0) return { verdict: "NEEDS FIXES FIRST", why: `${confirmedHigh} CONFIRMED HIGH finding(s)` };
@@ -472,10 +482,11 @@ async function summary(a, io) {
   const tg = testGateResult(io, sd, pr);
 
   // Phase 1E read: forgedock/verify is excluded; an unreadable result counts as failing (fail closed). forge/deploy-gate
-  // is excluded too: it reports this review's own marker, so an earlier GATE_FAILURE must not block the re-run that clears it.
+  // and the gate-marker check are excluded too: they report this review's own marker, so an earlier GATE_FAILURE must not block the re-run that clears it.
   let ciFailing = 1;
-  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket", "--jq", '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate") | select(.bucket == "fail" or .bucket == "cancel")] | length'], { env, cwd: io.cwd });
-  if (/^\d+$/.test(ci.stdout.trim())) ciFailing = Number(ci.stdout.trim());
+  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket"], { env, cwd: io.cwd });
+  const checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
+  if (checks) ciFailing = countFailingChecks(checks);
 
   const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
   const pass = v.verdict === "APPROVE FOR DEPLOY";
@@ -501,7 +512,7 @@ async function summary(a, io) {
     "### Risk Matrix",
     "| Domain | Result | Notes |",
     "|--------|--------|-------|",
-    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify and forge/deploy-gate excluded |`,
+    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded |`,
     `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
     "",
