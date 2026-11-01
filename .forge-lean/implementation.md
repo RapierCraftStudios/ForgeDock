@@ -24,4 +24,4 @@ Fix at the deterministic layer: the client consults the systemd unit before spaw
 Env: `FORGEDOCK_SCHEDD_ADMIT_MS`. A stalled `schedd status` now exits 1. Standby applies only when `INVOCATION_ID` is set. I did not audit every gh call site beyond the daemon path.
 
 ## R1 follow-up
-Audited gh execs on the daemon path: all already have timeouts; added 60s to the untimed `decisions list` gh calls (engine-cli.mjs). Reaping is libuv's job once the loop is responsive (lag watchdog logs starvation). A timed-out host() is not cancelled on purpose (would orphan/duplicate a launched batch); recorded as an amendment in result.json.
+Audited gh execs on the daemon path: all already have timeouts; added 60s to the untimed `decisions list` gh calls (engine-cli.mjs). Reaping is libuv's job once the loop is responsive (lag watchdog logs starvation). A timed-out host() is not cancelled on purpose (would orphan/duplicate a launched batch); recorded as a `decision` amendment in result.json.
