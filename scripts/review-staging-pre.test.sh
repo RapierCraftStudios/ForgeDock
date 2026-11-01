@@ -198,5 +198,12 @@ J="$TMP/sd/9_scope.json"
 [ "$EL" -lt 300 ] && ok || bad "300-PR scope took ${EL}s (limit 300s)"
 case "$OUT" in *"250/300"*) ok ;; *) bad "progress output expected for a long scope (got $(printf '%s' "$OUT" | head -3))" ;; esac
 
+# (8) #4960: a PR/issue kind lookup is cached in the scratch dir, so a rerun makes no gh call for it
+newfix kindcache; echo 1 > "$FIX/issue-77"
+K1=$(cd "$TMP/work" && _SD="$TMP/kc" bash -c 'FORGE_GH_RETRY_SLEEP=0; . <(awk "/^# BEGIN gh-retry\$/{f=1;next} /^# END gh-retry\$/{f=0} f" "$1"); . <(awk "/^# BEGIN bundle-pr-kind\$/{f=1;n++;next} /^# END bundle-pr-kind\$/{f=0} f&&n==1" "$1"); bundle_pr_kind o/r 77' _ "$PRE")
+rm -f "$FIX/issue-77"
+K2=$(cd "$TMP/work" && _SD="$TMP/kc" bash -c 'FORGE_GH_RETRY_SLEEP=0; . <(awk "/^# BEGIN gh-retry\$/{f=1;next} /^# END gh-retry\$/{f=0} f" "$1"); . <(awk "/^# BEGIN bundle-pr-kind\$/{f=1;n++;next} /^# END bundle-pr-kind\$/{f=0} f&&n==1" "$1"); bundle_pr_kind o/r 77' _ "$PRE")
+[ "$K1" = issue ] && [ "$K2" = issue ] && ok || bad "kind lookup must be answered from the cache on rerun (got '$K1' '$K2')"
+
 echo "review-staging-pre.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

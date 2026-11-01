@@ -107,7 +107,11 @@ MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --on
 # Merge-subject numbers are PRs by construction; an unclassifiable number is kept (fail open: it may be a PR). forge#4127
 # BEGIN bundle-pr-kind
 # Prints "pr" or "issue" for issue number ${2} in repo ${1}; prints nothing and returns 1 when the read fails or is malformed.
-bundle_pr_kind() { local k; k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+# A number's kind never changes, so a successful answer is cached under the run scratch dir ($_SD/gh-cache): a rerun after a killed run skips the read (#4960).
+bundle_pr_kind() { local k c="${_SD:-${FORGE_SCRATCHPAD:-}}"; [ -z "$c" ] || c="$c/gh-cache/kind-$(printf '%s' "${1}" | tr '/' '_')-${2}"
+  [ -z "$c" ] || ! [ -f "$c" ] || { k=$(cat "$c" 2>/dev/null); case "$k" in pr|issue) printf '%s' "$k"; return 0 ;; esac; }
+  k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) ;; *) return 1 ;; esac
+  [ -z "$c" ] || { mkdir -p "$(dirname "$c")" 2>/dev/null && printf '%s' "$k" > "$c" 2>/dev/null; }; printf '%s' "$k"; }
 # END bundle-pr-kind
 SUBJECT_PRS=""; SKIPPED_ISSUES=""
 for n in $BUNDLE_PRS; do
@@ -333,7 +337,11 @@ bundle_delta_credit() {
 # END bundle-delta-credit
 # BEGIN bundle-pr-kind
 # Prints "pr" or "issue" for issue number ${2} in repo ${1}; prints nothing and returns 1 when the read fails or is malformed.
-bundle_pr_kind() { local k; k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+# A number's kind never changes, so a successful answer is cached under the run scratch dir ($_SD/gh-cache): a rerun after a killed run skips the read (#4960).
+bundle_pr_kind() { local k c="${_SD:-${FORGE_SCRATCHPAD:-}}"; [ -z "$c" ] || c="$c/gh-cache/kind-$(printf '%s' "${1}" | tr '/' '_')-${2}"
+  [ -z "$c" ] || ! [ -f "$c" ] || { k=$(cat "$c" 2>/dev/null); case "$k" in pr|issue) printf '%s' "$k"; return 0 ;; esac; }
+  k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) ;; *) return 1 ;; esac
+  [ -z "$c" ] || { mkdir -p "$(dirname "$c")" 2>/dev/null && printf '%s' "$k" > "$c" 2>/dev/null; }; printf '%s' "$k"; }
 # END bundle-pr-kind
 # BEGIN bundle-scope-loop
 _WHY=""; DEGRADED_PRS=""
