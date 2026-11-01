@@ -953,23 +953,44 @@ describe("mutation check (#4913)", () => {
   });
   const harness = (o = {}) => {
     const calls = [], fs = { writeFileSync() {}, rmSync() {} };
-    const git = async (a) => { calls.push(a.join(" ")); if (a[0] === "status") return o.dirty ?? ""; if (a[0] === "apply" && o.applyFails) throw new Error("no"); return "patch"; };
+    let restored = false;
+    const git = async (a) => { calls.push(a.join(" ")); if (a[0] === "reset") restored = true; if (a[0] === "status") return restored ? (o.stillDirty ?? "") : (o.dirty ?? ""); if (a[0] === "apply" && o.applyFails) throw new Error("no"); return "patch"; };
     const runCommand = async () => { calls.push("run"); if (o.throws) throw new Error("boom"); return { rc: o.rc ?? 0 }; };
     const targets = mutationTargets(c, green);
     return { calls, go: () => runMutationCheck({ targets, files: ["src/b.js", "test/a.test.js"], base: "origin/staging", git, runCommand, cwd: "/w", fs, tmp: "/t" }) };
   };
-  it("reverts only non-test files, reruns, then restores from HEAD", async () => {
+  it("reverts only non-test files, reruns, then restores from HEAD (reset + clean of those paths)", async () => {
     const h = harness(); const r = await h.go();
     assert.deepEqual(r.results.map((x) => x.status), ["survived"]);
     assert.ok(h.calls.some((x) => x.startsWith("diff --binary origin/staging...HEAD -- src/b.js") && !x.includes("test/a")));
-    assert.deepEqual(h.calls.filter((x) => /^(apply|run|checkout)/.test(x)).map((x) => x.split(" ")[0]), ["apply", "run", "checkout"]);
+    assert.deepEqual(h.calls.filter((x) => /^(apply|run|reset|clean)/.test(x)), ["apply -R --whitespace=nowarn /t/mutation-" + process.pid + ".patch", "run", "reset -q --hard HEAD", "clean -fdq -- src/b.js"]);
   });
   it("a failing rerun is killed; the tree is restored even when the command throws", async () => {
     assert.equal((await harness({ rc: 1 }).go()).results[0].status, "killed");
     const h = harness({ throws: true }); assert.equal((await h.go()).results[0].status, "skipped");
-    assert.equal(h.calls.at(-1), "checkout HEAD -- src/b.js");
+    assert.equal(h.calls.at(-1), "status --porcelain -- src/b.js");
   });
   it("a dirty tree or a failed revert skips without running anything or restoring", async () => {
-    for (const o of [{ dirty: " M src/b.js" }, { applyFails: true }]) { const h = harness(o); const r = await h.go(); assert.deepEqual(r.results, []); assert.ok(r.skipped); assert.ok(!h.calls.includes("run") && !h.calls.some((x) => x.startsWith("checkout"))); }
+    for (const o of [{ dirty: " M src/b.js" }, { applyFails: true }]) { const h = harness(o); const r = await h.go(); assert.deepEqual(r.results, []); assert.ok(r.skipped); assert.ok(!h.calls.includes("run") && !h.calls.some((x) => x.startsWith("reset"))); }
+  });
+  it("#4931: a tree still dirty after the restore throws instead of returning (never push the reverted change)", async () => {
+    await assert.rejects(harness({ stillDirty: "?? src/b.js" }).go(), /could not restore the worktree: \?\? src\/b\.js/);
+  });
+  it("#4931: a real repo whose change deleted a non-test file is fully restored", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir: td } = await import("node:os");
+    const d = mkdtempSync(join(td(), "mut-"));
+    const g = (...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
+    try {
+      g("init", "-q", "-b", "main"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base");
+      g("checkout", "-qb", "lane"); writeFileSync(join(d, "a.js"), "a2\n"); g("rm", "-q", "b.js"); g("add", "a.js"); g("commit", "-qm", "change");
+      const r = await runMutationCheck({ targets: [{ id: "R1", commands: [{ id: "V1", command: "t" }] }], files: ["a.js", "b.js"], base: "main",
+        git: async (a) => g(...a), runCommand: async () => ({ rc: 1 }), cwd: d, tmp: d });
+      assert.equal(r.skipped, "", r.skipped); assert.equal(r.results[0].status, "killed");
+      assert.equal(readFileSync(join(d, "a.js"), "utf8"), "a2\n"); assert.equal(existsSync(join(d, "b.js")), false);
+      assert.equal(g("status", "--porcelain").trim(), "");
+    } finally { rmSync(d, { recursive: true, force: true }); }
   });
 });

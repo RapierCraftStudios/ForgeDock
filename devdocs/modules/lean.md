@@ -2239,3 +2239,8 @@ Cite: #4920.
 
 `makeDispatchCheck` calls `otherLaneOwner` with `checkPr: false`. An open `feat/issue-N-lean` PR is the issue's own lane: ci.red / base.conflict recovery lanes and relaunches after engine-error or ci-pending resume it by design, and the #4920 PR check deferred every such start as `lease.held` until `max_deferrals` gave up. A lane still running on the branch always holds the FORGE:STATE lease, which the dispatch check still reads. The push-rejected path keeps the PR check, because it knows its own PR (`ownPr`).
 Cite: #4933.
+
+## Entry 2026-11-01 — the mutation check restores a deleted file and fails closed (release review #4931)
+
+`runMutationCheck` restored with `git checkout HEAD -- <non-test files>`, which fails as a whole when the change deleted one of them (the revert re-creates it untracked), so nothing was restored and the lane continued on the reverted tree. The tree is verified clean before the revert, so the restore is now `git reset --hard HEAD` plus `git clean` of those paths, and a tree still dirty there afterwards throws (the lane ends engine-error instead of pushing the reverted change).
+Cite: #4934.
