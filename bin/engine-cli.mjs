@@ -1962,7 +1962,8 @@ export function makeDispatchCheck({ gh, repo }) {
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
     // #4920: a live lease or an open lane PR from another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox
-    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n }).catch(() => null) : null;
+    // the issue's own open lane PR is resumed by design (ci.red, base.conflict, engine-error relaunches); a running lane always holds the lease
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
