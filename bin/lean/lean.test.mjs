@@ -4152,7 +4152,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const prior = { body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] })}`, author_association: "OWNER", user: { type: "User", login: "op" } };
     const dir = tmpDir("guard-recover-");
     const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), prior], baseFiles: { ":src/foo.js": "old" } });
-    w.io.runCommand = async () => ({ rc: 1, output: "guard test failed" });
+    w.io.runCommand = async (a) => ({ rc: String(a?.cwd).includes("guardbase-") ? 0 : 1, output: "guard test failed" }); // #4968: the base tree passes, so the lane tree is what broke
     await run(w, { dir, worktreeRoot: dir, recover: { code: "ci.red", attempt: 1 }, loadGuards: async () => [mkGuard(4785), mkGuard(9)] });
     const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner").map((c) => c[4])]);
     assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");

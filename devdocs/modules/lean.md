@@ -1993,7 +1993,12 @@ no guarded file does no git work. Each selected test file is exported from the m
 that path substituted (else `node --test` / `python -m pytest -q`), then removed. At most `FORGE_HOST_PARALLELISM` (default 2) run at
 once under one 120 s cap; a timeout, missing base copy or unknown runner is a trajectory note, never a block.
 
-A failing base test is `conformance.guard_broken` (guard issue, its why, test, output tail), a precheck failure: enforce resumes the
+Baseline compare (#4968): a test that fails on the lane tree is rerun at its own path in one lazily made detached worktree of the merge base
+(`os.tmpdir()/guardbase-*`, `node_modules` symlinked, removed in `finally`; passing guards add no git or run) under the remaining cap.
+Failing test names (`failingNames`: TAP/node:test `not ok`, spec `✖`, pytest `FAILED`) are compared per name, so only names that pass on base block. A base that
+fails the same tests (or names none) records `guard #N <test>: fails on base`; a base that cannot run records `baseline unavailable (...)`; both are skips, not blocks.
+
+A failing base test is `conformance.guard_broken` (guard issue, its why, test, the new failing test names, output tail), a precheck failure: enforce resumes the
 builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `SHADOW_PRE_BLOCKS`), which is the would-block count.
 The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
