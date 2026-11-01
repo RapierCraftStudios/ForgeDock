@@ -75,12 +75,13 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
       { code: "merge.transient" },
       { code: "push.transient" },
       { code: "cli.idle" },
+      { code: "cli.idle" },
     ];
     const starts = [];
     const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
       runOne: async () => { starts.push(now()); const d = seq.shift(); return { terminalReason: "deferred", detail: d.code, ...d }; } });
     const gaps = starts.slice(1).map((t, i) => (t - starts[i]) / 1000);
-    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
+    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
     assert.equal(rows[0].outcome, "deferred");
     assert.match(rows[0].detail, /gave up after 3 deferrals/);
     // the usage-limit reset time and a lease expiry are honoured
@@ -844,7 +845,7 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.unreachable", retryInSeconds: 60 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 60000, host: true }); // #4788
-    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
+    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "sandbox.start_failed"]) {
       assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
     }
   });
@@ -870,6 +871,22 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [1, 2, 3, 4, 5, 6].map((n) => [n, "merged"]));
     assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
     assert.ok(Math.max(...capacityDefers.values()) > 3, "an issue was deferred for capacity more than maxDeferrals times");
+  });
+});
+
+describe("#4784: usage-limit deferrals", () => {
+  it("rate_limited is never capped and keeps its hold; a deferred row is requeuable", async () => {
+    assert.deepEqual(deferPolicy({ code: "rate_limited", resetAtEpochMs: 5000 }, { now: 1000, deferrals: 99, maxDeferrals: 3 }), { delayMs: 4000, hold: true });
+    const { now, sleep } = fakeClock();
+    let runs = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
+      runOne: async () => (++runs <= 6 ? { terminalReason: "deferred", code: "rate_limited", retryInSeconds: 600 } : { terminalReason: "merged", pr: 9 }) });
+    assert.equal(runs, 7);
+    assert.equal(rows[0].outcome, "merged");
+    const b = openBatch(tmpDir("batch-requeue-deferred-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1], results: { 1: { outcome: "deferred" } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
   });
 });
 
