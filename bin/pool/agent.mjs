@@ -257,7 +257,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const r = own(id);
     const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized" } };
-    const path = `/agent/relay/${encodeURIComponent(id)}${rid ? `/${encodeURIComponent(rid)}` : ""}`;
+    const lane = r.alias ?? r.id; // #4935: a claimed warm sandbox posts under its warm id, but the router queue and the dispatcher use the lane id
+    const path = `/agent/relay/${encodeURIComponent(lane)}${rid ? `/${encodeURIComponent(rid)}` : ""}`;
     const x = rid ? await call(cfg.router_url, "GET", path, { token: cfg.token, timeoutMs: 20000 })
       : await call(cfg.router_url, "POST", path, { token: cfg.token, timeoutMs: 20000, body: { argv: (await readJson(req, 32 * 1024))?.argv } });
     return { status: x.status, body: x.data };
