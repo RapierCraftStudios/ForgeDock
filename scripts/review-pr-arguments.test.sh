@@ -188,5 +188,15 @@ got=$(run_stg_fence "3401"); if printf '%s' "$got" | grep -q REACHED; then ok; e
 got=$(run_staging "3401	--auto-merge"); if [ "$got" = "|true" ]; then ok; else bad "staging tab not rejected: '$got'"; fi
 expect_rejected "tab separator" "3401	--auto-merge	--issue	3398"
 
+# --manual-pr / --owner-requested (forge#4770): plain flags, no value consumed, auto-merge stays bound
+MTAIL='
+printf "%s|%s|%s|%s|%s" "$AUTO_MERGE" "$MERGE_ISSUE" "$MANUAL_PR" "$OWNER_REQUESTED" "$PR_NUMBER"'
+gen_script "$BLOCK" "37338 --auto-merge --manual-pr --base staging" "$WORK/run.sh" "$MTAIL"; got=$(cd "$WORK" && "${BASH:-bash}" "$WORK/run.sh" 2>/dev/null)
+if [ "$got" = "true||true|false|37338" ]; then ok; else bad "manual-pr parse: '$got'"; fi
+gen_script "$BLOCK" "37338 --auto-merge --manual-pr --owner-requested" "$WORK/run.sh" "$MTAIL"; got=$(cd "$WORK" && "${BASH:-bash}" "$WORK/run.sh" 2>/dev/null)
+if [ "$got" = "true||true|true|37338" ]; then ok; else bad "owner-requested parse: '$got'"; fi
+gen_script "$BLOCK" "5 --auto-merge --issue 9" "$WORK/run.sh" "$MTAIL"; got=$(cd "$WORK" && "${BASH:-bash}" "$WORK/run.sh" 2>/dev/null)
+if [ "$got" = "true|9|false|false|5" ]; then ok; else bad "default has no manual-pr: '$got'"; fi
+
 echo "review-pr-arguments: $pass passed, $fail failed"
 [ "$fail" = 0 ]

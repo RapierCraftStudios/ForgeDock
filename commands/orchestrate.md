@@ -114,6 +114,7 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). Logical
   edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
   last lines are the report table.
+  Issue-level readiness (#4773): a trusted author's `Blocked by #N` / `Depends on #N` line is a DAG edge, and `--add` prints the edges it created; an issue labelled `blocked` (`orchestration.blocked_label`) is admitted but not dispatched until the label is removed.
 - **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.
   The prompt is:
 

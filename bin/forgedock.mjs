@@ -66,6 +66,7 @@ import {
   getInstalledCommandsDriftStatus,
 } from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
+import { guideText, guideWidth, useAnsi } from "./guide.mjs";
 import {
   renderLogo,
   getLogoTagline,
@@ -3342,6 +3343,7 @@ function help() {
   const commands = [
     ["Command", "Description"],
     ["npx forgedock", "Guided setup: install commands + configure repo (default)"],
+    ["npx forgedock guide", "How the workflow fits together: core commands, issue -> staging -> main, where a run ends, how to resume"],
     ["npx forgedock install", "Install commands to ~/.claude/"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
     ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
@@ -3359,10 +3361,13 @@ function help() {
     ["npx forgedock check [--base REF] [--json]", "Run the lane's frozen validate commands and change-scoped pre-PR checks locally in this worktree, as the engine will (no GitHub, no Actions)"],
     ["npx forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> [--before s|--after s] | --show <id>", "Unattended multi-milestone train: one durable state file (order, active set, lifecycle), typed STOP reasons, resumable; never edits forge.yaml"],
     ["npx forgedock guards list [--path p] [--json] | backfill --since <date> [--dry-run]", "Fix guards: list the FORGE:GUARD records (test files + protected hunks of merged fixes) covering a path, or build them for already-merged lean lanes"],
+    ["npx forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--dry-run] | status [--name <w>]", "Named, scoped, capped watches (forge.yaml issue_watch.watches) that claim matching open issues into lanes or one long-lived orchestrate batch, or (mode: release) pool them and cut themed releases; see docs/ISSUE-WATCH.md"],
+    ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; see docs/SELFTEST.md"],
+    ["npx forgedock prod-watch run [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status", "Production-side watcher (forge.yaml prod_watch): read-only signal sources -> triage -> governor -> issues, kill-switch file, owner digest; see docs/PROD-WATCH.md"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock decisions list [--stale] [--refresh]", "List anchored decisions (FORGE:DECISION); --stale shows those with an anchor missing on the base"],
     ["npx forgedock sched show | cap <N>|--clear | weight <owner/repo> <N>|--clear", "Show the host lane registry, set the host-wide lane cap shared by orchestrate batches, or set a repo's share of slots within a priority (default equal)"],
-    ["npx forgedock schedd [status]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid and batches"],
+    ["npx forgedock schedd [status | watchdog]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid, batches and last tick; watchdog restarts a stalled daemon"],
     ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes] [--sandboxes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes, orphaned lane sandboxes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
@@ -3377,6 +3382,7 @@ function help() {
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
+    ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
@@ -3395,11 +3401,14 @@ function help() {
     ["--version, -v", "Print the installed version and check for updates"],
   ];
 
+  // Fit the terminal (100 columns when stdout is not a TTY: CI logs, pipes); the box adds 4.
+  const maxWidth = guideWidth(process.stdout) - 4;
+  process.stdout.write("New to ForgeDock? npx forgedock guide explains the workflow in one screen.\n\n");
   process.stdout.write(
-    box(table(commands, { header: true }), { title: "Usage" }) + "\n",
+    box(table(commands, { header: true, maxWidth }), { title: "Usage" }) + "\n",
   );
   process.stdout.write(
-    box(table(flagRows, { header: true }), { title: "Flags" }) + "\n",
+    box(table(flagRows, { header: true, maxWidth }), { title: "Flags" }) + "\n",
   );
 }
 
@@ -3945,7 +3954,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4206,6 +4215,36 @@ switch (command) {
     }
     break;
   }
+  case "issue-watch": {
+    const { issueWatchFromCli } = await import("./lean/issuewatch.mjs");
+    try {
+      await issueWatchFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "selftest": {
+    const { selftestFromCli } = await import("./lean/selftest-live.mjs");
+    try {
+      if (!(await selftestFromCli(restArgs)).ok) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "prod-watch": {
+    const { prodWatchFromCli } = await import("./lean/prodwatch.mjs");
+    try {
+      await prodWatchFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "limits": {
     const { limitsFromCli } = await import("./engine-cli.mjs");
     try {
@@ -4327,6 +4366,15 @@ switch (command) {
     await demo();
     break;
   case "doctor":
+    if (restArgs.includes("--lanes")) {
+      // #4866: the lane preflight on demand: every check with pass/fail; exit 1 when any fails
+      const lc = await import("./lean/lanecheck.mjs");
+      const { readExecution } = await import("./engine-cli.mjs");
+      const checks = await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() });
+      console.log(lc.formatLaneChecks(checks));
+      exitCode = checks.every((c) => c.ok) ? 0 : 1;
+      break;
+    }
     exitCode = await doctor(restArgs.includes("--fix"));
     break;
   case "report": {
@@ -4464,6 +4512,9 @@ switch (command) {
   case "--help":
   case "-h":
     help();
+    break;
+  case "guide":
+    process.stdout.write(guideText({ width: guideWidth(process.stdout), ansi: useAnsi(process.stdout) }) + "\n");
     break;
   default:
     console.log(`${RED}Unknown command: ${command}${RESET}`);

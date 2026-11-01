@@ -261,9 +261,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -489,6 +489,30 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(plain.map((r) => r.issue), [1]);
   });
 
+  it("#4791 --requeue and --add accept a lane-refused issue", () => {
+    const b = openBatch(tmpDir("batch-lane-refused-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2], results: { 1: { outcome: "lane-refused", code: "lane.unresolved" }, 2: { outcome: "lane-refused" } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
+    assert.deepEqual(b.addIssues([2]).requeued, [2]);
+  });
+
+  it("#4791 a transient lane-resolution failure is retried with backoff, never capped, and not terminal", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = [];
+    let tries = 0;
+    const launched = [];
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 1, onUpdate: (r) => updates.push(r),
+      resolveLane: async () => (++tries <= 3 ? { ok: false, code: "lane.unresolved", detail: "TLS handshake timeout", transient: true } : { ok: true, lane: "staging" }),
+      runOne: async (n, lane) => { launched.push(lane); return { terminalReason: "merged", pr: 5 }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.deepEqual(launched, ["staging"]);
+    assert.ok(updates.some((u) => /requeued in 120s: lane.unresolved/.test(u.detail ?? "")));
+    assert.ok(updates.some((u) => /requeued in 240s: lane.unresolved/.test(u.detail ?? "")));
+    const hard = await orchestrate({ issues: [2], readBody: async () => "", now, sleep, resolveLane: async () => ({ ok: false, code: "lane.branch_missing", detail: "x" }), runOne: async () => { throw new Error("no"); } });
+    assert.equal(hard[0].outcome, "lane-refused");
+  });
+
   it("#4687 --add re-queues an issue that is skipped in the batch; any other ended issue stays 'already in batch'", () => {
     const root = tmpDir("batch-add-skipped-");
     const b = openBatch(root, "b1");
@@ -515,7 +539,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.readAdded(), [2, 3, 5]);
     assert.deepEqual(b.unrunAdds(), [2, 3, 5]);
     const views = [];
-    const io = { gh: async (a) => { views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
+    const io = { gh: async (a) => { if (a[0] === "api") return "OWNER\n"; views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
     const res = await quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io }));
     assert.deepEqual(res.added, [6]);
     assert.deepEqual(res.skipped.map((x) => [x.issue, x.reason]).sort(), [[3, "already in batch"], [7, "closed"], [8, "unreadable"], ["x", "not an integer"]]);
@@ -530,7 +554,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     b.writePlan({ argv: [], repo: "o/r" }); // no issues: the resume stops with the usage error after its adds
     b.store.save({ order: [1] });
     const views = [];
-    const io = { gh: async (a) => { views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
+    const io = { gh: async (a) => { if (a[0] === "api") return "OWNER\n"; views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
     await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5"], { batchRoot: root, io })), /usage/);
     assert.deepEqual(views, [], "no issue read for a flag value");
     assert.deepEqual(b.readAdded(), []);
@@ -731,8 +755,40 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "invalid"], [2, "merged"]]);
   });
 
+  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease; an expired or unreadable one runs, and the issue's own open lane PR runs (#4931)", async () => {
+    const mk = (issue, opts) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[a.length - 1] === "body") { if (opts.body instanceof Error) throw opts.body; return opts.body ?? "{}"; }
+      if (a[0] === "issue") return issue;
+      if (a.includes("open")) { if (opts.open instanceof Error) throw opts.open; return opts.open ?? "[]"; }
+      return "[]";
+    } });
+    const lease = (until) => JSON.stringify({ body: `x\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 9, lease: { by: "core_1", until, host: "sbx", pid: 1 } })}\n-->` });
+    const OPEN = '{"state":"OPEN"}';
+    const held = await mk(OPEN, { body: lease(Date.now() + 600000) })(9);
+    assert.equal(held.outcome, "deferred"); assert.equal(held.code, "lease.held"); assert.match(held.detail, /leased by core_1 until \d{4}-/);
+    assert.equal(await mk(OPEN, { body: lease(Date.now() - 1000) })(9), null, "expired lease: run");
+    // #4931: an open feat/issue-9-lean PR is this issue's own lane (ci.red / base.conflict recovery, a relaunch after
+    // engine-error or ci-pending resumes it), never another lane's: the lane runs
+    assert.equal(await mk(OPEN, { open: '[{"number":4919}]' })(9), null, "own open lane PR: run (resume it)");
+    assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
+    assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
+  });
+  it("#4920 a deferred dispatch check launches no lane and no sandbox, and a restarted batch (new orchestrate) defers again", async () => {
+    for (const round of [1, 2]) { // round 2: a fresh orchestrate call = a daemon restart; the answer is read from GitHub each time
+      const { now, sleep } = fakeClock();
+      let launched = 0;
+      const rows = await orchestrate({ issues: [5], readBody: async () => "", now, sleep, maxDeferrals: 1,
+        remote: { max: 1, place: () => ({ where: "remote", reason: "heavy" }) },
+        dispatchCheck: async () => ({ outcome: "deferred", code: "lease.held", detail: "issue 5 leased by core_1 until 2999-01-01T00:00:00.000Z" }),
+        runOne: async () => { launched++; return { terminalReason: "merged", cost_usd: 0 }; } });
+      assert.equal(launched, 0, `round ${round}: no lane, no sandbox`);
+      assert.equal(rows[0].outcome, "deferred", `round ${round}`);
+    }
+  });
   it("makeDispatchCheck: merged head-branch PR, closed issue, open issue, unreadable answers fail open", async () => {
-    const mk = (issue, prs, events = "") => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+    const mk = (issue, prs, events = "", { body = "{}", open = "[]" } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[a.length - 1] === "body") return body; // #4920: the lease lookup
+      if (a[0] === "pr" && a.includes("open")) return open; // #4920: the open lane PR lookup
       if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason"]); if (issue instanceof Error) throw issue; return issue; }
       if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
@@ -1053,5 +1109,26 @@ describe("#4751: batch state is private", () => {
       writeAtomic(join(root, "plain.json"), "{}");
       assert.equal(mode(join(root, "plain.json")), 0o644);
     } finally { process.umask(old); }
+  });
+});
+
+describe("batch plan secrets (#4787)", () => {
+  it("writePlan never writes secret env values and keeps the plan 0600", () => {
+    const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-1");
+    b.writePlan({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123", AWS_ACCESS_KEY: "k-456" } });
+    const raw = readFileSync(join(b.dir, "plan.json"), "utf8");
+    assert.ok(!raw.includes("tok-123") && !raw.includes("k-456"));
+    assert.deepEqual(b.readPlan().env, { PATH: "/bin" });
+    assert.deepEqual(b.readPlan().envSecrets, ["AWS_ACCESS_KEY", "COMPUTESHARE_TOKEN"]);
+    assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
+  });
+  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", () => {
+    const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-2");
+    mkdirSync(b.dir, { recursive: true });
+    writeFileSync(join(b.dir, "plan.json"), JSON.stringify({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123" } }), { mode: 0o644 });
+    assert.deepEqual(b.scrubPlan(), ["COMPUTESHARE_TOKEN"]);
+    assert.ok(!readFileSync(join(b.dir, "plan.json"), "utf8").includes("tok-123"));
+    assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
+    assert.deepEqual(b.scrubPlan(), []);
   });
 });

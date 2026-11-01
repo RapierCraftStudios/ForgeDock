@@ -7,6 +7,7 @@ import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
+import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -162,7 +163,8 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
-Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. Every defer or post-deploy row has one "bucket": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (credentials, spend, settings; disposition defer, never post-deploy) or new-issue (future work). One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is "deliver". A requirement you can do in this change is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
+Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. Every defer or post-deploy row has one "bucket": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (credentials, spend, settings, promotion of a default-off flag; disposition defer, never post-deploy) or new-issue (future work). One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is "deliver". A requirement you can do in this change is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
+A new default-off flag or rollout key needs an activation row: defer, bucket \`owner:promote:<flag>\`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
 A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
@@ -180,6 +182,15 @@ export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as writt
 3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
 4. Scope: does the diff change only deliverable paths and tests?`;
 
+/** #4959: reviewer-only (kept out of REVIEW_RUBRIC, which the builder prompt shares and its token budget caps). */
+const VERDICT_RULE = "A criterion asking for a validation or finding verdict (VALIDATED, FALSE_POSITIVE, INCONCLUSIVE) is met by the recorded verdict here (read by the engine from the lane's investigation) together with a regression or repro test in the diff; it needs no prose in the diff. A gap you yourself call minor is not a failing row.";
+
+/** #4959: the verdict word of an investigation note's \`**Verdict**:\` line (uppercased), or null. */
+export function investigationVerdict(md) {
+  const m = /^\*\*Verdict\*\*:\s*([A-Za-z_-]+)/m.exec(String(md ?? ""));
+  return m ? m[1].toUpperCase() : null;
+}
+
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
@@ -189,9 +200,10 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
-- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed issue requirement.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; unknown kinds are rejected. One requirement id per row (R2, R3 as two rows).
+- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
+- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
+- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure (e.g. new enum code).
 - {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
@@ -422,10 +434,28 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
     + (list.length ? `\n<omitted_files>\n${list.join("\n")}\n</omitted_files>` : "");
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null }) {
+const isDecision = (b) => /^<!-- FORGE:DECISION\b/.test(String(b ?? "").trim());
+const DECISION_NOTE_MAX = 4000;
+/**
+ * #4901: the trusted `FORGE:DECISION` comments posted after the last `FORGE:CONTRACT` comment (issue order), as a binding note for a
+ * lane that resumes a frozen contract without a plan session. The lane's own recovery records are skipped; the newest decisions survive the cap.
+ * "" when there are none.
+ */
+export function decisionNote(comments = []) {
+  const list = Array.isArray(comments) ? comments : [];
+  const at = list.map((c) => String(c?.body ?? "").trimStart().startsWith("<!-- FORGE:CONTRACT")).lastIndexOf(true);
+  const ds = list.slice(at + 1).filter((c) => isTrustedIssueComment(c) && isDecision(c?.body) && !/^##\s*Decision: recovery pass/m.test(String(c.body))).map((c) => String(c.body).trim());
+  let kept = [], n = 0;
+  for (const d of ds.reverse()) { if (n + d.length > DECISION_NOTE_MAX && kept.length) break; kept.unshift(d.length > DECISION_NOTE_MAX ? d.slice(0, DECISION_NOTE_MAX) : d); n += d.length; }
+  return kept.length ? `\n\nBinding decisions posted after the contract froze (trusted; they override the issue text where they conflict, and the frozen contract still applies):\n${kept.join("\n---\n")}` : "";
+}
+
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
+  const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
+  notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
 }
 
 /**

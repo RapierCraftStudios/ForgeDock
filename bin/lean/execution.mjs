@@ -34,8 +34,9 @@
  * orchestrate runs a remote-placed lane locally when `max_remote` or the execution budget is exhausted.
  *
  * Host capabilities (#4542): a lane that needs something only the dispatching host has (the SOPS/age key, scoped ops
- * credentials, read-only prod monitor SSH) is placed local in `remote` and `hybrid` mode, because a sandbox relays none of
- * them (`detectNeeds`, `placeLane` `needs`). forge.yaml `execution.host_capabilities` declares which the host has; a
+ * credentials, read-only prod monitor SSH) is placed local in `remote` and `hybrid` mode unless the provider relays it
+ * (`detectNeeds`, `placeLane` `needs`/`relays`). #4778: a remote provider relays the capabilities of forge.yaml
+ * `execution.relay_commands` (allowlisted read-only wrappers the host runs for the sandbox, relay.mjs). forge.yaml `execution.host_capabilities` declares which the host has; a
  * remote lane that blocks on one of them ends `env.capability_remote` and is recovered locally (`hostCapabilityBlock`).
  * #4785: needs are read from the body, FORGE:DECISION comments and the frozen contract's validate commands
  * (`placementText`); a remote lane whose frozen validate commands name a declared one ends before building (`contractHostNeeds`).
@@ -57,7 +58,8 @@ import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remo
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
-import { parseContractComment } from "./render.mjs";
+import { parseContractComment, noComments } from "./render.mjs";
+import { parseRelayCommands } from "./relay.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
 export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
@@ -77,6 +79,15 @@ export function isTransportError(e) {
   if (e.name === "AbortError" || e.name === "TimeoutError") return true;
   return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|network error|timed? ?out/i.test(String(e.message ?? ""));
 }
+const CLONE_RE = /\bclone\b[^\n]*\b(time[ds]?\s?out|timeout|fail\w*|refused|reset|unreachable|early eof|could not)|\b(time[ds]?\s?out|timeout|fail\w*)\b[^\n]*\bclone\b/i;
+/** #4866: text of a sandbox clone failure (timeout, transport) as seen in an error or a lane result's detail. */
+export const isCloneFailure = (text) => CLONE_RE.test(String(text ?? ""));
+const CLONE_RETRY_S = 120;
+/** Outcome code of a retryable sandbox clone failure; local (not in OUTCOME_CODES), like the preflight codes in lanecheck.mjs. */
+export const SANDBOX_CLONE_CODE = "sandbox.clone";
+/** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
+const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_CLONE_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
 /**
@@ -113,9 +124,12 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
+  const wsN = Number(str(s.warm_sandboxes));
+  const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
+  const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -226,7 +240,7 @@ const EVIDENCE_HEADING = /^(#{1,6})\s*(?:evidence|logs?|data|observations?|measu
 function proseOf(body) {
   const kept = [];
   let fence = null, skip = 0;
-  for (const line of String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n")) {
+  for (const line of noComments(body).split("\n")) {
     const f = /^\s*(`{3,}|~{3,})/.exec(line);
     if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null; continue; }
     if (f) { fence = f[1]; continue; }
@@ -494,7 +508,7 @@ export function providerByName(name, opts) {
   if (name === "remote") {
     const exec = opts?.exec ?? {};
     const env = opts?.env ?? process.env;
-    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: exec, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
+    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: { ...exec, ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
   }
   if (name === "pool") {
     // #4546: `remote` with the endpoint and token defaulted to the local router, and the repo's forge.yaml sent along.
@@ -508,7 +522,8 @@ export function providerByName(name, opts) {
     const tokenEnv = exec.tokenEnv ?? (router?.token ? "FORGEDOCK_POOL_TOKEN" : undefined);
     // #4685: an empty env/keychain lookup of a configured token_env falls back to the router's token file.
     const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }) ?? router?.token ?? null);
-    const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}) };
+    const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
+      ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, name: "pool", env, credentials, transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials }), ...(opts?.now ? { now: opts.now } : {}) });
   }
   const e = new Error(`unknown execution.provider ${JSON.stringify(name)} (known: ${SANDBOX_PROVIDERS.join(", ")})`);
@@ -521,7 +536,7 @@ export function providerByName(name, opts) {
  * returns that sandbox's ledger (ledger.mjs `makeLedger`).
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000 }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null }) {
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
@@ -556,6 +571,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   };
   const unreachable = (h, e) => ({ terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
     detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
+  const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
+  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   const wait = async (h, g = guard({ waited: 0, tries: 0 })) => {
     for (;;) {
       const r = await g(() => provider.fetchResult(h));
@@ -563,7 +580,9 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       const st = await g(() => provider.status(h));
       if (st !== "running") {
         const last = await g(() => provider.fetchResult(h)); // it may have written the result just before exiting
-        return last ?? { terminalReason: "engine-error", detail: `sandbox ${h.id} ${st} without a result` };
+        if (last) return last;
+        const why = `sandbox ${h.id} ${st} without a result`;
+        return isCloneFailure(await tailOf(h)) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why };
       }
       await sleep(pollMs);
     }
@@ -574,6 +593,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)` }
     : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    : isCloneFailure(errText(e)) ? cloneDeferred(id, errText(e))
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
     // #4612: a graceful stop of a live sandbox (the provider's checkpoint stop); false when it has none.
@@ -596,10 +616,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (!Number.isFinite(h.startedAt)) h.startedAt = base.startedAt;
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
-        r = await wait(h);
+        r = settleClone(await wait(h), base.id);
       } catch (e) {
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
-        r = started ? { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` } : startFailed(base.id, e);
+        r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
       }
       await tear(led, h); // every path, after the result is in (tear never throws)
       return started ? withUsage(r, h) : r; // a sandbox that never started used nothing

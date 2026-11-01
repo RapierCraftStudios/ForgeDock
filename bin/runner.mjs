@@ -1537,6 +1537,19 @@ function toFiniteUsageNumber(value) {
  */
 export const CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024;
 
+/**
+ * forge#4763: Windows CreateProcess caps the WHOLE command line at 32,767 UTF-16 chars (8,191 through a cmd.exe
+ * shim), so on win32 the prompt plus every other argument must stay under this conservative bound.
+ */
+export const CLI_ARGV_PROMPT_MAX_BYTES_WIN32 = 16 * 1024;
+
+/** forge#4763: true when the prompt must go over stdin: prompt bytes plus the other argv bytes exceed the platform bound. */
+export function promptGoesViaStdin(prompt, otherArgs = [], platform = process.platform) {
+  const max = platform === "win32" ? CLI_ARGV_PROMPT_MAX_BYTES_WIN32 : CLI_ARGV_PROMPT_MAX_BYTES;
+  const rest = platform === "win32" ? otherArgs.reduce((n, a) => n + Buffer.byteLength(String(a), "utf-8") + 1, 0) : 0;
+  return Buffer.byteLength(String(prompt ?? ""), "utf-8") + rest > max;
+}
+
 /** forge#4129: spawn errnos that fail the same way on every rerun (argv too big, binary missing or not executable). */
 export const DETERMINISTIC_SPAWN_ERRNOS = Object.freeze(["E2BIG", "ENOENT", "EACCES", "ENOEXEC", "ENAMETOOLONG"]);
 
@@ -1594,7 +1607,11 @@ export function runCliBackend({
   // directory gets cleaned up.
   let tmpDir = null;
   // forge#4129: a prompt over the argv bound is sent on stdin instead of as the `--print` argument.
-  const promptViaStdin = Buffer.byteLength(String(userMessage ?? ""), "utf-8") > CLI_ARGV_PROMPT_MAX_BYTES;
+  // forge#4763: the other argv (flags, system-prompt file path) counts toward the Windows command-line cap.
+  const promptViaStdin = promptGoesViaStdin(userMessage, [
+    "--print", "--output-format", "json", ...optionalFlags, "--dangerously-skip-permissions",
+    ...(systemPrompt ? ["--append-system-prompt-file", join(os.tmpdir(), "forgedock-cli-system-prompt-XXXXXX", "system-prompt.txt")] : []),
+  ]);
   const promptArgs = promptViaStdin ? [] : [userMessage];
   let cliArgs = [
     "--print",

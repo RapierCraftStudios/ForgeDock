@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cs-relay <cmd> [args...]: runs an allowlisted read-only command on the dispatching host (#4778) and replays its
+# output and exit code. A dispatch-time pre-fetch (CS_RELAY_PREFETCH_B64) with the same argv is served without a call.
+# The sandbox only sends argv; the host gates it (refused: rc 126). No relay, HTTP error or timeout: rc 125.
+set -uo pipefail
+[ $# -gt 0 ] || { echo "usage: cs-relay <cmd> [args...]" >&2; exit 2; }
+argv=$(jq -cn '$ARGS.positional' --args -- "$@") || { echo "relay unavailable: jq failed" >&2; exit 125; }
+replay() { # $1: {rc, stdout, stderr}
+  jq -j '.stdout // ""' <<<"$1"
+  jq -j '.stderr // ""' <<<"$1" >&2
+  exit "$(jq -r 'if (.rc|type) == "number" then .rc else 1 end' <<<"$1")"
+}
+if [ -n "${CS_RELAY_PREFETCH_B64:-}" ]; then
+  hit=$(base64 -d <<<"$CS_RELAY_PREFETCH_B64" 2>/dev/null | jq -c --argjson a "$argv" 'first(.[] | select(.argv == $a)) // empty' 2>/dev/null || true)
+  [ -n "$hit" ] && replay "$hit"
+fi
+[ -n "${CS_RELAY_BASE:-}" ] || { echo "relay unavailable: no relay (CS_RELAY_BASE)" >&2; exit 125; }
+auth="authorization: Bearer ${CS_CRED_TOKEN:-}"
+rid=$(jq -cn --argjson a "$argv" '{argv: $a}' | curl -fsS --max-time 30 -H "$auth" -H 'content-type: application/json' --data-binary @- "$CS_RELAY_BASE" | jq -r '.rid // empty') \
+  || { echo "relay unavailable: request failed" >&2; exit 125; }
+[ -n "$rid" ] || { echo "relay unavailable: no request id" >&2; exit 125; }
+deadline=$(( $(date +%s) + ${CS_RELAY_TIMEOUT_S:-300} ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  out=$(curl -fsS --max-time 30 -H "$auth" "$CS_RELAY_BASE/$rid") || { echo "relay unavailable: poll failed" >&2; exit 125; }
+  [ "$(jq -r '.state // empty' <<<"$out")" = done ] && replay "$out"
+  sleep 2
+done
+echo "relay unavailable: timed out after ${CS_RELAY_TIMEOUT_S:-300}s" >&2
+exit 125

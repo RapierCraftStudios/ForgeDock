@@ -38,9 +38,11 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_
     && uv tool install "poetry==${POETRY_VERSION}"
 
 COPY entrypoint.sh /usr/local/bin/cs-entrypoint
+COPY warm-refresh.sh /usr/local/bin/cs-warm-refresh
 COPY cs-cred /usr/local/bin/cs-cred
+COPY cs-relay /usr/local/bin/cs-relay
 COPY gh-shim /opt/cs/bin/gh
 COPY claude-shim /opt/cs/bin/claude
-RUN chmod 0755 /usr/local/bin/cs-entrypoint /usr/local/bin/cs-cred /opt/cs/bin/gh /opt/cs/bin/claude
+RUN chmod 0755 /usr/local/bin/cs-entrypoint /usr/local/bin/cs-warm-refresh /usr/local/bin/cs-cred /usr/local/bin/cs-relay /opt/cs/bin/gh /opt/cs/bin/claude
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/cs-entrypoint"]

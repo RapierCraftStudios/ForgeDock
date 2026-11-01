@@ -8,8 +8,8 @@ import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
-import { makeIo } from "../engine-cli.mjs";
+import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
+import { makeIo, readSubagentModel } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
@@ -76,21 +76,39 @@ export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
 
 /** #4456: `--settings` registering the re-read nudge (bin/hooks/reread-nudge.mjs) as a PostToolUse hook on Read and Bash. */
 export const REREAD_HOOK = fileURLToPath(new URL("../hooks/reread-nudge.mjs", import.meta.url));
-export const rereadNudgeFlags = (node = process.execPath, hook = REREAD_HOOK) => {
+export const rereadHooks = (node = process.execPath, hook = REREAD_HOOK) => {
   const hooks = [{ type: "command", command: `${JSON.stringify(node)} ${JSON.stringify(hook)}` }];
   // #4580: the same script denies a full-file Read of an unchanged path already read twice (PreToolUse)
-  return ["--settings", JSON.stringify({ hooks: { PostToolUse: [{ matcher: "Read|Bash", hooks }], PreToolUse: [{ matcher: "Read", hooks }] } })];
+  return { PostToolUse: [{ matcher: "Read|Bash", hooks }], PreToolUse: [{ matcher: "Read", hooks }] };
 };
+export const rereadNudgeFlags = (node = process.execPath, hook = REREAD_HOOK) => ["--settings", JSON.stringify({ hooks: rereadHooks(node, hook) })];
 
-export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
+/**
+ * #4843: ForgeDock owns the subagent model of the sessions it launches. An operator settings.json `env` such as
+ * CLAUDE_CODE_SUBAGENT_MODEL=sonnet + _FORCE=1 would otherwise override every subagent, the #4391 Haiku explorer
+ * included, and a child env var cannot undo it (settings env wins); a `--settings` flag does. FORCE=0 lets a
+ * ForgeDock-defined agent's own `model` win. CLAUDE_CODE_SUBAGENT_MODEL (the default for agents without one) is
+ * set only from forge.yaml `agents.subagent_model`; unset leaves the operator's own default alone (#4849).
+ */
+export const ownedModelEnv = (subagentModel = null) => {
+  const m = sanitizeCliModel(subagentModel);
+  return { ...(m ? { CLAUDE_CODE_SUBAGENT_MODEL: m } : {}), CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "0" };
+};
+/** The one `--settings` of a lean session: the owned model env, plus the re-read hooks for builder sessions (#4456). */
+export const leanSettingsFlags = ({ subagentModel = null, reread = false } = {}) =>
+  ["--settings", JSON.stringify({ env: ownedModelEnv(subagentModel), ...(reread ? { hooks: rereadHooks() } : {}) })];
+
+export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
-    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : []),
-      ...(rereadNudge && !readOnly && !noTools ? rereadNudgeFlags() : [])]; // #4456: builder sessions only
+    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
+    // #4843 owned models, in extraArgs so FORGEDOCK_FULL_SESSION=1 (which drops sessionFlags) keeps them (#4848 BUG-1);
+    // #4456 re-read hooks: builder sessions only, and like the other session flags not in a full session
+    const settings = leanSettingsFlags({ subagentModel, reread: rereadNudge && !readOnly && !noTools && process.env.FORGEDOCK_FULL_SESSION !== "1" });
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
-      args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
+      args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: [...(resume ? ["--resume", resume] : []), ...settings],
       logger: { log() {} },
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
@@ -275,12 +293,12 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
   };
 }
 
-export function makeLeanIo({ repo }) {
+export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
   return {
     ghCache: (root) => makeGhCache({ root }),
-    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */

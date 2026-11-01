@@ -653,11 +653,13 @@ export function stepHeader(current, total, label, status = "active") {
  * @param {boolean} [opts.header=true]    - Treat first row as header (bold + underline + separator)
  * @param {number}  [opts.padding=2]      - Column padding (spaces between columns)
  * @param {string}  [opts.separator="─"]  - Separator line character
+ * @param {number}  [opts.maxWidth]       - Total width to fit: the widest column shrinks (to 12 at least) and its
+ *                                          cells word-wrap onto continuation lines (#4782: help was 990 columns wide)
  * @returns {string} Rendered table string (includes trailing newline)
  */
 export function table(
   rows,
-  { header = true, padding = 2, separator = "─" } = {},
+  { header = true, padding = 2, separator = "─", maxWidth } = {},
 ) {
   if (!rows || rows.length === 0) return "";
 
@@ -666,6 +668,34 @@ export function table(
   const widths = Array.from({ length: colCount }, (_, c) =>
     Math.max(...rows.map((r) => (r[c] ? stripAnsi(String(r[c])).length : 0))),
   );
+  if (maxWidth > 0) {
+    const total = () => widths.reduce((a, b) => a + b, 0) + padding * (colCount - 1);
+    while (total() > maxWidth) {
+      const c = widths.indexOf(Math.max(...widths));
+      if (widths[c] <= 12) break;
+      widths[c] -= 1;
+    }
+    // Word-wrap every cell wider than its column into extra rows (cells with ANSI codes are left whole).
+    const fitted = [];
+    rows.forEach((row, i) => {
+      const parts = row.map((cell, c) => {
+        const text = String(cell ?? "");
+        if (stripAnsi(text).length <= widths[c] || text !== stripAnsi(text)) return [text];
+        const out = [];
+        let line = "";
+        for (let word of text.split(/\s+/).filter(Boolean)) {
+          while (word.length > widths[c]) { if (line) { out.push(line); line = ""; } out.push(word.slice(0, widths[c])); word = word.slice(widths[c]); }
+          const cand = line ? `${line} ${word}` : word;
+          if (line && cand.length > widths[c]) { out.push(line); line = word; } else line = cand;
+        }
+        if (line) out.push(line);
+        return out;
+      });
+      const height = Math.max(...parts.map((p) => p.length));
+      for (let k = 0; k < height; k++) fitted.push(parts.map((p) => p[k] ?? ""));
+    });
+    rows = fitted; // a header is a single short line, so row 0 stays the header
+  }
 
   function renderRow(row, isHeader) {
     return row

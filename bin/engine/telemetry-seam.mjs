@@ -9,6 +9,7 @@
  *                          builder_tier/class/model/escalated 0|1, forge#4394)
  *   SANDBOX_USAGE       -> `sandbox_usage` (provider, sandbox_id, minutes, cost_usd, batch; one per settled remote lane, forge#4255)
  *   DECISION_ENGINE     -> `decision_engine` (decided, escalated, vetoed, reversed, mode, needs_human_before/after; forge#4766)
+ *   PRODWATCH_METRICS   -> `prodwatch_metrics` (source, sample, invalid, fp_rate, fix_ineffective_rate, recurrence_rate, signal_to_issue/merge/verified_ms; forge#4837)
  *   STRUCTURE_DELTA     -> `structure_delta` (edges_added/removed, import_files_added/removed, boundary_changed/loosened 0|1; forge#4159)
  *                          lean's merge-time record (forge#4165) adds milestone, the pr and string lists: deps_added and
  *                          new_edges / removed_edges as "from:to" comma-joined, top_growth "file+N", decisions "K1:lint",
@@ -83,6 +84,11 @@ export function mapRecord(rec, wallMs) {
   if (rec.event === "DECISION_ENGINE") { // #4766
     return { event: "decision_engine", phase: null, payload: compact({ decided: rec.decided, escalated: rec.escalated, vetoed: rec.vetoed, reversed: rec.reversed, mode: rec.mode,
       needs_human_before: rec.needs_human_before, needs_human_after: rec.needs_human_after }) };
+  }
+  if (rec.event === "PRODWATCH_METRICS") { // #4837
+    return { event: "prodwatch_metrics", phase: null, payload: compact({ source: rec.source, sample: rec.sample, invalid: rec.invalid, fix_ineffective: rec.fix_ineffective, recurred: rec.recurred,
+      fp_rate: rec.fp_rate, fix_ineffective_rate: rec.fix_ineffective_rate, recurrence_rate: rec.recurrence_rate,
+      signal_to_issue_ms: rec.signal_to_issue_ms, signal_to_merge_ms: rec.signal_to_merge_ms, signal_to_verified_ms: rec.signal_to_verified_ms }) };
   }
   if (rec.event === "CI_PENDING_WAIT") {
     return { event: "ci_pending_wait", phase: rec.phase ?? "review", payload: compact({ pr: rec.pr, minutes_waited: rec.minutes_waited, result: rec.result, polls: rec.polls, rate_limit_sleeps: rec.rate_limit_sleeps }) };

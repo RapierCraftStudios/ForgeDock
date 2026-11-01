@@ -39,6 +39,7 @@ function world(o = {}) {
       if (k === "pr list") return o.openPr ?? "42\n";
       if (k === "pr view") return `${o.head ?? HEAD}\n`;
       if (k === "pr comment") return "";
+      if (a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")) { if (o.selftestErr) throw new Error(o.selftestErr); const row = (b) => JSON.stringify({ body: b, author_association: "OWNER", user: { login: "m", type: "User" } }); return o.selftest === undefined ? `${row(`<!-- FORGE:SELFTEST result=pass sha=${o.head ?? HEAD} step=none -->`)}\n` : o.selftest.split("\n").filter(Boolean).map((l) => row(JSON.parse(l))).join("\n"); }
       if (a[0] === "api") return o.priorRoutes ?? "0\n";
       if (k === "issue list") return JSON.stringify(a.includes("open") ? [{ number: 7, title: "bug (PR #42)", body: "" }, { number: 8, title: "bug (PR #420)", body: "" }] : []);
       throw new Error(`unexpected gh ${a.join(" ")}`);
@@ -198,6 +199,47 @@ describe("review-staging flow", () => {
   });
 });
 
+describe("review-staging release gate (#4865)", () => {
+  const SANDBOX = { "/repo/forge.yaml": "project:\n  owner: o\n  repo: r\nbranches:\n  default: main\n  staging: staging\nselftest:\n  sandbox_repo: o/sandbox\n" };
+  const run = async (o) => { const w = world({ ...o, files: { ...SANDBOX, ...(o.files ?? {}) } }); const r = await reviewStagingFromCli(["42"], w.io); return { w, r }; };
+  it("without selftest.sandbox_repo the gate is skipped: no marker needed, and the skip is printed", async () => {
+    const w = world({ selftest: "" });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
+    assert.ok(w.scripts.length > 0);
+    assert.match(w.err.join("\n"), /SELFTEST: skipped \(selftest\.sandbox_repo not set/);
+    assert.ok(!w.gh.some((a) => a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")), "marker not read");
+  });
+  it("stops BLOCKED without a FORGE:SELFTEST marker and reviews nothing", async () => {
+    const { w } = await run({ selftest: "" });
+    assert.match([...w.out, ...w.err].join("\n"), /REVIEW_RESULT: status: BLOCKED, blocker: no FORGE:SELFTEST/);
+    assert.equal(w.scripts.length, 0);
+    assert.ok(!w.gh.some((a) => a[0] === "pr" && a[1] === "comment"), "no route marker posted");
+  });
+  it("stops BLOCKED on a failing or stale marker", async () => {
+    const fail = await run({ selftest: JSON.stringify(`<!-- FORGE:SELFTEST result=fail sha=${HEAD} step=add -->`) + "\n" });
+    assert.match([...fail.w.out, ...fail.w.err].join("\n"), /failed at step add/);
+    const stale = await run({ selftest: JSON.stringify(`<!-- FORGE:SELFTEST result=pass sha=${FROM} step=none -->`) + "\n" });
+    assert.match([...stale.w.out, ...stale.w.err].join("\n"), /not the PR head/);
+  });
+  it("an unreadable marker list stops BLOCKED with its own reason, not 'no marker'", async () => {
+    const { w } = await run({ selftestErr: "HTTP 502" });
+    const all = [...w.out, ...w.err].join("\n");
+    assert.match(all, /could not read the FORGE:SELFTEST markers of PR #42 \(HTTP 502\)/);
+    assert.equal(w.scripts.length, 0);
+  });
+  it("a sandbox_repo that names no repo (null, ~, false) leaves the gate off", async () => {
+    for (const v of ["null", "~", "false"]) {
+      const w = world({ selftest: "", files: { "/repo/forge.yaml": `project:\n  owner: o\n  repo: r\nbranches:\n  default: main\n  staging: staging\nselftest:\n  sandbox_repo: ${v}\n` } });
+      assert.equal(await reviewStagingFromCli(["42"], w.io), 0, `${v}: ${w.err.join("\n")}`);
+      assert.match(w.err.join("\n"), new RegExp(`SELFTEST: skipped \\(selftest\\.sandbox_repo "${v}" is not an owner/repo`));
+    }
+  });
+  it("proceeds with a passing marker for the head", async () => {
+    const { w } = await run({});
+    assert.ok(w.scripts.length > 0);
+  });
+});
+
 describe("review-staging helpers", () => {
   it("renderBrief substitutes in one pass", () => {
     assert.equal(renderBrief("[A] [B] [C]", { A: "[B]", B: "b" }), "[B] b [C]");
@@ -242,7 +284,7 @@ function postWorld(o = {}) {
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     run: async (cmd, args, opts) => {
-      if (cmd === "gh") { w.gh.push(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "0\n", stderr: "" }; }
+      if (cmd === "gh") { w.gh.push(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "[]", stderr: "" }; }
       const script = args[0].split("/").pop(), sub = args[1];
       w.scripts.push({ script, sub, args, env: opts.env });
       if (script === "review-staging-post.sh" && sub === "delivery") return o.delivery ?? { code: 0, stdout: "DELIVERY: OK (2/2 ...)", stderr: "" };
@@ -398,7 +440,7 @@ describe("review-staging --summary", () => {
   for (const [name, o, verdict] of [
     ["a CONFIRMED CRITICAL", { findings: [{ severity: "CRITICAL", confidence: "CONFIRMED" }] }, "BLOCK DEPLOY"],
     ["a CONFIRMED HIGH", { findings: [{ severity: "high", confidence: "confirmed" }] }, "NEEDS FIXES FIRST"],
-    ["failing CI", { ci: "2\n", ciCode: 1 }, "BLOCK DEPLOY"],
+    ["failing CI", { ci: '[{"name":"build","bucket":"fail"},{"name":"lint","bucket":"cancel"}]' }, "BLOCK DEPLOY"],
     ["an unreadable CI result", { ci: "", ciCode: 1 }, "BLOCK DEPLOY"],
   ]) {
     it(`${name}: GATE_FAILURE, ${verdict}, exit 1`, async () => {
@@ -432,6 +474,18 @@ describe("review-staging --summary", () => {
     });
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 1);
     assert.match(posted(w)[0], /Staging Review: NEEDS FIXES FIRST[\s\S]*1 CONFIRMED HIGH/);
+  });
+
+  it("a red gate-marker check alone does not block; any other red check still does", async () => {
+    const red = (name) => JSON.stringify([{ name: "build", bucket: "pass" }, { name, bucket: "fail" }]);
+    const w = await finalized({ ci: red("Check for FORGE gate markers") });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    assert.match(posted(w)[0], /FORGE:GATE_PASS/);
+    const w2 = await finalized({ ci: red("build-linux") });
+    assert.equal(await reviewStagingFromCli(["--summary"], w2.io), 1);
+    assert.match(posted(w2)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
+    const w3 = await finalized({ ci: "not json" });
+    assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1);
   });
 
   it("a LIKELY HIGH does not block; a deleted test-gate verdict fails closed", async () => {

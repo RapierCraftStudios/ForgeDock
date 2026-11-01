@@ -442,6 +442,7 @@ Whichever path is taken, Phase 5F makes sure the board has every ForgeDock field
 - `DETECTED_HEALTH_PATH` is set (from Phase 2E) AND a base domain is known → compose full `HEALTH_ENDPOINT` URL directly. Do not ask.
 - Container name prefixes detected in Phase 2C → use them directly as `internal_service_patterns`. Do not ask for confirmation.
 - Nothing detected for health endpoint AND nothing detected for containers AND `INTERACTIVE=false` → skip this section silently.
+- `vitest` in `package.json` or `pytest` in `pyproject.toml`/`requirements*.txt` → suggest (never write silently; ask when `INTERACTIVE=true`, else print it as a commented hint) the changed-file commands `verification.commands.typescript.test_changed: "vitest related $FORGE_CHANGED_FILES --run"` and `verification.commands.python.test_changed`, plus `typescript.typecheck_changed` for large TypeScript repos (`/review-pr` Phase 2 exports `$FORGE_CHANGED_FILES`; see `docs/CONFIG.md`).
 - `INTERACTIVE=true` → show detected values and ask for confirmation:
   ```
   Detected potential health endpoint path: {DETECTED_PATH}

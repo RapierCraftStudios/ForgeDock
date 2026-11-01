@@ -9,14 +9,16 @@ import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { readSelfReview, compareSelfReview } from "./selfreview.mjs";
-import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
-import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { createHash, randomBytes } from "node:crypto";
+import { otherLaneOwner } from "./lanelock.mjs";
+import { TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
+import { readRollouts, detectNewOffKeys } from "./activation.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -27,7 +29,7 @@ import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { runChecks, runWithTimeoutRetry, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
-import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
+import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
@@ -35,7 +37,7 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
@@ -60,8 +62,9 @@ import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
-import { untrackToolState, unstageToolState } from "./toolstate.mjs";
+import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
+import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -72,14 +75,16 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.CI_RED]: "the PR's required checks failed. Read the failed checks' logs (`gh run view <run-id> --log-failed`, or the repo's declared check commands), fix the causes, re-run those checks locally and push new commits only (never rewrite history)",
   [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
   [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
-  [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+  [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned, or its requirement quotes did not match the issue text. Plan against the current issue text and quote each requirement verbatim from it",
   [OUTCOME_CODES.BUDGET_EXCEEDED]: "an earlier run spent the implement turn budget for this issue's size; its digest is in the earlier run's detail and the branch holds its checkpointed work. Continue from the checkpoint against the frozen contract without starting over; if the remaining work cannot fit the budget, stop with a typed split-required block naming the sub-issues instead of grinding",
+  [OUTCOME_CODES.CONTRACT_INVALID_COMMAND]: "a frozen validate command was rejected by its runner's CLI (vitest 3 rejects -q). The change may already be correct: rerun the validate with the runner's own flags (vitest: --reporter=dot) and amend the command, do not rewrite the deliverables",
   [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
+  [ENV_VALIDATE_TIMEOUT]: "a validate command timed out (exit 124) on the engine's rerun, even after one longer retry: host load, not a failed check; the change may already be correct. Do not edit the deliverables for it: run the same command narrowed to the changed files (or through the repo's own cached toolchain) with a longer timeout, record that exit under the same validate id and name the command in your summary",
   [OUTCOME_CODES.ENV_CAPABILITY_REMOTE]: "the earlier run ran in a remote sandbox that lacks a host-only capability (SOPS/age key, ops credentials, read-only prod monitor SSH); this host has it. Do the work that needed it now, with the host's own tools and credentials, and never print or commit a secret in the clear",
   [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]: "the repro harness could not run the contract's repro_test on head (timeout, missing runner or dependencies); the change may already be correct. Do not edit the deliverables or stub dependencies for it and never install anything globally: run the repro command through the repo's own toolchain and installed dependencies, and when it cannot run in this checkout, fix the repro_test command (not the code) so it does",
 });
 /** #4323/#4334: precheck failure codes that are environment errors (state "environment"), never a builder resume. */
-const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]);
+const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND]);
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
@@ -185,6 +190,8 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {object} [o.baseMerge] forge.yaml lean.base_merge_* (#4588): {unionGlobs, jsonGlobs, generatedGlobs, generatedCommand} for deterministic base-merge conflict resolution
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
+ * @param {"off"|"report"} [o.conformanceMutation] forge.yaml engine.conformance_mutation (#4913): rerun each evidence test with the change reverted; a survivor is conformance.mutation_survived (shadow unless conformance_kinds enforces it)
+ * @param {Record<string,"enforce"|"shadow">} [o.conformanceKinds] forge.yaml engine.conformance_kinds: a failure code's own mode (enforce blocks, shadow is recorded only); others follow `conformance`
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
  * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs}
  * @param {object} [o.verifier]      forge.yaml review.verifier/verifier_model (#4397): {mode: off (default)|shadow|enforce, model}
@@ -200,6 +207,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.laneInstructions] forge.yaml engine.lane_instructions (#4395): repo-relative file appended to fresh sessions instead of CLAUDE.md
  * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.hostCaps]      {hostCapabilities, hostCapabilityPatterns}: forge.yaml execution.host_capabilities (#4542); a remote credentials block naming one is env.capability_remote
+ * @param {string[]} [o.relayCaps]   capabilities the dispatching host relays to this sandbox (#4778, env CS_RELAY_CAPS): no env.capability_remote end before building for them
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
  * @param {object} [o.explore]       {mode: on|off, model}: forge.yaml lean.explore / lean.explore_model (#4391, default off): the explorer subagent
  * @param {object} [o.contextPack]   {mode: shadow|on|off, sources, bytes, days}: forge.yaml engine.context_pack* (#4275, default shadow)
@@ -209,7 +217,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -229,6 +237,7 @@ export async function runCore(o) {
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
+  const phaseLedger = createLedger(now, "sandbox_start", t0); // #4908: where the lane wall time goes
   const usage = { cost_usd: 0, input: 0, output: 0, cache: 0 };
   const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
@@ -257,6 +266,7 @@ export async function runCore(o) {
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
+    phaseLedger.addModel(phase === "review" ? "review" : stage === "plan" ? "plan" : "implement", rec.duration_ms, c.delta);
     const u = r?.usage ?? {};
     usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
@@ -272,8 +282,9 @@ export async function runCore(o) {
   const usageLine = () => `cost $${usage.cost_usd.toFixed(4)}, tokens ${usage.input} in / ${usage.output} out / ${usage.cache} cache, wall ${Math.round((now() - t0) / 60000 * 10) / 10} min`;
 
   // ---- lease (same FORGE:STATE lease the full path uses) ----
-  const agentId = o.agentId ?? `core_${process.pid}`;
   const myHost = o.hostName ?? osHostname();
+  // #4920: unique per lane. A sandbox's pid is 1, so `core_<pid>` made every remote lane the same holder and the lease never refused one.
+  const agentId = o.agentId ?? `core_${sanitizeLeaseHost(myHost)}_${o.pid ?? process.pid}_${randomBytes(3).toString("hex")}`;
   const leaseObj = () => ({ by: agentId, until: now() + leaseTtlMs, host: myHost, pid: o.pid ?? process.pid });
   /** Provably dead: same host and `kill(pid, 0)` throws ESRCH. A different host keeps the TTL behaviour. */
   const holderDead = (l) => {
@@ -310,6 +321,7 @@ export async function runCore(o) {
   let factsSeen = []; // #4401: trusted comment bodies on the issue, so an identical FORGE:FACTS is never posted twice
   let guardAddedMs = 0; // #4705 (R12): wall time the guard gate added, summed over the lane, carried on RUN_TERMINAL
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
+  const kinds = normalizeKindModes(conformanceKinds); // engine.conformance_kinds: a failure code's own mode
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   let light = false, modelMs = 0; // #4451: the light lane finished without an upgrade (the same structure/hotspot gates as the full lane, #4502); summed session time
@@ -435,8 +447,9 @@ export async function runCore(o) {
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
       context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
-    ev(term);
-    await emit(term);
+    const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
+    ev({ ...term, phases });
+    await emit({ ...term, ...flattenPhases(phases) });
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
     // decomposed and dependency-* are legitimate non-failure endings; deferred/engine-error may be requeued, so the batch runner
     // (orchestrate settle, relabelNeedsHuman) relabels those once they are final. #4302: a non-final attempt never relabels; the runner
@@ -459,12 +472,12 @@ export async function runCore(o) {
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason, code, extra.mergedTo ?? null);
-    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs,
+    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
-      ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced) } } : {}), ...extra };
+      ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced), ...(Object.keys(kinds).length ? { kinds: [...failureClasses] } : {}) } } : {}), ...extra };
     return done;
   }
   /** #4401: post the lane's FORGE:FACTS (result.json facts and validation, changed files, contract decisions); never fails a run. */
@@ -627,7 +640,7 @@ export async function runCore(o) {
     } catch (e) { throw Object.assign(e, { laneCode: OUTCOME_CODES.CI_DCO }); }
   };
   const gitPush = async (args) => {
-    if (!args.includes("--delete")) { await untrackToolState({ git, base, ev }); await signOffUnpushed(); } // #4590: never push .forge-lean/ or tool caches this branch added
+    if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() }); await signOffUnpushed(); } // #4590: never push .forge-lean/ or tool caches this branch added
     try { return await retrying(() => git(args), { transient: PUSH_TRANSIENT_RE, permanent: PUSH_PERMANENT_RE, attempts: 4, sleep: sleepFn, random }); }
     catch (e) {
       if (e?.transientExhausted) { e.deferCode = OUTCOME_CODES.PUSH_TRANSIENT; e.deferDetail = `git push kept failing transiently after 4 attempts: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`; }
@@ -683,6 +696,7 @@ export async function runCore(o) {
   const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}) });
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
+  let decisionsNote = ""; // #4901: trusted FORGE:DECISION comments newer than the frozen contract, "" otherwise
   let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
   /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
@@ -811,6 +825,7 @@ export async function runCore(o) {
     const digest = budgetDigest({ size, budget, used: tb.record().build, digest: res?.status === "budget-exceeded" ? res.digest : null, stat: facts.stat, check: facts.check });
     throw Object.assign(new Error(digest), { laneCode: OUTCOME_CODES.BUDGET_EXCEEDED });
   }
+  const keepPaths = async () => ((await readContract())?.deliverables ?? []).map((d) => d?.path).filter((x) => typeof x === "string"); // #4959: deliverables are never untracked as generated files
   const readContract = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
   /** Containers/volumes the builder reported in result.json `resources` go into the ledger, so teardown removes them. */
@@ -973,6 +988,12 @@ export async function runCore(o) {
     leaseState = { ...(st ?? { v: 1, run: `core_${issue}`, issue, lane, committed: [], phase: null, branch: null, pr: null, terminalReason: null }), terminal: false,
       ...(o.placement ? { placement: o.placement } : {}) }; // #4256: the latest placement replaces an earlier run's
     try { await writeLease(leaseObj()); } catch { /* best effort */ }
+    try { // #4920: read it back; a lane that wrote at the same moment and won leaves its id here, so this one defers
+      const back = await io.projector.readState(issue);
+      if (back?.lease && back.lease.until > now() && back.lease.by !== agentId && back.lease.by !== st?.lease?.by) { // a holder this lane just took over (dead) is not a racer
+        return { terminalReason: "deferred", code: "lease-held", detail: `issue ${issue} leased by ${back.lease.by} until ${new Date(back.lease.until).toISOString()}`, branch, worktree: wt };
+      }
+    } catch { /* unreadable: proceed */ }
     leaseTimer = setInterval(() => { writeLease(leaseObj()).catch(() => {}); }, o.leaseRenewMs ?? 120000);
     leaseTimer.unref?.();
   }
@@ -1080,12 +1101,16 @@ export async function runCore(o) {
       }
     };
     if (resumed) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* remote branch may not exist (PR-less resume) */ } }
+    // #4786: an open-PR-less remote branch whose only changes vs the base are tool state (.forge-lean/ scratch) holds no work: plan fresh, never resume its stale contract.
+    const toolOnly = async (ref) => { const n = String(await io.git(["diff", "--name-only", `${base}...${ref}`], { cwd })).split("\n").map((x) => x.trim()).filter(Boolean); return n.every((f) => isToolState(f)); };
+    let scratchOnly = false;
+    if (resumed && !resumed.pr) { try { scratchOnly = await toolOnly(`origin/${branch}`); } catch { /* unreadable: resume as before */ } }
     // #4118: a local lane branch with commits not yet pushed (e.g. a reviewed commit whose push failed) must never be reset.
     // Reuse it when it is ahead of the base and contains everything the remote branch has.
     let keepLocal = false;
     try {
       const ahead = Number(String(await io.git(["rev-list", "--count", `${base}..refs/heads/${branch}`], { cwd })).trim());
-      if (ahead > 0) {
+      if (ahead > 0 && !(await toolOnly(`refs/heads/${branch}`).catch(() => false))) { // #4786: a scratch-only local branch is not reused
         let containsRemote = true;
         if (resumed) { try { await io.git(["merge-base", "--is-ancestor", `origin/${branch}`, `refs/heads/${branch}`], { cwd }); } catch { containsRemote = false; } }
         keepLocal = containsRemote;
@@ -1099,6 +1124,13 @@ export async function runCore(o) {
       ev({ event: "LOCAL_BRANCH_REUSED", branch });
     } else if (resumed) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
+      if (scratchOnly) { // from origin/<branch> so the later plain push stays fast-forward; the scratch goes out in a normal commit
+        await io.git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR], { cwd: wt }).catch(() => {});
+        if (String(await io.git(["diff", "--cached", "--name-only"], { cwd: wt }).catch(() => "")).trim()) await io.git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"], { cwd: wt }).catch(() => {});
+        resumed = null;
+        ev({ event: "SCRATCH_BRANCH_DROPPED", branch });
+        T.decisions.push(`Lane branch ${branch} held only ${LEAN_DIR}/ scratch: its stale checkpoint was dropped and the issue is planned fresh`);
+      }
     } else {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
@@ -1113,6 +1145,7 @@ export async function runCore(o) {
     }
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
+    if (!resumed && await clearLaneScratch({ git, fs: io.fs, cwd: wt })) ev({ event: "LANE_SCRATCH_CLEARED" }); // #4880: never read a previous lane's scratch
     // ---- 2a. lane profile (#4395): the repo's lane instruction file replaces CLAUDE.md; a bad one falls back with an anomaly ----
     const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
     if (laneProfile.name !== "full" && lanePath) {
@@ -1141,6 +1174,7 @@ export async function runCore(o) {
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
     // After 2b (#4347): installs run with the toolchain env, so a pm only its shim provides resolves; no env is the host PATH.
     if (io.deps?.prepare) {
+      phaseLedger.enter("deps_install");
       let res;
       try { res = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
       for (const r of Array.isArray(res) ? res : []) {
@@ -1178,7 +1212,7 @@ export async function runCore(o) {
     // #4160: files the branch touched (three-dot) whose content still differs from the base tip (two-dot); a file merged
     // in from the base by a base-sync equals the base and drops out of the scope check.
     const changedFiles = async () => {
-      const touched = names(await git(["diff", "--name-only", `${base}...HEAD`]));
+      const touched = names(await git(["diff", "--name-only", `${base}...HEAD`])).filter((f) => !isToolState(f)); // #4786
       if (!touched.length) return touched;
       const differs = new Set(names(await git(["diff", "--name-only", base, "HEAD"])));
       return touched.filter((f) => differs.has(f));
@@ -1211,6 +1245,7 @@ export async function runCore(o) {
     };
 
     // ---- 3. builder: plan call -> frozen contract -> implement call in the same session ----
+    phaseLedger.enter("plan");
     let result = null, attemptN = 0, reviewN = 0;
     const lastSubject = resumed ? String(await git(["log", "-1", "--format=%s"]).catch(() => "")).trim() : "";
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
@@ -1346,13 +1381,20 @@ export async function runCore(o) {
       let out = "";
       try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
       let found = null;
+      const amendLog = []; // #4899: trusted FORGE:AMENDMENT payloads in order, bound to a contract hash
       for (const l of out.split("\n")) {
         let c; try { c = JSON.parse(l); } catch { continue; }
         if (!isTrustedComment(c)) continue;
         const b = String(c?.body ?? "");
+        const am = parseAmendmentsComment(b);
+        if (am) amendLog.push(am);
         if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
         const fc = parseContractComment(b);
         if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
+      }
+      if (found) {
+        const seen = new Set(); found.amendments = [];
+        for (const st of amendLog) if (st.contract === found.hash) for (const a of st.amendments) { const k = JSON.stringify(a); if (!seen.has(k)) { seen.add(k); found.amendments.push(a); } }
       }
       return found;
     }
@@ -1414,6 +1456,14 @@ export async function runCore(o) {
     /** #4694: the engine appends guard-derived H preserve rows from the local index (one file read; the same contract when none apply). */
     const historyRows = (c) => { const w = withHistoryRows(c, { repo, issue }); const n = (w.preserve ?? []).length - (c.preserve ?? []).length; if (w !== c && n > 0) T.decisions.push(`History preserve rows: ${w.preserve.filter((p) => p.source === "guard").map((p) => p.id).join(", ")} from guards (#4694)`); return w; };
     let frozen = null, hash = null, planned = false, files = [], split = null;
+    const impliedDocs = []; // add-deliverable amendments for doc edits the docs-freshness rule demanded (docs round, CI fix round)
+    /** Doc files a fix round added to satisfy the freshness rule: recorded only when the rule failed before and passes after. */
+    async function noteFreshnessDocs(before, wasFailing) {
+      if (!io.docsFreshness || !wasFailing) return;
+      const nowOk = (await io.docsFreshness({ cwd: wt, base }).catch(() => null))?.ok === true;
+      for (const a of impliedDocDeliverables({ before, after: await changedFiles(), contract: frozen, wasFailing, nowOk })) if (!impliedDocs.some((x) => x.path === a.path)) impliedDocs.push(a);
+    }
+    let priorAmendments = []; // #4899: accepted amendments recovered with the frozen contract
     const pendingPits = []; // #4375: rework rounds whose gate has not passed again yet
     async function notePitfall(trigger, text) {
       const pit = io.pitfalls ? pendingPitfall(trigger, text) : null;
@@ -1471,7 +1521,7 @@ export async function runCore(o) {
           if (stale) {
             ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
-          } else { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+          } else { frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
         }
       }
       if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
@@ -1483,6 +1533,8 @@ export async function runCore(o) {
           T.decisions.push(`Resume digest given to the builder: ${d.files} file(s), ${d.validates} validate result(s)${d.reason ? `, last run ${d.reason}` : ""}`);
         }
       }
+      decisionsNote = frozen && (resumed || salvagedRef || recover) ? decisionNote(trustedComments) : ""; // #4901
+      if (decisionsNote) T.decisions.push("Trusted FORGE:DECISION comment(s) posted after the contract froze are binding notes for the builder");
       await label("building");
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
       const elig = lightEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], predictedFiles: namedPaths(iss.body ?? ""), riskPaths, cfg: o.light ?? {} });
@@ -1498,7 +1550,7 @@ export async function runCore(o) {
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
       if (lightTry) {
-        liveKeys = ["implementation"]; stage = "implement";
+        liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
         const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn() }),
           build: () => builder(++attemptN, lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants), null, true, undefined, { trigger: "build" }),
@@ -1533,7 +1585,7 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote, null, true, planPrompt, { trigger: "plan" });
+        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1588,7 +1640,7 @@ export async function runCore(o) {
           }
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
@@ -1605,7 +1657,8 @@ export async function runCore(o) {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
       }
       if (o.placement?.where === "remote" && !recover) { // #4785: the frozen validate commands need a tool only the host has
-        const hn = contractHostNeeds(frozen, o.hostCaps);
+        const relayed = new Set(o.relayCaps ?? []); // #4778: a relayed capability is served to the sandbox, so the lane builds there
+        const hn = contractHostNeeds(frozen, o.hostCaps && { ...o.hostCaps, hostCapabilities: (o.hostCaps.hostCapabilities ?? []).filter((c) => !relayed.has(c)) });
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
       }
       T.plan = [`contract ${hash}${lightDone ? " (derived, light lane)" : ""}`, `${frozen.requirements.length} requirement(s)`];
@@ -1622,9 +1675,9 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote);
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
-      stage = "implement";
+      stage = "implement"; phaseLedger.enter("implement");
       if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
@@ -1645,6 +1698,7 @@ export async function runCore(o) {
       T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
     }
 
+    phaseLedger.enter("precheck");
     // ---- 3a. declared check commands (#4240): the repo's own cheap gates (forge.yaml learned.test_commands), run locally in
     // the worktree before review and PR; no Actions minutes. A failure goes back to the builder in-session (#4149), up to
     // verify.max_rounds; a round with no commit or exhausted rounds is an anomaly, not a stop: CI stays the gate.
@@ -1741,9 +1795,11 @@ export async function runCore(o) {
       if (docs && !docs.ok && sessionId) {
         ev({ event: "DOCS_STALE", round: 1 });
         T.decisions.push("Docs freshness check failed; builder resumed once");
+        const docsBefore = await changedFiles();
         await fixRound("docs", docsPrompt(docs.output), [], "docs", String(docs.output ?? ""));
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
+        await noteFreshnessDocs(docsBefore, true);
         docs = await io.docsFreshness({ cwd: wt, base }).catch(() => null);
       }
       verifyFacts.docs = docs;
@@ -1908,6 +1964,7 @@ export async function runCore(o) {
     }
     const structureLine = structureNote(structure);
 
+    phaseLedger.enter("ci_wait");
     // ---- 3c. verify by CI (#4167): ci|hybrid push the branch and run the repo's CI on GitHub runners, before review ----
     // A red run resumes the builder with the failed jobs' logs (verify.max_rounds), slow CI ends ci-pending, and CI that
     // cannot run falls back once to local validation. A head verified here lets the precheck accept validate ids left to CI.
@@ -1919,7 +1976,7 @@ export async function runCore(o) {
     async function ciVerify(trigger) {
       let fixes = 0;
       for (;;) {
-        await untrackToolState({ git, base, ev }); // #4621: gitPush's untrack commit would move HEAD after `head` was read; do it first so head is the pushed tip
+        await untrackToolState({ git, base, ev, keep: await keepPaths() }); // #4621: gitPush's untrack commit would move HEAD after `head` was read; do it first so head is the pushed tip
         await signOffUnpushed(); // #4651: likewise the sign-off rewrite
         const head = String(await git(["rev-parse", "HEAD"])).trim();
         if (head === ciVerifiedHead || ciFellBack) return { fixes };
@@ -1988,9 +2045,12 @@ export async function runCore(o) {
         ciRounds++; fixes++;
         T.decisions.push(`CI verification red (${jobs}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
         ev({ event: "CI_FIX_ROUND", trigger, round: ciRounds, jobs: sp.own.map((f) => f.job) });
+        const ciBefore = io.docsFreshness ? await changedFiles() : [];
+        const ciDocsStale = io.docsFreshness ? (await io.docsFreshness({ cwd: wt, base }).catch(() => null))?.ok === false : false;
         await fixRound("ci", ciFailurePrompt(sp.own, vcfg.mode), [], "ci_red", failureLog(sp.own));
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
+        await noteFreshnessDocs(ciBefore, ciDocsStale);
         if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
           // #4387/#4586: no commit says the failure is not the change's; the failed jobs were already rerun once on this head (before the round).
           const rr = ciReruns.get(head)?.rr ?? { ok: false, detail: isSplit ? "refactor:split" : "no rerun seam" };
@@ -2000,6 +2060,7 @@ export async function runCore(o) {
       }
     }
 
+    phaseLedger.enter("precheck");
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
     // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
     // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression),
@@ -2007,6 +2068,10 @@ export async function runCore(o) {
     // A review without usable rows ends needs-human (or, with engine.review_incomplete: degraded, merges flagged).
     await label("in-review");
     let shadow = conformance !== "enforce";
+    // per-kind modes (engine.conformance_kinds) apply until a risk path forces the whole lane to enforce (#4398)
+    const kindsNow = () => (riskEnforced ? null : kinds);
+    const recording = () => shadow || (!riskEnforced && Object.keys(kinds).length > 0); // the gate records what it would have blocked
+    const blockingOf = (fs, allow) => blockingFailures(fs, { shadow, kinds: kindsNow(), allow });
     let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
@@ -2017,11 +2082,14 @@ export async function runCore(o) {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
       baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
-      const a = applyAmendments(frozen, result?.amendments, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
+      const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
+      const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
+      const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
+      const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
-        await post("FORGE:AMENDMENT", renderAmendments(a.applied));
+        await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all }));
         T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
       }
       pendingDecisions = a.decisions; // #4737: persisted only once the PR merges
@@ -2030,7 +2098,8 @@ export async function runCore(o) {
     }
     const IGNORE = [`${LEAN_DIR}/`];
     /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
-    async function reviewOnce() {
+    function reviewOnce() { return phaseLedger.during("review", reviewOnceRaw); }
+    async function reviewOnceRaw() {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
@@ -2047,7 +2116,7 @@ export async function runCore(o) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
           prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE }) });
+            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
@@ -2105,7 +2174,8 @@ export async function runCore(o) {
     }
     const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
-    async function rerunFailedValidates(contract) {
+    function rerunFailedValidates(contract) { return phaseLedger.during("validate", () => rerunFailedValidatesRaw(contract)); }
+    async function rerunFailedValidatesRaw(contract) {
       if (!io.runCommand) return null;
       const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
       const env = laneEnv();
@@ -2114,6 +2184,13 @@ export async function runCore(o) {
         if (!r || r.exit === undefined || r.exit === 0) continue;
         let x;
         try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        // #4761: a runner usage error (vitest -q) is the frozen command's defect: try the normalised command once
+        const fixed = cliUsageError(x ?? {}) ? normalizeRunnerCommand(v.command) : null;
+        if (fixed && fixed !== String(v.command)) {
+          try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: fixed, cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+          const note = `Validate ${v.id} hit a runner usage error; reran normalised (\`${fixed}\`): exit ${x?.rc}`;
+          if (!T.decisions.includes(note)) T.decisions.push(note);
+        }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
       }
       if (Object.keys(out).length) ev({ event: "VALIDATE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
@@ -2137,6 +2214,11 @@ export async function runCore(o) {
       return r.failures;
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
+    /** #4769: default-off keys the diff adds to the forge.yaml `rollouts` registry; [] when none is declared. */
+    async function newOffKeysOf() {
+      const cfg = readRollouts(wt);
+      return cfg ? detectNewOffKeys(cfg, String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...cfg.files]).catch(() => ""))) : [];
+    }
     async function gate() {
       await refreshIssue("conformance");
       result = (await readResult()) ?? result;
@@ -2162,7 +2244,7 @@ export async function runCore(o) {
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf() });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
@@ -2175,15 +2257,33 @@ export async function runCore(o) {
         const note = `Validate ${pc.ciCovered.join(", ")} verified by CI at ${gateHead.slice(0, 12)} (no local result)`;
         if (!T.decisions.includes(note)) T.decisions.push(note);
       }
+      // report-only: a deliver requirement whose test never ran green is named, not judged on prose
+      const unverified = unverifiedRequirements(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered });
+      if (unverified.length) {
+        ev({ event: "REQUIREMENT_UNVERIFIED", ids: unverified.map((u) => u.id) });
+        const note = `Unverified (no executed evidence test): ${unverified.map((u) => u.id).join(", ")}`;
+        if (!T.decisions.includes(note)) T.decisions.push(note);
+      }
+      let mutBlock = [];
+      if (conformanceMutation === "report" && io.runCommand) { // #4913: report-only unless conformance_kinds enforces the kind
+        const m = await phaseLedger.during("validate", () => runMutationCheck({ targets: mutationTargets(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered }), files, base, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), tmp: runTmp ?? undefined }));
+        const mf = mutationFailures(m.results);
+        if (m.results.length || m.skipped) ev({ event: "REQUIREMENT_MUTATION_SURVIVED", ids: mf.map((f) => f.detail.split(" ")[0]), checked: m.results.length, skipped: m.skipped || undefined });
+        if (mf.length) {
+          mutBlock = blockingFailures(mf, { shadow: true, kinds: { [MUTATION_SURVIVED]: "shadow", ...kinds } }).block;
+          const note = `Mutation check: evidence test still passes with the change reverted for ${mf.map((f) => f.detail.split(" ")[0]).join(", ")}${mutBlock.length ? "" : " (shadow: not blocking)"}`;
+          if (!T.decisions.includes(note)) T.decisions.push(note);
+        }
+      }
       Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
       // #4323/#4334: a missing host tool or module, or a repro test the harness could not run, is an environment error:
       // never a conformance failure, never a builder resume
       const envFails = pc.failures.filter((f) => ENV_CODES.includes(f.code));
-      const pre = [...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems];
+      const pre = [...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems, ...mutBlock];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
-      if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
+      if (pre.length && !recording()) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
-      const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.code)) : [];
+      const hard = recording() ? blockingOf(pre, SHADOW_PRE_BLOCKS).block : [];
       if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard, would: "nonconforming", wouldFail: pre, reviewState: null };
       if (envFails.length) return { state: "environment", by: "precheck", failures: envFails };
       // #4273: deterministic review trigger; off computes nothing, shadow logs and always reviews, enforce skips when untriggered
@@ -2194,7 +2294,7 @@ export async function runCore(o) {
         ev({ event: "REVIEW_TRIGGER", mode: triggerMode, would_skip: t ? t.would_skip : false, reasons: t ? t.reasons.map((r) => r.code) : ["trigger.error"], skipped: skip });
         if (skip) {
           triggerSkipped = true;
-          return { state: "conforms", by: "trigger", failures: [], ...(shadow ? { would: "conforms", wouldFail: [], reviewState: null } : {}) };
+          return { state: "conforms", by: "trigger", failures: [], ...(recording() ? { would: "conforms", wouldFail: [], reviewState: null } : {}) };
         }
         triggerSkipped = false;
       }
@@ -2204,12 +2304,12 @@ export async function runCore(o) {
         const vf = await runVerifier();
         if (vf.length) d = { state: "nonconforming", failures: vf, by: "verifier" };
       }
-      if (!shadow) return { ...d, by: d.by ?? "review" };
+      if (!recording()) return { ...d, by: d.by ?? "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
       const would = d.state === "conforms" && !pre.length ? "conforms" : d.state.startsWith("review.") ? d.state : "nonconforming";
       const wouldFail = [...pre, ...(d.state === "conforms" ? [] : d.failures)];
       if (d.state.startsWith("review.")) return { ...d, by: "review", would, wouldFail, reviewState: d.state };
-      const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
+      const blocking = d.state === "nonconforming" ? blockingOf(d.failures, SHADOW_BLOCKS).block : [];
       return { state: blocking.length ? "nonconforming" : "conforms", by: d.by ?? "review", failures: blocking, would, wouldFail, reviewState: d.state };
     }
     const verifyReported = new Set();
@@ -2241,6 +2341,14 @@ export async function runCore(o) {
       if (failures.every((f) => f.code === OUTCOME_CODES.ENV_REPRO_UNRUNNABLE)) {
         T.anomalies.push("Environment error: the repro harness could not run the repro test on head");
         return await needsHuman(`Environment error (not a conformance failure): the repro harness could not run the repro test on head; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRun the repro command through the repo's own toolchain and installed dependencies, then rerun.`, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE);
+      }
+      if (failures.every((f) => f.code === ENV_VALIDATE_TIMEOUT)) { // #4906: the teardown below pushes the lane's commits, so CI and recovery still see them
+        T.anomalies.push("Environment error: a validate command timed out on the engine's rerun (infra, exit 124)");
+        return await needsHuman(`Environment error (not a conformance failure): a validate command timed out (exit 124) even after one longer retry, which is host load rather than a failed check; no builder resume was spent, the branch is pushed and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery reruns the command narrowed to the changed files; CI decides the head.`, ENV_VALIDATE_TIMEOUT);
+      }
+      if (failures.every((f) => f.code === OUTCOME_CODES.CONTRACT_INVALID_COMMAND)) {
+        T.anomalies.push("Contract defect: a frozen validate command is a runner CLI usage error");
+        return await needsHuman(`Contract defect (not a conformance failure): a frozen validate command is rejected by its runner's CLI, so no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery re-plans the command (vitest: --reporter=dot, not -q).`, OUTCOME_CODES.CONTRACT_INVALID_COMMAND);
       }
       const tools = [...new Set(failures.filter((f) => f.tool).map((f) => f.tool))].join(", ");
       T.anomalies.push(`Environment error: validate command(s) could not run, the host is missing ${tools}`);
@@ -2291,14 +2399,14 @@ export async function runCore(o) {
       if (degradedReq) await track([degradedReq], "the conformance review stayed incomplete");
       if (triggerSkipped) {
         T.decisions.push("Conformance reviewer skipped by review.trigger enforce: no trigger reason (risk path, package edge, hotspot, failed or ambiguous gate)");
-        if (shadow) {
+        if (recording()) {
           shadowWould = verdict.would;
           ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: [] });
           await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: [] });
         }
         T.review = [TRIGGER_SKIP, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
         await post("FORGE:REVIEW", triggerSkipNote);
-      } else if (shadow) {
+      } else if (recording()) {
         const wf = verdict.wouldFail ?? [];
         shadowWould = verdict.would;
         ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
@@ -2324,6 +2432,7 @@ export async function runCore(o) {
     }
     if (degradedReq?.tracked && !closing.tracked.includes(degradedReq.tracked)) closing.tracked.push(degradedReq.tracked);
 
+    phaseLedger.enter("ci_wait");
     // ---- 5. push + PR ----
     files = await changedFiles();
     await gitPush(["push", "-u", "origin", branch]);
@@ -2398,7 +2507,8 @@ export async function runCore(o) {
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
     const syncRow = [];
     /** Returns null to continue with the merge flow, or a terminal result. */
-    async function baseSync(trigger, soft = false) {
+    function baseSync(trigger, soft = false) { return phaseLedger.during("base_sync", () => baseSyncRaw(trigger, soft)); }
+    async function baseSyncRaw(trigger, soft = false) {
       await renew();
       try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
       const baseFull = await gitOut(["rev-parse", base]), baseSha = baseFull.slice(0, 12);
@@ -2712,6 +2822,7 @@ export async function runCore(o) {
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
       try {
+        phaseLedger.enter("merge");
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
         try { seqLease?.release(); } catch { /* fail-open */ }
         seqLease = null;
@@ -2795,6 +2906,12 @@ export async function runCore(o) {
     if (e?.laneCode) return await needsHuman(e.message, e.laneCode);
     if (e?.code === "CLI_SPAWN_FAILED" || e?.spawnDeterministic === true) { // #4129: certain to fail again, so not engine-error (orchestrate would relaunch it)
       return await needsHuman(`The claude CLI could not be started (${e.spawnErrno ?? "spawn error"}); a rerun fails the same way: ${String(e.message).slice(0, 400)}`, OUTCOME_CODES.CLI_SPAWN_FAILED);
+    }
+    if (e?.pushRejected && /non-fast-forward|fetch first|\[rejected\]/i.test(String(e?.stderr ?? e?.message ?? e))) {
+      // #4920: another live lane owns this branch (its lease, or its open PR): this lane is superseded, nothing for a human to do
+      let owner = null;
+      try { owner = await otherLaneOwner({ gh: (a) => ghc(a), repo, issue, branch, selfId: agentId, ownPr: Number(/#(\d+)/.exec(String(T.pr?.[0] ?? ""))?.[1]) || null }); } catch { /* fail-open */ }
+      if (owner) return finish("deferred", `git push was rejected (non-fast-forward): ${owner.detail}; another lane owns ${branch}`, { code: OUTCOME_CODES.LEASE_HELD, branch }, OUTCOME_CODES.LEASE_HELD);
     }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     return finish("engine-error", e?.message ?? String(e));

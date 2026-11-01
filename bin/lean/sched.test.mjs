@@ -78,6 +78,15 @@ describe("host lane registry (#4191)", () => {
     assert.equal(a2.list().slots.length, 3);
   });
 
+  it("sched show reports the schedd tick age (#4780)", async () => {
+    const { handle } = world();
+    const lines = [];
+    const l = console.log; console.log = (m) => lines.push(String(m));
+    try { await schedFromCli(["show"], { sched: handle(401) }); } finally { console.log = l; }
+    assert.ok(lines.some((m) => /^schedd: (not running|pid \d+, last tick \d+ s ago)/.test(m)), lines.join("\n"));
+    assert.ok(lines.some((m) => m.startsWith("host cap:")), "existing lines kept");
+  });
+
   it("forgedock sched cap changes the cap live; --clear falls back to the caller's config", async () => {
     const { handle } = world();
     const a = handle(301), b = handle(302);

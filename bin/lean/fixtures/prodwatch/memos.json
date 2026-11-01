@@ -1,0 +1,282 @@
+[
+ {
+  "id": "memo-001",
+  "text": "# Postgres connection pool exhausted on db-2.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T01:01:00Z\n\nPool at 17 of 17 connections, request 3c6ef362 waited 17s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-002",
+  "text": "# Postgres connection pool exhausted on db-3.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T02:02:00Z\n\nPool at 24 of 24 connections, request 78dde6c4 waited 24s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-003",
+  "text": "# Postgres connection pool exhausted on db-4.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T03:03:00Z\n\nPool at 31 of 31 connections, request b54cda26 waited 31s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-004",
+  "text": "# Postgres connection pool exhausted on db-5.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T04:04:00Z\n\nPool at 38 of 38 connections, request f1bbcd88 waited 38s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-005",
+  "text": "# Postgres connection pool exhausted on db-1.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T05:05:00Z\n\nPool at 45 of 45 connections, request 2e2ac0ea waited 45s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-006",
+  "text": "# Postgres connection pool exhausted on db-2.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T06:06:00Z\n\nPool at 52 of 52 connections, request 6a99b44c waited 52s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-007",
+  "text": "# Postgres connection pool exhausted on db-3.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T07:07:00Z\n\nPool at 59 of 59 connections, request a708a7ae waited 59s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-008",
+  "text": "# Postgres connection pool exhausted on db-4.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T08:08:00Z\n\nPool at 66 of 66 connections, request e3779b10 waited 66s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-009",
+  "text": "# Postgres connection pool exhausted on db-5.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T09:09:00Z\n\nPool at 73 of 73 connections, request 1fe68e72 waited 73s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-010",
+  "text": "# Postgres connection pool exhausted on db-1.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T10:10:00Z\n\nPool at 80 of 80 connections, request 5c5581d4 waited 80s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-011",
+  "text": "# Postgres connection pool exhausted on db-2.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T11:11:00Z\n\nPool at 87 of 87 connections, request 98c47536 waited 87s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-012",
+  "text": "# Postgres connection pool exhausted on db-3.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T12:12:00Z\n\nPool at 94 of 94 connections, request d5336898 waited 94s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-013",
+  "text": "# Postgres connection pool exhausted on db-4.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T13:13:00Z\n\nPool at 101 of 101 connections, request 11a25bfa waited 101s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-014",
+  "text": "# Postgres connection pool exhausted on db-5.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T14:14:00Z\n\nPool at 108 of 108 connections, request 4e114f5c waited 108s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-015",
+  "text": "# Postgres connection pool exhausted on db-1.internal.example\nseverity: P1\nowner: db\nseen: 2026-10-29T15:15:00Z\n\nPool at 115 of 115 connections, request 8a8042be waited 115s; queries are queuing.\n"
+ },
+ {
+  "id": "memo-016",
+  "text": "# Public API unavailable for tenant group 38\nseverity: P0\nowner: api\nseen: 2026-10-29T04:04:00Z\n\nService down: gateway returned 503 for 38 requests, trace 5c5581d4.\n"
+ },
+ {
+  "id": "memo-017",
+  "text": "# Job queue lag growing in worker pool\nseverity: P2\nowner: jobs\nseen: 2026-10-29T07:07:00Z\n\nOldest job is 59 minutes old, worker d5336898 idle.\n"
+ },
+ {
+  "id": "memo-018",
+  "text": "# TLS certificate for edge host nearing expiry\nseverity: P2\nowner: infra\nseen: 2026-10-29T10:10:00Z\n\nCertificate expires in 80 days on db-1.internal.example.\n"
+ },
+ {
+  "id": "memo-019",
+  "text": "# Disk usage above threshold on storage node\nseverity: P1\nowner: infra\nseen: 2026-10-29T13:13:00Z\n\nVolume at 101 percent on db-4.internal.example.\n"
+ },
+ {
+  "id": "memo-020",
+  "text": "# Error rate up after the deploy of release v1.122\nseverity: P1\nowner: web\nseen: 2026-10-29T16:16:00Z\n\nErrors in checkout handler 3fcd1ce4 began after the deploy.\n"
+ },
+ {
+  "id": "memo-021",
+  "text": "# Disk alert is a false positive\nseverity: P2\nowner: obs\nseen: 2026-10-29T19:19:00Z\n\nAlert fires although the metric source b8ab03a8 reports a stale metric of 143.\n"
+ },
+ {
+  "id": "memo-022",
+  "text": "# Memory growth in indexer process\nseverity: P2\nowner: search\nseen: 2026-10-29T22:22:00Z\n\nRSS grew 164 MB over the last hour, pid 3188ea6c.\n"
+ },
+ {
+  "id": "memo-023",
+  "text": "# Transient timeout calling vendor API\nseverity: P3\nowner: api\nseen: 2026-10-29T01:25:00Z\n\nRetry succeeded after 185ms, request aa66d130.\n"
+ },
+ {
+  "id": "memo-024",
+  "text": "# Transient DNS lookup failure\nseverity: P3\nowner: infra\nseen: 2026-10-29T04:28:00Z\n\nSelf-recovered after 206 seconds on db-4.internal.example.\n"
+ },
+ {
+  "id": "memo-025",
+  "text": "# Transient lock wait on billing table\nseverity: P3\nowner: db\nseen: 2026-10-29T07:31:00Z\n\nRetry succeeded, wait 227ms, tx 9c229eb8.\n"
+ },
+ {
+  "id": "memo-026",
+  "text": "# Transient cache eviction spike\nseverity: P3\nowner: cache\nseen: 2026-10-29T10:34:00Z\n\nSelf-recovered within 248 seconds, node 1500857c.\n"
+ },
+ {
+  "id": "memo-027",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T13:37:00Z\n\nExpected: backup 8dde6c40 completed in 269 minutes.\n"
+ },
+ {
+  "id": "memo-028",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T14:38:00Z\n\nExpected: backup ca4d5fa2 completed in 276 minutes.\n"
+ },
+ {
+  "id": "memo-029",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T15:39:00Z\n\nExpected: backup 06bc5304 completed in 283 minutes.\n"
+ },
+ {
+  "id": "memo-030",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T16:40:00Z\n\nExpected: backup 432b4666 completed in 290 minutes.\n"
+ },
+ {
+  "id": "memo-031",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T17:41:00Z\n\nExpected: backup 7f9a39c8 completed in 297 minutes.\n"
+ },
+ {
+  "id": "memo-032",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T18:42:00Z\n\nExpected: backup bc092d2a completed in 304 minutes.\n"
+ },
+ {
+  "id": "memo-033",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T19:43:00Z\n\nExpected: backup f878208c completed in 311 minutes.\n"
+ },
+ {
+  "id": "memo-034",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T20:44:00Z\n\nExpected: backup 34e713ee completed in 318 minutes.\n"
+ },
+ {
+  "id": "memo-035",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T21:45:00Z\n\nExpected: backup 71560750 completed in 325 minutes.\n"
+ },
+ {
+  "id": "memo-036",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T22:46:00Z\n\nExpected: backup adc4fab2 completed in 332 minutes.\n"
+ },
+ {
+  "id": "memo-037",
+  "text": "# Nightly backup completed\nseverity: P3\nowner: db\nseen: 2026-10-29T23:47:00Z\n\nExpected: backup ea33ee14 completed in 339 minutes.\n"
+ },
+ {
+  "id": "memo-038",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T16:40:00Z\n\nRoutine heartbeat 34e713ee from db-1.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-039",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T17:41:00Z\n\nRoutine heartbeat 71560750 from db-2.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-040",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T18:42:00Z\n\nRoutine heartbeat adc4fab2 from db-3.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-041",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T19:43:00Z\n\nRoutine heartbeat ea33ee14 from db-4.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-042",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T20:44:00Z\n\nRoutine heartbeat 26a2e176 from db-5.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-043",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T21:45:00Z\n\nRoutine heartbeat 6311d4d8 from db-1.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-044",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T22:46:00Z\n\nRoutine heartbeat 9f80c83a from db-2.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-045",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T23:47:00Z\n\nRoutine heartbeat dbefbb9c from db-3.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-046",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T00:48:00Z\n\nRoutine heartbeat 185eaefe from db-4.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-047",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T01:49:00Z\n\nRoutine heartbeat 54cda260 from db-5.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-048",
+  "text": "# Scheduled maintenance window heartbeat\nseverity: P3\nowner: infra\nseen: 2026-10-29T02:50:00Z\n\nRoutine heartbeat 913c95c2 from db-1.internal.example, no action needed.\n"
+ },
+ {
+  "id": "memo-049",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T19:43:00Z\n\nRoutine: 311 requests rejected, client dbefbb9c.\n"
+ },
+ {
+  "id": "memo-050",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T20:44:00Z\n\nRoutine: 318 requests rejected, client 185eaefe.\n"
+ },
+ {
+  "id": "memo-051",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T21:45:00Z\n\nRoutine: 325 requests rejected, client 54cda260.\n"
+ },
+ {
+  "id": "memo-052",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T22:46:00Z\n\nRoutine: 332 requests rejected, client 913c95c2.\n"
+ },
+ {
+  "id": "memo-053",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T23:47:00Z\n\nRoutine: 339 requests rejected, client cdab8924.\n"
+ },
+ {
+  "id": "memo-054",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T00:48:00Z\n\nRoutine: 346 requests rejected, client 0a1a7c86.\n"
+ },
+ {
+  "id": "memo-055",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T01:49:00Z\n\nRoutine: 353 requests rejected, client 46896fe8.\n"
+ },
+ {
+  "id": "memo-056",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T02:50:00Z\n\nRoutine: 360 requests rejected, client 82f8634a.\n"
+ },
+ {
+  "id": "memo-057",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T03:51:00Z\n\nRoutine: 367 requests rejected, client bf6756ac.\n"
+ },
+ {
+  "id": "memo-058",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T04:52:00Z\n\nRoutine: 374 requests rejected, client fbd64a0e.\n"
+ },
+ {
+  "id": "memo-059",
+  "text": "# Expected rate-limit rejections from load test\nseverity: P3\nowner: api\nseen: 2026-10-29T05:53:00Z\n\nRoutine: 381 requests rejected, client 38453d70.\n"
+ },
+ {
+  "id": "memo-060",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T22:46:00Z\n\nExpected output size 332 rows, run 82f8634a.\n"
+ },
+ {
+  "id": "memo-061",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T23:47:00Z\n\nExpected output size 339 rows, run bf6756ac.\n"
+ },
+ {
+  "id": "memo-062",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T00:48:00Z\n\nExpected output size 346 rows, run fbd64a0e.\n"
+ },
+ {
+  "id": "memo-063",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T01:49:00Z\n\nExpected output size 353 rows, run 38453d70.\n"
+ },
+ {
+  "id": "memo-064",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T02:50:00Z\n\nExpected output size 360 rows, run 74b430d2.\n"
+ },
+ {
+  "id": "memo-065",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T03:51:00Z\n\nExpected output size 367 rows, run b1232434.\n"
+ },
+ {
+  "id": "memo-066",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T04:52:00Z\n\nExpected output size 374 rows, run ed921796.\n"
+ },
+ {
+  "id": "memo-067",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T05:53:00Z\n\nExpected output size 381 rows, run 2a010af8.\n"
+ },
+ {
+  "id": "memo-068",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T06:54:00Z\n\nExpected output size 388 rows, run 666ffe5a.\n"
+ },
+ {
+  "id": "memo-069",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T07:55:00Z\n\nExpected output size 395 rows, run a2def1bc.\n"
+ },
+ {
+  "id": "memo-070",
+  "text": "# Scheduled report job finished\nseverity: P3\nowner: data\nseen: 2026-10-29T08:56:00Z\n\nExpected output size 402 rows, run df4de51e.\n"
+ }
+]

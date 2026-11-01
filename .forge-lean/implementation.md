@@ -10,6 +10,6 @@ Add `windowsHide: true` to every detached spawn root; guard with a source-scan t
 - R4 ✅ bin/tests/windows-hide.test.mjs
 ### Verification
 - V1: exit 0 (100 pass)
-- V2: exit 1; 3 failures (journey Platform/WSL rows, writeInstallReceipt, install copyFile) are WSL-host environment detection, unrelated to spawn options; not confirmed against base.
+- V2: exit 1 after merging staging; 3 WSL-host env-detection failures (journey Platform rows, writeInstallReceipt, install copyFile); one load-flaky #4690 test passes alone. Not confirmed against base.
 ### Notes
 No env vars. R2 deferred, R3 post-deploy per contract.

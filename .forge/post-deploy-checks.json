@@ -1,0 +1,1 @@
+{"windows-hide-console":"node --test bin/tests/windows-hide.test.mjs"}

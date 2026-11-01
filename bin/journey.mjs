@@ -2813,6 +2813,7 @@ export function celebrate(ctx, summary) {
         `  5. run /issue <title> then /work-on <number>`,
         `  6. run npx forgedock run-issue <N> — drive an issue via the durable engine`,
         `  7. run npx forgedock watch      — monitor pipeline state`,
+        `  8. run npx forgedock guide      — how the workflow fits together`,
       ],
       { title: "what's next" },
     ),

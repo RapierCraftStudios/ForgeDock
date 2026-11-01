@@ -1,0 +1,85 @@
+{
+ "memos": 70,
+ "clusters": [
+  {
+   "name": "pg-conn",
+   "class": "defect",
+   "count": 15
+  },
+  {
+   "name": "api-5xx",
+   "class": "incident",
+   "count": 1
+  },
+  {
+   "name": "queue-lag",
+   "class": "defect",
+   "count": 1
+  },
+  {
+   "name": "cert",
+   "class": "defect",
+   "count": 1
+  },
+  {
+   "name": "disk",
+   "class": "defect",
+   "count": 1
+  },
+  {
+   "name": "deploy",
+   "class": "deploy-fallout",
+   "count": 1
+  },
+  {
+   "name": "mon-bug",
+   "class": "monitoring-bug",
+   "count": 1
+  },
+  {
+   "name": "mem-leak",
+   "class": "defect",
+   "count": 1
+  },
+  {
+   "name": "t1",
+   "class": "transient",
+   "count": 1
+  },
+  {
+   "name": "t2",
+   "class": "transient",
+   "count": 1
+  },
+  {
+   "name": "t3",
+   "class": "transient",
+   "count": 1
+  },
+  {
+   "name": "t4",
+   "class": "transient",
+   "count": 1
+  },
+  {
+   "name": "e1",
+   "class": "expected-class",
+   "count": 11
+  },
+  {
+   "name": "e2",
+   "class": "expected-class",
+   "count": 11
+  },
+  {
+   "name": "e3",
+   "class": "expected-class",
+   "count": 11
+  },
+  {
+   "name": "e4",
+   "class": "expected-class",
+   "count": 11
+  }
+ ]
+}
