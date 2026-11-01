@@ -336,6 +336,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    from HEAD in a `finally` (commits are never touched). A green rerun is
    `conformance.mutation_survived`, shadow unless `conformance_kinds` enforces it;
    a dirty tree, failed revert, timeout or missing runner skips, never fails.
+   `conformance-calibrate.mjs --events <run-log>` (#4929) reports the survived-mutation
+   share (from `REQUIREMENT_MUTATION_SURVIVED` events) and the false-survived rate
+   (labelled `conformance.mutation_survived` cases) for promotion.
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).

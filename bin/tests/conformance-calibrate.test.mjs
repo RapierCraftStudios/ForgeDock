@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { labelOf, casesOf, scoreKinds, formatKindReport, run, parseCalibrateArgs } from "../../scripts/conformance-calibrate.mjs";
+import { labelOf, casesOf, scoreKinds, formatKindReport, run, parseCalibrateArgs, eventsOf, mutationStats, formatMutationReport } from "../../scripts/conformance-calibrate.mjs";
 
 const LABELS = "docs/eval/conformance-labels-v1.json";
 const labels = () => JSON.parse(readFileSync(LABELS, "utf8"));
@@ -59,5 +59,49 @@ describe("conformance-calibrate", () => {
     assert.throws(() => parseCalibrateArgs([]), /usage/);
     assert.throws(() => parseCalibrateArgs(["--nope"]), /unknown argument/);
     assert.match(formatKindReport([]), /none earned/);
+  });
+
+  describe("mutation metrics (#4929)", () => {
+    const evt = (ids, checked, skipped) => ({ event: "REQUIREMENT_MUTATION_SURVIVED", ids, checked, skipped });
+    const mc = (label) => ({ kind: "conformance.mutation_survived", label });
+
+    it("survived share is survived ids over checked requirements, ignoring other events", () => {
+      const m = mutationStats([evt(["R1"], 2), evt([], 3), evt([], 0, "dirty tree"), { event: "PRECHECK", ids: ["x"], checked: 9 }], []);
+      assert.deepEqual([m.events, m.checked, m.survived, m.survivedShare, m.skippedRuns], [3, 5, 1, 0.2, 1]);
+      assert.equal(mutationStats([], []).survivedShare, null);
+      assert.equal(mutationStats([evt([], 0, "skip")], []).survivedShare, null);
+    });
+
+    it("false survived is the false-block share of labelled mutation_survived cases", () => {
+      const m = mutationStats([], [mc("true-block"), mc("false-block"), mc("true-block"), mc("true-pass"), { kind: "other", label: "false-block" }]);
+      assert.deepEqual([m.falseSurvived, m.labelledSurvived, m.falseSurvivedRate], [1, 3, 1 / 3]);
+      assert.equal(mutationStats([], []).falseSurvivedRate, null);
+    });
+
+    it("eventsOf reads JSONL, an array and {events}, dropping bad lines", () => {
+      assert.equal(eventsOf('{"event":"a"}\nnot json\n{"event":"b"}\n').length, 2);
+      assert.equal(eventsOf('[{"event":"a"}]').length, 1);
+      assert.equal(eventsOf('{"events":[{"event":"a"},{"event":"b"}]}').length, 2);
+      assert.equal(eventsOf("").length, 0);
+    });
+
+    it("run with --events adds the mutation section; without it the output is unchanged", () => {
+      const jsonl = [evt(["R1"], 2), evt([], 2)].map((e) => JSON.stringify(e)).join("\n");
+      const files = { l: { cases: [mc("true-block"), mc("false-block")] }, e: jsonl };
+      const read = (p) => files[p];
+      const withEv = run(["--labels", "l", "--events", "e"], read, read);
+      assert.match(withEv, /survived-mutation share: 1\/4 \(25%\) over 2 event\(s\), 0 skipped/);
+      assert.match(withEv, /false survived: 1\/2 \(50%\)/);
+      assert.equal(JSON.parse(run(["--labels", "l", "--events", "e", "--json"], read, read)).mutation.survivedShare, 0.25);
+      const plain = run(["--labels", "l"], read, read);
+      assert.doesNotMatch(plain, /mutation check/);
+      assert.equal(JSON.parse(run(["--labels", "l", "--json"], read, read)).mutation, undefined);
+      assert.match(formatMutationReport(mutationStats([], [])), /0\/0 \(n\/a\)/);
+    });
+
+    it("parses --events", () => {
+      assert.equal(parseCalibrateArgs(["--labels", "l", "--events", "e"]).events, "e");
+      assert.equal(parseCalibrateArgs(["--labels", "l"]).events, null);
+    });
   });
 });
