@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
+import { shellSyntaxError, unrunnableValidate, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -136,6 +136,30 @@ describe("precheck (deterministic, no reviewer)", () => {
   it("failed or missing validation -> unimplemented", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 1 }] }, changedFiles: files })), ["conformance.unimplemented"]);
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files })), ["conformance.unimplemented"]);
+  });
+  it("#4857 validateContract rejects a validate command that fails bash -n", () => {
+    const prose = { ...C, validate: [{ id: "V3", command: "node checks.mjs --base origin/staging (then run the scoped tsc/eslint commands it prints)" }] };
+    assert.ok(validateContract(prose, ISSUE).problems.some((p) => /V3: the command is not valid shell/.test(p)));
+    assert.ok(!validateContract({ ...C, validate: [{ id: "V1", command: "node checks.mjs --base origin/staging" }] }, ISSUE).problems.some((p) => /valid shell/.test(p)));
+    assert.equal(shellSyntaxError("echo ok && true"), null);
+    assert.ok(shellSyntaxError("echo (oops"));
+  });
+  it("#4857 a command that died before any test ran is contract.invalid_command; substitute-validate swaps a runnable one", () => {
+    assert.ok(unrunnableValidate({ rc: 5, output: "collected 0 items / 1 deselected\nno tests ran" }));
+    assert.ok(unrunnableValidate({ rc: 1, output: "Poetry could not find a pyproject.toml file in /repo" }));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "AssertionError: 1 !== 2" }));
+    assert.ok(!unrunnableValidate({ rc: 0, output: "no tests ran" }));
+    const r = applyAmendments({ requirements: [], validate: [{ id: "V2", command: "poetry run pytest -k 404_probe" }] }, [{ kind: "substitute-validate", validate: "V2", command: "poetry -C services/worker run pytest tests/test_probe.py", why: "no pyproject at root" }]);
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.contract.validate[0].command, "poetry -C services/worker run pytest tests/test_probe.py");
+    assert.equal(r.contract.validate[0].substituted.from, "poetry run pytest -k 404_probe");
+    const bad = applyAmendments({ requirements: [], validate: [{ id: "V2", command: "x" }] }, [{ kind: "substitute-validate", validate: "V2", command: "echo (oops", why: "w" }]);
+    assert.ok(bad.problems.some((p) => /not valid shell/.test(p)));
+    assert.ok(applyAmendments({ requirements: [], validate: [] }, [{ kind: "substitute-validate", validate: "V9", command: "true", why: "w" }]).problems.length);
+  });
+  it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
+    assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));
+    assert.ok(!describesUnrunnableCommand("needs a pricing decision from the product owner"));
   });
   it("#4761 vitest -q is a contract problem; a runner usage error is contract.invalid_command, not conformance", () => {
     const bad = { ...C, validate: [{ id: "V1", command: "pnpm --filter x exec vitest run a.test.ts -q" }] };

@@ -2276,3 +2276,8 @@ Cite: #4894.
 
 `lean.mjs` reads `.forge-lean/investigation.md` at the reviewer call and passes `investigationVerdict(md)` (the `**Verdict**:` word, `prompts.mjs`) to `reviewerPrompt`, which renders an `<investigation_verdict>` block plus `VERDICT_RULE`: a validation/finding-verdict criterion is met by the recorded verdict with a regression or repro test in the diff (no prose needed), and a gap the reviewer calls minor is not a failing row. The prompt is byte-identical without a verdict, and the rule stays out of the shared `REVIEW_RUBRIC` (builder token cap). `untrackToolState` takes `keep` (contract deliverable paths, from `keepPaths()` at both call sites) and also untracks an added `requirements*.txt` when the base is a Poetry/uv project (`strayGenerated`, `toolstate.mjs`), the base tracks none, and the path is not in `keep`. `conformance.mjs` row logic is unchanged.
 Cite: #4959.
+
+## Entry 2026-11-01 — Unrunnable validate commands are contract defects, not product decisions
+
+`validateContract` rejects a validate or `repro_test` command that fails `bash -n` (`shellSyntaxError`, `conformance.mjs`). A rerun that dies before any test (`unrunnableValidate`: no tests selected, no pyproject at the cwd) is `contract.invalid_command`. A new `substitute-validate` amendment swaps in a runnable equivalent. `classifyBlock` turns a `human/product-decision` block whose summary describes an unrunnable validate into an untyped block, which gets the one corrective resume. `forge.yaml` `verification.test_runners` ({path prefix: runner}) is read by `engine-cli.mjs readEnvConfig` and checked at freeze by `testRunnerProblems` (`preflight.mjs`).
+Cite: #4857.
