@@ -2296,3 +2296,8 @@ Cite: #4959.
 
 `validateContract` rejects a validate or `repro_test` command that fails `bash -n` (`shellSyntaxError`, `conformance.mjs`). A rerun that dies before any test (`unrunnableValidate`: no tests selected, no pyproject at the cwd) is `contract.invalid_command`. A new `substitute-validate` amendment swaps in a runnable equivalent. `classifyBlock` turns a `human/product-decision` block whose summary describes an unrunnable validate into an untyped block, which gets the one corrective resume. `forge.yaml` `verification.test_runners` ({path prefix: runner}) is read by `engine-cli.mjs readEnvConfig` and checked at freeze by `testRunnerProblems` (`preflight.mjs`).
 Cite: #4857.
+
+## Entry 2026-11-01 — New-file lanes no longer parked by false duplicate-export and missing-anchor checks
+
+`duplicateExports` (`postmerge.mjs`) skips entry-point names (`main`, `cli`) and manifest-less files under `scripts/` (standalone scripts, not a package). `applyAmendments` (`conformance.mjs`) takes `defaultWhy`, filling a blank `why`; `lean.mjs` sets it when the duplicate gate demanded a rename, so the engine's own amendment is not rejected. A `decision` anchor may also name a file the lane adds that the contract lists as a deliverable (`addedPaths`); other anchors must still exist on the base.
+Cite: #4974.
