@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { nightlyConfig, nightlyDue, NIGHTLY_MARKER } from "./selftest-nightly.mjs";
 
-const setup = (yaml) => { const cwd = mkdtempSync(join(tmpdir(), "nt-")), stateDir = mkdtempSync(join(tmpdir(), "ns-")); if (yaml) writeFileSync(join(cwd, "forge.yaml"), yaml); return { cwd, stateDir }; };
+const setup = (yaml) => { const cwd = tmpDir("nt-"), stateDir = tmpDir("ns-"); if (yaml) writeFileSync(join(cwd, "forge.yaml"), yaml); return { cwd, stateDir }; };
 const YAML = "selftest:\n  sandbox_repo: a/b\n  nightly_interval_hours: 24\n";
 const fakeIo = (open = []) => { const calls = []; return { calls, gh: async (a) => { calls.push(a); if (a[1] === "list") return JSON.stringify(open); if (a[1] === "create") return "https://github.com/o/r/issues/77\n"; return ""; } }; };
 
