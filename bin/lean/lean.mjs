@@ -1881,6 +1881,7 @@ export async function runCore(o) {
     }
     { const sq = await sequenceHandoff("hand-off"); if (sq?.done) return sq.done; }
     /** #4406: same-app duplicate exports (verify.duplicate_exports): one "rename or reuse" round, then an anomaly. True when a fix round ran. */
+    let engineWhy = null; // the reason an amendment gets when the engine demanded the change (a blank builder why is not its fault)
     async function duplicateGate(trigger) {
       if (!io.duplicateExports || isSplit || vcfg.duplicateExports === false) return false;
       const found = async () => (await io.duplicateExports({ cwd: wt, base }).catch(() => null)) ?? [];
@@ -1889,6 +1890,7 @@ export async function runCore(o) {
         const text = dups.map((d) => `duplicate export \`${d.symbol}\`: ${d.path} and ${(d.others ?? []).join(", ")}`).join("\n");
         ev({ event: "DUPLICATE_EXPORTS", trigger, count: dups.length });
         T.decisions.push(`Duplicate export(s) (${trigger}): ${dups.slice(0, 5).map((d) => `${d.symbol} in ${d.path} vs ${(d.others ?? []).join(", ")}`).join("; ")}; builder resumed once`);
+        engineWhy = `engine-demanded rename: duplicate export(s) ${dups.slice(0, 5).map((d) => d.symbol).join(", ")} (${trigger})`;
         await fixRound("duplicate", duplicateExportsPrompt(dups, vcfg.mode), [], "duplicate", text);
         result = (await readResult()) ?? result;
         files = await changedFiles();
@@ -2086,10 +2088,11 @@ export async function runCore(o) {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
       baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
+      const addedPaths = wantsDecision ? String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").filter(Boolean) : [];
       const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
       const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
       const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
-      const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
+      const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null, addedPaths, defaultWhy: engineWhy });
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;

@@ -880,6 +880,19 @@ describe("decision amendments (#4695)", () => {
     assert.match(a.problems[0], /match no file on the base/);
     assert.equal(a.decisions.length, 0);
   });
+  it("an anchor on a lane-added file the contract lists as a deliverable conforms; an unlisted added file does not", () => {
+    const withNew = { ...withRow, deliverables: [...withRow.deliverables, { id: "D3", path: "scripts/seed.py" }] };
+    const go = (added) => applyAmendments(withNew, [{ kind: "decision", why: "w", decision: { choice: "use B", anchors: ["scripts/seed.py"] } }], null, { baseFiles: ["src/scrape.js"], addedPaths: added });
+    assert.deepEqual(go(["scripts/seed.py"]).problems, []);
+    assert.match(go(["scripts/other.py"]).problems[0], /match no file on the base/);
+  });
+  it("a blank-why amendment takes the engine's defaultWhy; without one it is still rejected", () => {
+    const am = [{ kind: "add-deliverable", path: "x.js" }];
+    const ok = applyAmendments(C, am, null, { defaultWhy: "engine-demanded rename" });
+    assert.deepEqual(ok.problems, []);
+    assert.equal(ok.applied[0].why, "engine-demanded rename");
+    assert.match(applyAmendments(C, am).problems[0], /amendment without why/);
+  });
   it("supersedes drops the engine-authored preserve row; without it the row stays", () => {
     assert.ok(!amend({ supersedes: "d9-1" }).contract.preserve.some((p) => p.id === "H1"));
     assert.ok(amend({}).contract.preserve.some((p) => p.id === "H1"));
