@@ -20,7 +20,7 @@
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
  *   {op:"hold"|"release", id, issues} → {type:"ok", changed, hosted} (#4592): merges into / removes from the batch's `hold` file; a hosted
  *                                   runner admits no held issue from its next pass (running lanes are not stopped)
- *   {op:"status"}                 → {type:"status", pid, lastTick, batches:[{id, running}]} (#4780: `lastTick` = epoch ms of the last heartbeat; see schedd-health.mjs)
+ *   {op:"status"}                 → {type:"status", pid, lastTick, batches:[{id, running, lastProgressAt, lastProgressAgeSec, pendingAdds}]} (#4775: also an unhosted batch with pending adds)
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
  * report, so live lanes are re-adopted through the batch runner's `adopt`. It exits after `idleMs` with no batch and no client.
@@ -34,8 +34,8 @@
  */
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
+import { execFileSync, spawn } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +46,10 @@ import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
+export const ADMIT_MS = 120 * 1000; // #4775: how long one add/requeue/attach/resume waits for its batch to start before answering an error
+export const LAG_MS = 5 * 1000; // #4775: an event-loop stall longer than this is logged
+export const REQUEST_MS = 15 * 1000; // #4775: default bound of a control/status request
+export const UNIT = "forgedock-schedd";
 export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
 /** #4762: win32 `net` servers only accept named pipes, so the socket is a per-dir pipe there (it vanishes with its server). */
@@ -130,7 +134,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -176,8 +180,31 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     runs.set(run, ac);
   });
 
+  /** #4775: wait for a batch start at most `admitMs`; the start itself goes on (a second host() would duplicate the batch). */
+  const bound = (p, what) => {
+    let t;
+    return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} did not start within ${admitMs} ms (schedd is busy; retry)`)), admitMs); t.unref?.(); })]).finally(() => clearTimeout(t));
+  };
+  const hostBounded = (args, first = null, what = "batch") => bound(host(args, first), what);
+
+  /** #4775: per batch id, last progress and pending adds: every hosted batch, plus any daemon batch holding adds it never took. */
+  const statusBatches = () => {
+    const now = Date.now(), out = [];
+    const ids = new Set(hosted.keys());
+    for (const id of starting.keys()) ids.add(id);
+    try { for (const id of listBatches(root)) if (!ids.has(id) && openBatch(root, id).readPlan()?.daemon) ids.add(id); } catch { /* unreadable root */ }
+    for (const id of [...ids].sort()) {
+      const isHosted = hosted.has(id) || starting.has(id);
+      let last = null, pending = [];
+      try { const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); } catch { /* a half-written batch */ }
+      if (!isHosted && !pending.length) continue;
+      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), pendingAdds: pending });
+    }
+    return out;
+  };
+
   const handle = async (req, send) => {
-    if (req.op === "status") return send({ type: "status", pid, lastTick, batches: [...hosted.keys()].map((id) => ({ id, running: true })) }, true);
+    if (req.op === "status") return send({ type: "status", pid, lastTick, batches: statusBatches() }, true);
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -190,7 +217,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const { added, skipped, requeued = [] } = b.addIssues(req.issues ?? []);
       // #4687: a re-queued skipped issue reopens a finished, unhosted batch like --requeue does
       const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
-      if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
+      if (reopen) await hostBounded({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, null, `batch ${req.id}`);
       return send({ type: "ok", added, skipped, requeued, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
     if (req.op === "requeue") {
@@ -199,7 +226,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { requeued, refused } = b.requeue(req.issues ?? [], { reason: req.reason, by: req.by });
       const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
-      if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
+      if (reopen) await hostBounded({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, null, `batch ${req.id}`);
       return send({ type: "ok", requeued, refused, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
     if (req.op === "hold" || req.op === "release") {
@@ -222,7 +249,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }
     if (req.op === "attach") {
       if (req.resume) { const rb = openBatch(root, req.id); if (rb.exists()) rb.clearCancel(); } // #4592: the operator's resume continues a cancelled batch the daemon still hosts
-      if (!hosted.has(req.id) && starting.has(req.id)) await starting.get(req.id).catch(() => {});
+      if (!hosted.has(req.id) && starting.has(req.id)) await bound(starting.get(req.id), `batch ${req.id}`).catch((e) => { if (/did not start within/.test(e?.message)) throw e; });
       const live = hosted.get(req.id);
       if (live) {
         // Synchronous read + subscribe: no row is lost or doubled between the replay and the live stream.
@@ -236,7 +263,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held") && !b.unrunAdds().length && !b.unrunRequeues().length) {
         return send({ type: "done", replay: true, result: { rows: rep.rows ?? [], crossLane: rep.crossLane ?? [], batch: b.id, ok: !!rep.ok }, report: rep.report ?? null }, true);
       }
-      const ent = await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, sub);
+      const ent = await hostBounded({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, sub, `batch ${req.id}`);
       return send({ type: "batch", id: ent.id, dir: ent.dir });
     }
     throw new Error(`unknown op ${JSON.stringify(req.op)}`);
@@ -277,6 +304,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (closing) return closing;
     clearInterval(idleTimer);
     clearInterval(lockTimer);
+    clearInterval(lagTimer);
     clearInterval(beatTimer);
     if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
@@ -309,6 +337,14 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     else if (process.platform !== "win32" && !existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
   }, lockCheckMs);
   lockTimer.unref?.();
+  // #4775: an event loop starved by host load leaves sockets unanswered and children unreaped; leave a trace of it.
+  let lagAt = Date.now(), lagLogged = 0;
+  const lagTimer = setInterval(() => {
+    const now = Date.now(), lag = now - lagAt - 1000;
+    lagAt = now;
+    if (lag >= lagMs && now - lagLogged >= 60_000) { lagLogged = now; log(`schedd: event loop stalled ${Math.round(lag / 1000)}s (host overloaded?)`); }
+  }, 1000);
+  lagTimer.unref?.();
   // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
   let dueRunning = false;
   const dueTimer = due ? setInterval(async () => {
@@ -333,6 +369,9 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       log(`schedd: resuming batch ${id}`);
       const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
       starting.set(id, started);
+      const stall = setTimeout(() => log(`schedd: batch ${id} has not started after ${admitMs} ms (still resuming; other batches are served)`), admitMs);
+      stall.unref?.();
+      started.finally(() => clearTimeout(stall)).catch(() => {});
       started.catch((e) => log(`schedd: resume ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
     }
   }
@@ -362,8 +401,29 @@ export function exitOnSignals(d, { on = (s, f) => (s.startsWith("SIG") || s === 
   on("exit", (code) => log(`schedd: exited (code ${code})`));
 }
 
-/** Connect to the daemon, spawning it (`spawnDaemon()`) when nobody listens. @returns {Promise<import("node:net").Socket>} */
-export async function connectDaemon({ dir = schedDir(), spawnDaemon = defaultSpawn, waitMs = 10_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+/**
+ * #4775: state of the systemd-user unit (`active`, `activating`, `inactive`, ...), or null when no unit is installed or
+ * systemd is not usable here (then a client may spawn the daemon itself).
+ */
+export function unitState({ unitFile = join(homedir(), ".config", "systemd", "user", `${UNIT}.service`), exists = existsSync, run = execFileSync } = {}) {
+  if (!exists(unitFile)) return null;
+  try { return String(run("systemctl", ["--user", "is-active", UNIT], { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] })).trim() || null; }
+  catch (e) { return e?.code === "ENOENT" || e?.killed ? null : String(e?.stdout ?? "").trim() || null; } // is-active exits 3 and prints the state when not active
+}
+
+/** Start the installed unit (best effort: the connect retry reports a failure). */
+export function startUnit({ run = execFileSync } = {}) {
+  try { run("systemctl", ["--user", "start", "--no-block", UNIT], { timeout: 5000, stdio: "ignore" }); } catch { /* reported by the connect retry */ }
+}
+
+/**
+ * Connect to the daemon. When nobody listens it is started: a systemd-managed instance (`unitState()` active, activating
+ * or reloading: restarting) is waited for and never raced by a second daemon, an installed but stopped unit is started
+ * (`startUnit()`), and only without a unit does `spawnDaemon()` run (#4775). `spawnDaemon: null` never starts anything.
+ * @returns {Promise<import("node:net").Socket>}
+ */
+export async function connectDaemon({ dir = schedDir(), spawnDaemon = defaultSpawn, waitMs = 10_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  unit = unitState, start = startUnit } = {}) {
   const { sock } = scheddPaths(dir);
   const tryConnect = () => new Promise((res, rej) => {
     const c = createConnection(sock);
@@ -371,7 +431,9 @@ export async function connectDaemon({ dir = schedDir(), spawnDaemon = defaultSpa
     c.once("error", rej);
   });
   try { return await tryConnect(); } catch (e) { if (!["ENOENT", "ECONNREFUSED"].includes(e?.code) || !spawnDaemon) throw e; }
-  spawnDaemon({ dir });
+  const state = unit();
+  if (state === null) spawnDaemon({ dir });
+  else if (!["active", "activating", "reloading"].includes(state)) start();
   const end = Date.now() + waitMs;
   for (;;) {
     await sleep(100);
@@ -396,10 +458,12 @@ export function defaultSpawn({ dir = schedDir(), script = SCHEDD_SCRIPT, env = p
  * Send one request and feed every reply to `onMsg`. Resolves with the last message (`done`, `ok`, `status`), rejects on
  * `error` or when the daemon closes the stream first.
  */
-export function request(sock, msg, onMsg = () => {}) {
+export function request(sock, msg, onMsg = () => {}, { timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
-    let buf = "", last = null, settled = false;
-    const finish = (fn, v) => { if (!settled) { settled = true; fn(v); } };
+    let buf = "", last = null, settled = false, timer = null;
+    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
+    // #4775: a bound for one-shot requests; a stalled daemon answers an error instead of hanging the caller (streams pass none)
+    if (timeoutMs > 0) timer = setTimeout(() => { sock.destroy(); finish(reject, Object.assign(new Error(`schedd did not answer within ${Math.round(timeoutMs / 1000)}s (not responding)`), { code: "schedd.timeout" })); }, timeoutMs);
     sock.on("data", (d) => {
       buf += d;
       let i;

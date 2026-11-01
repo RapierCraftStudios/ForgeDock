@@ -15,7 +15,7 @@
  * running; a resumed dispatcher re-attaches to it by pid, checking `/proc/<pid>/cmdline` against its result path. These
  * detached lanes are the `local` execution (#4253); `execution.mjs` is the sandbox-provider seam for remote lanes.
  */
-import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -220,6 +220,12 @@ export function openBatch(root, id) {
     clearCancel: () => rmSync(f("cancel"), { force: true }),
     /** Added issues the batch never took into its `order` (a finished or unhosted batch with pending adds). */
     unrunAdds: () => { const order = new Set(readJson(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
+    /** #4775: epoch ms of the batch's last progress (newest mtime of `state.json` / `log.jsonl`), or null when neither exists. */
+    lastProgressMs: () => {
+      let best = null;
+      for (const n of ["state.json", "log.jsonl"]) { try { const m = statSync(f(n)).mtimeMs; if (best === null || m > best) best = m; } catch { /* absent */ } }
+      return best;
+    },
     /** The lane updates in `log.jsonl`, in order (unparsable lines skipped). */
     readLog: () => {
       let text = "";
