@@ -63,26 +63,48 @@ describe("#4965 readers", () => {
 });
 
 describe("#4965 forge.yaml and resume", () => {
-  it("readOrchestration reads auto_add_children and its poll; defaults keep today's behaviour", async () => {
-    const { readOrchestration } = await import("../engine-cli.mjs");
+  it("readAutoChildren reads auto_add_children and its poll; defaults keep today's behaviour", async () => {
+    const { readAutoChildren } = await import("../engine-cli.mjs");
     const { mkdtempSync, writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
     const d = mkdtempSync(join(tmpdir(), "ac-"));
-    assert.equal(readOrchestration(d).autoAddChildren, "decomposed");
-    assert.equal(readOrchestration(d).autoAddChildrenPollS, 120);
+    assert.equal(readAutoChildren(d).mode, "decomposed");
+    assert.equal(readAutoChildren(d).pollS, 120);
     writeFileSync(join(d, "forge.yaml"), "orchestration:\n  auto_add_children: epic\n  auto_add_children_poll_s: 30\n");
-    assert.equal(readOrchestration(d).autoAddChildren, "epic");
-    assert.equal(readOrchestration(d).autoAddChildrenPollS, 30);
+    assert.equal(readAutoChildren(d).mode, "epic");
+    assert.equal(readAutoChildren(d).pollS, 30);
   });
-  it("--resume keeps the mode: the flag is in plan.argv, which a resume re-reads", async () => {
+  it("--resume keeps the mode: a resumed batch whose plan carries --auto-children epic --epic 9 adds #9's children", async () => {
     const { openBatch } = await import("./batch.mjs");
-    const { mkdtempSync } = await import("node:fs");
+    const { orchestrateFromCli } = await import("../engine-cli.mjs");
+    const fs = await import("node:fs");
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
-    const root = mkdtempSync(join(tmpdir(), "acb-"));
+    process.env.FORGEDOCK_SCHED_DIR = fs.mkdtempSync(join(tmpdir(), "ac-sched-"));
+    const work = fs.mkdtempSync(join(tmpdir(), "acb-")), root = join(work, "batches"), launches = join(work, "launches");
+    fs.writeFileSync(launches, "");
+    const stub = join(work, "stub.mjs");
+    fs.writeFileSync(stub, `import { appendFileSync, writeFileSync } from "node:fs";
+const a = process.argv.slice(2); const rf = a[a.indexOf("--result-file") + 1];
+appendFileSync(${JSON.stringify(launches)}, a[1] + "\\n"); writeFileSync(rf, JSON.stringify({ terminalReason: "merged", pr: 100 + Number(a[1]), cost_usd: 0 }));
+`);
     const b = openBatch(root, "b20261101-000000-1");
-    b.writePlan({ v: 1, id: b.id, argv: ["1", "--auto-children", "all", "--epic", "9"], repo: "o/r", cwd: root });
-    assert.deepEqual(openBatch(root, b.id).readPlan().argv.slice(1, 5), ["--auto-children", "all", "--epic", "9"]);
+    b.writePlan({ v: 1, id: b.id, argv: ["1", "--repo", "o/r", "--no-prefilter", "--auto-children", "epic", "--epic", "9"], repo: "o/r", cwd: process.cwd(), created: new Date().toISOString() });
+    b.setParallel(2);
+    const lists = [];
+    const gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "list" && a.includes("--state") && a.includes("number,body,labels,parent,subIssues")) { lists.push(a); return JSON.stringify([{ number: 9, body: "", labels: [] }, { number: 51, body: "**Parent**: #9", labels: [] }]); }
+      if (a.includes("milestone")) return JSON.stringify({ milestone: null });
+      if (a[0] === "repo") return "main\n";
+      return JSON.stringify({ body: "", state: "OPEN", labels: [] });
+    };
+    const deps = { batchRoot: root, allowTmpfs: true, laneScript: stub, pollMs: 20, orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\n" },
+      leanIo: { gh, git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") } };
+    const l = console.log; console.log = () => {};
+    let res;
+    try { res = await orchestrateFromCli(["--resume", b.id], deps); } finally { console.log = l; }
+    assert.ok(lists.length >= 1, "the child list was read: the epic mode survived the resume");
+    assert.deepEqual(res.rows.map((r) => r.issue).sort((x, y) => x - y), [1, 51]);
   });
 });

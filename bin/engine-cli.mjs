@@ -1720,8 +1720,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
-  const autoMod = _autoChildren;
-  const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : orch.autoAddChildren ?? "decomposed", pollS: orch.autoAddChildrenPollS ?? autoMod.DEFAULT_POLL_S,
+  const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
+  const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
     epics: argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : [])) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
@@ -2273,6 +2273,13 @@ export async function schedFromCli(argv, deps = {}) {
 /** #4773: is the author of a `viewIssue` record (author plus the REST association, #4859) trusted (the engine admission's `isTrustedActor`)? */
 const bodyTrusted = (v) => isTrustedActor({ association: v?.authorAssociation, type: v?.author?.is_bot ? "Bot" : "User", login: v?.author?.login });
 
+/** forge.yaml `orchestration.auto_add_children` (#4965; default `decomposed`) and `auto_add_children_poll_s` (default 120). */
+export function readAutoChildren(cwd = process.cwd()) {
+  let o = {};
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestration ?? {}; } catch { o = {}; }
+  return { mode: _autoChildren.parseAutoMode(o.auto_add_children), pollS: _autoChildren.parsePollS(o.auto_add_children_poll_s) };
+}
+
 /**
  * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),
  * `orchestration.max_deferrals` (default 3) and `orchestration.global_parallel` (#4191: host-wide lane cap; unset = none). The parser flattens one nested level, so the breaker keys arrive as
@@ -2291,8 +2298,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  const autoMod = _autoChildren; // #4965
-  return { autoAddChildren: autoMod.parseAutoMode(o.auto_add_children, "decomposed"), autoAddChildrenPollS: autoMod.parsePollS(o.auto_add_children_poll_s), breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
