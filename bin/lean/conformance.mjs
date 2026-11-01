@@ -7,9 +7,11 @@
  * The reviewer supplies per-row judgements; the engine computes the verdict. A review without rows (a generic
  * "PASS") is incomplete, and incomplete never merges.
  */
-import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
 import { activationFailures } from "./activation.mjs";
+import * as nodeFs from "node:fs";
+import { tmpdir } from "node:os";
 
 export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
@@ -321,6 +323,8 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+// #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
+const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
 function normalizeAmendment(a) {
@@ -329,6 +333,7 @@ function normalizeAmendment(a) {
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
+  if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
   return n;
 }
@@ -377,6 +382,13 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
       const ids = splitRequirementRefs(n.requirement);
       if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    if (n?.kind === "supersedes" && Array.isArray(n.guards) && n.guards.length) {
+      // #4916: one supersedes row per guard id; each still hits the GUARD_ID_RE check below
+      const { guards, ...rest } = n;
+      const ids = blank(rest.guard) ? guards : [rest.guard, ...guards];
+      for (const guard of ids) rows.push({ a: { ...rest, guard }, raw });
+      continue;
     }
     rows.push({ a: n, raw });
   }
@@ -524,6 +536,12 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
+      // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
+      if (rerun?.rc === 124) {
+        if (ciVerified) { ciCovered.push(v.id); continue; }
+        failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `validate ${v.id} (\`${v.command}\`) timed out (exit 124) on the engine's rerun: infrastructure (host load), not a failed check` });
+        continue;
+      }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) { ciCovered.push(v.id); continue; }
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
@@ -885,7 +903,10 @@ export function formatShadowSummary(rows) {
   const falseB = sh.filter((c) => UNUSABLE_REVIEW.includes(c.would)).length;
   const pct = (k) => (sh.length ? `${Math.round((k / sh.length) * 100)}%` : "n/a");
   const risk = cs.filter((c) => c.risk === true).length;
-  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
+  const byKind = {};
+  for (const c of cs) for (const k of new Set(Array.isArray(c.kinds) ? c.kinds : [])) byKind[k] = (byKind[k] ?? 0) + 1;
+  const kinds = Object.entries(byKind).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k} ${n}/${cs.length} (${Math.round((n / cs.length) * 100)}%)`);
+  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}${kinds.length ? `; per kind: ${kinds.join(", ")}` : ""}`;
 }
 
 /** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724). */
@@ -970,4 +991,131 @@ export function structureNote(delta) {
   const config = loosened ? `the repo's boundary config was loosened in this PR (${files})` : "the repo's boundary config allows it";
   const s = grow.length ? `this PR adds ${pairs} (files); ${config}` : `this PR loosens the repo's boundary config (${files})`;
   return `Structure (report only): ${s}; flag only if the contract or the architecture doc says otherwise.`.replace(/[\r\n]+/g, " ");
+}
+
+/** engine.conformance_kinds: a failure code's own gate mode; "enforce" blocks, "shadow" is recorded only. */
+export const KIND_MODES = Object.freeze(["enforce", "shadow"]);
+
+/**
+ * The valid `{code: mode}` entries of a config map, or of forge.yaml's flat form `"code=mode, code=mode"` (the
+ * forge.yaml reader has no third nesting level); anything else is dropped. {} when absent.
+ */
+export function normalizeKindModes(raw) {
+  const out = {};
+  if (typeof raw === "string") raw = Object.fromEntries(raw.split(",").map((x) => x.trim()).filter(Boolean).map((p) => p.split("=").map((x) => x.trim())));
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) for (const [k, v] of Object.entries(raw)) if (String(k).trim() && KIND_MODES.includes(String(v).trim())) out[String(k).trim()] = String(v).trim();
+  return out;
+}
+
+/**
+ * Split gate failures into those that block and those only recorded. A kind with its own mode follows it; every other
+ * kind follows the lane: an enforce lane blocks it, a shadow lane blocks only the codes in `allow` (the previous reviewer's set).
+ * @param {{code?: string}[]} failures
+ * @param {{shadow?: boolean, kinds?: Record<string,string>|null, allow?: string[]}} [o]
+ */
+export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
+  const block = [], record = [];
+  for (const f of failures ?? []) {
+    const own = kinds?.[f?.code];
+    (own ? own === "enforce" : !shadow || allow.includes(f?.code)) ? block.push(f) : record.push(f);
+  }
+  return { block, record };
+}
+
+/**
+ * Deliver requirements with no executed evidence test: one row per requirement id. Evidence is a test deliverable linked to the
+ * requirement (`deliverables[].requirements`) that a validate command names and that ran green (the engine's rerun, else the
+ * builder's result, else CI). Requirements verified out of band are judged by their instrumentation and skipped.
+ * @returns {{id: string, reason: string}[]}
+ */
+export function unverifiedRequirements(contract, { runs = [], reruns = null, ciCovered = [] } = {}) {
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
+    const tests = evidenceTests(contract, r);
+    if (!tests.length) { out.push({ id: r.id, reason: "no test deliverable linked to the requirement" }); continue; }
+    if (!greenEvidence(contract, tests, { runs, reruns, ciCovered }).length) out.push({ id: r.id, reason: `no executed passing validate runs its test (${tests.join(", ")})` });
+  }
+  return out;
+}
+
+const evidenceTests = (contract, r) => (contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path));
+/** The validate commands that name one of `tests` and ran green (the engine's rerun, else the builder's result, else CI). */
+function greenEvidence(contract, tests, { runs = [], reruns = null, ciCovered = [] } = {}) {
+  const green = (v) => {
+    const rerun = reruns?.[v.id];
+    if (rerun) return rerun.rc === 0;
+    return (Array.isArray(runs) ? runs : []).some((x) => x?.id === v.id && x.exit === 0) || ciCovered.includes(v.id);
+  };
+  return (contract.validate ?? []).filter((v) => tests.some((t) => String(v.command).includes(t) || String(v.command).includes(t.split("/").pop())) && green(v));
+}
+
+/** #4913 engine.conformance_mutation: the failure code of an evidence test that still passes with the change reverted. */
+export const MUTATION_SURVIVED = "conformance.mutation_survived";
+
+/**
+ * Deliver requirements whose executed evidence test can be mutation-checked: one row per requirement id with the green
+ * evidence commands and the non-test files of the diff (the change to revert). Out-of-band requirements and requirements
+ * with no green evidence are skipped; with no non-test file changed there is nothing to revert.
+ * @returns {{id: string, commands: {id: string, command: string}[]}[]}
+ */
+export function mutationTargets(contract, evidence = {}) {
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
+    const tests = evidenceTests(contract, r);
+    const commands = tests.length ? greenEvidence(contract, tests, evidence).map((v) => ({ id: v.id, command: String(v.command) })) : [];
+    if (commands.length) out.push({ id: r.id, commands });
+  }
+  return out;
+}
+
+/** conformance.mutation_survived rows: a result still green with the change reverted. A skipped or killed result never fails. */
+export function mutationFailures(results) {
+  return (results ?? []).filter((x) => x?.status === "survived").map((x) => ({
+    code: MUTATION_SURVIVED, kind: "mutation_survived",
+    detail: `${x.id} evidence test passes with the change reverted (\`${x.command}\`, exit 0): it does not prove the requirement`,
+  }));
+}
+
+/**
+ * Rerun each target's evidence commands with the diff's non-test files reverted to the merge base (git apply -R of the
+ * non-test diff), then restore them from HEAD in a finally. The commits stay in HEAD, so no work is lost. A dirty tree,
+ * a failed revert, a timeout (124) or a missing runner (127) is skipped, never a failure.
+ * @returns {{results: {id: string, command: string, status: "survived"|"killed"|"skipped", note?: string}[], skipped: string, ms: number}}
+ */
+export async function runMutationCheck({ targets, files, base, git, runCommand, cwd, env, capMs = 120000, tmp = tmpdir(), fs = nodeFs, now = Date.now }) {
+  const t0 = now(), results = [];
+  const nonTest = (files ?? []).filter((f) => !isTestPath(f));
+  const skip = (note) => ({ results, skipped: note, ms: now() - t0 });
+  if (!targets?.length) return skip("");
+  if (!nonTest.length) return skip("no non-test file changed");
+  if (String(await git(["status", "--porcelain"]).catch(() => "x")).trim()) return skip("working tree not clean");
+  const patch = `${tmp}/mutation-${process.pid}.patch`;
+  let reverted = false, restoreFailed = "";
+  try {
+    fs.writeFileSync(patch, await git(["diff", "--binary", `${base}...HEAD`, "--", ...nonTest]));
+    try { await git(["apply", "-R", "--whitespace=nowarn", patch]); reverted = true; } catch { return skip("could not revert the change"); }
+    for (const t of targets) for (const c of t.commands) {
+      const left = capMs - (now() - t0);
+      if (left <= 0) { results.push({ id: t.id, command: c.command, status: "skipped", note: "over the cap" }); continue; }
+      let r;
+      try { r = await runCommand({ command: c.command, cwd, timeoutMs: left, env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+      const rc = Number.isInteger(r?.rc) ? r.rc : 1;
+      results.push({ id: t.id, command: c.command, status: rc === 124 || rc === 127 ? "skipped" : rc === 0 ? "survived" : "killed" });
+    }
+  } finally {
+    // Release review #4931: the tree was clean, so HEAD is the exact restore point. `checkout HEAD -- <files>` failed as a
+    // whole on a file the change deleted (the revert re-creates it untracked) and restored nothing; reset + clean of
+    // those paths does not, and a tree still dirty there afterwards throws (fail closed: never push the reverted change).
+    if (reverted) {
+      await git(["reset", "-q", "--hard", "HEAD"]).catch(() => {});
+      await git(["clean", "-fdq", "--", ...nonTest]).catch(() => {});
+      const left = await git(["status", "--porcelain", "--", ...nonTest]).catch(() => "unreadable");
+      if (String(left).trim()) restoreFailed = String(left).trim();
+    }
+    try { fs.rmSync(patch, { force: true }); } catch { /* best effort */ }
+  }
+  if (restoreFailed) throw new Error(`mutation check could not restore the worktree: ${restoreFailed}`);
+  return { results, skipped: "", ms: now() - t0 };
 }

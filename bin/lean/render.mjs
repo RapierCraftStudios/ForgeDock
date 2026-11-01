@@ -140,8 +140,16 @@ export function parseContractComment(body) {
 }
 
 /** Typed amendments, posted visibly before review. */
-export function renderAmendments(applied, filed = {}) {
-  return `## Contract Amendments\n| Kind | Target | Why |\n| --- | --- | --- |\n${applied.map((a) => `| ${esc(a.kind)} | ${esc(a.target)}${filed[a.target] ? ` → ${filed[a.target]}` : ""} | ${esc(a.why)} |`).join("\n")}`;
+export function renderAmendments(applied, filed = {}, state = null) {
+  const block = state ? `\n\n<!-- FORGE:AMENDMENT-STATE ${JSON.stringify(state).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->` : "";
+  return `## Contract Amendments\n| Kind | Target | Why |\n| --- | --- | --- |\n${applied.map((a) => `| ${esc(a.kind)} | ${esc(a.target)}${filed[a.target] ? ` → ${filed[a.target]}` : ""} | ${esc(a.why)} |`).join("\n")}${block}`;
+}
+
+/** #4899: the raw amendments a FORGE:AMENDMENT comment carries, `{contract, amendments}` (contract = frozen hash), or null. */
+export function parseAmendmentsComment(body) {
+  const m = /<!-- FORGE:AMENDMENT-STATE (.*?) --!?>/.exec(String(body ?? ""));
+  if (!m) return null;
+  try { const j = JSON.parse(m[1]); return typeof j?.contract === "string" && Array.isArray(j.amendments) ? j : null; } catch { return null; }
 }
 
 /** FORGE:REVIEW for a conforming change: the engine-computed verdict and the reviewer's rows. */

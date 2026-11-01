@@ -107,7 +107,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 `forgedock orchestrate` recovers mechanical outcomes inside the batch:
 
 - **recoverable**:
-  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.capability_remote`, `contract.invalid_command` or `budget.exceeded`;
+  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`, `contract.invalid_command` or `budget.exceeded`;
   - `contract.invalid` when the issue was edited mid-run (`issueEdited`);
   - `ci-pending` on a conflicting PR, recovered as `base.conflict`.
 
