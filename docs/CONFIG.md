@@ -674,7 +674,7 @@ selftest:
 |-----|------|----------|-------------|
 | `sandbox_repo` | string | No | `owner/repo` the live harness runs in. `--repo` overrides it; with neither the command stops. Never point it at a real project. Setting it also turns on the release gate: `forgedock review-staging` then requires a passing `FORGE:SELFTEST` marker for the release PR head; unset, the gate is skipped. |
 | `fixture` | string | No | Toolchain of the two trivial fixture issues: `node` (default) or `python`. `--lang` overrides it. |
-| `nightly_interval_hours` | number | No | Off when unset or 0. When positive, the schedd daemon (host, never GitHub Actions) runs `selftest --live` against `sandbox_repo` once this many hours have passed since the last run, and on failure files or edits one issue naming the failed step. See [SELFTEST.md](SELFTEST.md#nightly-run). |
+| `nightly_interval_hours` | number | No | Off when unset or 0. When positive, the schedd daemon (host, never GitHub Actions) starts a detached `selftest --live` against `sandbox_repo` once this many hours have passed since the last run of that repo. On failure, including a run that cannot start, it files or edits one issue naming the failed step, in the repo schedd resolves for its working directory. See [SELFTEST.md](SELFTEST.md#nightly-run). |
 
 **Commands that use this section**: `forgedock selftest`, `forgedock review-staging` (release gate, only when `sandbox_repo` is set)
 

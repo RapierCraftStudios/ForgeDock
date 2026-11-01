@@ -39,7 +39,7 @@ function world(o = {}) {
       if (k === "pr list") return o.openPr ?? "42\n";
       if (k === "pr view") return `${o.head ?? HEAD}\n`;
       if (k === "pr comment") return "";
-      if (a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")) return o.selftest === undefined ? `${JSON.stringify(`<!-- FORGE:SELFTEST result=pass sha=${o.head ?? HEAD} step=none -->`)}\n` : o.selftest;
+      if (a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")) { if (o.selftestErr) throw new Error(o.selftestErr); const row = (b) => JSON.stringify({ body: b, author_association: "OWNER", user: { login: "m", type: "User" } }); return o.selftest === undefined ? `${row(`<!-- FORGE:SELFTEST result=pass sha=${o.head ?? HEAD} step=none -->`)}\n` : o.selftest.split("\n").filter(Boolean).map((l) => row(JSON.parse(l))).join("\n"); }
       if (a[0] === "api") return o.priorRoutes ?? "0\n";
       if (k === "issue list") return JSON.stringify(a.includes("open") ? [{ number: 7, title: "bug (PR #42)", body: "" }, { number: 8, title: "bug (PR #420)", body: "" }] : []);
       throw new Error(`unexpected gh ${a.join(" ")}`);
@@ -220,6 +220,19 @@ describe("review-staging release gate (#4865)", () => {
     assert.match([...fail.w.out, ...fail.w.err].join("\n"), /failed at step add/);
     const stale = await run({ selftest: JSON.stringify(`<!-- FORGE:SELFTEST result=pass sha=${FROM} step=none -->`) + "\n" });
     assert.match([...stale.w.out, ...stale.w.err].join("\n"), /not the PR head/);
+  });
+  it("an unreadable marker list stops BLOCKED with its own reason, not 'no marker'", async () => {
+    const { w } = await run({ selftestErr: "HTTP 502" });
+    const all = [...w.out, ...w.err].join("\n");
+    assert.match(all, /could not read the FORGE:SELFTEST markers of PR #42 \(HTTP 502\)/);
+    assert.equal(w.scripts.length, 0);
+  });
+  it("a sandbox_repo that names no repo (null, ~, false) leaves the gate off", async () => {
+    for (const v of ["null", "~", "false"]) {
+      const w = world({ selftest: "", files: { "/repo/forge.yaml": `project:\n  owner: o\n  repo: r\nbranches:\n  default: main\n  staging: staging\nselftest:\n  sandbox_repo: ${v}\n` } });
+      assert.equal(await reviewStagingFromCli(["42"], w.io), 0, `${v}: ${w.err.join("\n")}`);
+      assert.match(w.err.join("\n"), /SELFTEST: skipped/);
+    }
   });
   it("proceeds with a passing marker for the head", async () => {
     const { w } = await run({});

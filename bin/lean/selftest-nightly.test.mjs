@@ -48,10 +48,25 @@ test("failure files one issue naming the step; the second failure edits it", asy
   assert.match(io2.calls.find((a) => a[1] === "edit").join(" "), /step add/);
 });
 
-test("a passing run writes no issue; a throwing harness never throws", async () => {
+test("a passing run writes no issue; a throwing harness is reported, never silent", async () => {
   const s = setup(YAML), io = fakeIo();
   await nightlyDue({ ...s, repo: "o/r", io, runLive: async () => ({ ok: true }) });
   assert.equal(io.calls.length, 0);
-  const s2 = setup(YAML);
-  assert.deepEqual(await nightlyDue({ ...s2, repo: "o/r", io, runLive: async () => { throw new Error("boom"); } }), { ran: false });
+  const s2 = setup(YAML), io2 = fakeIo();
+  const r = await nightlyDue({ ...s2, repo: "o/r", io: io2, runLive: async () => { throw new Error("boom"); } });
+  assert.deepEqual([r.ran, r.ok, r.action], [true, false, "create"]);
+  assert.match(io2.calls.find((a) => a[1] === "create").join(" "), /step harness/);
+});
+
+test("with launch (the daemon) the run is only started, detached: nothing is awaited or filed in-process", async () => {
+  const s = setup(YAML), io = fakeIo(); let launched = 0;
+  const r = await nightlyDue({ ...s, repo: "o/r", io, launch: () => { launched++; }, runLive: async () => { throw new Error("must not run"); } });
+  assert.deepEqual(r, { ran: true, launched: true }); assert.equal(launched, 1); assert.equal(io.calls.length, 0);
+  assert.equal((await nightlyDue({ ...s, repo: "o/r", io, launch: () => { launched++; } })).ran, false, "not again within the interval");
+});
+
+test("the schedule is per repo: one repo's run never skips another's", async () => {
+  const s = setup(YAML); let n = 0; const t = 1e13;
+  const run = (repo) => nightlyDue({ ...s, repo, io: fakeIo(), now: () => t, runLive: async () => { n++; return { ok: true }; } });
+  assert.equal((await run("o/a")).ran, true); assert.equal((await run("o/b")).ran, true); assert.equal(n, 2);
 });

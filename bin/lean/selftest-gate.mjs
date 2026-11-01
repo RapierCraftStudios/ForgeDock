@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // FORGE:SELFTEST marker (#4865): the live selftest result on the staging->main PR, and the release gate over it.
-const MARKER_RE = /<!--\s*FORGE:SELFTEST\s+([^>]*?)\s*-->/;
+import { isTrustedComment } from "../engine/phases.mjs";
+
+// Anchored: the marker leads the comment (postMarker writes it first), so prose that quotes a marker never counts.
+const MARKER_RE = /^\s*<!--\s*FORGE:SELFTEST\s+([^>]*?)\s*-->/;
 
 /** @param {{result:"pass"|"fail", sha:string, step?:string}} m */
 export function buildMarker({ result, sha, step }) {
@@ -27,10 +30,15 @@ export function selftestGate(comments, headSha) {
   return { ok: true };
 }
 
-/** Comment bodies of PR `pr` that carry a marker, oldest first (one JSON string per gh output line). */
+/**
+ * Bodies of the trusted comments of PR `pr` that carry a marker, oldest first (one JSON object per gh output line).
+ * Only comments `isTrustedComment` accepts count (maintainer association, a Bot, FORGE_TRAIL_TRUSTED_LOGINS): anyone can
+ * comment on a public PR, and a forged pass must not open the release gate. A gh failure throws (the caller fails closed).
+ */
 export async function readMarkerComments(gh, repo, pr) {
-  const out = await gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments`, "--jq", '.[] | select(.body | test("FORGE:SELFTEST")) | .body | @json']);
-  return String(out).split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  const out = await gh(["api", "--paginate", `repos/${repo}/issues/${pr}/comments`, "--jq", '.[] | select(.body | test("FORGE:SELFTEST")) | {body, author_association, user: {login: .user.login, type: .user.type}} | @json']);
+  return String(out).split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } })
+    .filter(isTrustedComment).map((c) => String(c.body ?? ""));
 }
 
 export async function postMarker(gh, repo, pr, m) {

@@ -1,4 +1,0 @@
-{
-  "selftest-live-run": { "run": "node bin/forgedock.mjs selftest --live", "pass": "exit 0", "timeout": 3000 },
-  "selftest-live-defect-detect": { "run": "sh -c 'node bin/forgedock.mjs selftest --live; true'", "pass": "/selftest --live FAILED at step (add|body)/", "timeout": 3000 }
-}

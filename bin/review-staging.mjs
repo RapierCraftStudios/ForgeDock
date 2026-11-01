@@ -33,6 +33,8 @@ const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough 
   "       forgedock review-staging [<PR>] --finalize --test-gate-output <file> [--notes-dropped <n>] [--json]\n" +
   "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]";
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** selftest.sandbox_repo turns the release gate on only when it names a repo (`null`, `~`, `false` or prose leave it off). */
+const SANDBOX_RE = /^[\w.-]+\/[\w.-]+$/;
 /** Persona file / catalog keys per canonical marker domain (review-pr-agents.md routing table). */
 const INDEX_KEY = { auth: "auth", billing: "billing", database: "database", api: "api", frontend: "frontend", infra: "infrastructure" };
 const CONFIG_DOMAIN = { scraper: "scraping" };
@@ -138,7 +140,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: String(cfg.selftest?.sandbox_repo ?? "").trim() };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "" };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -227,7 +229,9 @@ async function main(argv, io) {
   // #4865: with selftest.sandbox_repo set, the release needs a passing live selftest for exactly this head (fail closed).
   // Without a sandbox repo there is nothing the harness can run against, so the gate is skipped and says so.
   if (c.sandboxRepo) {
-    const selftest = selftestGate(await readMarkerComments(io.gh, c.ghRepo, pr).catch(() => []), head);
+    let marks;
+    try { marks = await readMarkerComments(io.gh, c.ghRepo, pr); } catch (e) { throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not read the FORGE:SELFTEST markers of PR #${pr} (${String(e?.message ?? e).split("\n")[0].slice(0, 200)}); nothing reviewed (fail closed)`]); }
+    const selftest = selftestGate(marks, head);
     if (!selftest.ok) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: ${selftest.reason}; nothing reviewed (fail closed)`]);
   } else io.err("SELFTEST: skipped (selftest.sandbox_repo not set in forge.yaml; the release does not require a FORGE:SELFTEST marker)");
   let priorRoutes = 0;
