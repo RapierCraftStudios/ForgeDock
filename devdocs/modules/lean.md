@@ -671,6 +671,14 @@ one hold and a lane on another account is admitted. Legacy per-batch `holdUntil`
 `state.json` is ignored on `--resume`. CLI: `forgedock limits show|clear [<id>|--all]`
 (`engine-cli.mjs` `limitsFromCli`).
 
+Pool-aware admission (#4956): a hold gates only the lanes of its own account. Admission knows two identities, the host's
+(`identity()`) and the sandbox's (`remote.identity()`, else the `backendId` a remote lane reports, else the key `remote`). A remote
+lane's `rate_limited` holds the sandbox identity, never the host's. While only the sandbox identity is held, `placeOf` falls
+a remote-placed lane back to the host; while only the host identity is held, local lanes wait (`notBefore`) and remote lanes
+run. The batch pauses (`heldUntil()`, waking at the earliest reset) only when every identity is held. `limits show` lists
+the host identity (free or held) and every held identity (`limits.mjs` `poolState`). Per-lane credential injection into
+sandboxes is not done here (needs host account-pool tooling).
+
 ## Entry 2026-10-20 — Host lane registry: global cap and cross-batch priority (#4191)
 
 `sched.mjs` keeps one host registry (`~/.forge/sched/registry.json`, or

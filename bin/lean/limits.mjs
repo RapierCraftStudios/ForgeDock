@@ -56,3 +56,16 @@ export function openLimits(file = limitsFile(), { now = () => Date.now() } = {})
     list: () => Object.entries(read()).map(([id, h]) => ({ id, until: h.until, source: h.source ?? null, setAt: h.setAt ?? null })),
   };
 }
+
+/**
+ * Every identity the operator should see: the host account (`host`), the sandbox account when known (`remote`), and any other
+ * identity with a live hold. @returns {{id, role, state: "held"|"free", until, source}[]}
+ */
+export function poolState(limits, { host = null, remote = null } = {}) {
+  const held = new Map(limits.list().map((h) => [h.id, h]));
+  const roles = new Map();
+  if (host) roles.set(host, "host");
+  if (remote && !roles.has(remote)) roles.set(remote, "remote");
+  for (const id of held.keys()) if (!roles.has(id)) roles.set(id, "other");
+  return [...roles].map(([id, role]) => ({ id, role, state: held.has(id) ? "held" : "free", until: held.get(id)?.until ?? null, source: held.get(id)?.source ?? null }));
+}

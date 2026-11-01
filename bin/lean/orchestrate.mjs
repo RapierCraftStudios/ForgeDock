@@ -201,6 +201,8 @@ const cancellableSleep = (ms, signal) => new Promise((res) => {
   signal?.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
 });
 
+const remoteMaxOf = (remote) => (remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0);
+
 // In-memory hold store with the `openLimits` interface, for callers without the host store.
 const memoryLimits = (now) => {
   const holds = new Map();
@@ -270,7 +272,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let errorTimes = [...(saved?.errorTimes ?? [])];
   // A legacy batch-local `holdUntil` (pre-#4190) names no account and is ignored: a same-account lane re-sets the hold.
   const holds = limits ?? memoryLimits(now);
-  const heldUntil = () => { try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
+  // The accounts a lane can run on: the host's (`identity()`) and, with remote placement, the sandbox's (configured by
+  // `remote.identity()` or learned from a remote lane's `backendId`). A hold gates only the lanes of its own account; the batch
+  // pauses when every account is held.
+  let remoteId = null;
+  const heldOf = (id) => { try { const u = id == null ? null : holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
+  const hostHeld = () => heldOf(identity());
+  const remoteHeld = () => { if (!remote) return null; let id = remoteId; try { id ??= remote.identity?.() ?? null; } catch { id = null; } return heldOf(id); };
+  const heldUntil = () => {
+    const h = hostHeld();
+    if (!h) return null;
+    if (!(remoteMaxOf(remote) > 0)) return h;
+    const r = remoteHeld();
+    return r ? Math.min(h, r) : null;
+  };
   let tripped = saved?.breaker ?? null;
   let pfAll = false, pfRemote = false, pfNoted = new Set(); // #4866: lane preflight holds
   let opHeld = new Set(); // #4592: operator-held issues this pass (the batch `hold` file is the authority)
@@ -289,7 +304,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const integHeld = new Map(); // issue -> reason (red integration streak on its milestone lane, #4667) holding it this pass
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
-  const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
+  const remoteMax = remoteMaxOf(remote);
   let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
   const capWait = makeCapWait({ now }); // #4909: a lane refused for capacity waits for a free slot, recorded as queue time
   let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
@@ -302,6 +317,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
     if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
+    if (remoteHeld()) return { where: "local", reason: `fallback to local: sandbox account held until ${new Date(remoteHeld()).toISOString()}` }; // the host account has room (else the batch is paused)
     try {
       if (typeof remote.place === "function") {
         const p = remote.place(n);
@@ -483,6 +499,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
     let p = placeOf(n);
+    const hh = hostHeld();
+    if (hh && p?.where !== "remote") { notBefore.set(n, hh); return "busy"; } // the host account is held, a sandbox account is not: only remote lanes run
     if (p?.where === "remote" && reg?.holder) {
       let other = null;
       try { other = reg.holder(entryOf(n)) ?? null; } catch { other = null; }
@@ -579,6 +597,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { remote?.onUsage?.(n, r.sandbox, rec); } catch { /* the batch total still counts it */ }
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
+    if (rec.remote && typeof r?.backendId === "string" && r.backendId) remoteId = r.backendId; // the sandbox account, as the lane saw it
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
@@ -637,7 +656,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // account runs it at once. If the hold cannot be recorded, the reset delay applies to this issue instead.
         let delayMs = pol.delayMs;
         if (pol.hold) {
-          try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          // A remote lane's limit belongs to the sandbox account, never the host's; with no id reported it is the key `remote`.
+          const holdId = () => { if (!rec.remote) return r?.backendId ?? identity(); remoteId ??= remote?.identity?.() ?? "remote"; return remoteId; };
+          try { holds.set(holdId(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
         }
         requeue(n, capGated && !pol.hold ? 0 : delayMs); done(); save();
         update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s${pol.hold ? " (admissions held)" : ""}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });

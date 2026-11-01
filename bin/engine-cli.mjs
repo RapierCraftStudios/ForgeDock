@@ -2104,9 +2104,11 @@ export async function limitsFromCli(argv, deps = {}) {
   const [sub, arg] = argv;
   if (!sub || sub === "show") {
     const holds = limits.list();
+    const identities = limitsMod.poolState(limits, { host: current });
     if (!holds.length) console.log(`no usage-limit holds (this account: ${current})`);
-    for (const h of holds) console.log(`${h.id === current ? "*" : " "} ${h.id}  until ${new Date(h.until).toISOString()}  source ${h.source ?? "-"}`);
-    return { holds, current };
+    for (const i of identities) console.log(i.state === "held" ? `${i.id === current ? "*" : " "} ${i.id}  until ${new Date(i.until).toISOString()}  source ${i.source ?? "-"}` : `${i.id === current ? "*" : " "} ${i.id}  free  (${i.role})`);
+    if (holds.length) console.log(identities.every((i) => i.state === "held") ? "all identities held: admissions are paused" : "admissions continue on the free identities");
+    return { holds, current, identities };
   }
   if (sub === "clear") {
     if (arg === "--all") { const n = limits.clearAll(); console.log(`cleared ${n} usage-limit hold(s)`); return { cleared: n }; }

@@ -182,4 +182,69 @@ describe("account-scoped usage-limit holds (#4190)", () => {
     assert.deepEqual(await quiet(() => limitsFromCli(["clear", "--all"], { limits })), { cleared: 1 });
     assert.deepEqual(limits.list(), []);
   });
+
+  describe("identity pool: a hold gates its own account only", () => {
+    const hybrid = (extra = {}) => ({ max: 2, place: () => ({ where: "remote", reason: "test" }), identity: () => "S", ...extra });
+    const run = async ({ limits, now, sleep, starts, issues = [1], remote = hybrid(), host = "H" }) => orchestrate({ issues, parallel: 2, now, sleep, readBody: async () => "", limits, identity: () => host, remote, pollMs: 5000,
+      runOne: async (n, _l, ctx) => { starts.push({ n, remote: !!ctx?.remote, t: now() }); return { terminalReason: "merged" }; } });
+
+    it("sandbox account held, host free: the lane is admitted on the host at once", async () => {
+      const { c, now, sleep } = fakeClock();
+      const t0 = c.t;
+      const limits = openLimits(storeFile(), { now });
+      limits.set("S", t0 + 3_600_000, "batch b0 #9");
+      const starts = [];
+      const rows = await run({ limits, now, sleep, starts });
+      assert.equal(rows[0].outcome, "merged");
+      assert.deepEqual(starts.map((x) => [x.remote, x.t]), [[false, t0]]);
+    });
+
+    it("host held, sandbox free: the remote lane runs, no wait for the reset", async () => {
+      const { c, now, sleep } = fakeClock();
+      const t0 = c.t;
+      const limits = openLimits(storeFile(), { now });
+      limits.set("H", t0 + 3_600_000, "batch b0 #9");
+      const starts = [];
+      await run({ limits, now, sleep, starts });
+      assert.deepEqual(starts.map((x) => [x.remote, x.t]), [[true, t0]]);
+    });
+
+    it("every identity held: admissions wait for the earliest reset", async () => {
+      const { c, now, sleep } = fakeClock();
+      const t0 = c.t;
+      const limits = openLimits(storeFile(), { now });
+      limits.set("H", t0 + 3_600_000, "x");
+      limits.set("S", t0 + 600_000, "x");
+      const starts = [];
+      await run({ limits, now, sleep, starts });
+      assert.equal(starts.length, 1);
+      assert.equal(starts[0].t, t0 + 600_000, "resumes when the first account is free again");
+    });
+
+    it("a remote lane's rate limit holds the sandbox account, not the host's, and the rest run on the host", async () => {
+      const { c, now, sleep } = fakeClock();
+      const t0 = c.t;
+      const limits = openLimits(storeFile(), { now });
+      const calls = [];
+      const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", limits, identity: () => "H", remote: { max: 1, place: () => ({ where: "remote", reason: "t" }) }, pollMs: 5000,
+        runOne: async (n, _l, ctx) => { calls.push([n, !!ctx?.remote, now()]); return ctx?.remote && calls.length === 1 ? limited("S", t0 + 600_000) : { terminalReason: "merged" }; } });
+      assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+      assert.equal(limits.holdUntil("H"), null);
+      assert.equal(limits.holdUntil("S"), t0 + 600_000);
+      assert.ok(calls.slice(1).every(([, remote, t]) => !remote && t === t0), "retry and #2 run locally at once");
+    });
+
+    it("limits show lists every identity with its state", async () => {
+      const { c, now } = fakeClock();
+      const limits = openLimits(storeFile(), { now });
+      limits.set("S", c.t + 600_000, "batch b1 #1");
+      const lines = [];
+      const l = console.log; console.log = (x) => lines.push(x);
+      let shown;
+      try { shown = await limitsFromCli(["show"], { limits, identity: () => "H" }); } finally { console.log = l; }
+      assert.deepEqual(shown.identities.map((i) => [i.id, i.state]), [["H", "free"], ["S", "held"]]);
+      assert.match(lines.join("\n"), /^\* H {2}free/m);
+      assert.match(lines.join("\n"), /admissions continue/);
+    });
+  });
 });
