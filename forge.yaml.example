@@ -201,7 +201,13 @@ branches:
 #   #   3. Hardcoded default         ("sonnet")
 #   #
 #   # Omit this field to have sub-agents inherit default_model (or "sonnet"
-#   # if that's unset too) — no change from today's behavior.
+#   # if that's unset too) in interactive command specs.
+#   #
+#   # Engine lanes (core work-on, #4843/#4849) read only this field: when set it
+#   # is the default for subagents without a model of their own; when unset the
+#   # operator's own CLAUDE_CODE_SUBAGENT_MODEL stays in effect. ForgeDock's own
+#   # agents (e.g. the explorer) always keep their model: an operator
+#   # CLAUDE_CODE_SUBAGENT_MODEL_FORCE is turned off for lane sessions.
 #   subagent_model: "sonnet"
 
 # =============================================================================
@@ -393,6 +399,12 @@ branches:
 #   # The train never writes this file and never rewrites branches.staging: lanes resolve their
 #   # base from the issue's milestone.
 #   global_parallel: 12
+#
+#   # Children a running batch adds by itself (#4965): off | decomposed | epic | all. `epic` adds the open
+#   # children (`**Parent**: #P` or sub-issues) of every batch issue, also those filed later. Per batch:
+#   # forgedock orchestrate --auto-children <mode> [--epic N]. Default: decomposed.
+#   auto_add_children: decomposed
+#   auto_add_children_poll_s: 120
 #
 #   # Maximum number of /work-on sub-agents dispatched concurrently. Guards
 #   # against saturating the Anthropic API rate limit in one burst on a large
@@ -916,6 +928,8 @@ branches:
 #   #     lint: "ruff check ."
 #   #     typecheck: "mypy src/ --ignore-missing-imports"
 #   #     test: "pytest tests/ -x -q --tb=short"
+#   #     # Changed-file scoped (/review-pr Phase 2): $FORGE_CHANGED_FILES = changed files, newline-separated.
+#   #     test_changed: "pytest -q $(printf '%s\n' $FORGE_CHANGED_FILES | grep 'test_.*\.py$')"
 #   #     build: ""   # omit or leave empty to skip
 #   #
 #   #   # TypeScript project using tsc + vitest
@@ -926,6 +940,9 @@ branches:
 #   #     lint: "eslint src/"
 #   #     typecheck: "tsc --noEmit"
 #   #     test: "vitest run"
+#   #     # Changed-file scoped (/review-pr Phase 2) for repos where full tsc or the full suite is too slow:
+#   #     test_changed: "vitest related $FORGE_CHANGED_FILES --run"
+#   #     typecheck_changed: "tsc --noEmit -p tsconfig.json 2>&1 | grep -F \"$FORGE_CHANGED_FILES\" && exit 1 || exit 0"
 #   #     build: "npm run build"
 #   #
 #   #   # Go project

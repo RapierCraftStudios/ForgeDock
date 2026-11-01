@@ -20,7 +20,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync, appendFileSync, writeFileSync, chmodSync } from "node:fs";
 import { cpus, freemem } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeAtomic } from "./batch.mjs";
 import { schedDir, pidAlive, DEFAULT_PRIORITY } from "./sched.mjs";
@@ -36,15 +36,22 @@ const PMS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const PM_LIGHT = new Set(["version", "help", "view", "info", "show", "ls", "list", "why", "outdated", "config", "get", "set", "whoami", "root", "bin", "prefix", "store", "cache", "pack", "publish", "login", "logout", "search", "owner", "dist-tag"]);
 const PM_VALUE_FLAGS = new Set(["-w", "-C", "-F", "--filter", "--dir", "--cwd", "--prefix", "--workspace"]);
 const RUNNERS = new Set(["npx", "bunx", "pnpx"]);
-const TOOLS = new Set(["tsc", "eslint", "jest", "vitest", "playwright", "pytest", "mypy", "pyright", "tox", "gradle", "gradlew", "mvn"]);
+const TOOLS = new Set(["tsc", "eslint", "jest", "vitest", "playwright", "pytest", "mypy", "pyright", "tox", "gradle", "gradlew", "mvn", "ruff", "black", "flake8", "pylint", "make", "cmake", "ninja"]);
 const SUBTOOLS = {
   cargo: new Set(["build", "b", "test", "t", "check", "c", "clippy", "run", "r", "bench", "doc", "install"]),
   go: new Set(["build", "test", "vet", "run", "install", "generate"]),
   docker: new Set(["run", "build", "compose", "buildx"]),
   "docker-compose": new Set(["up", "run", "build", "create", "start"]),
+  promtool: new Set(["check", "test"]),
+  pip: new Set(["install", "wheel", "download"]),
+  pip3: new Set(["install", "wheel", "download"]),
 };
+/** #4777: Python project managers; `run <cmd>` takes the class of <cmd>, these subcommands install or build. */
+const PY_MANAGERS = new Set(["poetry", "uv", "pipenv", "pdm", "hatch"]);
+const PY_MGR_HEAVY = new Set(["install", "sync", "build", "add", "lock", "update"]);
+const PY_SHIMS = ["python", "python3"];
 /** Every command name a heavy shim is written for (only those found on the lane PATH get one). */
-export const HEAVY_BINS = Object.freeze([...PMS, ...RUNNERS, ...TOOLS, ...Object.keys(SUBTOOLS)]);
+export const HEAVY_BINS = Object.freeze([...PMS, ...RUNNERS, ...TOOLS, ...Object.keys(SUBTOOLS), ...PY_MANAGERS, ...PY_SHIMS]);
 const INFO = new Set(["-v", "-V", "--version", "version", "-h", "--help", "help"]);
 
 /** 'heavy' | 'llm' for one command line (`name` is the basename, `args` its argv). Unknown commands are llm. */
@@ -61,6 +68,12 @@ export function classifyStep(name, args = []) {
     return PM_LIGHT.has(sub) || INFO.has(sub) ? "llm" : "heavy";
   }
   if (RUNNERS.has(n) || TOOLS.has(n)) return a.length === 0 && RUNNERS.has(n) ? "llm" : onlyInfo ? "llm" : "heavy";
+  if (PY_MANAGERS.has(n)) {
+    const i = a.findIndex((x) => !x.startsWith("-")), sub = a[i];
+    if (sub === "run") { const inner = a.slice(i + 1).filter((x, j, all) => !(j === 0 && x === "--") || all.length === 1); return inner.length ? (classifyStep(inner[0], inner.slice(1)) === "heavy" || isHeavyProcess(inner.join(" ")) ? "heavy" : "llm") : "llm"; }
+    return PY_MGR_HEAVY.has(sub) ? "heavy" : "llm";
+  }
+  if (PY_SHIMS.includes(n)) { const mi = a.indexOf("-m"); return mi >= 0 && PY_HEAVY_MODULES.has(a[mi + 1]) ? "heavy" : "llm"; }
   if (SUBTOOLS[n]) { const sub = a.find((x) => !x.startsWith("-")); return sub && SUBTOOLS[n].has(sub) ? "heavy" : "llm"; }
   return "llm";
 }
@@ -295,6 +308,27 @@ export function sumWaits(text, waits = {}) {
     if (Number.isInteger(j?.queued)) queueMax = Math.max(queueMax, j.queued);
   }
   return { waits, queueMax };
+}
+
+/**
+ * Admission-time form of the guardChain loop (#4866): every PATH dir holding a pass-through wrapper for a heavy-shimmed tool
+ * with no real binary behind it (so the wrapper's own `command -v` lands back on the shim). Returns [{name, dir}].
+ */
+export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = head, skip = [] } = {}) {
+  const out = [];
+  const dirs = String(path ?? "").split(delimiter).filter(Boolean);
+  for (const name of names) {
+    const wrappers = [];
+    for (const d of dirs) {
+      if (skip.includes(d)) continue;
+      const f = find(name, d, []);
+      if (f && isPassThroughWrapper(read(f), name)) wrappers.push(d);
+    }
+    if (!wrappers.length) continue;
+    const real = find(name, path, [...skip, ...wrappers]);
+    if (!real) for (const dir of wrappers) out.push({ name, dir });
+  }
+  return out;
 }
 
 export const SHIM_LOOP_MAX = 4;

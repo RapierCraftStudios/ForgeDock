@@ -5,8 +5,9 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { oldRanges, selectGuards, runGuards, commandFor, basePathOf, guardFailures, supersessionComment, supersededIds, loadGuards } from "./guardgate.mjs";
+import { oldRanges, selectGuards, runGuards, commandFor, basePathOf, failingNames, guardFailures, supersessionComment, supersededIds, loadGuards } from "./guardgate.mjs";
 import { applyAmendments, precheck } from "./conformance.mjs";
+import { builderImplementPrompt, conformanceResumePrompt } from "./prompts.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
@@ -18,13 +19,13 @@ const put = (cwd, p, body) => { mkdirSync(join(cwd, p, ".."), { recursive: true 
 const TEST_SRC = (v) => `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { price } from "./a.mjs";\ntest("price is ${v}", () => assert.equal(price(), ${v}));\n`;
 
 /** A repo whose fix commit (merge_sha) made price() return 2, guarded by src/a.test.mjs; the lane starts from it. */
-function fixture() {
+function fixture(testSrc = TEST_SRC(2)) {
   const d = tmpDir("guardgate-");
   sh(d, "init", "-q", "-b", "main");
   put(d, "src/a.mjs", "export function price() {\n  return 1;\n}\n");
   sh(d, "add", "-A"); sh(d, "commit", "-qm", "init");
   put(d, "src/a.mjs", "export function price() {\n  return 2;\n}\n");
-  put(d, "src/a.test.mjs", TEST_SRC(2));
+  put(d, "src/a.test.mjs", testSrc);
   sh(d, "add", "-A"); sh(d, "commit", "-qm", "fix: price");
   const sha = sh(d, "rev-parse", "HEAD").trim();
   put(d, "src/other.mjs", "export const x = 1;\n");
@@ -126,6 +127,24 @@ test("a base test that cannot run in the cap, or has no known runner, is skipped
   assert.equal(existsSync(join(d, basePathOf("src/a.test.mjs"))), false);
 });
 
+test("a verify.guard_command template wins over the contract and the fallbacks (#4792)", async () => {
+  const gc = { ".py": "scripts/pytest {path}" };
+  assert.equal(commandFor("tests/test_a__guardbase.py", {}, gc), "scripts/pytest tests/test_a__guardbase.py");
+  assert.equal(commandFor("tests/test_a__guardbase.py", { validate: [{ command: "pytest -q tests/test_a.py" }] }, gc), "scripts/pytest tests/test_a__guardbase.py");
+  assert.equal(commandFor("tests/test_a__guardbase.py", {}, { ".py": "uv run pytest -q" }), "uv run pytest -q tests/test_a__guardbase.py");
+  assert.equal(commandFor("src/a.test__guardbase.mjs", {}, gc), "node --test src/a.test__guardbase.mjs");
+  const { d, guard } = fixture();
+  put(d, "src/a.mjs", "export function price() {\n  return 1;\n}\n");
+  commit(d, "revert");
+  const git = gitIn(d);
+  const { selected, mergeBase } = await selectGuards({ guards: [guard], files: files(d), git, base: "origin/main" });
+  const seen = [];
+  const r = await runGuards({ selected, mergeBase, contract: {}, guardCommand: { ".mjs": "run-it {path}" }, git, runCommand: async (a) => { seen.push(a); return { rc: 0, output: "" }; }, cwd: d, env: {} });
+  assert.equal(r.runs.length, 1);
+  assert.equal(seen[0].command, "run-it src/a.test__guardbase.mjs");
+  assert.equal(seen[0].cwd, d);
+});
+
 test("pytest-style guards run through the contract's own validate command with the path substituted", () => {
   assert.equal(commandFor("tests/test_a__guardbase.py", { validate: [{ command: "pytest -q tests/test_a.py" }] }), "pytest -q tests/test_a__guardbase.py");
   assert.equal(commandFor("tests/test_a__guardbase.py", {}), "python -m pytest -q tests/test_a__guardbase.py");
@@ -150,4 +169,113 @@ test("guardFailures keeps only failing runs and loadGuards falls back to a stale
   const down = await loadGuards({ repo: "o/r", gh: async () => { throw new Error("offline"); }, root });
   assert.deepEqual(down, [{ issue: 3 }]);
   assert.deepEqual(await loadGuards({ repo: "o/none", gh: async () => "[]", root }), []);
+});
+
+test("guard_broken detail names the supersedes override and survives the resume prompt", async () => {
+  const { d, guard } = fixture();
+  put(d, "src/a.mjs", "export function price() {\n  return 3;\n}\n");
+  commit(d, "change");
+  const { r } = await gate(d, guard);
+  assert.match(r.failures[0].detail, /"kind":"supersedes","guard":"#7"/);
+  assert.match(r.failures[0].detail, /adding a code to an enum/);
+  assert.match(conformanceResumePrompt(r.failures), /"kind":"supersedes","guard":"#7"/);
+  assert.match(builderImplementPrompt("local"), /"kind":"supersedes","guard":"#N"/);
+});
+
+test("an additive enum change that updates its coverage test fails the guard without supersedes and passes with it", async () => {
+  const d = tmpDir("guardgate-enum-");
+  const cov = (codes) => `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { CODES } from "./codes.mjs";\ntest("every enum code has a declared coverage entry", () => assert.deepEqual(Object.values(CODES).sort(), ${JSON.stringify(codes)}));\n`;
+  sh(d, "init", "-q", "-b", "main");
+  put(d, "src/codes.mjs", "export const CODES = {\n  A: \"a\",\n};\n");
+  put(d, "src/codes.test.mjs", cov(["a"]));
+  sh(d, "add", "-A"); sh(d, "commit", "-qm", "fix: codes");
+  const sha = sh(d, "rev-parse", "HEAD").trim();
+  sh(d, "update-ref", "refs/remotes/origin/main", "HEAD");
+  sh(d, "checkout", "-qb", "lane");
+  put(d, "src/codes.mjs", "export const CODES = {\n  A: \"a\",\n  B: \"b\",\n};\n");
+  put(d, "src/codes.test.mjs", cov(["a", "b"]));
+  commit(d, "add code b");
+  const guard = { v: 1, issue: 5, pr: 6, merge_sha: sha, tests: [{ path: "src/codes.test.mjs", ids: [] }], hunks: [{ file: "src/codes.mjs", start: 2, end: 2, symbol: "CODES" }], why: "enum coverage" };
+  const { selected, r } = await gate(d, guard);
+  assert.equal(selected.length, 1);
+  assert.equal(r.failures.length, 1, JSON.stringify({ runs: r.runs, skipped: r.skipped }));
+  const contract = { requirements: [], deliverables: [{ id: "D1", path: "src/codes.mjs" }, { id: "D2", path: "src/codes.test.mjs" }], validate: [] };
+  const base = { result: {}, changedFiles: files(d), guardFailures: r.failures };
+  const without = precheck({ contract, ...base });
+  assert.deepEqual(without.failures.filter((f) => f.kind === "guard_broken").map((f) => f.guard), ["#5"]);
+  const a = applyAmendments(contract, [{ kind: "supersedes", guard: "#5", why: "new code added to the closed enum" }]);
+  const withIt = precheck({ contract: a.contract, ...base });
+  assert.deepEqual(withIt.failures.filter((f) => f.kind === "guard_broken"), []);
+});
+
+// #4968: a guard test already red on the merge base must not block the lane
+const FLAKY = (v) => `${TEST_SRC(v)}test("env dependent", () => assert.fail("red on base"));\n`;
+const revert = (d) => { put(d, "src/a.mjs", "export function price() {\n  return 1;\n}\n"); commit(d, "revert"); };
+
+test("a guard test that already fails on base is skipped (fails on base), not guard_broken", async () => {
+  const { d, guard } = fixture(FLAKY(2));
+  put(d, "src/a.mjs", "export function price() {\n  return 1 + 1;\n}\n"); // harmless edit of the guarded line
+  commit(d, "refactor");
+  const { selected, r } = await gate(d, guard);
+  assert.equal(selected.length, 1);
+  assert.equal(r.failures.length, 0, JSON.stringify(r));
+  assert.ok(r.skipped.some((x) => /guard #7 .*fails on base/.test(x)), r.skipped.join("|"));
+});
+
+test("a test that passes on base and fails on the lane is blocked, with no skip", async () => {
+  const { d, guard } = fixture();
+  revert(d);
+  const { r } = await gate(d, guard);
+  assert.equal(r.failures.length, 1);
+  assert.deepEqual(r.skipped, []);
+  assert.match(r.failures[0].detail, /failing tests: price is 2:/);
+});
+
+test("a new failure in a file that already had one is blocked and its name leads the detail", async () => {
+  const { d, guard } = fixture(FLAKY(2));
+  revert(d);
+  const { r } = await gate(d, guard);
+  assert.equal(r.failures.length, 1, JSON.stringify({ skipped: r.skipped }));
+  const detail = r.failures[0].detail;
+  assert.match(detail, /failing tests: price is 2:\n/, "only the new failure is named");
+  assert.ok(detail.indexOf("failing tests:") < detail.indexOf("env dependent"), "names precede the output tail (any reporter)");
+});
+
+test("a passing guard adds no baseline worktree, and a failing one removes its worktree", async () => {
+  const pass = fixture();
+  const calls = [];
+  const spy = (cwd) => async (args) => { calls.push(args[0]); return sh(cwd, ...args); };
+  put(pass.d, "src/a.mjs", "export function price() {\n  return 1 + 1;\n}\n"); commit(pass.d, "refactor");
+  let git = spy(pass.d);
+  let { selected, mergeBase } = await selectGuards({ guards: [pass.guard], files: files(pass.d), git, base: "origin/main" });
+  calls.length = 0;
+  const ok = await runGuards({ selected, mergeBase, contract: {}, git, runCommand, cwd: pass.d, env: process.env });
+  assert.equal(ok.failures.length, 0);
+  assert.ok(!calls.includes("worktree"), calls.join(","));
+  const bad = fixture();
+  revert(bad.d);
+  git = spy(bad.d);
+  ({ selected, mergeBase } = await selectGuards({ guards: [bad.guard], files: files(bad.d), git, base: "origin/main" }));
+  calls.length = 0;
+  const r = await runGuards({ selected, mergeBase, contract: {}, git, runCommand, cwd: bad.d, env: process.env });
+  assert.equal(r.failures.length, 1);
+  assert.ok(calls.includes("worktree"));
+  assert.equal(sh(bad.d, "worktree", "list").trim().split("\n").length, 1, "baseline worktree removed");
+});
+
+test("a baseline that cannot run is skipped, never blocking", async () => {
+  const { d, guard } = fixture();
+  revert(d);
+  const git = async (a) => { if (a[0] === "worktree" && a[1] === "add") throw new Error("no worktree"); return sh(d, ...a); };
+  const { selected, mergeBase } = await selectGuards({ guards: [guard], files: files(d), git, base: "origin/main" });
+  const r = await runGuards({ selected, mergeBase, contract: {}, git, runCommand, cwd: d, env: process.env });
+  assert.equal(r.failures.length, 0);
+  assert.match(r.skipped[0], /baseline unavailable \(no worktree\)/);
+});
+
+test("failingNames reads TAP, spec and pytest output and ignores skips", () => {
+  assert.deepEqual(failingNames("ok 1 - a\nnot ok 2 - b c\n    not ok 1 - nested # SKIP why\nnot ok 3 - d # TODO x"), ["b c"]);
+  assert.deepEqual(failingNames("  ✖ spec one (1.2ms)\n✖ failing tests:\n  ✖ spec one (1.2ms)"), ["spec one"]);
+  assert.deepEqual(failingNames("FAILED tests/t.py::test_x - assert 1 == 2"), ["tests/t.py::test_x"]);
+  assert.equal(failingNames("all fine"), null);
 });

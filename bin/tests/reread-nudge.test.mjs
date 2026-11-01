@@ -8,7 +8,7 @@ import { existsSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./_tmp.mjs";
 import { payloadReads, nudgeFor, guardFor, stateFile, main } from "../hooks/reread-nudge.mjs";
-import { makeLeanRunner, rereadNudgeFlags, REREAD_HOOK } from "../lean/effects.mjs";
+import { makeLeanRunner, rereadNudgeFlags, rereadHooks, REREAD_HOOK } from "../lean/effects.mjs";
 import { REREAD_MIN } from "../lean/toolstats.mjs";
 
 const read = (file_path, session_id = "s1") => ({ session_id, cwd: "/w", tool_name: "Read", tool_input: { file_path } });
@@ -58,18 +58,20 @@ describe("#4456 re-read nudge hook", () => {
     } finally { /* tmpDir cleans up at exit */ }
   });
 
-  it("makeLeanRunner adds the --settings hook only for rereadNudge sessions that can use tools", async () => {
+  it("makeLeanRunner adds the re-read hooks to its one --settings only for rereadNudge sessions that can use tools", async () => {
     const seen = [];
-    const runCli = async (o) => { seen.push(o.sessionFlags); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+    const runCli = async (o) => { seen.push(o.extraArgs); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
     const base = { role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
     await makeLeanRunner({ runCli })({ ...base });
     await makeLeanRunner({ runCli })({ ...base, rereadNudge: true });
     await makeLeanRunner({ runCli })({ ...base, rereadNudge: true, readOnly: true });
     await makeLeanRunner({ runCli })({ ...base, rereadNudge: true, noTools: true });
-    const [plain, nudged, ro, none] = seen;
-    assert.ok(!plain.includes("--settings"));
-    assert.deepEqual(nudged, [...plain, ...rereadNudgeFlags()]);
-    assert.ok(!ro.includes("--settings") && !none.includes("--settings"));
+    const settings = (flags) => { assert.equal(flags.filter((f) => f === "--settings").length, 1, "exactly one --settings (#4843)"); return JSON.parse(flags[flags.indexOf("--settings") + 1]); };
+    const [plain, nudged, ro, none] = seen.map(settings);
+    assert.equal(plain.hooks, undefined);
+    assert.deepEqual(nudged.hooks, rereadHooks());
+    assert.equal(ro.hooks, undefined);
+    assert.equal(none.hooks, undefined);
     const s = JSON.parse(rereadNudgeFlags()[1]);
     assert.equal(s.hooks.PostToolUse[0].matcher, "Read|Bash");
     assert.equal(s.hooks.PostToolUse[0].hooks[0].command, `${JSON.stringify(process.execPath)} ${JSON.stringify(REREAD_HOOK)}`);

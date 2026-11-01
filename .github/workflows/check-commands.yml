@@ -30,6 +30,8 @@ on:
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
+      - 'scripts/review-pr-changed-verification.test.sh'
+      - 'scripts/postdeploy-rollup-link.test.sh'
       - 'scripts/review-roster.sh'
       - 'scripts/selfreview-plan.sh'
       - 'scripts/review-roster.test.sh'
@@ -132,6 +134,8 @@ on:
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
+      - 'scripts/review-pr-changed-verification.test.sh'
+      - 'scripts/postdeploy-rollup-link.test.sh'
       - 'scripts/review-roster.sh'
       - 'scripts/selfreview-plan.sh'
       - 'scripts/review-roster.test.sh'
@@ -469,6 +473,8 @@ jobs:
           bash scripts/spec-no-worktree-script.test.sh
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
+          bash scripts/review-pr-changed-verification.test.sh
+          bash scripts/postdeploy-rollup-link.test.sh
           bash scripts/review-roster.test.sh
           bash scripts/selfreview-plan.test.sh
           bash scripts/review-prepare.test.sh

@@ -51,14 +51,30 @@ export async function unstageToolState(git) {
   return stray.length ? (await git(["diff", "--cached", "--name-only"])).trim() !== "" : staged.length > 0;
 }
 
+const REQUIREMENTS_EXPORT = /^requirements([-_.][\w.-]+)?\.txt$/;
+
+/**
+ * #4959: `requirements*.txt` files the branch added to a Poetry/uv project (pyproject [tool.poetry], or poetry.lock / uv.lock at
+ * the base) that the base does not track and the contract does not list (`keep`): an export generated to run local tests.
+ */
+export async function strayGenerated(git, ref, added, keep = []) {
+  const cands = added.filter((p) => REQUIREMENTS_EXPORT.test(base(p)) && !keep.includes(p));
+  if (!cands.length) return [];
+  const tracked = zlist(await git(["ls-tree", "-r", "--name-only", "-z", ref]));
+  const managed = tracked.some((f) => /(^|\/)(poetry|uv)\.lock$/.test(f))
+    || (await Promise.all(tracked.filter((f) => /(^|\/)pyproject\.toml$/.test(f)).map((f) => git(["show", `${ref}:${f}`]).catch(() => "")))).some((t) => /^\[tool\.poetry[\].]/m.test(String(t)));
+  return managed ? cands : [];
+}
+
 /**
  * Remove from the index (and commit) the deny-listed files this branch added against `base`. Returns the removed paths ([]
- * when the branch is clean). Never throws: a failure leaves the branch as it was and the push proceeds.
+ * when the branch is clean). `keep`: contract deliverable paths, never removed as generated files. Never throws: a failure
+ * leaves the branch as it was and the push proceeds.
  */
-export async function untrackToolState({ git, base: ref, ev = () => {} }) {
+export async function untrackToolState({ git, base: ref, ev = () => {}, keep = [] }) {
   try {
     const added = zlist(await git(["diff", "--diff-filter=A", "--name-only", "-z", `${ref}...HEAD`]));
-    const stray = await strayPaths(git, added);
+    const stray = [...await strayPaths(git, added), ...await strayGenerated(git, ref, added, keep)];
     if (!stray.length) return [];
     await git(["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ...stray]);
     await git(["commit", "--no-verify", "-m", "chore: untrack lane tool state (#4590)", "-m", stray.slice(0, 20).join("\n")]);
@@ -68,6 +84,20 @@ export async function untrackToolState({ git, base: ref, ev = () => {} }) {
     ev({ event: "TOOLSTATE_UNTRACK_FAILED", error: String(e?.message ?? e).slice(0, 200) });
     return [];
   }
+}
+
+/**
+ * #4880: a fresh lane starts with no scratch it did not write. Drops .forge-lean/ from the index (a base that still tracks it)
+ * and from disk (`git clean -x`, so no fs delete is needed). Never throws. Returns true when the directory was tracked or present.
+ */
+export async function clearLaneScratch({ git, fs = {}, cwd }) {
+  const dir = `${cwd}/${LEAN_SCRATCH.slice(0, -1)}`;
+  let cleared = false;
+  try { cleared = String((await git(["ls-files", "--", LEAN_SCRATCH])) ?? "").split("\n").some((f) => isToolState(f.trim())); } catch { /* unreadable index: still clean the disk */ }
+  try { if (!cleared && fs.exists) cleared = Boolean(await fs.exists(dir)); } catch { /* best effort */ }
+  try { if (cleared) await git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_SCRATCH]); } catch { /* best effort */ }
+  try { if (cleared) await git(["clean", "-f", "-d", "-x", "-q", "--", LEAN_SCRATCH]); } catch { /* best effort */ }
+  return cleared;
 }
 
 /** The deny-list lines a repo's .gitignore text lacks (append-only; `next`: also next-env.d.ts, for Next.js repos). */

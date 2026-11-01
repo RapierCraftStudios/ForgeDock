@@ -1,0 +1,403 @@
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { join } from "node:path";
+import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
+import { openBatch } from "./batch.mjs";
+
+const tmp = () => tmpDir("iw-");
+const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, authorAssociation: "OWNER", author: { login: "me" }, createdAt: "2026-10-01T00:00:00Z", ...o });
+const lbl = (...n) => n.map((name) => ({ name }));
+const W = (o = {}) => validateWatch("w", o);
+
+const REVIEW_PASS = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR", body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would PASS." };
+
+/**
+ * gh fake: `issues` open list, `closed` set of closed numbers, `bodies` for view/edit. Merge verification: every closed
+ * issue has a merged `feat/issue-N-lean` PR into staging with a passing review and green CI unless `prs[n]` / `comments[n]` /
+ * `checks[sha]` / `compare` say otherwise.
+ */
+function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", failGh = () => false } = {}) {
+  const calls = [], launched = [], batchOps = [];
+  let clock = Date.parse("2026-10-30T00:00:00Z"), nb = 0;
+  const io = { env: { FORGEDOCK_WATCH_DIR: env }, calls, launched, batchOps, closed, bodies, prs, comments, checks, tickClock: (ms) => { clock += ms; }, now: () => clock, sleep: async () => {},
+    requiredChecks: async () => [],
+    gh: async (a) => {
+      calls.push(a);
+      if (failGh(a)) throw new Error("gh transient");
+      if (a[0] === "api" && /\/compare\//.test(a[1])) return compare;
+      if (a[0] === "api" && /\/commits\/([0-9a-f]+)\/check-runs/.test(a.join(" "))) { const sha = /commits\/([0-9a-f]+)/.exec(a.join(" "))[1]; return (checks[sha] ?? []).map(([n, st, c], i) => `${i + 1}\t${n}\t${st}\t${c ?? ""}`).join("\n"); }
+      if (a[0] === "api" && /\/commits\/[0-9a-f]+\/status/.test(a[1])) return "";
+      if (a[0] === "api") return issues.filter((i) => !closed.has(i.number)).map((i) => `${i.number}\t${i.authorAssociation}`).join("\n"); // #4859: REST association list
+      if (a[0] === "pr" && a[1] === "list") { const n = +/feat\/issue-(\d+)-lean/.exec(a.join(" "))[1]; return JSON.stringify(n in prs ? prs[n] : [{ number: 1000 + n, baseRefName: "staging", headRefOid: `aa${n}`, mergeCommit: { oid: `bb${n}` }, labels: [] }]); }
+      if (a[1] === "list") return JSON.stringify(issues.filter((i) => !closed.has(i.number)).map(({ authorAssociation: _a, ...i }) => i));
+      if (a[1] === "view" && a.includes("state")) return JSON.stringify({ state: closed.has(+a[2]) ? "CLOSED" : "OPEN" });
+      if (a[1] === "view" && a.includes("comments")) return JSON.stringify({ comments: comments[a[2]] ?? [REVIEW_PASS] });
+      if (a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "" });
+      if (a[1] === "reopen") { closed.delete(+a[2]); return ""; }
+      if (a[1] === "edit") { bodies[a[2]] = a[a.indexOf("--body") + 1]; return ""; }
+      return "";
+    },
+    launch: (n, lane) => { launched.push([n, lane]); return { poll: () => ({ code: exit(n) }) }; },
+    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false } };
+  return io;
+}
+
+test("parseWatches reads three nesting levels, lists, quotes and ISO times", () => {
+  const w = loadWatches(`project:\n  name: x\nissue_watch:\n  watches:\n    nomilestone:\n      milestone: none\n      exclude_labels: [epic, post-deploy]\n      include_followups: defer-only\n      mode: batch\n      parallel: 12\n    release-1-4:\n      version: "1.4"\n      max_issues: 300\n      until: 2026-11-15T00:00:00Z\nother:\n  a: b\n`);
+  assert.deepEqual(Object.keys(w), ["nomilestone", "release-1-4"]);
+  assert.deepEqual(w.nomilestone.exclude_labels, ["epic", "post-deploy"]);
+  assert.equal(w.nomilestone.parallel, 12);
+  assert.equal(w["release-1-4"].max_issues, 300);
+  assert.equal(w["release-1-4"].until, "2026-11-15T00:00:00Z");
+  assert.equal(w["release-1-4"].version, "1.4");
+  assert.deepEqual(parseWatches("project:\n  a: b\n"), {});
+});
+
+test("validateWatch rejects unknown keys, bad mode, regex, date, numbers", () => {
+  assert.throws(() => W({ bogus: 1 }), /unknown key/);
+  assert.throws(() => W({ mode: "x" }), /mode/);
+  assert.throws(() => W({ title_regex: "(" }), /title_regex/);
+  assert.throws(() => W({ until: "soon" }), /until/);
+  assert.throws(() => W({ max_issues: "0" }), /max_issues/);
+  assert.throws(() => W({ version: "1" }), /version/);
+  assert.equal(W().mode, "per-issue");
+  assert.equal(W().max_issues, null);
+});
+
+test("selectors: milestone slug / none, labels, exclude_labels, title_regex, since", () => {
+  const m = iss(1, { milestone: { title: "Release 1.4" } });
+  assert.ok(matchesSelectors(m, W({ milestone: "release-1.4" }))); // slug form
+  assert.ok(!matchesSelectors(m, W({ milestone: "other" })));
+  assert.ok(!matchesSelectors(m, W({ milestone: "none" })));
+  assert.ok(matchesSelectors(iss(2), W({ milestone: "none" })));
+  assert.ok(!matchesSelectors(iss(2), W({ milestone: "some" })));
+  assert.ok(matchesSelectors(iss(3, { labels: lbl("a", "b") }), W({ labels: ["a"] })));
+  assert.ok(!matchesSelectors(iss(3, { labels: lbl("a") }), W({ labels: ["a", "b"] })));
+  assert.ok(!matchesSelectors(iss(4, { labels: lbl("epic") }), W({ exclude_labels: ["epic"] })));
+  assert.ok(matchesSelectors(iss(4, { labels: lbl("x") }), W({ exclude_labels: ["epic"] })));
+  assert.ok(matchesSelectors(iss(5, { title: "fix: a" }), W({ title_regex: "^fix:" })));
+  assert.ok(!matchesSelectors(iss(5, { title: "feat: a" }), W({ title_regex: "^fix:" })));
+  assert.ok(matchesSelectors(iss(6), W({ since: "2026-09-01T00:00:00Z" })));
+  assert.ok(!matchesSelectors(iss(6), W({ since: "2026-10-02T00:00:00Z" })));
+});
+
+test("version: from the milestone title, from a version:x.y label, title wins", () => {
+  assert.equal(issueVersion(iss(1, { milestone: { title: "v1.4 hardening" } })), "1.4");
+  assert.equal(issueVersion(iss(2, { labels: lbl("version:1.5") })), "1.5");
+  assert.equal(issueVersion(iss(3, { milestone: { title: "Release 1.4" }, labels: lbl("version:1.5") })), "1.4");
+  assert.equal(issueVersion(iss(4)), null);
+  const w = W({ version: "1.4" });
+  assert.ok(matchesSelectors(iss(1, { milestone: { title: "Release 1.4" } }), w));
+  assert.ok(matchesSelectors(iss(2, { labels: lbl("version:1.4") }), w));
+  assert.ok(!matchesSelectors(iss(3, { labels: lbl("version:1.5") }), w));
+});
+
+test("search is passed to gh", async () => {
+  const dir = tmp(), io = fakeIo(dir, [iss(1)]);
+  await tick({ watch: W({ search: "label:bug sort:created-asc" }), repo: "o/r", io, state: { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" } });
+  const list = io.calls.find((a) => a[1] === "list");
+  assert.equal(list[list.indexOf("--search") + 1], "label:bug sort:created-asc");
+});
+
+test("lane: milestone → pattern, else staging, pin allowed, default branch refused", () => {
+  const b = { staging: "staging", featurePattern: "milestone/{slug}" };
+  assert.equal(laneFor(iss(1, { milestone: { title: "Release 1.4" } }), W(), { branches: b, defaults: ["main"] }), "milestone/release-14");
+  assert.equal(laneFor(iss(2), W(), { branches: b, defaults: ["main"] }), "staging");
+  assert.equal(laneFor(iss(2), W({ lane: "dev" }), { branches: b, defaults: ["main"] }), "dev");
+  assert.throws(() => laneFor(iss(2), W({ lane: "main" }), { branches: b, defaults: ["main"] }), /default branch/);
+});
+
+test("follow-ups: defer-only claims bot follow-ups with an unchecked defer item; plain bot issues and post-deploy-only excluded", () => {
+  const bot = (body, title = "follow-up: 1 deferred item(s)") => iss(9, { title, body, authorAssociation: "CONTRIBUTOR", author: { login: "forge[bot]" } });
+  const defer = "- [ ] `R1: x` — defer: separate work\n";
+  const pd = "- [ ] `R2: y` — post-deploy: check later\n";
+  assert.ok(hasUnresolvedDefer(defer));
+  assert.ok(!hasUnresolvedDefer("- [x] `R1: x` — defer: done\n"));
+  assert.ok(!hasUnresolvedDefer(pd));
+  assert.equal(classifyIssue(bot(defer), W({ include_followups: "defer-only" })), "claim");
+  assert.equal(classifyIssue(bot(defer + pd), W({ include_followups: "defer-only" })), "claim");
+  assert.equal(classifyIssue(bot(defer), W()), null);
+  assert.equal(classifyIssue(bot(defer, "chore: bot issue"), W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only", postdeploy_rollup: "50" })), "fold");
+  assert.equal(classifyIssue(iss(1, { authorAssociation: "NONE" }), W()), null);
+  // release #4820 AUTH-1: a FORGE:DEFERRED marker in the body never makes an outsider a bot
+  const spoof = iss(11, { title: "follow-up: 1 deferred item(s)", body: `<!-- FORGE:DEFERRED_FROM: #1 -->\n${defer}`, authorAssociation: "NONE", author: { login: "mallory" } });
+  assert.equal(classifyIssue(spoof, W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue({ ...spoof, body: `<!-- FORGE:DEFERRED_FROM: #1 -->\n${pd}` }, W({ include_followups: "defer-only", postdeploy_rollup: "50" })), null);
+  // the App as gh reports it (bare login, CONTRIBUTOR) still counts as the bot
+  const app = iss(12, { title: "follow-up: 1 deferred item(s)", body: defer, authorAssociation: "CONTRIBUTOR", author: { login: "rapiercraft-forgedock" } });
+  assert.equal(classifyIssue(app, W({ include_followups: "defer-only" })), "claim");
+});
+
+test("postdeploy_rollup folds a post-deploy-only follow-up into the release checklist once", async () => {
+  const dir = tmp();
+  const f = iss(9, { title: "follow-up: 1 deferred item(s)", body: "- [ ] `R2: y` — post-deploy: check\n", authorAssociation: "CONTRIBUTOR", author: { login: "forge[bot]" } });
+  const io = fakeIo(dir, [f], { bodies: { 50: "## Release\n- [ ] ship\n" } });
+  const watch = W({ include_followups: "defer-only", postdeploy_rollup: "50" });
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  await tick({ watch, repo: "o/r", io, state });
+  await tick({ watch, repo: "o/r", io, state });
+  assert.match(io.bodies[50], /- \[ \] #9 follow-up: 1 deferred item\(s\) — post-deploy/);
+  assert.equal(io.bodies[50].match(/#9\b/g).length, 1);
+  assert.deepEqual(io.launched, []);
+  assert.deepEqual(state.claimed, []);
+});
+
+test("two named watches on one repo never double-claim", async () => {
+  const dir = tmp();
+  const issues = [1, 2, 3, 4].map((n) => iss(n));
+  const mk = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
+  const a = { watch: validateWatch("a", { max_inflight: "3" }), io: fakeIo(dir, issues), state: mk() };
+  const b = { watch: validateWatch("b", { max_inflight: "3" }), io: fakeIo(dir, issues), state: mk() };
+  await Promise.all([a, b].map((x) => tick({ ...x, repo: "o/r", handles: new Map() })));
+  await Promise.all([a, b].map((x) => tick({ ...x, repo: "o/r", handles: new Map() })));
+  const all = [...a.state.claimed, ...b.state.claimed];
+  assert.equal(new Set(all).size, all.length);
+  assert.deepEqual([...all].sort(), [1, 2, 3, 4]);
+  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "c"), false);
+});
+
+test("release #4820 BUG-1: a throwing batch.start loses no claim; the same watch re-claims on the next pass", async () => {
+  const dir = tmp();
+  const mk = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
+  const watch = validateWatch("w", { mode: "batch", max_inflight: "3" });
+  const io = fakeIo(dir, [iss(1), iss(2)]);
+  const start = io.batch.start;
+  io.batch.start = async () => { throw new Error("schedd unreachable"); };
+  await assert.rejects(tick({ watch, repo: "o/r", io, state: mk() }), /schedd unreachable/); // status.json never saved
+  io.batch.start = start;
+  const state = await tick({ watch, repo: "o/r", io, state: mk() }); // restart from the last saved (empty) state
+  assert.deepEqual([...state.claimed].sort(), [1, 2]);
+  assert.deepEqual(io.batchOps, [["start", [1, 2], watch.parallel, "staging"]]);
+  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "another watch still cannot take it");
+});
+
+test("max_issues stops claiming at N, drains, then finishes", async () => {
+  const dir = tmp();
+  const io = fakeIo(dir, [1, 2, 3, 4, 5].map((n) => iss(n)), { exit: () => 0 });
+  const watch = W({ max_issues: "3", max_inflight: "2" });
+  const state = await runWatch({ watch, repo: "o/r", io, dir: watchDir("o/r", "w", { FORGEDOCK_WATCH_DIR: dir }), once: false, intervalMs: 1 });
+  assert.equal(state.claimed.length, 3);
+  assert.equal(state.phase, "done");
+  assert.equal(io.launched.length, 3);
+  assert.match(formatStatus(state, watch, io.now()), /claims: 3\/3/);
+});
+
+test("max_issues drain keeps retrying: a deferred (75) lane relaunches until it merges", async () => {
+  const dir = tmp();
+  let n75 = 1;
+  const io = fakeIo(dir, [iss(1), iss(2)], { exit: (n) => (n75-- > 0 ? 75 : (io.closed.add(n), 0)) });
+  const state = await runWatch({ watch: W({ max_issues: "1" }), repo: "o/r", io, dir: watchDir("o/r", "w", { FORGEDOCK_WATCH_DIR: dir }), intervalMs: 1 });
+  assert.equal(io.launched.length, 2); // launch + one retry
+  assert.deepEqual(state.merged, [1]);
+  assert.deepEqual(state.verified, [1]);
+  assert.equal(state.claimed.length, 1);
+});
+
+test("until stops claiming and drains; a failed lane is counted", async () => {
+  const dir = tmp();
+  const io = fakeIo(dir, [iss(1), iss(2)], { exit: () => 1 });
+  const watch = W({ until: "2026-10-30T00:10:00Z", max_inflight: "1" });
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map();
+  await tick({ watch, repo: "o/r", io, state, handles });
+  assert.deepEqual(state.inflight, [1]);
+  io.tickClock(20 * 60 * 1000);
+  await tick({ watch, repo: "o/r", io, state, handles });
+  assert.deepEqual(state.failed, [1]);
+  assert.equal(state.phase, "done");
+  assert.deepEqual(state.claimed, [1]); // nothing claimed after until
+});
+
+test("no cap: keeps claiming across passes (forever)", async () => {
+  const dir = tmp();
+  const io = fakeIo(dir, [iss(1)], { exit: () => 0 });
+  const watch = W();
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map();
+  for (let i = 0; i < 3; i++) await tick({ watch, repo: "o/r", io, state, handles });
+  io.closed.add(1);
+  await tick({ watch, repo: "o/r", io, state, handles });
+  assert.equal(state.phase, "running");
+  assert.equal(watch.max_issues, null);
+});
+
+test("lock is per (repo, name): a live holder blocks, another name does not, a dead holder is taken over", () => {
+  const d = tmp(), a = join(d, "a"), b = join(d, "b");
+  mkdirSync(a); mkdirSync(b);
+  acquireLock(a, { pid: 111, host: "h", alive: () => true });
+  assert.throws(() => acquireLock(a, { pid: 222, host: "h", alive: () => true }), /already running/);
+  acquireLock(b, { pid: 222, host: "h", alive: () => true });
+  acquireLock(a, { pid: 222, host: "h", alive: () => false });
+});
+
+test("batch mode adds to one batch, rolls to a new one after the report, and orders by Depends on", async () => {
+  const dir = tmp();
+  const issues = [iss(1, { body: "Depends on #2" }), iss(2), iss(3)];
+  const io = fakeIo(dir, issues);
+  const watch = W({ mode: "batch", parallel: "7", max_inflight: "2" });
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running", batch: null };
+  await tick({ watch, repo: "o/r", io, state });
+  assert.deepEqual(io.batchOps[0], ["start", [2, 1], 7, "staging"]); // dependency first
+  io.closed.add(2); io.closed.add(1);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.deepEqual(io.batchOps[1], ["add", "b1", [3]]);
+  io.reported = new Set(["b1"]);
+  io.closed.add(3);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.equal(state.batch, null);
+  assert.deepEqual(state.verified.sort(), [1, 2, 3]);
+  io.reported = new Set();
+  issues.push(iss(4));
+  await tick({ watch, repo: "o/r", io, state });
+  assert.deepEqual(io.batchOps[2], ["start", [4], 7, "staging"]); // a new batch
+  assert.deepEqual(dagOrder([iss(1, { body: "Depends on: #2, #3" }), iss(2), iss(3)]).map((i) => i.number), [2, 3, 1]);
+});
+
+test("batch mode with the real batch file: addIssues lands in the batch's add file", async () => {
+  const root = tmp();
+  const b = openBatch(root, "b1"); mkdirSync(b.dir, { recursive: true });
+  b.writePlan({ issues: [1] }); b.store.save({ order: [1] });
+  const io = fakeIo(tmp(), [iss(5)]);
+  io.batch.add = (id, nums) => openBatch(root, id).addIssues(nums);
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running", batch: "b1" };
+  await tick({ watch: W({ mode: "batch" }), repo: "o/r", io, state });
+  assert.deepEqual(b.readAdded(), [5]);
+});
+
+test("status prints selector, claims, inflight, merged, verified, failed, time remaining; CLI status/run", async () => {
+  const dir = tmp(), cwd = tmp();
+  writeFileSync(join(cwd, "forge.yaml"), "branches:\n  default: main\nissue_watch:\n  watches:\n    r:\n      version: \"1.4\"\n      max_issues: 5\n      until: 2026-10-30T02:00:00Z\n");
+  const io = fakeIo(dir, [iss(1, { labels: lbl("version:1.4") })], { exit: () => 0 });
+  io.gh = ((orig) => async (a) => (a[0] === "repo" ? (a.includes("nameWithOwner") ? JSON.stringify({ nameWithOwner: "o/r" }) : "main") : orig(a)))(io.gh);
+  const out = [];
+  await issueWatchFromCli(["run", "--name", "r", "--once"], { cwd, env: { FORGEDOCK_WATCH_DIR: dir }, io, print: (l) => out.push(l) });
+  assert.ok(existsSync(join(watchDir("o/r", "r", { FORGEDOCK_WATCH_DIR: dir }), "status.json")));
+  out.length = 0;
+  await issueWatchFromCli(["status", "--name", "r"], { cwd, env: { FORGEDOCK_WATCH_DIR: dir }, io, print: (l) => out.push(l) });
+  const t = out.join("\n");
+  assert.match(t, /selector: version=1\.4/);
+  assert.match(t, /claims: 1\/5\s+inflight: 0\s+merged: 1\s+verified: 0|claims: 1\/5\s+inflight: 1/);
+  assert.match(t, /time remaining: 120m/);
+  await assert.rejects(issueWatchFromCli(["bogus"], { cwd, env: { FORGEDOCK_WATCH_DIR: dir }, io }), /usage/);
+});
+
+test("release #4820 CONC-1: release mode keeps this watch's own registry claims eligible; others' stay excluded", () => {
+  const reg = { 1: "r", 2: "other" };
+  assert.equal(unclaimedOrOwn(reg, 1, "r"), true, "own claim left by a crash is re-eligible");
+  assert.equal(unclaimedOrOwn(reg, 2, "r"), false, "another watch's claim is not");
+  assert.equal(unclaimedOrOwn(reg, 3, "r"), true);
+  assert.equal(unclaimedOrOwn(null, 3, "r"), true);
+});
+
+// ── merge verification (issuewatch-verify.mjs) ───────────────────────────────────────────────────────────────
+/** One claimed issue #1 whose lane exits 0 and closes it; returns the state after the tick and the fake. */
+async function settleOne(opts = {}, { ticks = 1, gap = 0 } = {}) {
+  const dir = tmp();
+  const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), ...opts });
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map(), watch = W({ max_issues: "1" });
+  await tick({ watch, repo: "o/r", io, state, handles }); // claim + launch
+  for (let i = 0; i < ticks; i++) { await tick({ watch, repo: "o/r", io, state, handles }); io.tickClock(gap); }
+  const posted = io.calls.filter((a) => a[1] === "comment").map((a) => a[a.indexOf("--body") + 1]);
+  return { state, io, posted, reopened: io.calls.some((a) => a[1] === "reopen"), escalated: io.calls.some((a) => a[1] === "edit" && a.includes("needs-human")) };
+}
+
+test("verify: a merged, reviewed, green lane PR is verified and the evidence is posted", async () => {
+  const r = await settleOne({ checks: { bb1: [["test", "completed", "success"], ["forgedock/verify", "completed", "failure"]] } });
+  assert.deepEqual(r.state.verified, [1]);
+  assert.deepEqual(r.state.merged, [1]);
+  assert.equal(r.reopened, false);
+  assert.match(r.posted[0], /FORGE:WATCH_VERIFY[\s\S]*merge verified[\s\S]*PR #1001[\s\S]*CI green on the merge commit \(1 check/); // forgedock/verify is report-only
+});
+
+test("verify: a shadow `would BLOCK` review merged anyway is NOT verified: reopened, needs-human, evidence", async () => {
+  const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+  const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
+  assert.deepEqual(r.state.verified, []);
+  assert.deepEqual(r.state.unverified, [1]);
+  assert.ok(r.reopened && r.escalated);
+  assert.match(r.posted[0], /merge NOT verified[\s\S]*FAIL: the latest FORGE:REVIEW did not pass/);
+});
+
+test("verify: a review comment from an untrusted author does not count", async () => {
+  const forged = { author: { login: "stranger" }, authorAssociation: "NONE", body: REVIEW_PASS.body };
+  const r = await settleOne({ comments: { 1: [forged] } });
+  assert.deepEqual(r.state.unverified, [1]);
+  assert.match(r.posted[0], /no trusted FORGE:REVIEW/);
+});
+
+test("verify: review-degraded, wrong base, missing required check, merge commit off the lane, red lane CI each fail", async () => {
+  const pr = (o) => ({ 1: [{ number: 1001, baseRefName: "staging", headRefOid: "aa1", mergeCommit: { oid: "bb1" }, labels: [], ...o }] });
+  const cases = [
+    [{ prs: pr({ labels: [{ name: "review-degraded" }] }) }, /incomplete review \(review-degraded\)/],
+    [{ prs: pr({ baseRefName: "main" }) }, /targets main, not staging/],
+    [{ compare: "diverged" }, /not on staging \(compare: diverged\)/],
+    [{ checks: { bb1: [["lint", "completed", "failure"]] } }, /staging CI red on the merge commit: lint=failure/],
+  ];
+  for (const [opts, re] of cases) {
+    const r = await settleOne(opts);
+    assert.deepEqual(r.state.unverified, [1], String(re));
+    assert.match(r.posted[0], re);
+  }
+  const dir = tmp();
+  const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0) });
+  io.requiredChecks = async () => ["build"];
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map();
+  await tick({ watch: W(), repo: "o/r", io, state, handles });
+  await tick({ watch: W(), repo: "o/r", io, state, handles });
+  assert.deepEqual(state.unverified, [1]);
+  assert.match(io.calls.filter((a) => a[1] === "comment").at(-1).at(-1), /required check\(s\) not green on the merged head aa1: build=missing/);
+});
+
+test("verify: pending merge-commit CI waits, holds the drain, then fails after 60 minutes", async () => {
+  const r = await settleOne({ checks: { bb1: [["test", "in_progress"]] } }, { ticks: 2, gap: 30 * 60000 });
+  assert.deepEqual(r.state.pendingVerify, [1]);
+  assert.notEqual(r.state.phase, "done"); // max_issues 1 reached, but the merge is mid-verification
+  assert.equal(r.posted.length, 0);
+  const s = r.state;
+  await tick({ watch: W({ max_issues: "1" }), repo: "o/r", io: r.io, state: s, handles: new Map() });
+  assert.deepEqual(s.unverified, [1]);
+  assert.match(r.io.calls.filter((a) => a[1] === "comment").at(-1).at(-1), /staging CI pending: test[\s\S]*still unverified after 60 min/);
+  await tick({ watch: W({ max_issues: "1" }), repo: "o/r", io: r.io, state: s, handles: new Map() });
+  assert.equal(s.phase, "done");
+});
+
+test("verify: an issue closed with no merged lane PR is closed-unmerged, never verified or escalated", async () => {
+  const r = await settleOne({ prs: { 1: [] } });
+  assert.deepEqual(r.state.closed, [1]);
+  assert.deepEqual(r.state.verified, []);
+  assert.deepEqual(r.state.merged, []);
+  assert.equal(r.reopened || r.escalated, false);
+  assert.equal(r.posted.length, 0);
+});
+
+for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
+  test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
+    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+    let failing = true;
+    const dir = tmp();
+    const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), comments: { 1: [block] }, failGh: (a) => failing && bad(a) });
+    const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+    const handles = new Map(), watch = W({ max_issues: "1" });
+    await tick({ watch, repo: "o/r", io, state, handles });
+    await assert.rejects(tick({ watch, repo: "o/r", io, state, handles }), /gh transient/);
+    assert.equal(io.calls.some((a) => a[1] === "reopen"), false); // not reopened while evidence is missing
+    assert.deepEqual(state.unverified ?? [], []);
+    assert.deepEqual(state.pendingVerify, [1]);
+    failing = false;
+    await tick({ watch, repo: "o/r", io, state, handles });
+    const n = (f) => io.calls.filter(f).length;
+    assert.equal(n((a) => a[1] === "comment"), what === "comment" ? 2 : 1); // the failed attempt is recorded too
+    assert.equal(n((a) => a[1] === "edit" && a.includes("needs-human")), what === "label" ? 2 : 1);
+    assert.equal(n((a) => a[1] === "reopen"), 1);
+    assert.deepEqual(state.unverified, [1]);
+    assert.deepEqual(state.pendingVerify, []);
+  });
+}

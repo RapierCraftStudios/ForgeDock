@@ -60,7 +60,15 @@ export function parseVerify(sec = {}) {
   const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim().replace(/^(["'])(.*)\1$/s, "$2").trim()).filter(Boolean))];
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
   const invariants = [...new Set((Array.isArray(s.invariants) ? s.invariants : []).map((x) => String(x ?? "").trim()).filter(Boolean))];
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, e2e: parseE2e(s) };
+  // #4792: guard_command maps an extension (`.py` or `py`) to a test-file command template; read by engine-cli readYamlMap; the key is omitted when empty so unconfigured repos parse as before
+  const guardCommand = {};
+  if (s.guard_command && typeof s.guard_command === "object" && !Array.isArray(s.guard_command)) {
+    for (const [k, v] of Object.entries(s.guard_command)) {
+      const ext = String(k).trim().toLowerCase().replace(/^\.?/, "."), cmd = str(v);
+      if (ext.length > 1 && cmd) guardCommand[ext] = cmd;
+    }
+  }
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

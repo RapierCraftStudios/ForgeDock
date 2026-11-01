@@ -53,7 +53,8 @@
 #                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--other-blocking true|false] [--out-dir D] [--dry-run]
 #                 (--other-blocking: the reviewer's criterion 1/2/3/5 result; resolved and persisted to OUT_DIR/other-blocking.txt, which merge-gate ORs in)
 #   calibrate:    [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--trust-needs-human B] [--dry-run]; the issue is context contract.issue or --issue N
-#   merge-gate:   --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
+#   merge-gate:   [--manual-pr [--owner-requested]] (hand-built PR: skips ONLY the phase-trail preflight, recorded as FORGE:PHASE_TRAIL_SKIPPED; refused for a pipeline issue, see manual_pr_eligibility)
+#                 --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
 #                 --base-conflict B --other-blocking B [--calibration-note-file F | --calibration-note T] [--table-cell-key K] [--base B] [--issue N]
 #                 (every B is true|false; an empty or other value aborts the merge: the guard state must be bound)
 #   Free text (purpose findings, agents, calibration note) derives from PR content: pass it through the *-file flags (a file written with the
@@ -83,7 +84,7 @@ PR_NUMBER=""; REPO=""; CONTEXT=""; OUT_DIR=""; IN_FILE=""; OUT_FILE=""; AUTO_MER
 REVIEW_SHA_OPT=""; REVIEW_MODE_OPT=""; BASE_OPT=""; HEAD_BRANCH=""; ISSUE_OPT=""; VERDICT=""; HAS_PURPOSE_REGRESSION=""; CALIBRATION_NEEDS_HUMAN=""; CALIBRATION_NOTE=""; TRUST_NEEDS_HUMAN=""
 BASE_CONFLICT=""; OTHER_BLOCKING=""; INTENSITY_TIER=""; TABLE_CELL_KEY=""; TRUST_SHADOW_MODE=""; MERGE_HEALTH=""; MERGE_HEALTH_STATE=""; RESULT=""
 AGENTS_TEXT=""; FINDINGS_COUNT=""; BLOCKING_COUNT=""; PURPOSE_FINDINGS=""; IS_MILESTONE="false"; MERGE_STATE_IN=""
-CALIBRATION_NOTE_FILE=""; AGENTS_FILE=""; PURPOSE_FINDINGS_FILE=""
+CALIBRATION_NOTE_FILE=""; AGENTS_FILE=""; PURPOSE_FINDINGS_FILE=""; MANUAL_PR="false"; OWNER_REQUESTED="false"
 while [ $# -gt 0 ]; do
     case "$1" in
         --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--calibration-note-file|--agents-file|--purpose-findings-file|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode|--scope-files|--prior-prs)
@@ -130,6 +131,8 @@ while [ $# -gt 0 ]; do
         --scope-files) SCOPE_FILES="${2:-}"; shift 2 ;;
         --prior-prs) PRIOR_PRS="${2:-}"; BUNDLE="true"; shift 2 ;;
         --dry-run) DRY_RUN="true"; shift ;;
+        --manual-pr) MANUAL_PR="true"; shift ;;
+        --owner-requested) OWNER_REQUESTED="true"; shift ;;
         *) echo "review-finalize: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -1259,6 +1262,36 @@ do_calibrate() {
 # ======================================================================================================================
 # Every refusal prints the REVIEW_RESULT line and exits 3 (4 for PHASE_TRAIL_FAILED, which carries the MISSING lines). A parked or
 # routed outcome (base-conflict, awaiting-merge) is reported through MERGE_OUTCOME. Nothing below a failed gate ever runs.
+# A hand-built PR has no pipeline issue: gate notices and labels go to the PR itself (--manual-pr only; MERGE_ISSUE is otherwise always set).
+gate_comment() {
+    if [ -n "${MERGE_ISSUE:-}" ]; then gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "$1"; else gh pr comment "$PR_NUMBER" -R "$REPO" --body "$1"; fi # allowlist:check-command-side-effects
+}
+gate_label() {
+    if [ -n "${MERGE_ISSUE:-}" ]; then gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "$1"; else gh pr edit "$PR_NUMBER" -R "$REPO" --add-label "$1"; fi # allowlist:check-command-side-effects
+}
+# is_pipeline_issue N: 0 when N is a /work-on or /orchestrate issue (a workflow:* label, or a FORGE:STATE / FORGE:STARTED marker); an unreadable issue counts as one (fail closed).
+is_pipeline_issue() {
+    local v
+    v=$(gh issue view "$1" -R "$REPO" --json body,comments,labels \
+        --jq '([.labels[].name | startswith("workflow:")] + [.body | contains("<!-- FORGE:STATE")] + [.comments[].body | contains("FORGE:STARTED") or contains("<!-- FORGE:STATE")]) | any' 2>/dev/null) || return 0
+    [ "$v" != "false" ]
+}
+# manual_pr_eligibility: --manual-pr never applies to a pipeline lane. An explicit --issue that is a pipeline issue is always refused;
+# a closing reference to one is refused unless the caller passed --owner-requested. Any unreadable lookup refuses.
+manual_pr_eligibility() {
+    local refs n
+    if [ -n "${MERGE_ISSUE:-}" ] && is_pipeline_issue "$MERGE_ISSUE"; then
+        echo "MANUAL PR: #${MERGE_ISSUE} is a pipeline issue — --manual-pr never applies to a /work-on or /orchestrate lane" >&2
+        blocked "manual-pr refused: #${MERGE_ISSUE} is a pipeline issue"
+    fi
+    refs=$(gh pr view "$PR_NUMBER" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number' 2>/dev/null) || blocked "manual-pr refused: closing references unreadable"
+    for n in $refs; do
+        if is_pipeline_issue "$n" && [ "$OWNER_REQUESTED" != "true" ]; then
+            echo "MANUAL PR: the PR closes pipeline issue #${n}; pass --owner-requested only when the owner explicitly asked for this merge" >&2
+            blocked "manual-pr refused: PR closes pipeline issue #${n}"
+        fi
+    done
+}
 do_merge_gate() {
     BASE="${BASE_OPT:-$CTX_BASE_BRANCH}"
     # --- note-disposition preflight: fail closed on an unreadable comment list ---
@@ -1300,7 +1333,13 @@ do_merge_gate() {
     fi
 
     # --- phase-trail preflight: a reviewer verdict alone must not merge work whose earlier phases were skipped ---
-    if [ -z "${MERGE_ISSUE:-}" ]; then
+    if [ "$MANUAL_PR" = "true" ]; then
+        manual_pr_eligibility
+        gate_comment "<!-- FORGE:PHASE_TRAIL_SKIPPED -->
+Phase-trail preflight skipped for PR #${PR_NUMBER}: manual-PR mode (hand-built PR${MERGE_ISSUE:+, linked #${MERGE_ISSUE}}; owner-requested=${OWNER_REQUESTED}). Every other merge gate still runs." 2>/dev/null || true
+        TRAIL_RC=0; TRAIL_SKIPPED=true
+    fi
+    if [ "${TRAIL_SKIPPED:-false}" != "true" ] && [ -z "${MERGE_ISSUE:-}" ]; then
         echo "PHASE TRAIL: auto-merge requested without --issue — the issue is never inferred from PR-author-controlled text, so the phase trail cannot be verified; refusing to merge (fail closed)" >&2
         gh pr comment "$PR_NUMBER" -R "$REPO" --body "Auto-merge skipped: no --issue was given, so the phase trail cannot be verified. Re-run \`/review-pr ${PR_NUMBER} --auto-merge --issue <N>\` or merge manually." 2>/dev/null || true # allowlist:check-command-side-effects
         # Not a PHASE_TRAIL_FAILED (nothing to re-run).
@@ -1319,7 +1358,9 @@ do_merge_gate() {
     CODE_DIFF_FLAG="--code-diff"
     if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
     OVERRIDE_BOUND_HEAD=""
-    if [ -z "$TRAIL_SCRIPT" ]; then
+    if [ "${TRAIL_SKIPPED:-false}" = "true" ]; then
+        :   # manual PR: preflight skipped and recorded above
+    elif [ -z "$TRAIL_SCRIPT" ]; then
         # Fail closed: an unresolvable verifier is NOT a pass (never fall back to the consumer repo).
         echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
         TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
@@ -1348,9 +1389,9 @@ ${TRAIL}
 \`\`\`
 
 Fix the cause (gh auth/API outage, \`FORGE_TRAIL_QG_SINCE\`/runner clock, or set \`FORGEDOCK_HOME\` when the verifier is unresolvable), then re-run /review-pr."
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "$TRAIL_ERR_BODY" # <!-- allowlist:check-command-side-effects -->
+        gate_comment "$TRAIL_ERR_BODY" # <!-- allowlist:check-command-side-effects -->
         # Nothing can resume this automatically, so park it for a human instead of leaving workflow:in-review.
-        gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+        gate_label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
         # The PR stays open and unmerged; callers must NOT fall back to a manual merge.
         blocked "phase trail unreadable (rc=${TRAIL_RC})"
     elif [ "$TRAIL_RC" -ne 0 ]; then
@@ -1362,7 +1403,7 @@ ${TRAIL}
 \`\`\`
 
 Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
+        gate_comment "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
         # rc 1 only; the work-on review phase (work-on/review.md R4) is the single owner of re-dispatching the named phases. Not an immediate needs-human escalation.
         echo "REVIEW_RESULT: status: PHASE_TRAIL_FAILED"
         printf '%s\n' "$TRAIL"
@@ -1375,6 +1416,7 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
     # issue name the degraded checks. Each one must be named in a trusted `### Degraded Paths Reviewed` section on the PR; a generic section
     # does not satisfy it. Unreadable comments fail closed. Only trusted-comments.sh ever reads these comments, so an untrusted comment can
     # neither forge a DEGRADED marker nor clear one.
+    if [ -n "${MERGE_ISSUE:-}" ]; then   # a hand-built PR has no issue gate comments to read
     DEG_ISSUE_JSON=$(gh api --paginate "repos/${REPO}/issues/${MERGE_ISSUE}/comments" 2>/dev/null) || DEG_ISSUE_JSON=""
     if [ -z "$DEG_ISSUE_JSON" ] || [ -z "$TRUSTED_SCRIPT" ]; then
         echo "DEGRADED GATE: issue comments or trusted-comments.sh unreadable — refusing to merge (fail closed)" >&2
@@ -1441,13 +1483,14 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
         fi
         if [ -n "$DEG_MISSING" ]; then
             echo "DEGRADED GATE: the build's gate is DEGRADED (${DEG_NAMES}) and the review does not cover it (${DEG_MISSING})" >&2
-            gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "<!-- FORGE:DEGRADED_GATE_UNREVIEWED -->
+            gate_comment "<!-- FORGE:DEGRADED_GATE_UNREVIEWED -->
 Auto-merge refused for PR #${PR_NUMBER}: the build's verification was DEGRADED (a check ran nothing or did not complete): ${DEG_NAMES}.
 
 The review must add a \`### Degraded Paths Reviewed\` section that names each degraded check and states how its path was reviewed (${DEG_MISSING}). Then re-run /review-pr." 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
-            gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+            gate_label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
             blocked "degraded-gate-unreviewed"
         fi
+    fi
     fi
 
     # --- merge guard state: §7B verdict + purpose-regression + calibration + trust-escalation ---
@@ -1460,8 +1503,8 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
         case "$_guard_val" in true|false) ;; *) GUARD_STATE_OK=false ;; esac
     done
     if [ "$GUARD_STATE_OK" != "true" ]; then
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: the Phase 8 merge guard state is unbound (VERDICT='${VERDICT}', HAS_PURPOSE_REGRESSION='${HAS_PURPOSE_REGRESSION}', CALIBRATION_NEEDS_HUMAN='${CALIBRATION_NEEDS_HUMAN}', TRUST_NEEDS_HUMAN='${TRUST_NEEDS_HUMAN}', BASE_CONFLICT='${BASE_CONFLICT}', OTHER_BLOCKING='${OTHER_BLOCKING}'). Not merging; re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
-        gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+        gate_comment "⛔ Auto-merge aborted for PR #${PR_NUMBER}: the Phase 8 merge guard state is unbound (VERDICT='${VERDICT}', HAS_PURPOSE_REGRESSION='${HAS_PURPOSE_REGRESSION}', CALIBRATION_NEEDS_HUMAN='${CALIBRATION_NEEDS_HUMAN}', TRUST_NEEDS_HUMAN='${TRUST_NEEDS_HUMAN}', BASE_CONFLICT='${BASE_CONFLICT}', OTHER_BLOCKING='${OTHER_BLOCKING}'). Not merging; re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
+        gate_label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
         blocked "merge guard state unbound"
     fi
     # OR in the value `verdict` persisted: a passed `false` never overrides a persisted `true`. Anything else in the file is ignored.
@@ -1473,7 +1516,7 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     fi
     if [ "$ONLY_BASE_CONFLICT" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
         # Pure base conflict: route to the base-sync path, NOT needs-human. A standalone /review-pr caller just sees the blocker.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict with \`${BASE}\` (the only blocking reason). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync re-runs the quality gate and then re-reviews the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+        gate_comment "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict with \`${BASE}\` (the only blocking reason). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync re-runs the quality gate and then re-reviews the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
         echo "MERGE_OUTCOME=base-conflict"
         blocked "base-conflict"
     elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "$TRUST_NEEDS_HUMAN" = "true" ]; then
@@ -1482,8 +1525,8 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
         [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
         [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }calibration threshold: ${CALIBRATION_NOTE}"
         [ "$TRUST_NEEDS_HUMAN" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`${TABLE_CELL_KEY}\` — no sufficient prior data (forge#1745)"
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
-        gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true
+        gate_comment "⛔ Auto-merge aborted for PR #${PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
+        gate_label "needs-human" 2>/dev/null || true
         echo "MERGE_OUTCOME=needs-human"
         blocked "auto-merge blocked: ${BLOCK_REASON}"
     fi
@@ -1501,19 +1544,20 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     fi
     if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
         # Base moved during review: route to the base-sync path, NOT needs-human.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync is followed by a re-review. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+        gate_comment "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync is followed by a re-review. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
         echo "MERGE_OUTCOME=base-conflict"
         blocked "base-conflict"
     elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
         # Branch protection not satisfied: syncing the base cannot clear it, so this is NOT a base-conflict blocker.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: branch protection is not satisfied (\`mergeStateStatus=BLOCKED\`); syncing the base cannot clear it. Satisfy the required review/checks, then re-run /review-pr."
-        gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true
+        gate_comment "⛔ Auto-merge aborted for PR #${PR_NUMBER}: branch protection is not satisfied (\`mergeStateStatus=BLOCKED\`); syncing the base cannot clear it. Satisfy the required review/checks, then re-run /review-pr."
+        gate_label "needs-human" 2>/dev/null || true
         echo "MERGE_OUTCOME=protection-blocked"
         blocked "branch protection not satisfied"
     fi
 
     # --- previously-escalated re-review guard (base-scoped): park at awaiting-merge, never merge here ---
-    PREVIOUSLY_ESCALATED=$(gh issue view "$MERGE_ISSUE" -R "$REPO" --json labels,comments \
+    PREVIOUSLY_ESCALATED=false
+    [ -z "${MERGE_ISSUE:-}" ] || PREVIOUSLY_ESCALATED=$(gh issue view "$MERGE_ISSUE" -R "$REPO" --json labels,comments \
         --jq '([.labels[].name | . == "needs-human" or . == "workflow:remediating"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
     GUARD_BASE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
     if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
@@ -1521,9 +1565,9 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
         GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
         if [ -n "$GATE_SCRIPT" ]; then GUARD_GATE=$(bash "$GATE_SCRIPT" "$GUARD_BASE" "$REPO" 2>/dev/null || echo true); else GUARD_GATE=true; fi; [ "$GUARD_GATE" = "false" ] || GUARD_GATE=true
         if [ "$GUARD_GATE" = "false" ]; then
-            gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "🟠 PR #${PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-default-branch base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge ${PR_NUMBER} -R ${REPO} --merge\`."
+            gate_comment "🟠 PR #${PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-default-branch base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge ${PR_NUMBER} -R ${REPO} --merge\`."
         else
-            gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "🟠 PR #${PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge ${PR_NUMBER} -R ${REPO} --merge\`."
+            gate_comment "🟠 PR #${PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge ${PR_NUMBER} -R ${REPO} --merge\`."
         fi
         # transition-label.sh: install roots only. Unresolvable falls through to the prose label edit so the transition is never silently skipped.
         TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
@@ -1582,7 +1626,7 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
         # TIMEOUT = checks still pending, not failing (wait-ci-green.sh rc=3). Not a human problem: no needs-human label,
         # so the documented re-run (or engine retry) merges once CI is green instead of parking behind the
         # previously-escalated guard (#3919).
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⏳ Auto-merge deferred for PR #${PR_NUMBER}: CI checks still pending after the wait window (ci gate rc=3). Re-run the merge gate once they finish; nothing to fix." 2>/dev/null || true # allowlist:check-command-side-effects
+        gate_comment "⏳ Auto-merge deferred for PR #${PR_NUMBER}: CI checks still pending after the wait window (ci gate rc=3). Re-run the merge gate once they finish; nothing to fix." 2>/dev/null || true # allowlist:check-command-side-effects
         echo "MERGE_OUTCOME=ci-pending"
         blocked "checks still pending after the wait window (timeout) — re-run the merge once CI finishes"
     elif [ "$CI_GATE_RC" -ne 0 ]; then
@@ -1590,18 +1634,18 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
 \`\`\`
 ${CI_GATE_OUT}
 \`\`\`"
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
-        gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+        gate_comment "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
+        gate_label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
         echo "MERGE_OUTCOME=ci-not-green"
         blocked "ci gate not green (rc=${CI_GATE_RC})"
     fi
 
     # --- merge exactly the commit the CI gate (and the reviewed-head guard) checked ---
-    gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "Review complete for PR #${PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. CI green. Proceeding to merge."
+    gate_comment "Review complete for PR #${PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. CI green. Proceeding to merge."
     gh pr merge "$PR_NUMBER" -R "$REPO" --merge --match-head-commit "$GATED_HEAD"
     MERGE_STATE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json state --jq '.state')
     if [ "$MERGE_STATE" != "MERGED" ]; then
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "PR #${PR_NUMBER} merge failed. State: $MERGE_STATE."
+        gate_comment "PR #${PR_NUMBER} merge failed. State: $MERGE_STATE."
         echo "MERGE_OUTCOME=merge-failed"
     else
         echo "MERGE_OUTCOME=merged"

@@ -4,10 +4,11 @@
  * Guard gate (#4693): execution-based, no pattern matching on diff text. A lane whose diff changes lines a merged fix
  * protected (git blame on the lane's merge base names the guard's merge commit, or a later commit that kept the lines), or
  * edits/deletes a guard's test file, reruns that guard's test files *as they exist on base* against the lane's tree. A
- * failure is `conformance.guard_broken` (builder resumed once). The only override is a `supersedes` amendment (conformance.mjs).
+ * failure is `conformance.guard_broken` (builder resumed once) unless the same base test also fails on the merge-base tree (#4968). The only override is a `supersedes` amendment (conformance.mjs).
  * Deterministic, 0 LLM calls; a lane touching nothing guarded does one local index read and no git work.
  */
 import * as nodeFs from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, extname, join } from "node:path";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { collectGuards, guardsIndexPath, readIndex, writeIndex } from "./guards.mjs";
@@ -94,9 +95,15 @@ export async function selectGuards({ guards, files, git, base }) {
   return { selected, mergeBase };
 }
 
-/** The command that runs one test file: the contract's own validate command with that path substituted, else a per-extension default; null when unknown. */
-export function commandFor(path, contract) {
+/**
+ * The command that runs one test file: the repo's `verify.guard_command` template for the extension (`{path}` substituted,
+ * or the path appended), else the contract's own validate command with that path substituted, else a per-extension
+ * default; null when unknown. The command runs from the worktree root with the repo-relative path.
+ */
+export function commandFor(path, contract, guardCommand = {}) {
   const ext = extname(path);
+  const tpl = String(guardCommand?.[ext.toLowerCase()] ?? "").trim();
+  if (tpl) return tpl.includes("{path}") ? tpl.replaceAll("{path}", path) : `${tpl} ${path}`;
   for (const v of contract?.validate ?? []) {
     const cmd = String(v?.command ?? "");
     if (/(?:^|\s)(?:-k|-t|--grep|--test-name-pattern|--testNamePattern)(?:\s|=)|::/.test(cmd)) continue;
@@ -112,22 +119,61 @@ export function commandFor(path, contract) {
 /** Sibling path for the base copy of a test file, so its relative imports resolve against the lane's tree. */
 export const basePathOf = (path) => { const e = extname(path); return `${path.slice(0, path.length - e.length)}__guardbase${e}`; };
 
+/** Names of the failing tests in a runner's output: TAP/node:test `not ok` lines (SKIP/TODO excluded), the spec reporter's `✖ name (Nms)`, pytest `FAILED path::name`. null when the output names none. */
+export function failingNames(output) {
+  const names = new Set();
+  for (const raw of String(output ?? "").split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    let m = /^\s*not ok \d+ - (.+?)\s*$/.exec(line);
+    if (m && !/\s#\s*(?:SKIP|TODO)\b/i.test(m[1])) { names.add(m[1].replace(/\s+#\s.*$/, "").trim()); continue; }
+    m = /^\s*✖ (.+?) \([\d.]+m?s\)\s*$/.exec(line) ?? /^\s*FAILED (\S+?)(?: - .*)?\s*$/.exec(line);
+    if (m) names.add(m[1]);
+  }
+  return names.size ? [...names] : null;
+}
+
 const tailOf = (out) => String(out ?? "").split("\n").filter((l) => l.trim()).slice(-40).join("\n").slice(-1500);
 
 /**
  * Rerun the selected guards' base test files against the lane tree, in a small pool, under one wall-time cap.
  * Returns {failures, runs, skipped[], ms}. A test that cannot be run (no base copy, unknown runner, over the cap) is skipped, never a failure.
  */
-export async function runGuards({ selected, mergeBase, contract, git, runCommand, cwd, env, capMs = GUARD_CAP_MS, parallelism = 2, fs = nodeFs, now = Date.now }) {
+export async function runGuards({ selected, mergeBase, contract, guardCommand, git, runCommand, cwd, env, capMs = GUARD_CAP_MS, parallelism = 2, fs = nodeFs, now = Date.now }) {
   const t0 = now(), skipped = [], runs = [], jobs = [];
   for (const { guard } of selected) {
     for (const t of guard.tests ?? []) {
-      const path = norm(t.path), copy = basePathOf(path), command = commandFor(copy, contract);
+      const path = norm(t.path), copy = basePathOf(path), command = commandFor(copy, contract, guardCommand);
       if (!command) { skipped.push(`#${guard.issue} ${path}: no runner known for ${extname(path) || "this file"}`); continue; }
       jobs.push({ guard, path, copy, command });
     }
   }
   const made = [];
+  let base = null; // #4968: one detached worktree of the merge base, made on the first lane failure and shared by the pool
+  const baseTree = () => (base ??= (async () => {
+    let dir = null;
+    try {
+      dir = fs.mkdtempSync(join(tmpdir(), "guardbase-"));
+      await git(["worktree", "add", "--detach", dir, mergeBase]);
+      try { if (fs.existsSync(join(cwd, "node_modules"))) fs.symlinkSync(join(cwd, "node_modules"), join(dir, "node_modules")); } catch { /* best effort */ }
+      return { dir };
+    } catch (e) { return { dir, error: String(e?.message ?? e).split("\n")[0].slice(0, 80) }; }
+  })());
+  /** Decide a failed lane run against the same test on the base tree: the names the lane newly fails, [] when base fails it too, null when base passes (every failure is the lane's). */
+  const newFailures = async (j, laneOut) => {
+    const left = capMs - (now() - t0);
+    if (left <= 0) return { skip: `over the ${Math.round(capMs / 1000)}s guard cap` };
+    const t = await baseTree();
+    if (t.error) return { skip: `baseline unavailable (${t.error})` };
+    const bcmd = commandFor(j.path, contract);
+    let b;
+    try { b = await runCommand({ command: bcmd, cwd: t.dir, timeoutMs: left, env }); } catch (e) { b = { rc: 127, output: String(e?.message ?? e) }; }
+    if (b?.rc === TIMEOUT_RC || b?.rc === 127) return { skip: `baseline unavailable (${b.rc === 127 ? "runner unavailable" : "over the guard cap"})` };
+    if (b?.rc === 0) return { fresh: null };
+    const lane = failingNames(laneOut), prior = failingNames(b?.output);
+    if (!lane || !prior) return { skip: "fails on base" };
+    const fresh = lane.filter((n) => !prior.includes(n));
+    return fresh.length ? { fresh } : { skip: "fails on base" };
+  };
   try {
     const queue = jobs.slice();
     const work = async () => {
@@ -142,21 +188,37 @@ export async function runGuards({ selected, mergeBase, contract, git, runCommand
         try { r = await runCommand({ command: j.command, cwd, timeoutMs: left, env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
         if (r?.rc === TIMEOUT_RC) { skipped.push(`#${j.guard.issue} ${j.path}: over the ${Math.round(capMs / 1000)}s guard cap`); continue; }
         if (r?.rc === 127) { skipped.push(`#${j.guard.issue} ${j.path}: runner unavailable`); continue; }
-        runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command: j.command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
+        const rc = Number.isInteger(r?.rc) ? r.rc : 1, output = String(r?.output ?? "");
+        let failed = rc === 0 ? null : failingNames(output);
+        if (rc !== 0) {
+          const v = await newFailures(j, output);
+          if (v.skip) { skipped.push(`guard #${j.guard.issue} ${j.path}: ${v.skip}`); continue; }
+          if (v.fresh) failed = v.fresh;
+        }
+        runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command: j.command, rc, output, failed });
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(parallelism, jobs.length)) }, work));
   } finally {
     for (const p of made) { try { fs.rmSync(p, { force: true }); } catch { /* best effort */ } }
+    const t = base ? await base : null;
+    if (t?.dir) {
+      try { await git(["worktree", "remove", "--force", t.dir]); } catch { /* best effort */ }
+      try { fs.rmSync(t.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { await git(["worktree", "prune"]); } catch { /* best effort */ }
+    }
   }
   return { failures: guardFailures(runs), runs, skipped, ms: now() - t0 };
 }
+
+/** The only override of a guard_broken failure, named for the builder (#4883); leads the detail so the resume prompt's truncation keeps it. */
+const supersedesHint = (guard) => `If this change intentionally changes the guarded behaviour (e.g. adding a code to an enum an exhaustiveness test enumerates), add {"kind":"supersedes","guard":"${guard}","why":"..."} to the amendments in the result file; the reviewer judges it.`;
 
 /** conformance.guard_broken rows (one per failing guard test): the guard's issue, its one-line why, the failing test and its output tail. */
 export function guardFailures(runs) {
   return (runs ?? []).filter((r) => r.rc !== 0).map((r) => ({
     code: OUTCOME_CODES.CONFORMANCE_GUARD_BROKEN, kind: "guard_broken", guard: `#${r.issue}`, test: r.test,
-    detail: `guard #${r.issue} broken (${String(r.why ?? "").slice(0, 200)}): base test ${r.test} fails against your tree (\`${r.command}\`, exit ${r.rc}):\n${tailOf(r.output)}`,
+    detail: `${supersedesHint(`#${r.issue}`)} guard #${r.issue} broken (${String(r.why ?? "").slice(0, 200)}): base test ${r.test} fails against your tree (\`${r.command}\`, exit ${r.rc})${r.failed?.length ? `; failing tests: ${r.failed.slice(0, 20).join(" | ")}` : ""}:\n${tailOf(r.output)}`,
   }));
 }
 

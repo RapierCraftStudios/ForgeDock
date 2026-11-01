@@ -13,9 +13,9 @@ import { makeLedger } from "./ledger.mjs";
 import { writeIndex } from "./guards.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
-import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
+import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -24,7 +24,7 @@ const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -106,6 +106,8 @@ function world(o = {}) {
         w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
       }
       if (a[0] === "worktree" && a[1] === "remove") w.seq.push("worktree-remove");
+      if (a[0] === "ls-files" && a.includes(".forge-lean/")) return Object.keys(w.files).filter((k) => k.startsWith(`${WT}/.forge-lean/`)).map((k) => k.slice(WT.length + 1)).join("\n"); // #4880
+      if (a[0] === "clean" && a.includes(".forge-lean/")) for (const k of Object.keys(w.files)) if (k.startsWith(`${WT}/.forge-lean/`)) delete w.files[k]; // #4880
       if (a[0] === "update-ref") w.seq.push(`update-ref ${a[1]}`);
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "status" && a[1] === "--porcelain") return w.dirty ? " M src/foo.js\n" : "";
@@ -148,6 +150,7 @@ function world(o = {}) {
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);
       if (c.role === "builder") {
+        w.filesAtFirstBuilder ??= { ...w.files }; // #4880
         const cost = c.resume ? (w.sessCost = Math.round(((w.sessCost ?? 0) + 0.1) * 1e9) / 1e9) : (w.sessCost = 0.1); // #4407: a resumed CLI session reports its running total
         const fix = Boolean(c.resume) || /no earlier session/.test(c.prompt); // #4363: a fresh fix session acts like the old resume
         const r = fix ? (w.resumeResult ?? w.result) : w.result;
@@ -178,7 +181,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; } },
+    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
@@ -391,6 +394,31 @@ describe("core work-on", () => {
     assert.doesNotMatch(p, /complete what is missing/);
   });
 
+  it("#4786: a remote lane branch holding only .forge-lean scratch plans fresh and drops the scratch", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", ".forge-lean/checkpoint.json"] });
+    await run(w);
+    assert.doesNotMatch(builders(w)[0][4], /This is a rerun/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")), "scratch removed from the branch");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.join(" ").includes("drop stale .forge-lean scratch")));
+  });
+
+  it("#4880: a stale .forge-lean scratch from another lane is cleared before the plan call", async () => {
+    const w = world({ prList: [] });
+    w.files[`${WT}/.forge-lean/investigation.md`] = "STALE investigation of another issue";
+    w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ status: "already-fixed", summary: "stale" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged", "the stale result.json did not stand in for the builder's");
+    assert.deepEqual(Object.keys(w.filesAtFirstBuilder).filter((f) => f.includes("/.forge-lean/") && /STALE|stale/.test(w.filesAtFirstBuilder[f])), [], "nothing stale at the first builder call");
+    assert.ok(!w.comments.some((c) => c.includes("STALE investigation")), "the stale note is never posted");
+  });
+
+  it("#4786: a remote lane branch with a code change besides scratch still resumes", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", "src/foo.js"] });
+    await run(w);
+    assert.match(builders(w)[0][4], /This is a rerun/);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")));
+  });
+
   it("a reviewer that returns no JSON twice ends review.no_verdict", async () => {
     const w = world({ reviews: ["no json", "still none"] });
     const r = await run(w);
@@ -456,7 +484,7 @@ describe("core work-on", () => {
   });
   it("#4730 an issue whose only content is an existing owner ask is closed as a duplicate; extra content only links", async () => {
     const { askKey } = await import("./needs-human-premise.mjs");
-    const existing = { number: 40, comments: [{ body: `<!-- FORGE:ASK key=${askKey("Builder is blocked (credentials): sign the contract")} -->\n## Owner ask\n{}` }] };
+    const existing = { number: 40, comments: [{ author: { login: "rapiercraft-forgedock" }, body: `<!-- FORGE:ASK key=${askKey("Builder is blocked (credentials): sign the contract")} -->\n## Owner ask\n{}` }] };
     const dup = ownerWorld({ kind: "human", why: "credentials" }, { body: "sign the contract" }, existing);
     const r = await run(dup);
     assert.equal(r.terminalReason, "invalid");
@@ -543,6 +571,14 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "decomposed");
     assert.deepEqual({ independent: r.decomposition.independent, oversize: r.decomposition.oversize }, { independent: false, oversize: true });
     assert.ok(w.comments.some((c) => /FORGE:DECOMPOSED/.test(c) && /size: 40 files, 4000 lines .* oversize yes/.test(c)));
+  });
+
+  it("#4857 a product-decision block over an unrunnable validate is untyped (one correction resume), a real one stays human", () => {
+    const u = classifyBlock({ summary: "V2 cannot run: poetry found no pyproject at the repo root", block: { kind: "human", why: "product-decision" } }, 1);
+    assert.equal(u.kind, "untyped");
+    assert.match(u.problem, /substitute-validate/);
+    assert.equal(classifyBlock({ summary: "needs a pricing decision", block: { kind: "human", why: "product-decision" } }, 1).kind, "human");
+    assert.equal(classifyBlock({ summary: "V1 needs the prod key", block: { kind: "human", why: "credentials" } }, 1).kind, "human");
   });
 
   it("#4385 split siblings that declare a shared hub file are serialised (chained, no duplicate transitive edge); disjoint or undeclared files stay parallel", () => {
@@ -720,6 +756,15 @@ describe("core work-on", () => {
     // local placement, no declared capability, or a recovery run: unchanged
     assert.equal((await run(world({ contract }), { ...remote, placement: { where: "local", reason: "x" } })).terminalReason, "merged");
     assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
+  });
+
+  it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
+    assert.equal((await run(world({ contract }), { ...remote, relayCaps: ["promtool"] })).terminalReason, "merged");
+    assert.equal((await run(world({ contract }), { ...remote, relayCaps: ["sops"] })).code, "env.capability_remote");
+    const blocked = world({ result: { status: "blocked", summary: "promtool relay unavailable", block: { kind: "human", why: "credentials" } } });
+    assert.equal((await run(blocked, { ...remote, relayCaps: ["promtool"] })).code, "env.capability_remote");
   });
 
   it("needs-human terminals carry a specific outcome code, never unclassified", async () => {
@@ -925,6 +970,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const r = await run(w);
     assert.equal(r.code, "contract.invalid");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
+    assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
     assert.match(nhBody(w), /still invalid after one correction/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
@@ -1077,6 +1123,16 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     assert.match(builders(w)[2][4], /docs freshness check[\s\S]*devdocs\/modules\/lean\.md/);
     assert.equal(w.docsCalls[0].base, "origin/staging");
     assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
+  });
+
+  it("a doc the docs round edits outside the deliverables is an implied deliverable (no scope_creep); an unrelated extra file still is", async () => {
+    for (const [extra, code] of [[[], null], [["src/billing.js"], "conformance.scope_creep"]]) {
+      const w = dworld([STALE, { ok: true, output: "OK" }], { changed: ["src/foo.js", "test/foo.test.js"] });
+      const inner = w.io.docsFreshness;
+      w.io.docsFreshness = async (x) => { const r = await inner(x); if (r?.ok && !w.changed.includes("devdocs/modules/lean.md")) w.changed = [...w.changed, "devdocs/modules/lean.md", ...extra]; return r; };
+      const r = await run(w);
+      if (code) assert.equal(r.code, code); else assert.equal(r.terminalReason, "merged");
+    }
   });
 
   it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
@@ -1292,6 +1348,18 @@ describe("conformance shadow mode (the default)", () => {
       assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
       assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
+    }
+  });
+  it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: v });
+      w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
+      const r = await run(w, { conformance });
+      assert.equal(r.code, ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
+      assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
+      assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);
     }
   });
   it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
@@ -1723,7 +1791,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
-    assert.ok(approxTokens(plan) <= 2100, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2150, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2159,7 +2227,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2000, `plan prompt is ${approxTokens(plan)} tokens`); // 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(plan) <= 2050, `plan prompt is ${approxTokens(plan)} tokens`); // 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
     assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -2622,8 +2690,9 @@ describe("orchestrate", () => {
     const leanIo = {
       gh: async (a) => {
         if (a[0] === "repo" && a[1] === "view") return "main\n";
+        if (a[0] === "api") return "OWNER\n"; // #4859: the author association is a REST read
         if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
-        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "" });
+        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "", authorAssociation: "OWNER" });
       },
       git: async (a) => (a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""),
     };
@@ -2812,7 +2881,7 @@ describe("orchestrate maintenance budget (#4197)", () => {
       // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
       // #4399: the batch-start acceptance-probe sweep (`forge-probe` search) is not a maintenance scan.
       assert.ok(calls.some((c) => c.startsWith("issue list") && c.includes("forge-probe")), calls.join("\n"));
-      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe")) || c.endsWith("--json labels")), calls.join("\n"));
+      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe") && !c.includes("--label blocked")) || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);
@@ -3539,7 +3608,8 @@ describe("batch robustness (#4112-#4115)", () => {
 
   it("#4169 heavy steps: env.setup and precheck take a host slot; builder runs get the shim PATH, phase, issue and priority; the result carries waits", async () => {
     const w = heavyWorld();
-    w.files[`${WT}/.forge-lean/heavy-waits.jsonl`] = '{"phase":"implement","name":"tsc","waitMs":30000,"queued":4}\n';
+    const shims = w.io.writeHeavyShims; // the shims write the waits file after the engine cleared the scratch (#4880)
+    w.io.writeHeavyShims = async (...a) => { w.files[`${WT}/.forge-lean/heavy-waits.jsonl`] = '{"phase":"implement","name":"tsc","waitMs":30000,"queued":4}\n'; return shims(...a); };
     const r = await run(w, { envSetup: "pnpm install", precheck: { commands: ["pnpm lint"] }, heavy: { max: 2 } });
     assert.equal(r.terminalReason, "merged");
     assert.deepEqual(w.acq.map((a) => [a.phase, a.issue, a.priority, a.cfg.max]), [["setup", 7, 0, 2], ["precheck", 7, 0, 2]]);
@@ -3748,6 +3818,45 @@ describe("batch robustness (#4112-#4115)", () => {
       assert.equal((await run(w)).terminalReason, "merged", msg);
       assert.equal(w.pushes, 2, msg);
     }
+  });
+
+  const NONFF = "To github.com:o/r.git\n ! [rejected] feat/issue-7-lean -> feat/issue-7-lean (non-fast-forward)\nerror: failed to push some refs";
+  const ownerProbe = (w, { open = [], body = "" } = {}) => { // answers #4920's lane-owner lookups only
+    const g0 = w.io.gh;
+    w.io.gh = async (a, o) => {
+      if (a[0] === "pr" && a[1] === "list" && a[a.indexOf("--limit") + 1] === "5") return JSON.stringify(open);
+      if (a[0] === "issue" && a[1] === "view" && a[a.length - 1] === "body") return JSON.stringify({ body });
+      return g0(a, o);
+    };
+    return w;
+  };
+  it("#4920 non-ff push with another lane's open PR ends deferred (lease held), not needs-human", async () => {
+    const w = ownerProbe(world({ pushErrors: [NONFF] }), { open: [{ number: 4919 }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "lease.held");
+    assert.match(r.detail, /non-fast-forward.*PR #4919 is open on feat\/issue-7-lean/);
+  });
+  it("#4920 non-ff push while another lane holds a live lease ends deferred", async () => {
+    const lease = { v: 1, issue: 7, lease: { by: "core_sbx_1_ab12", until: Date.now() + 600000, host: "sbx", pid: 1 } };
+    const w = ownerProbe(world({ pushErrors: [NONFF] }), { body: `x\n<!-- FORGE:STATE\n${JSON.stringify(lease)}\n-->` });
+    const r = await run(w);
+    assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
+  });
+  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
+    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+    assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
+  });
+  it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {
+    const ids = [];
+    for (let i = 0; i < 2; i++) { const w = world(); w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } }; await run(w, { pid: 1, hostName: "sbx" }); ids.push(w.leaseWrites.find((x) => x.lease)?.lease.by); }
+    assert.ok(ids[0] && ids[1] && ids[0] !== ids[1], `${ids}`);
+    assert.match(ids[0], /^core_sbx_1_[0-9a-f]{6}$/);
+    const w = world(); w.leaseWrites = []; let reads = 0;
+    w.io.projector = { readState: async () => (++reads === 1 ? null : { v: 1, lease: { by: "core_sbx_1_other", until: Date.now() + 600000 } }), writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const r = await run(w, { pid: 1, hostName: "sbx" });
+    assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease-held");
+    assert.equal(w.builderCalls?.length ?? 0, 0);
   });
 
   it("#4118 a rerun reuses a local lane branch with unpushed commits instead of resetting it to the base", async () => {
@@ -4023,6 +4132,41 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
   });
+  it("recovery lane replays accepted supersedes amendment (#4899)", async () => {
+    const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
+    const state = { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] };
+    const mk = (st) => ({ body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, st)}`, author_association: "OWNER", user: { type: "User", login: "op" } });
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk(state)] });
+    assert.equal((await run(w, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, "merged");
+    const posted = w.comments.find((c) => c.includes("FORGE:AMENDMENT-STATE"));
+    assert.ok(posted, "the recovery lane re-applies the prior supersedes and posts it");
+    assert.deepEqual(parseAmendmentsComment(posted).amendments, [sup]);
+    // a state bound to another contract hash is ignored
+    const w2 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk({ ...state, contract: "000000000000" })] });
+    await run(w2, { recover: { code: "ci.red", attempt: 1 } });
+    assert.ok(!w2.comments.some((c) => c.includes("FORGE:AMENDMENT-STATE")));
+  });
+  it("#4899 recovery lane keeps enforcing a guard that was not superseded", async () => {
+    const mkGuard = (issue) => ({ v: 1, issue, pr: issue * 10, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: `guard ${issue}` });
+    const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
+    const prior = { body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] })}`, author_association: "OWNER", user: { type: "User", login: "op" } };
+    const dir = tmpDir("guard-recover-");
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), prior], baseFiles: { ":src/foo.js": "old" } });
+    w.io.runCommand = async (a) => ({ rc: String(a?.cwd).includes("guardbase-") ? 0 : 1, output: "guard test failed" }); // #4968: the base tree passes, so the lane tree is what broke
+    await run(w, { dir, worktreeRoot: dir, recover: { code: "ci.red", attempt: 1 }, loadGuards: async () => [mkGuard(4785), mkGuard(9)] });
+    const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner").map((c) => c[4])]);
+    assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");
+    assert.doesNotMatch(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#4785\\"/, "precheck does not report the superseded #4785");
+  });
+  it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
+    const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
+    assert.deepEqual(parseAmendmentsComment(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });
+    assert.equal(parseAmendmentsComment(renderAmendments([], {})), null);
+    const frozen = { requirements: [], deliverables: [] };
+    const eff = applyAmendments(frozen, am).contract;
+    assert.deepEqual((eff.supersedes ?? []).map((s) => s.guard), ["#1"]);
+    assert.equal(applyAmendments(frozen, []).contract.supersedes, undefined);
+  });
   const scoped = (body = ISSUE_BODY) => contractHash(scopeText({ title: "foo breaks", body: `${body}\n\n<!-- FORGE:STATE {"v":1} -->` }, []));
   it("#4265 a rerun recovers a contract frozen from the current issue scope (engine annotations aside)", async () => {
     const c = frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scoped()})`));
@@ -4234,6 +4378,24 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(seen[0].args[0], "--print"); assert.equal(seen[0].args[1], "--output-format");
     call("go");
     assert.equal(seen[1].args[1], "go"); assert.equal(seen[1].input, undefined);
+  });
+
+  it("#4763 promptGoesViaStdin is platform-aware and counts the other argv", async () => {
+    const { promptGoesViaStdin, runCliBackend } = await import("../runner.mjs");
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(10 * 1024), ["--print"], "win32"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(16 * 1024 - 10), ["--a".repeat(10)], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "linux"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(65 * 1024), [], "linux"), true);
+    const prev = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const seen = [];
+      runCliBackend({ spec: { name: "t" }, userMessage: "y".repeat(40 * 1024), systemPrompt: "sys", args: ["1"], cwd: tmpDir("core-4763-"), logger: { log() {} },
+        spawnFn: (_b, args, o2) => { seen.push({ args, input: o2.input }); return { status: 0, stdout: "{}", stderr: "" }; } });
+      assert.equal(seen[0].input.length, 40 * 1024);
+      assert.ok(!seen[0].args.some((x) => x.length > 1000));
+    } finally { Object.defineProperty(process, "platform", prev); }
   });
 
   it("runCliBackendAsync pipes a 300 KiB prompt to a real child (no E2BIG)", async () => {
@@ -4924,11 +5086,12 @@ describe("#4364 in-session forgedock check: plan hand-off and self-check record"
 
   it("a green run on the final tree logs nothing; a record of another tree is stale on SELF_CHECK_MISSING and a failed pre-PR round", async () => {
     const w = world(); const dir = tmpDir("core-");
-    w.files[SELF] = JSON.stringify({ v: 1, fingerprint: await fp(w), ok: true });
+    const seed = (x, rec) => { const r = x.io.runner; x.io.runner = async (c) => { if (c.role === "builder") x.files[SELF] = JSON.stringify(rec); return r(c); }; }; // written by the builder, after the scratch clear (#4880)
+    seed(w, { v: 1, fingerprint: await fp(w), ok: true });
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "SELF_CHECK_MISSING").length, 0);
     const w2 = world(); const dir2 = tmpDir("core-");
-    w2.files[SELF] = JSON.stringify({ v: 1, fingerprint: "other-tree", ok: true });
+    seed(w2, { v: 1, fingerprint: "other-tree", ok: true });
     let rc = 1; w2.io.runCommand = async () => ({ rc, output: "boom" });
     const inner = w2.io.runner; w2.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) rc = 0; return inner(c); };
     assert.equal((await run(w2, { dir: dir2, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
@@ -6483,6 +6646,42 @@ describe("resume digest in builder prompts (#4400)", () => {
     assert.ok(p.indexOf("Recovery pass (ci.red)") >= 0 && p.indexOf("Recovery pass (ci.red)") < p.indexOf("Resume digest of the last run"), p);
   });
 
+  describe("#4901 FORGE:DECISION after the contract froze", () => {
+    const dec = (t, who = BOT) => ({ body: `<!-- FORGE:DECISION {"v":1} -->\n## Decision\n${t}`, ...who });
+    const CONTRACT_C = { body: frozen().body, ...BOT };
+    const NOBODY = { author: { login: "rando" }, authorAssociation: "NONE" };
+    const withDecisions = (viewComments) => world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozen()], issueBodies: [body], viewComments });
+
+    it("reviewerPrompt keeps trusted FORGE:DECISION comments, drops other FORGE: records and untrusted decisions", () => {
+      const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "", comments: [dec("deliver the nightly timer"), dec("evil override", NOBODY),
+        { body: "<!-- FORGE:STATE\n{}\n-->", ...BOT }, { body: "<!-- FORGE:TRAJECTORY -->\nt", ...BOT }, { body: "<!-- FORGE:FACTS -->\nf", ...BOT }] });
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /evil override|FORGE:STATE|FORGE:TRAJECTORY|FORGE:FACTS/);
+    });
+
+    it("decisionNote: only trusted decisions after the last contract; recovery records skipped", () => {
+      const n = decisionNote([dec("old, before contract"), CONTRACT_C, dec("declare supersedes X"), dec("untrusted", NOBODY), { body: "<!-- FORGE:DECISION -->\n## Decision: recovery pass for `ci.red` (attempt 1)", ...BOT }]);
+      assert.match(n, /declare supersedes X/);
+      assert.doesNotMatch(n, /old, before contract|untrusted|recovery pass/);
+      assert.equal(decisionNote([CONTRACT_C]), "");
+    });
+
+    it("a requeued lane with a frozen contract gives the builder a newer trusted decision, not an untrusted or older one", async () => {
+      const w = withDecisions([dec("older decision"), CONTRACT_C, dec("deliver the nightly timer"), dec("untrusted override", NOBODY), { body: factsRec, ...BOT }]);
+      await run(w);
+      const p = builders(w)[0][4];
+      assert.match(p, /Binding decisions posted after the contract froze/);
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /untrusted override|older decision/);
+    });
+
+    it("context_pack off still passes the decision", async () => {
+      const w = withDecisions([CONTRACT_C, dec("deliver the nightly timer")]);
+      await run(w, { contextPack: { mode: "off" } });
+      assert.match(builders(w)[0][4], /deliver the nightly timer/);
+    });
+  });
+
   it("a first run gets no digest; context_pack off gives none; the contract quotes are unchanged", async () => {
     const first = world({ issueBodies: [body], viewComments: [{ body: factsRec, ...BOT }] });
     await run(first);
@@ -6589,7 +6788,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2000);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2050);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -6827,5 +7026,69 @@ describe("block rules: a check timeout is not a block (#4589)", () => {
   it("tells the builder rc 124 is host load, never a human block", async () => {
     const { blockCorrectionPrompt } = await import("./prompts.mjs");
     assert.match(blockCorrectionPrompt("x"), /times out \(rc 124\) is host load, never a block/);
+  });
+});
+
+describe("per-kind conformance modes (engine.conformance_kinds)", () => {
+  const CREEP = ["src/foo.js", "src/billing.js", "test/foo.test.js"];
+  const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+  const blockedNothingMerged = (w) => { assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.ok(w.edits.some((e) => e.includes("needs-human"))); };
+  it("a shadow kind in an enforce lane is recorded, not blocking; the lane merges", async () => {
+    const w = world({ changed: CREEP, reviews: [conf({}, CONTRACT, CREEP)] });
+    const r = await run(w, { conformance: "enforce", conformanceKinds: { "conformance.scope_creep": "shadow" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
+  });
+
+  it("an enforce kind in a shadow lane blocks (scope creep is recorded-only in shadow by default)", async () => {
+    const w = world({ changed: CREEP });
+    const r = await run(w, { conformance: "shadow", conformanceKinds: { "conformance.scope_creep": "enforce" } });
+    assert.equal(r.code, "conformance.scope_creep"); assert.equal(reviewers(w).length, 0);
+    blockedNothingMerged(w);
+  });
+
+  it("an enforce lane without kinds still blocks scope creep (unchanged default)", async () => {
+    const w = world({ changed: CREEP });
+    assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
+  });
+});
+
+describe("mutation check (engine.conformance_mutation, #4913)", () => {
+  const MC = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "test/foo.test.js", change: "t", requirements: ["R1"] }] };
+  const setup = (rc) => {
+    const w = world({ contract: MC, result: { status: "fixed", summary: "s", evidence: [], tests: [], validation: [{ id: "V1", exit: 0 }] } });
+    w.cmds = []; w.io.runCommand = async (a) => { w.cmds.push(a.command); return { rc: a.command.includes("--test") && w.cmds.length > 0 ? rc : 0, output: "" }; };
+    return w;
+  };
+  const applied = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "apply").length;
+  it("off (default): no revert, no extra command", async () => {
+    const w = setup(0); await run(w, { conformance: "shadow" });
+    assert.equal(applied(w), 0); assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "checkout" && c[2] === "HEAD"));
+  });
+  it("report: a vacuous test is recorded (shadow kind), the lane still merges, the tree is restored", async () => {
+    const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report" });
+    assert.equal(r.terminalReason, "merged"); assert.equal(applied(w), 1);
+    const seq = w.calls.filter((c) => c[0] === "git" && (c[1] === "apply" || (c[1] === "reset" && c[3] === "--hard"))).map((c) => c[1]);
+    assert.deepEqual(seq, ["apply", "reset"]);
+  });
+  it("report with the kind set to enforce blocks on a survivor", async () => {
+    const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report", conformanceKinds: { "conformance.mutation_survived": "enforce" } });
+    assert.equal(r.code, "conformance.mutation_survived"); assert.equal(w.merges.length, 0);
+  });
+});
+
+describe("investigation verdict for the reviewer (#4959)", () => {
+  it("investigationVerdict reads the Verdict line", () => {
+    assert.equal(investigationVerdict("**Verdict**: validated\n**Confidence**: high"), "VALIDATED");
+    assert.equal(investigationVerdict("**Verdict**: CONFIRMED"), "CONFIRMED");
+    assert.equal(investigationVerdict("no verdict"), null);
+    assert.equal(investigationVerdict(null), null);
+  });
+  it("reviewerPrompt carries the verdict block and rubric rule, and is unchanged without it", () => {
+    const args = { issue: { number: 7, title: "t", body: "b" }, contract: {}, result: {}, files: [], diff: "x" };
+    assert.ok(reviewerPrompt({ ...args, investigationVerdict: "VALIDATED" }).includes("<investigation_verdict>VALIDATED</investigation_verdict>"));
+    assert.ok(!reviewerPrompt(args).includes("</investigation_verdict>"));
+    assert.ok(reviewerPrompt({ ...args, investigationVerdict: "VALIDATED" }).includes("is not a failing row"));
+    assert.ok(!REVIEW_RUBRIC.includes("is not a failing row"));
   });
 });

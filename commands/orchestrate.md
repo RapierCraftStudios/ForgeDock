@@ -103,10 +103,10 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   `forgedock orchestrate --set-parallel <id> K`. Issues filed while a batch runs join it with
   `forgedock orchestrate --add <id> N...` (or `--resume <id> N...`), under its K and DAG; never start a second batch
   for them. After a decision (a `FORGE:DECISION` posted and `needs-human` removed), a blocked issue that already ended in the batch
-  (`needs-human`, `invalid`, `skipped`, `dependency-*`, `ci-pending`) returns to it with
+  (`needs-human`, `invalid`, `skipped`, `dependency-*`, `ci-pending`, `deferred`) returns to it with
   `forgedock orchestrate --requeue <id> N... --reason "..."` (refused while it is labelled `needs-human` or closed; skipped dependents
   return to pending with it; a finished batch is reopened); `--add` on a `skipped` issue re-queues it (other ended issues still report `already in batch`). A dependency-skipped issue shows as `waiting on #X` while the batch runs (the blocker is re-checked each pass; merged or closed re-admits it, closed as not planned keeps it skipped) and ends `skipped` only if the blocker never resolved. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
-  retry-in, uncapped, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
+  retry-in, uncapped, a usage limit holds admissions for that account (backend identity) until the reset, never capped, across every batch on
   the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; other
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
   `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Lanes are
@@ -114,6 +114,7 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). Logical
   edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
   last lines are the report table.
+  Issue-level readiness (#4773): a trusted author's `Blocked by #N` / `Depends on #N` line is a DAG edge, and `--add` prints the edges it created; an issue labelled `blocked` (`orchestration.blocked_label`) is admitted but not dispatched until the label is removed.
 - **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.
   The prompt is:
 

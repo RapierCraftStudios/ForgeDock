@@ -1,0 +1,40 @@
+[
+  {
+    "issue": 37290,
+    "needs": [],
+    "note": "inline code in an Evidence heading; FORGE:STATE comment",
+    "body": "## Summary\nSame-user, same-URL requests within seconds of each other each pay for proxy again (acct_1: 1,499 jobs over 32 URLs on example.com).\n\n## Evidence (read-only `obs-psql`)\n`lag(created_at) over (partition by user_id order by created_at)` on `jobs`.\n\n| gap | jobs | GiB |\n|---|---|---|\n| 0–10 s | 16,125 | 6.62 |\n\n## Investigate\n1. Trace why the in-flight slot did not catch these requests.\n\n## Acceptance criteria\n- [ ] Identical concurrent requests share one execution.\n\n<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_37290\",\"issue\":37290,\"lane\":\"staging\",\"placement\":{\"where\":\"local\",\"reason\":\"host capability: prod_monitor\",\"mode\":\"remote\"}}\n-->"
+  },
+  {
+    "issue": 37291,
+    "needs": [],
+    "note": "inline code in an Evidence heading; FORGE:STATE comment",
+    "body": "## Summary\nSuccesses classified `invalid:challenge` are refunded wrongly.\n\n## Evidence (read-only `obs-psql`)\nCounts from `scrape_diagnostics` for example.com.\n\n## Expected\nNo refund for delivered pages.\n\n## Acceptance criteria\n- [ ] Labels corrected.\n\n<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_37291\",\"issue\":37291,\"lane\":\"staging\",\"placement\":{\"where\":\"local\",\"reason\":\"host capability: prod_monitor\",\"mode\":\"remote\"}}\n-->"
+  },
+  {
+    "issue": 37299,
+    "needs": [],
+    "note": "Evidence heading naming the ovh-monitor host; fenced block and quoted query inside it",
+    "body": "## Summary\nRedis command rate is saturated.\n\n## Evidence (read-only, Prometheus on OVH via `ovh-monitor`, 2026-10-29 ~09:00Z)\n`sum by (cmd)(rate(redis_commands_total[5m]))`, 24h window:\n\n| cmd | min | avg | max |\n|---|---|---|---|\n| get | 1 | 2 | 3 |\n\n```\nssh ovh-monitor curl -s prometheus:9090/api/v1/query\n```\n\n> ran ssh ovh-monitor obs-psql earlier\n\n## Prior attempts\nNone.\n\n## Root cause\nA hot key.\n\n## Acceptance criteria\n- [ ] Command rate drops.\n\n<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_37299\",\"issue\":37299,\"lane\":\"staging\",\"placement\":{\"where\":\"local\",\"reason\":\"host capability: prod_monitor\",\"mode\":\"remote\"}}\n-->"
+  },
+  {
+    "issue": 37312,
+    "needs": [],
+    "note": "inline-code query quoted in a Summary paragraph; FORGE:STATE comment",
+    "body": "## Summary\nT4 labels are wrong.\n\nThis matters because #37291 auto-refunds `invalid:challenge` successes. Read-only `obs-psql`, `scrape_diagnostics` joined to `jobs`, T4 final tier.\n\n## Investigate and fix\nFix the labels.\n\n## Acceptance criteria\n- [ ] Labels corrected.\n\n<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_37312\",\"issue\":37312,\"lane\":\"staging\",\"placement\":{\"where\":\"local\",\"reason\":\"host capability: prod_monitor\",\"mode\":\"remote\"}}\n-->"
+  },
+  {
+    "issue": 37317,
+    "needs": [],
+    "note": "quoted ssh ovh-monitor obs-psql query inside inline code in a Decision, no prose directive",
+    "body": "## Summary\nT4 success on the `soft_block` vendor class collapsed (11%, 54 of 493, against about 55% on other days).\n\n## Investigate\n1. Identify the vendor behind the `soft_block` body.\n\n## Acceptance criteria\n- [ ] Vendor attribution and the leaking signal identified, with evidence.\n\n<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_37317\",\"issue\":37317,\"lane\":\"staging\",\"placement\":{\"where\":\"local\",\"reason\":\"host capability: prod_monitor\",\"mode\":\"remote\"}}\n-->\n\n## Decision (2026-10-29, supersedes conflicting text above)\n\n**What:** Agents have production read access. Gather the evidence from the dev host with `ssh ovh-monitor \"obs-psql \\\"select 1\\\"\"` (read-only `monitor_ro`; one-line SQL). Pull `tier_attempts` for soft_block-class T4 attempts.\n**Why:** By policy, missing production access is not a reason for needs-human. The monitor aliases exist for exactly this."
+  },
+  {
+    "issue": 37317,
+    "needs": [
+      "prod_monitor"
+    ],
+    "note": "the same Decision plus an explicit prose directive: a stated need, not evidence",
+    "body": "## Summary\nT4 success on the `soft_block` vendor class collapsed (11%, 54 of 493, against about 55% on other days).\n\n## Investigate\n1. Identify the vendor behind the `soft_block` body.\n\n## Acceptance criteria\n- [ ] Vendor attribution and the leaking signal identified, with evidence.\n\n<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_37317\",\"issue\":37317,\"lane\":\"staging\",\"placement\":{\"where\":\"local\",\"reason\":\"host capability: prod_monitor\",\"mode\":\"remote\"}}\n-->\n\n## Decision (2026-10-29, supersedes conflicting text above)\n\n**What:** Agents have production read access. Gather the evidence from the dev host with `ssh ovh-monitor \"obs-psql \\\"select 1\\\"\"` (read-only `monitor_ro`; one-line SQL). Pull `tier_attempts` for soft_block-class T4 attempts.\n**Why:** By policy, missing production access is not a reason for needs-human. The monitor aliases exist for exactly this.\nThis lane runs locally (prod monitor capability)."
+  }
+]

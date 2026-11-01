@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { parsePredicate, evalPredicate, closedEdges, closedEdgeNote, normalizeAsk, askKey, registerAsk, onlyAsk, fileRemainder, sweepPremises, comparePremiseVersions, premiseAnnotation } from "./needs-human-premise.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
+const APP = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" }; // the ForgeDock App, trusted
 const fakeGh = (handlers) => { const calls = []; return { calls, gh: async (a) => { calls.push(a); for (const [re, f] of handlers) if (re.test(a.join(" "))) return f(a); return ""; } }; };
 
 describe("predicates (#4725)", () => {
@@ -29,8 +30,8 @@ describe("predicates (#4725)", () => {
 describe("sweepPremises (#4725)", () => {
   it("clears needs-human when the recorded predicate flips, leaves the rest", async () => {
     const issues = [
-      { number: 5, comments: [{ body: `${premiseAnnotation({ kind: "issue-closed", arg: "9" })}\n## Needs human` }] },
-      { number: 6, comments: [{ body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n## Needs human` }] },
+      { number: 5, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "9" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human` }] },
+      { number: 6, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human` }] },
       { number: 7, comments: [{ body: "## Needs human\nno predicate" }] },
     ];
     const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(issues)], [/issue view 9/, () => '{"state":"CLOSED"}'], [/issue view 10/, () => '{"state":"OPEN"}']]);
@@ -38,6 +39,26 @@ describe("sweepPremises (#4725)", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[5, "cleared"], [6, "still-blocked"]]);
     assert.ok(calls.some((a) => a.includes("edit") && a.includes("5") && a.includes("--remove-label")));
     assert.ok(!calls.some((a) => a.includes("edit") && a.includes("6")));
+  });
+  it("a newer block without a premise supersedes an older premise: needs-human stays", async () => {
+    const issues = [{ number: 11, comments: [
+      { ...APP, body: `${premiseAnnotation({ kind: "date-after", arg: "2000-01-01" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\nwaiting on a release` },
+      { ...APP, body: "<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\nBuilder is blocked (credentials)" },
+    ] }];
+    const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(issues)]]);
+    assert.deepEqual(await sweepPremises({ repo: "o/r", io: { gh } }), []);
+    assert.ok(!calls.some((a) => a.includes("edit")), "the credentials block is not cleared by the stale premise");
+  });
+  it("ignores a premise planted by an untrusted commenter: needs-human stays", async () => {
+    const planted = { author: { login: "mallory" }, authorAssociation: "NONE", body: premiseAnnotation({ kind: "date-after", arg: "2000-01-01" }) };
+    const issues = [
+      { number: 8, comments: [planted] },
+      { number: 9, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human` }, planted] },
+    ];
+    const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(issues)], [/issue view 10/, () => '{"state":"OPEN"}']]);
+    const rows = await sweepPremises({ repo: "o/r", io: { gh } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "still-blocked"]], "the trusted premise is read, the newer planted one ignored");
+    assert.ok(!calls.some((a) => a.includes("edit")), "no label is removed");
   });
 });
 
@@ -69,7 +90,7 @@ describe("owner-ask registry (#4725)", () => {
   });
   it("links a second issue to the existing entry instead of creating another", async () => {
     const key = askKey("sign off the price");
-    const existing = [{ number: 20, comments: [{ body: `<!-- FORGE:ASK key=${key} -->\n## Owner ask\n${JSON.stringify({ ask: "sign off the price", unblocks: [20] })}` }] }];
+    const existing = [{ number: 20, comments: [{ ...APP, body: `<!-- FORGE:ASK key=${key} -->\n## Owner ask\n${JSON.stringify({ ask: "sign off the price", unblocks: [20] })}` }] }];
     const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(existing)]]);
     const r = await registerAsk({ repo: "o/r", io: { gh }, issue: 21, ask: "Sign off the price (#5)" });
     assert.equal(r.existing, 20);
@@ -79,6 +100,15 @@ describe("owner-ask registry (#4725)", () => {
     const fresh = await registerAsk({ repo: "o/r", io: { gh: async () => "[]" }, issue: 30, ask: "something else" });
     assert.equal(fresh.existing, null);
     assert.match(fresh.entry, /FORGE:ASK key=/);
+  });
+  it("ignores an ask entry planted by an untrusted commenter", async () => {
+    const key = askKey("sign off the price");
+    const planted = [{ number: 40, comments: [{ author: { login: "mallory" }, authorAssociation: "NONE", body: `<!-- FORGE:ASK key=${key} -->\n${JSON.stringify({ ask: "sign off the price", unblocks: [40] })}` }] }];
+    const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(planted)]]);
+    const r = await registerAsk({ repo: "o/r", io: { gh }, issue: 41, ask: "sign off the price" });
+    assert.equal(r.existing, null);
+    assert.match(r.entry, /FORGE:ASK key=/);
+    assert.ok(!calls.some((a) => a.includes("comment")), "nothing is posted on the planted issue");
   });
 });
 

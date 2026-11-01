@@ -22,6 +22,10 @@ function fake(o = {}) {
 }
 
 describe("verify-by-CI config (#4167)", () => {
+  it("parseVerify normalises guard_command extensions and drops empty values (#4792)", () => {
+    assert.deepEqual(parseVerify({ guard_command: { PY: " scripts/pytest {path} ", ".js": "", "": "x" } }).guardCommand, { ".py": "scripts/pytest {path}" });
+    assert.equal("guardCommand" in parseVerify({ guard_command: "nope" }), false);
+  });
   it("parseVerify defaults to local and rejects invalid values", () => {
     assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e: parseE2e({}) });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });

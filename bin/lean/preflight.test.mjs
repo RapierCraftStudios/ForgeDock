@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
+import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -104,5 +104,19 @@ describe("#4393 validate preflight: running the command on base", () => {
     const contract = C(`node -e "require('absent-pkg-4393')"`, `node -e "process.exit(1)"`);
     const r = await runPreflight({ contract, run: (a) => runCheckCommand({ ...a, cwd: dir }), git });
     assert.deepEqual(r.misses.map((m) => [m.ids[0], m.tool]), [["V1", "absent-pkg-4393"]]);
+  });
+});
+
+describe("testRunnerProblems (#4857)", () => {
+  const runners = { "services/worker": "poetry -C services/worker run" };
+  it("flags a validate on a mapped path that skips its runner", () => {
+    const p = testRunnerProblems(C("python3 -m pytest services/worker/tests/test_a.py"), runners);
+    assert.equal(p.length, 1);
+    assert.match(p[0], /V1: touches services\/worker\//);
+  });
+  it("accepts the runner, other paths, and no config", () => {
+    assert.deepEqual(testRunnerProblems(C("poetry -C services/worker run pytest tests/test_a.py"), runners), []);
+    assert.deepEqual(testRunnerProblems(C("node --test bin/lean/x.test.mjs"), runners), []);
+    assert.deepEqual(testRunnerProblems(C("pytest services/worker/t.py"), null), []);
   });
 });
