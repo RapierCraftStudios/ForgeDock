@@ -140,7 +140,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "" };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -233,7 +233,7 @@ async function main(argv, io) {
     try { marks = await readMarkerComments(io.gh, c.ghRepo, pr); } catch (e) { throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not read the FORGE:SELFTEST markers of PR #${pr} (${String(e?.message ?? e).split("\n")[0].slice(0, 200)}); nothing reviewed (fail closed)`]); }
     const selftest = selftestGate(marks, head);
     if (!selftest.ok) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: ${selftest.reason}; nothing reviewed (fail closed)`]);
-  } else io.err("SELFTEST: skipped (selftest.sandbox_repo not set in forge.yaml; the release does not require a FORGE:SELFTEST marker)");
+  } else io.err(`SELFTEST: skipped (selftest.sandbox_repo ${c.sandboxRaw ? `"${c.sandboxRaw.slice(0, 80)}" is not an owner/repo` : "not set"} in forge.yaml; the release does not require a FORGE:SELFTEST marker)`);
   let priorRoutes = 0;
   try {
     const out = await io.gh(["api", "--paginate", `repos/${c.ghRepo}/issues/${pr}/comments`, "--jq", '[.[] | select(.body | test("FORGE:REVIEW_ROUTE"))] | length']);

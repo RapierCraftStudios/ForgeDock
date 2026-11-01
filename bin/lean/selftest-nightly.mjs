@@ -5,6 +5,7 @@
 // detached `forgedock selftest --live --nightly-report <repo>`: the harness itself talks to schedd (orchestrate --add), so
 // running it inside the daemon's event loop would deadlock it, and a 45-minute run would hold the due pass. A failing run
 // (or one that cannot start, e.g. no sandbox repo) files ONE issue naming the failed step; the next failure edits it.
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { schedDir } from "./sched.mjs";
@@ -27,6 +28,20 @@ function readLast(dir, repo) {
 function writeLast(dir, repo, ts) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, stateFile(repo)), JSON.stringify({ lastRun: ts }));
+}
+
+/**
+ * Start `node <cli> selftest --live --nightly-report <repo>` detached, from the daemon. A spawn failure (EAGAIN, EMFILE,
+ * a vanished cwd) arrives as an async 'error' event: without a listener it is an uncaught exception, which stops schedd.
+ * It is swallowed here; that night's run is lost, never the daemon.
+ */
+export function launchNightly({ cli, repo, cwd = process.cwd(), spawnFn = spawn }) {
+  try {
+    const c = spawnFn(process.execPath, [cli, "selftest", "--live", "--nightly-report", repo], { cwd, detached: true, stdio: "ignore" });
+    c.on("error", () => {});
+    c.unref();
+    return c;
+  } catch { return null; }
 }
 
 /** File (or edit) the one nightly failure issue in `repo`. `result` is {step, message}. @returns {Promise<{issue:?number, action:"create"|"edit"}>} */

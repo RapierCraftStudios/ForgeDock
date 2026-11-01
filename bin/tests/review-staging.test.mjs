@@ -231,7 +231,7 @@ describe("review-staging release gate (#4865)", () => {
     for (const v of ["null", "~", "false"]) {
       const w = world({ selftest: "", files: { "/repo/forge.yaml": `project:\n  owner: o\n  repo: r\nbranches:\n  default: main\n  staging: staging\nselftest:\n  sandbox_repo: ${v}\n` } });
       assert.equal(await reviewStagingFromCli(["42"], w.io), 0, `${v}: ${w.err.join("\n")}`);
-      assert.match(w.err.join("\n"), /SELFTEST: skipped/);
+      assert.match(w.err.join("\n"), new RegExp(`SELFTEST: skipped \\(selftest\\.sandbox_repo "${v}" is not an owner/repo`));
     }
   });
   it("proceeds with a passing marker for the head", async () => {
