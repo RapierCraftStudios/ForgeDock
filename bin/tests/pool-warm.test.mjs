@@ -74,6 +74,22 @@ test("spec.warm N: the agent keeps N warm sandboxes; a ready one is claimed, its
   assert.equal(agent.store.data.sandboxes[c.body.id], undefined);
 });
 
+test("claim keeps the burst limit: replenished warm sandboxes keep lane caps, and a claim without limit leaves it untouched", async () => {
+  const limit = { lane_cpus: 6, lane_mem_gb: 9, lane_swap_gb: 0 };
+  const { agent, docker, markReady } = fixture();
+  await agent.launch({ spec: spec("lane-1", { warm: 1 }), ...SIZE, limit });
+  await agent.warm.replenish();
+  markReady();
+  assert.equal((await agent.warm.claim({ spec: spec("lane-2", { warm: 1 }), ...SIZE, limit })).status, 200);
+  await new Promise((r) => setImmediate(r));
+  const last = docker.runs[docker.runs.length - 1];
+  assert.ok(last.some((x) => String(x).startsWith("warm-")) || last.join(" ").includes("warm-"), "a replacement warm sandbox was started");
+  assert.equal(last[last.indexOf("--cpus") + 1], "6", "replacement keeps lane_cpus");
+  markReady();
+  assert.equal((await agent.warm.claim({ spec: spec("lane-3", { warm: 1 }), ...SIZE })).status, 200);
+  assert.deepEqual(Object.values(agent.store.data.warm)[0].limit, limit, "absent limit leaves the stored one");
+});
+
 test("a warm sandbox of another size or repo is not claimed", async () => {
   const { agent, markReady } = fixture();
   await agent.launch({ spec: spec("lane-1", { warm: 1 }), ...SIZE });

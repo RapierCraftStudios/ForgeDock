@@ -20,10 +20,11 @@ export function makeWarm({ store, sb, own, now, launch, destroy, view, log = con
   const recs = (key) => Object.values(sb()).filter((r) => r.warm && (key === undefined || r.warm === key));
   const isReady = (r) => r.state === "running" && existsSync(join(r.dir, "out", "warm-ready"));
   /** The pool entry for a launch spec: n warm sandboxes for the spec's repo (0 removes it). */
-  function configure({ spec, cpus, mem_gb, limit = null, n }) {
+  function configure({ spec, cpus, mem_gb, limit, n }) {
     const key = keyOf(spec), want = Math.min(MAX_WARM, Number.isInteger(n) ? n : 0);
     if (want <= 0) { delete wanted()[key]; store.save(); return { key, n: 0 }; }
-    wanted()[key] = { n: want, cpus, mem_gb, limit, spec: { image: spec.image ?? null, repo: spec.repo ?? null, cache: spec.cache ?? null, docker: Boolean(spec.docker) } };
+    // An absent limit keeps the stored burst caps; an explicit null clears them.
+    wanted()[key] = { n: want, cpus, mem_gb, limit: limit === undefined ? (wanted()[key]?.limit ?? null) : limit, spec: { image: spec.image ?? null, repo: spec.repo ?? null, cache: spec.cache ?? null, docker: Boolean(spec.docker) } };
     store.save();
     return { key, n: want };
   }
@@ -46,8 +47,8 @@ export function makeWarm({ store, sb, own, now, launch, destroy, view, log = con
     }
   }
   /** Claim a ready warm sandbox of the same repo and size for the lane `spec`; 404 when none is ready. */
-  async function claim({ spec, cpus, mem_gb }) {
-    if (Number.isInteger(spec?.warm)) configure({ spec, cpus, mem_gb, n: spec.warm });
+  async function claim({ spec, cpus, mem_gb, limit }) {
+    if (Number.isInteger(spec?.warm)) configure({ spec, cpus, mem_gb, limit, n: spec.warm });
     const known = own(spec?.id);
     if (known) { known.lease = now(); store.save(); return { status: 200, body: view(known) }; }
     const rec = recs(keyOf(spec)).find((r) => isReady(r) && r.cpus === cpus && r.mem_gb === mem_gb);
