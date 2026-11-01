@@ -220,7 +220,7 @@ test("a new failure in a file that already had one is blocked and its name leads
   assert.equal(r.failures.length, 1, JSON.stringify({ skipped: r.skipped }));
   const detail = r.failures[0].detail;
   assert.match(detail, /failing tests: price is 2:\n/, "only the new failure is named");
-  assert.ok(detail.indexOf("failing tests:") < detail.indexOf("not ok"), "names precede the output tail");
+  assert.ok(detail.indexOf("failing tests:") < detail.indexOf("env dependent"), "names precede the output tail (any reporter)");
 });
 
 test("a passing guard adds no baseline worktree, and a failing one removes its worktree", async () => {
