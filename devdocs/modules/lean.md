@@ -2249,3 +2249,7 @@ Cite: #4933.
 
 `runMutationCheck` restored with `git checkout HEAD -- <non-test files>`, which fails as a whole when the change deleted one of them (the revert re-creates it untracked), so nothing was restored and the lane continued on the reverted tree. The tree is verified clean before the revert, so the restore is now `git reset --hard HEAD` plus `git clean` of those paths, and a tree still dirty there afterwards throws (the lane ends engine-error instead of pushing the reverted change).
 Cite: #4934.
+
+## Entry 2026-11-01 — Nightly live selftest (#4894)
+
+`selftest-nightly.mjs` is an opt-in schedd hook: `scheddDue` (`bin/engine-cli.mjs`) calls `nightlyDue` on each due pass, best effort, so other sweeps never stop. Off unless `forge.yaml` `selftest.nightly_interval_hours` is positive; the last run time is cached in `selftest-nightly.json` under the sched dir and written before the run. A failed run files one issue naming the failed step, marked `<!-- FORGE:SELFTEST_NIGHTLY -->`; the next failure edits the open issue with that marker instead of creating another (same dedupe as prodwatch). Runs on the host only; never throws. Docs: `docs/SELFTEST.md`, `docs/CONFIG.md`.
