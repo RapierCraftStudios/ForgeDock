@@ -2271,3 +2271,8 @@ Cite: #4865, #4894.
 
 `launchNightly` (`selftest-nightly.mjs`) owns the detached spawn that `scheddDue` used to inline. It attaches an `'error'` listener before `unref()`. Without one, an async spawn failure (EAGAIN, EMFILE, a removed cwd) was an uncaught exception, and `schedd.mjs` stops the daemon on that. Now the failure costs only that night's run. The review-staging skip line now names a malformed `selftest.sandbox_repo` value instead of saying "not set". Found in the delta review of release PR #4946.
 Cite: #4894.
+
+## Entry 2026-11-01 — Batch setup reads run concurrently and show progress
+
+`orchestrate.mjs` reads a new batch's issues through `pmap.mjs` `mapLimit` (`setupConcurrency`, default 6) instead of one at a time; `order`, edges and lanes are keyed by issue and come out unchanged. Before the first read it saves `state.json` with `phase: "setup"` and `setup: {read, total}` (updated per issue; absent once setup ends and ignored on resume), so a slow start is visible. `lane.mjs` `resolveLane` takes an optional per-batch `makeLaneCache()` (default-branch read once, `ls-remote` once per lane; failures and a missing lane branch are evicted so retries re-read) and a pre-read `milestone`, which `engine-cli.mjs` `readBody` supplies from the issue view it already makes.
+Cite: #4963.

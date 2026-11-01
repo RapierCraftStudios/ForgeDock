@@ -1130,4 +1130,21 @@ describe("batch plan secrets (#4787)", () => {
     assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
     assert.deepEqual(b.scrubPlan(), []);
   });
+
+  it("setup reads run with bounded concurrency, keep order and deps, and write an early setup state (#4963)", async () => {
+    const saves = []; let live = 0, peak = 0;
+    const bodies = { 1: "Blocked by #2", 2: "", 3: "Depends on #1", 4: "", 5: "" };
+    const store = { load: () => null, save: (s) => saves.push(JSON.parse(JSON.stringify(s))) };
+    await orchestrate({ issues: [1, 2, 3, 4, 5], parallel: 1, store, setupConcurrency: 2, trusted: () => true,
+      readBody: async (n) => { live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 15 - n * 2)); live--; return bodies[n]; },
+      runOne: async () => ({ terminalReason: "merged" }), now: () => Date.now(), sleep: async () => {}, pollMs: 1 });
+    assert.equal(peak, 2);
+    const setupSaves = saves.filter((s) => s.phase === "setup");
+    assert.deepEqual(setupSaves[0].setup, { read: 0, total: 5 });
+    assert.equal(setupSaves.at(-1).setup.read, 5);
+    assert.deepEqual(setupSaves[0].order, [1, 2, 3, 4, 5]);
+    const last = saves.at(-1);
+    assert.equal(last.phase, undefined);
+    assert.deepEqual(last.deps, { 1: [2], 2: [], 3: [1], 4: [], 5: [] });
+  });
 });

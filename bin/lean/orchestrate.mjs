@@ -112,6 +112,7 @@ import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
 import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
+import { mapLimit } from "./pmap.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -140,6 +141,8 @@ export const EST_DEFAULT_MIN = Object.freeze({ S: 10, M: 25, L: 50 });
 export const POST_DEPLOY_EST_MIN = 2;
 // A ready issue queued longer than this joins the head band (starvation guard; only with an estimator).
 export const DEFAULT_STARVE_MS = 30 * 60000;
+/** #4963: issues read at once while a batch sets up. */
+export const DEFAULT_SETUP_CONCURRENCY = 6;
 // Merged runs of one repo and size needed before their median replaces the default.
 export const HISTORY_MIN_SAMPLES = 3;
 
@@ -248,7 +251,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
-  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
+  estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -330,10 +333,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
 
+  let setup = null; // #4963: {read, total} while the initial per-issue reads run; written with phase "setup" so a slow start is visible
   let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
   const save = () => {
     if (!store || halted) return;
-    store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
+    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
@@ -406,7 +410,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // New issues (a fresh batch, or extra issues passed to a resume) join the queue.
   for (const n of issues) if (!set.has(n)) { set.add(n); order.push(n); pending.push(n); }
   for (const n of pending) if (!enqueued.has(n)) enqueued.set(n, now());
-  for (const n of order) if (!deps.has(n)) await readDeps(n);
+  // #4963: bounded-concurrency setup reads; each issue's result lands in Maps keyed by issue, so `order` and the edges are unchanged.
+  const unread = order.filter((n) => !deps.has(n));
+  if (unread.length) {
+    setup = { read: 0, total: unread.length };
+    save();
+    await mapLimit(unread, setupConcurrency, async (n) => { await readDeps(n); setup.read++; save(); });
+    setup = null;
+  }
   if (estimate) for (const n of order) { // a resume that enabled the estimator
     if (estimates.has(n) || results.has(n)) continue;
     let b = ""; try { b = await readBody(n); } catch { b = ""; }

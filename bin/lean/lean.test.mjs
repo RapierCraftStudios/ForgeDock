@@ -2675,6 +2675,28 @@ describe("orchestrate", () => {
     assert.match(t, /skipped \(dependency #1/);
   });
 
+  it("orchestrateFromCli reads the milestone with the body: no second issue view, one default-branch read, one ls-remote per lane (#4963)", async () => {
+    const calls = [];
+    const leanIo = {
+      gh: async (a) => {
+        calls.push(["gh", ...a]);
+        if (a[0] === "repo" && a[1] === "view") return "main\n";
+        if (a[0] === "api") return "OWNER\n";
+        return JSON.stringify({ body: "", authorAssociation: "OWNER", milestone: a[2] === "2" ? null : { title: "M One" } });
+      },
+      git: async (a) => { calls.push(["git", ...a]); return a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""; },
+    };
+    const deps = { dir: tmpDir("core-orch-"), batchRoot: tmpDir("core-orch-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+      leanModule: { runCore: async (o) => ({ terminalReason: "merged", pr: 50 + o.issue, cost_usd: 1, wall_ms: 1 }) } };
+    const l = console.log; console.log = () => {};
+    let res;
+    try { res = await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], deps); } finally { console.log = l; }
+    assert.equal(res.ok, true);
+    assert.equal(calls.filter((c) => c.includes("milestone") && !c.some((x) => /body/.test(x))).length, 0, "no milestone-only view");
+    assert.equal(calls.filter((c) => c[1] === "repo" && c[2] === "view").length, 2, "the up-front --lane check plus one batch-wide lane lookup, not one per issue");
+    assert.equal(calls.filter((c) => c[0] === "git" && c[1] === "ls-remote").length, 2);
+  });
+
   it("orchestrateFromCli routes each issue to its own lane (no --lane), reports cross-lane edges, refuses --lane main", async () => {
     const seen = [];
     const logs = [];

@@ -41,11 +41,25 @@ export async function defaultBranches({ repo, io, branches = {} }) {
   return [...new Set([branches.default, gh].filter(Boolean))];
 }
 
+/** #4963: one batch's shared lookups: the default branches once, `ls-remote` once per lane. Failures are evicted, so a retry re-reads. */
+export function makeLaneCache() { return new Map(); }
+const once = (cache, key, load, keep = () => true) => {
+  let p = cache.get(key);
+  if (!p) {
+    p = Promise.resolve().then(load);
+    cache.set(key, p);
+    p.then((v) => { if (!keep(v) && cache.get(key) === p) cache.delete(key); }, () => { if (cache.get(key) === p) cache.delete(key); });
+  }
+  return p;
+};
+
 /**
+ * `cache` (makeLaneCache) shares the default-branch and ls-remote reads across issues; `milestone` (a title, or null for none)
+ * is a pre-read value that skips the per-issue `gh issue view`; undefined reads it.
  * @returns {Promise<{ok:true, lane:string, expected:string, milestone:?string, overridden:boolean, defaults:string[]}
  *   | {ok:false, code:string, detail:string}>}
  */
-export async function resolveLane({ issue, repo, io, cwd, branches = {}, requested = null, override = false }) {
+export async function resolveLane({ issue, repo, io, cwd, branches = {}, requested = null, override = false, cache = null, milestone: known }) {
   const refuse = (code, detail) => ({ ok: false, code, detail });
   const transient = (detail) => ({ ...refuse(OUTCOME_CODES.LANE_UNRESOLVED, detail), transient: true }); // #4791: a gh/git command failed; retry
   const staging = branches.staging || DEFAULT_STAGING_BRANCH;
@@ -53,9 +67,12 @@ export async function resolveLane({ issue, repo, io, cwd, branches = {}, request
   if (!pattern.includes("{slug}")) return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `forge.yaml branches.feature_pattern "${pattern}" has no {slug}`);
   let milestone = null, defaults;
   try {
-    milestone = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "milestone"])))?.milestone?.title || null;
+    if (known !== undefined) milestone = known || null;
+    else milestone = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "milestone"])))?.milestone?.title || null;
   } catch (e) { return transient(`cannot read the milestone of #${issue}: ${String(e?.message ?? e).slice(0, 200)}`); }
-  try { defaults = await defaultBranches({ repo, io, branches }); } catch (e) {
+  try {
+    defaults = cache ? await once(cache, "default-branches", () => defaultBranches({ repo, io, branches })) : await defaultBranches({ repo, io, branches });
+  } catch (e) {
     return transient(`cannot read the default branch of ${repo}: ${String(e?.message ?? e).slice(0, 200)}`);
   }
   let expected = staging;
@@ -78,7 +95,8 @@ export async function resolveLane({ issue, repo, io, cwd, branches = {}, request
   }
   if (!LANE_RE.test(lane) || lane.includes("..")) return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `invalid lane ${JSON.stringify(lane)}`);
   let out;
-  try { out = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/${lane}`], { cwd })); } catch (e) {
+  const lsRemote = () => io.git(["ls-remote", "--heads", "origin", `refs/heads/${lane}`], { cwd });
+  try { out = String(cache ? await once(cache, `lane:${lane}`, async () => String(await lsRemote()), (v) => v.trim() !== "") : await lsRemote()); } catch (e) {
     return transient(`cannot check origin for ${lane}: ${String(e?.message ?? e).slice(0, 200)}`);
   }
   if (!out.trim()) return refuse(OUTCOME_CODES.LANE_BRANCH_MISSING, `lane branch ${lane} (${why}) does not exist on origin; create it first (e.g. /milestone start) or fix the milestone title`);
