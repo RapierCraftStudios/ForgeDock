@@ -94,9 +94,15 @@ export async function selectGuards({ guards, files, git, base }) {
   return { selected, mergeBase };
 }
 
-/** The command that runs one test file: the contract's own validate command with that path substituted, else a per-extension default; null when unknown. */
-export function commandFor(path, contract) {
+/**
+ * The command that runs one test file: the repo's `verify.guard_command` template for the extension (`{path}` substituted,
+ * or the path appended), else the contract's own validate command with that path substituted, else a per-extension
+ * default; null when unknown. The command runs from the worktree root with the repo-relative path.
+ */
+export function commandFor(path, contract, guardCommand = {}) {
   const ext = extname(path);
+  const tpl = String(guardCommand?.[ext.toLowerCase()] ?? "").trim();
+  if (tpl) return tpl.includes("{path}") ? tpl.replaceAll("{path}", path) : `${tpl} ${path}`;
   for (const v of contract?.validate ?? []) {
     const cmd = String(v?.command ?? "");
     if (/(?:^|\s)(?:-k|-t|--grep|--test-name-pattern|--testNamePattern)(?:\s|=)|::/.test(cmd)) continue;
@@ -118,11 +124,11 @@ const tailOf = (out) => String(out ?? "").split("\n").filter((l) => l.trim()).sl
  * Rerun the selected guards' base test files against the lane tree, in a small pool, under one wall-time cap.
  * Returns {failures, runs, skipped[], ms}. A test that cannot be run (no base copy, unknown runner, over the cap) is skipped, never a failure.
  */
-export async function runGuards({ selected, mergeBase, contract, git, runCommand, cwd, env, capMs = GUARD_CAP_MS, parallelism = 2, fs = nodeFs, now = Date.now }) {
+export async function runGuards({ selected, mergeBase, contract, guardCommand, git, runCommand, cwd, env, capMs = GUARD_CAP_MS, parallelism = 2, fs = nodeFs, now = Date.now }) {
   const t0 = now(), skipped = [], runs = [], jobs = [];
   for (const { guard } of selected) {
     for (const t of guard.tests ?? []) {
-      const path = norm(t.path), copy = basePathOf(path), command = commandFor(copy, contract);
+      const path = norm(t.path), copy = basePathOf(path), command = commandFor(copy, contract, guardCommand);
       if (!command) { skipped.push(`#${guard.issue} ${path}: no runner known for ${extname(path) || "this file"}`); continue; }
       jobs.push({ guard, path, copy, command });
     }
