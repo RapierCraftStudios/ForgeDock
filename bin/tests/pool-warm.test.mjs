@@ -168,3 +168,14 @@ test("#4935 relay from a warm-claimed sandbox is queued under the lane id, an un
   assert.equal((await post("lane-1", null, cold.credToken)).status, 200);
   assert.deepEqual(seen, ["POST /agent/relay/lane-1"]);
 });
+
+test("#4936: a claim keeps the burst limit, so replenished warm sandboxes launch with it", async () => {
+  const { agent, docker } = fixture();
+  const limit = { lane_cpus: 4, lane_mem_gb: 6, lane_swap_gb: 0 };
+  await agent.warm.claim({ spec: spec("lane-1", { warm: 1 }), ...SIZE, limit });
+  assert.deepEqual(Object.values(agent.store.data.warm)[0].limit, limit, "the stored pool entry keeps the limit");
+  await agent.warm.replenish();
+  const runs = docker.runs.filter((a) => a.some((x) => String(x).startsWith("cs-warm-") || String(x).includes("warm-")));
+  assert.ok(runs.length >= 1, "a warm sandbox was launched");
+  for (const a of runs) assert.equal(a[a.indexOf("--cpus") + 1], "4", "launched with the burst lane_cpus, not the reservation");
+});
