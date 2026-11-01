@@ -1,3 +1,10 @@
+---
+issue: 4960
+status: fresh
+anchor: scripts/review-staging-pre.sh
+created: 2026-11-01
+---
+
 # 4960 — Staging scope degrades per PR, reads run in parallel
 
 **Context:** On a ~290-PR bundle the serial per-PR gh reads took 25+ minutes, and one failed read set `SCOPE_MODE=full` for the whole bundle.
