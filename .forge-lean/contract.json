@@ -2,98 +2,151 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "`sandbox.unreachable` with an offline pool should not count toward `max_deferrals`, the same as `sandbox.capacity` after #4528.",
+   "quote": "Add `windowsHide: true` to every `spawn`/`spawnSync` call (it is a no-op off Windows), and add a lint or test that rejects `detached: true` without it.",
    "disposition": "deliver",
+   "why": "",
+   "evidence": "",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "When the pool has had zero live agents for more than N minutes:\n  - print one loud batch event and notification;",
-   "disposition": "deliver",
-   "verify": "in_lane"
+   "quote": "Add `windowsHide: true` to every `spawn`/`spawnSync` call (it is a no-op off Windows)",
+   "disposition": "defer",
+   "why": "Non-detached children inherit the hidden console of their detached parent, so only detached roots open windows; blanket edits to ~70 other sites are churn. R1 covers every detached site and the guard test; a follow-up can sweep the rest if a window is still observed."
   },
   {
    "id": "R3",
-   "quote": "with `fallback_local` unset, fall back to the host at a host-safe K, or at least report the stall in the status line.",
-   "disposition": "deliver",
-   "verify": "in_lane"
+   "quote": "`forgedock orchestrate 1 2 --foreground` on Windows opens no console windows",
+   "disposition": "post-deploy",
+   "why": "Only observable on a Windows 11 desktop; CI is Linux."
   },
   {
    "id": "R4",
-   "quote": "**Fix:** derive `online` for the remote provider from `/agents` (`ok && !paused`), as `bin/pool/router.mjs` already does for the built-in pool, or treat a 503 or 502 streak as `online: 0`.",
+   "quote": "A test or lint covers new spawn sites",
    "disposition": "deliver",
+   "why": "",
+   "evidence": "",
    "verify": "in_lane"
   }
  ],
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/orchestrate.mjs",
-   "change": "Add sandbox.unreachable to UNCAPPED_DEFERRALS (update the comment at :23/:122); in grant() track the first sample with cap.online===0 and, once it exceeds the configured minutes (default 10), emit exactly one pool-offline update() batch event (status-line text names the stall, and a notification through any existing notify mechanism); reset when online>0. Do not force host fallback when fallback_local is unset (report only).",
+   "path": "bin/lean/batch.mjs",
+   "change": "add windowsHide: true to the launchLane spawnFn options",
    "requirements": [
-    "R1",
-    "R2",
-    "R3"
+    "R1"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/sandbox-remote.mjs",
-   "change": "httpTransport.capacity(): when /status gives no valid online, GET /agents and set online=count(ok&&!paused), total=length; a failed /agents leaves online unknown. Update the doc comment.",
+   "path": "bin/runner.mjs",
+   "change": "add windowsHide: true to the claude CLI spawn options at ~line 2078 (one option only, no new logic)",
    "requirements": [
-    "R4"
+    "R1"
    ]
   },
   {
    "id": "D3",
-   "path": "bin/lean/batch.test.mjs",
-   "change": "Regression tests: deferPolicy uncaps sandbox.unreachable; a pool-offline event fires once after N minutes and resets.",
+   "path": "bin/lean/effects.mjs",
+   "change": "add windowsHide: true to runCheckCommand spawn",
    "requirements": [
-    "R1",
-    "R2",
-    "R3"
+    "R1"
    ]
   },
   {
    "id": "D4",
-   "path": "bin/lean/sandbox-provider.contract.test.mjs",
-   "change": "Test capacity() derives online from /agents when /status is 404, and stays unknown when /agents fails.",
+   "path": "bin/lean/probe.mjs",
+   "change": "add windowsHide: true to spawnProbe spawn",
    "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/lean/schedd.mjs",
+   "change": "add windowsHide: true to daemon spawn",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/pool/agent.mjs",
+   "change": "add windowsHide: true to wsl.exe --shutdown spawn",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "scripts/ci-local/run.mjs",
+   "change": "add windowsHide: true to detached spawn",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/journey.mjs",
+   "change": "add windowsHide: true to the open/xdg-open spawnSync calls (~645,647); options only",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "bin/tests/windows-hide.test.mjs",
+   "change": "new test: read every non-test .mjs under bin and scripts, find each `detached: true` and fail (listing file:line) unless `windowsHide: true` is on the same spawn call (same line or within the call's options); keep each call's options on one line or check the enclosing call text",
+   "requirements": [
+    "R1",
     "R4"
+   ]
+  },
+  {
+   "id": "D10",
+   "path": "bin/lean/batch.test.mjs",
+   "change": "assert launchLane passes windowsHide: true to spawnFn",
+   "requirements": [
+    "R1"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "UNCAPPED_DEFERRALS behaviour for host.busy and sandbox.capacity, and the capped rate_limited/sandbox.auth paths in bin/lean/orchestrate.mjs deferPolicy"
+   "what": "launchLane/detachedLanes signature and spawnFn injection contract in bin/lean/batch.mjs"
   },
   {
    "id": "P2",
-   "what": "httpTransport /status {free,online,total} parsing and the null-when-unknown contract in bin/lean/sandbox-remote.mjs; bin/pool/router.mjs /status unchanged"
+   "what": "process-group kill behaviour (detached: true, process.kill(-pid)) in runner.mjs, effects.mjs, probe.mjs stays unchanged on POSIX"
   },
   {
    "id": "P3",
-   "what": "execution.fallback_local opt-in semantics (#4547): fallback only when set and online===0"
+   "what": "bin/orchestrate-preflight.mjs and bin/journey.mjs:643 existing windowsHide usage"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs"
+   "command": "node --test bin/tests/windows-hide.test.mjs bin/lean/batch.test.mjs bin/lean/probe.test.mjs bin/lean/schedd.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/tests/runner.test.mjs bin/tests/journey.test.mjs bin/lean/lean.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Uncap sandbox.unreachable unconditionally rather than gating on sampled online===0",
-   "justification": "The unreachable lane error already waited unreachable_window_min (execution.mjs guard) and retries every 60s; a router that is down gives no online sample, so gating would miss the case that broke AlterLab. Mirrors #4528 (orchestrate.mjs:123).",
+   "choice": "Guard is a node:test source scan, not an eslint rule",
+   "justification": "Repo has no custom lint rule infra; tests under bin/tests already scan sources, and the scan needs no dependency",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "Stall is reported, not auto-routed to the host, when fallback_local is unset",
-   "justification": "Issue allows 'or at least report'; auto host fallback would override an explicit opt-in (#4547) and NORTHSTAR 'never lose work/host safety'.",
+   "choice": "Only detached roots are fixed; non-detached spawn sites deferred (R2)",
+   "justification": "Node docs: only detached Windows children get their own console; others inherit the parent's",
    "source": "spec"
   }
  ]

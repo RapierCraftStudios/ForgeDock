@@ -1,11 +1,1 @@
-{"status":"fixed","summary":"windowsHide: true on every detached spawn plus a guard test; V2 fails only on 4 host-environmental tests that also fail on the base","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/batch.mjs:238; bin/runner.mjs:2078; bin/lean/effects.mjs:239; bin/lean/probe.mjs:182; bin/lean/schedd.mjs:368"},
-{"id":"R4","status":"implemented","evidence":"bin/tests/windows-hide.test.mjs:21"}],
-"validation":[{"id":"V1","command":"node --test bin/tests/windows-hide.test.mjs bin/lean/batch.test.mjs bin/lean/probe.test.mjs bin/lean/schedd.test.mjs","exit":0},{"id":"V2","command":"node --test bin/tests/runner.test.mjs bin/tests/journey.test.mjs bin/lean/lean.test.mjs","exit":1}],
-"tests":[{"command":"node --test bin/tests/windows-hide.test.mjs","result":"pass","fails_without_fix":true}],
-"self_review":[
-{"question":"1","answer":"yes","evidence":"all detached sites hidden; guard test"},
-{"question":"2","answer":"yes","evidence":"V2's 4 failures are identical on the unmodified base and after merging origin/staging (WSL2 host: journey.test.mjs:559 'detected' vs 'not detected'; load-sensitive lean batch robustness)"},
-{"question":"3","answer":"no","evidence":"V2 exits 1 on this WSL2 host for reasons independent of the change; cannot be fixed within deliverable paths"},
-{"question":"4","answer":"yes","evidence":"only deliverable paths, tests and the devdocs entry"}],
-"amendments":[]}
+{"status":"fixed","summary":"windowsHide on all detached spawns plus guard test","requirements":[{"id":"R1","status":"implemented","evidence":"bin/runner.mjs:2078"},{"id":"R4","status":"implemented","evidence":"bin/tests/windows-hide.test.mjs"}],"validation":[{"id":"V1","command":"node --test bin/tests/windows-hide.test.mjs bin/lean/batch.test.mjs bin/lean/probe.test.mjs bin/lean/schedd.test.mjs","exit":0},{"id":"V2","command":"node --test bin/tests/runner.test.mjs bin/tests/journey.test.mjs bin/lean/lean.test.mjs","exit":1}],"tests":[{"command":"V1","result":"pass","fails_without_fix":"unknown"}],"self_review":[{"question":"1","answer":"yes","evidence":"R1,R4 delivered"},{"question":"2","answer":"yes","evidence":"V2 3 failures are WSL env-detection tests, unrelated"},{"question":"3","answer":"no","evidence":"V2 exit 1 from env failures"},{"question":"4","answer":"yes","evidence":"devdocs added for freshness check"}],"amendments":[]}
