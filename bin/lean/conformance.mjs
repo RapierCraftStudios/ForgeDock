@@ -7,6 +7,7 @@
  * The reviewer supplies per-row judgements; the engine computes the verdict. A review without rows (a generic
  * "PASS") is incomplete, and incomplete never merges.
  */
+import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
 import { activationFailures } from "./activation.mjs";
@@ -303,6 +304,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
     for (const p of tmpdirInputs(v.command)) problems.push(tmpInputProblem(v.id, p));
     if (vitestQuietFlag(v.command)) problems.push(`${v.id}: vitest 3 rejects -q/--quiet (usage error before any test runs); use --reporter=dot`);
+    const syn = shellSyntaxError(v.command);
+    if (syn) problems.push(`${v.id}: the command is not valid shell (bash -n: ${syn}); keep notes out of the command`);
   }
   if (repro) {
     const t = c.repro_test;
@@ -311,6 +314,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (vitestQuietFlag(t.command)) problems.push("repro_test: vitest 3 rejects -q/--quiet; use --reporter=dot");
+      const syn = shellSyntaxError(t.command);
+      if (syn) problems.push(`repro_test: the command is not valid shell (bash -n: ${syn})`);
     }
   }
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
@@ -320,7 +325,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
@@ -405,6 +410,15 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
       if (have) { have.change = have.change ? `${have.change}; ${a.why}` : a.why; have.amended = true; }
       else c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
+    } else if (a.kind === "substitute-validate" && !blank(a.validate)) {
+      // #4857: a runnable equivalent of an unrunnable frozen validate command; same id, same checks as a planned command
+      const v = (c.validate ?? []).find((x) => x.id === a.validate);
+      if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
+      const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
+      if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
+      v.substituted = { from: v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
+      applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
@@ -452,6 +466,24 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
 const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportError: No module named '?([\w.]+)'?/;
 const NODE_MISSING_RE = /Cannot find (?:module|package) '([^']+)'/;
 const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /([^\s:'"`]+): not found\b/;
+/** #4857: why a command is not valid bash (`bash -n`), or null when it parses (or bash is unavailable). Catches prose left on a command. */
+export function shellSyntaxError(command) {
+  const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
+  if (r.error || r.status === 0 || r.status == null) return null;
+  return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
+}
+const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
+/** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
+export function unrunnableValidate({ rc, output } = {}) {
+  return rc !== 0 && rc !== 124 && UNRUNNABLE_RE.test(String(output ?? ""));
+}
+const BLOCK_VALIDATE_RE = /\b(?:V\d+|validate|repro)\b/i;
+const BLOCK_UNRUNNABLE_RE = /unrunnable|cannot (?:be )?run|could not (?:be )?run|can't run|not runnable|command not found|No module named|no tests (?:ran|were collected)|collected 0 items|syntax error|pyproject|(?:tool|module)s? (?:is|are) missing|fails? before any test/i;
+/** #4857: a blocked result's text that says a validate/repro command could not run: an environment defect, never a product decision. */
+export function describesUnrunnableCommand(text) {
+  const t = String(text ?? "");
+  return BLOCK_VALIDATE_RE.test(t) && BLOCK_UNRUNNABLE_RE.test(t);
+}
 // #4761: a runner rejecting its own flags is a defect of the frozen command, not of the change
 const CLI_USAGE_RE = /\bUnknown option\b|Unrecognized CLI Parameter|error: unrecognized arguments|unknown (?:shorthand )?flag\b|bad option:/i;
 const VITEST_QUIET_RE = /\bvitest\b[^&|;]*\s(?:-q|--quiet)(?=\s|$)/;
@@ -536,6 +568,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
+      if (rerun && unrunnableValidate(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
       // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
       if (rerun?.rc === 124) {
         if (ciVerified) { ciCovered.push(v.id); continue; }

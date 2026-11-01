@@ -573,6 +573,14 @@ describe("core work-on", () => {
     assert.ok(w.comments.some((c) => /FORGE:DECOMPOSED/.test(c) && /size: 40 files, 4000 lines .* oversize yes/.test(c)));
   });
 
+  it("#4857 a product-decision block over an unrunnable validate is untyped (one correction resume), a real one stays human", () => {
+    const u = classifyBlock({ summary: "V2 cannot run: poetry found no pyproject at the repo root", block: { kind: "human", why: "product-decision" } }, 1);
+    assert.equal(u.kind, "untyped");
+    assert.match(u.problem, /substitute-validate/);
+    assert.equal(classifyBlock({ summary: "needs a pricing decision", block: { kind: "human", why: "product-decision" } }, 1).kind, "human");
+    assert.equal(classifyBlock({ summary: "V1 needs the prod key", block: { kind: "human", why: "credentials" } }, 1).kind, "human");
+  });
+
   it("#4385 split siblings that declare a shared hub file are serialised (chained, no duplicate transitive edge); disjoint or undeclared files stay parallel", () => {
     const hub = ["src/domain/index.ts", "./src/domain/events.ts"];
     const BIG = { files: 40, lines: 2000 }; // #4396: shared or undeclared files are admitted only over the size budget
