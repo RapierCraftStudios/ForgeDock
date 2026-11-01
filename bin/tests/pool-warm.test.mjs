@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgent } from "../pool/agent.mjs";
@@ -137,4 +138,33 @@ test("entrypoint claim loader: lane env, argv and ref load verbatim, quotes incl
   const out = spawnSync("bash", ["-c", `eval "$(node -e '${script.replace(/'/g, `'\\''`)}')"; printf '%s|%s|%s|%s' "$GH_TOKEN" "$CS_CLAIM_REF" "$#" "$5"`], { encoding: "utf8" });
   assert.equal(out.status, 0, out.stderr);
   assert.equal(out.stdout, "it's a 'secret'|staging|5|a b'c");
+});
+
+test("#4935 relay from a warm-claimed sandbox is queued under the lane id, an unclaimed one under its own id", async (t) => {
+  const seen = [];
+  const stub = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); req.resume(); res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ rid: "r1" })); });
+  await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+  let now = 1_000_000;
+  const docker = fakeDocker();
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 0 }, router_url: `http://127.0.0.1:${stub.address().port}`, state_dir: tmpDir("cs-warm-relay-"), allow_cpus: 8, allow_mem_gb: 16, lease_ttl_s: 600, token: "t" }, { docker, now: () => now, log: quiet, live: () => ({ ok: true }) });
+  const srv = createServer(agent.handle);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  t.after(() => { srv.close(); stub.close(); });
+  const post = (id, rid, token) => fetch(`http://127.0.0.1:${srv.address().port}/sandboxes/${id}/relay${rid ? `/${rid}` : ""}`, { method: rid ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: rid ? undefined : JSON.stringify({ argv: ["obs-psql"] }) });
+
+  await agent.launch({ spec: spec("lane-1", { warm: 1 }), ...SIZE });
+  await agent.warm.replenish();
+  for (const r of Object.values(agent.store.data.sandboxes)) if (r.warm) { mkdirSync(join(r.dir, "out"), { recursive: true }); writeFileSync(join(r.dir, "out", "warm-ready"), ""); }
+  const c = await agent.warm.claim({ spec: spec("lane-2", { warm: 1 }), ...SIZE });
+  assert.equal(c.status, 200);
+  const warmId = c.body.id, warmRec = agent.store.data.sandboxes[warmId];
+  assert.notEqual(warmId, "lane-2");
+  assert.equal((await post(warmId, null, warmRec.credToken)).status, 200);
+  assert.equal((await post(warmId, "r1", warmRec.credToken)).status, 200);
+  assert.deepEqual(seen, ["POST /agent/relay/lane-2", "GET /agent/relay/lane-2/r1"]);
+  // An unclaimed (cold) sandbox keeps relaying under its own id.
+  const cold = agent.store.data.sandboxes["lane-1"];
+  seen.length = 0;
+  assert.equal((await post("lane-1", null, cold.credToken)).status, 200);
+  assert.deepEqual(seen, ["POST /agent/relay/lane-1"]);
 });
