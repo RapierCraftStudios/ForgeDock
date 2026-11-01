@@ -112,3 +112,25 @@ describe("lane scratch is untracked and cleared (#4880)", () => {
     assert.equal(execFileSync("git", ["ls-files", ".forge-lean"], { cwd: root, encoding: "utf8" }).trim(), "");
   });
 });
+
+describe("generated requirements.txt is untracked in a Poetry project (#4959)", () => {
+  const lane = (poetry, files) => {
+    const d = tmpDir("toolstate-poetry-");
+    sh(d, "init", "-q", "-b", "main"); sh(d, "config", "user.email", "t@t"); sh(d, "config", "user.name", "t");
+    put(d, "pyproject.toml", poetry ? "[tool.poetry]\nname = \"x\"\n" : "[project]\nname = \"x\"\n");
+    sh(d, "add", "-A"); sh(d, "commit", "-q", "-m", "base"); sh(d, "checkout", "-q", "-b", "lane");
+    for (const f of files) put(d, f);
+    sh(d, "add", "-A"); sh(d, "commit", "-q", "-m", "lane");
+    return d;
+  };
+  it("drops an added requirements.txt, keeps product files and contract-listed ones", async () => {
+    const d = lane(true, ["services/worker/requirements.txt", "services/worker/app.py", "services/api/requirements.txt"]);
+    const removed = await untrackToolState({ git: gitIn(d), base: "main", keep: ["services/api/requirements.txt"] });
+    assert.deepEqual(removed, ["services/worker/requirements.txt"]);
+    assert.deepEqual(sh(d, "diff", "--name-only", "main...HEAD").trim().split("\n"), ["services/api/requirements.txt", "services/worker/app.py"]);
+  });
+  it("a non-Poetry project is untouched", async () => {
+    const d = lane(false, ["requirements.txt"]);
+    assert.deepEqual(await untrackToolState({ git: gitIn(d), base: "main" }), []);
+  });
+});
