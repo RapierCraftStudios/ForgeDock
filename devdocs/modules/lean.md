@@ -2266,3 +2266,8 @@ Cite: #4865.
 - **`selftest-live.mjs`:** forge.yaml is read with `parseForgeYaml`, per section. Flags without a value throw. The sandbox may not be the project or release repo. The `--pr` head is read with `-R <release repo>` before the run.
 - **`.forge/post-deploy-checks.json`:** removed. Its two checks were contradictory (one needed a pass, the other a fail), and their timeout was clamped to 900 s.
 Cite: #4865, #4894.
+
+## Entry 2026-11-01 — Nightly launch survives a spawn error
+
+`launchNightly` (`selftest-nightly.mjs`) owns the detached spawn that `scheddDue` used to inline. It attaches an `'error'` listener before `unref()`. Without one, an async spawn failure (EAGAIN, EMFILE, a removed cwd) was an uncaught exception, and `schedd.mjs` stops the daemon on that. Now the failure costs only that night's run. The review-staging skip line now names a malformed `selftest.sandbox_repo` value instead of saying "not set". Found in the delta review of release PR #4946.
+Cite: #4894.

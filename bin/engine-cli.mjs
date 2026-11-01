@@ -2033,9 +2033,9 @@ async function scheddDue() {
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
   try { const prem = await import("./lean/needs-human-premise.mjs"); await prem.sweepPremises({ repo, io: { gh: (a) => leanIo.gh(a), pkgVersion: prem.registryPkgVersion } }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
   try { // #4894: opt-in nightly live selftest (forge.yaml selftest.nightly_interval_hours); best effort
-    const { nightlyDue } = await import("./lean/selftest-nightly.mjs");
+    const { nightlyDue, launchNightly } = await import("./lean/selftest-nightly.mjs");
     // Detached child: the harness calls back into this daemon (orchestrate --add), so it must never run on its event loop.
-    const launch = () => spawn(process.execPath, [fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), "selftest", "--live", "--nightly-report", repo], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+    const launch = () => launchNightly({ cli: fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), repo });
     await nightlyDue({ repo, cwd: process.cwd(), io: leanIo, launch });
   } catch { /* never stops the other sweeps */ }
 }
