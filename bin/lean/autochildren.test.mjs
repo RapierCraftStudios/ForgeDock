@@ -110,7 +110,7 @@ appendFileSync(${JSON.stringify(launches)}, a[1] + "\\n"); writeFileSync(rf, JSO
     b.setParallel(2);
     const lists = [];
     const gh = async (a) => {
-      if (a[0] === "issue" && a[1] === "list" && a.includes("--help")) return "JSON FIELDS\\n  number, body, labels, parent, subIssues\\n\\nEXAMPLES\\n";
+      if (a[0] === "issue" && a[1] === "list" && a.includes("--help")) return "JSON FIELDS\n  number, body, labels, parent, subIssues\n\nEXAMPLES\n";
       if (a[0] === "issue" && a[1] === "list" && a.includes("--state") && a.includes("number,body,labels,parent,subIssues")) { lists.push(a); return JSON.stringify([{ number: 9, body: "", labels: [] }, { number: 51, body: "**Parent**: #9", labels: [] }]); }
       if (a.includes("milestone")) return JSON.stringify({ milestone: null });
       if (a[0] === "repo") return "main\n";
