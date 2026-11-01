@@ -141,7 +141,7 @@ export function parseContractComment(body) {
 
 /** Typed amendments, posted visibly before review. */
 export function renderAmendments(applied, filed = {}, state = null) {
-  const block = state ? `\n\n<!-- FORGE:AMENDMENT-STATE ${JSON.stringify(state).replace(/</g, "\\u003c").replace(/-->/g, "--\\u003e")} -->` : "";
+  const block = state ? `\n\n<!-- FORGE:AMENDMENT-STATE ${JSON.stringify(state).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->` : "";
   return `## Contract Amendments\n| Kind | Target | Why |\n| --- | --- | --- |\n${applied.map((a) => `| ${esc(a.kind)} | ${esc(a.target)}${filed[a.target] ? ` → ${filed[a.target]}` : ""} | ${esc(a.why)} |`).join("\n")}${block}`;
 }
 
