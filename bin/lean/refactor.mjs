@@ -18,6 +18,7 @@ import { extname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { groupingPrompt } from "./prompts.mjs";
+import { unstageToolState } from "./toolstate.mjs";
 
 export const SPLIT_LABEL = "refactor:split";
 export const DEFAULT_SPLIT_MAX_LINES = 4000;
@@ -246,7 +247,8 @@ export async function runSplitStep(ctx) {
   const tool = lang === "python" ? "libcst" : "ts-morph";
   try {
     await git(["add", "-A"]);
-    await git(["commit", "--no-verify", "-q", "-m", `refactor(split): move ${Object.keys(now).length} module(s) of ${target} into ${pkg}${ctx.issue ? ` (#${ctx.issue})` : ""}`]);
+    const staged = await unstageToolState(git); // #4880: never commit .forge-lean/ scratch
+    if (staged) await git(["commit", "--no-verify", "-q", "-m", `refactor(split): move ${Object.keys(now).length} module(s) of ${target} into ${pkg}${ctx.issue ? ` (#${ctx.issue})` : ""}`]);
   } catch (e) { return await refuse(OUTCOME_CODES.SPLIT_PLAN_INVALID, `committing the move failed: ${String(e?.message ?? e).slice(0, 300)}`); }
   // ---- 8. verify ----
   const vr = await sh("bash", [REFACTOR_VERIFY, "verify", "--baseline", baseline, "--base", ctx.base]);

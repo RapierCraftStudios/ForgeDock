@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { oldRanges, selectGuards, runGuards, commandFor, basePathOf, guardFailures, supersessionComment, supersededIds, loadGuards } from "./guardgate.mjs";
 import { applyAmendments, precheck } from "./conformance.mjs";
+import { builderImplementPrompt, conformanceResumePrompt } from "./prompts.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
@@ -168,4 +169,41 @@ test("guardFailures keeps only failing runs and loadGuards falls back to a stale
   const down = await loadGuards({ repo: "o/r", gh: async () => { throw new Error("offline"); }, root });
   assert.deepEqual(down, [{ issue: 3 }]);
   assert.deepEqual(await loadGuards({ repo: "o/none", gh: async () => "[]", root }), []);
+});
+
+test("guard_broken detail names the supersedes override and survives the resume prompt", async () => {
+  const { d, guard } = fixture();
+  put(d, "src/a.mjs", "export function price() {\n  return 3;\n}\n");
+  commit(d, "change");
+  const { r } = await gate(d, guard);
+  assert.match(r.failures[0].detail, /"kind":"supersedes","guard":"#7"/);
+  assert.match(r.failures[0].detail, /adding a code to an enum/);
+  assert.match(conformanceResumePrompt(r.failures), /"kind":"supersedes","guard":"#7"/);
+  assert.match(builderImplementPrompt("local"), /"kind":"supersedes","guard":"#N"/);
+});
+
+test("an additive enum change that updates its coverage test fails the guard without supersedes and passes with it", async () => {
+  const d = tmpDir("guardgate-enum-");
+  const cov = (codes) => `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { CODES } from "./codes.mjs";\ntest("every enum code has a declared coverage entry", () => assert.deepEqual(Object.values(CODES).sort(), ${JSON.stringify(codes)}));\n`;
+  sh(d, "init", "-q", "-b", "main");
+  put(d, "src/codes.mjs", "export const CODES = {\n  A: \"a\",\n};\n");
+  put(d, "src/codes.test.mjs", cov(["a"]));
+  sh(d, "add", "-A"); sh(d, "commit", "-qm", "fix: codes");
+  const sha = sh(d, "rev-parse", "HEAD").trim();
+  sh(d, "update-ref", "refs/remotes/origin/main", "HEAD");
+  sh(d, "checkout", "-qb", "lane");
+  put(d, "src/codes.mjs", "export const CODES = {\n  A: \"a\",\n  B: \"b\",\n};\n");
+  put(d, "src/codes.test.mjs", cov(["a", "b"]));
+  commit(d, "add code b");
+  const guard = { v: 1, issue: 5, pr: 6, merge_sha: sha, tests: [{ path: "src/codes.test.mjs", ids: [] }], hunks: [{ file: "src/codes.mjs", start: 2, end: 2, symbol: "CODES" }], why: "enum coverage" };
+  const { selected, r } = await gate(d, guard);
+  assert.equal(selected.length, 1);
+  assert.equal(r.failures.length, 1, JSON.stringify({ runs: r.runs, skipped: r.skipped }));
+  const contract = { requirements: [], deliverables: [{ id: "D1", path: "src/codes.mjs" }, { id: "D2", path: "src/codes.test.mjs" }], validate: [] };
+  const base = { result: {}, changedFiles: files(d), guardFailures: r.failures };
+  const without = precheck({ contract, ...base });
+  assert.deepEqual(without.failures.filter((f) => f.kind === "guard_broken").map((f) => f.guard), ["#5"]);
+  const a = applyAmendments(contract, [{ kind: "supersedes", guard: "#5", why: "new code added to the closed enum" }]);
+  const withIt = precheck({ contract: a.contract, ...base });
+  assert.deepEqual(withIt.failures.filter((f) => f.kind === "guard_broken"), []);
 });

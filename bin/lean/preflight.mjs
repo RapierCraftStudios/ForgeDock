@@ -131,6 +131,27 @@ export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIG
   return { probes: all.slice(0, cap), dropped: Math.max(0, all.length - cap) };
 }
 
+/**
+ * #4857: validate commands that touch a path under a configured forge.yaml `verification.test_runners` prefix
+ * ({"services/worker": "poetry -C services/worker run"}) without using that runner, one problem per validate id. Pure.
+ */
+export function testRunnerProblems(contract, runners) {
+  const entries = Object.entries(runners && typeof runners === "object" ? runners : {}).filter(([k, v]) => k && typeof v === "string" && v.trim());
+  const out = [];
+  for (const v of Array.isArray(contract?.validate) ? contract.validate : []) {
+    if (!v?.id || typeof v.command !== "string") continue;
+    const cmd = v.command.replace(/\s+/g, " ");
+    for (const [prefix, runner] of entries) {
+      const p = prefix.replace(/^\.?\/+|\/+$/g, "");
+      if (new RegExp(`(^|[\\s=:'"])(\\./)?${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`).test(cmd) && !cmd.includes(runner.trim().replace(/\s+/g, " "))) {
+        out.push(`${v.id}: touches ${p}/ but does not run through that path's configured test runner (forge.yaml verification.test_runners: \`${runner.trim()}\`); use it, with paths relative to its cwd`);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 const FIX_HOW = "run the check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts) or use a check that does not need it, never a global install";
 /** One contract problem per miss: names the validate ids and the tool (or path, or env var), and how to fix the plan (never a global install). */
 export function preflightProblems(misses) {

@@ -42,7 +42,7 @@ describe("explorer subagent config (#4391)", () => {
     const [plain, withAgents] = seen;
     assert.ok(!plain.includes("--agents"));
     const i = withAgents.indexOf("--agents");
-    assert.deepEqual(withAgents.slice(0, i), plain);
+    assert.deepEqual([...withAgents.slice(0, i), ...withAgents.slice(i + 2)], plain, "only the --agents pair is added");
     assert.deepEqual(JSON.parse(withAgents[i + 1]), agents);
   });
 

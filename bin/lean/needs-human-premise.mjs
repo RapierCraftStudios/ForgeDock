@@ -15,6 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { isTrustedIssueComment } from "./prefilter.mjs";
 
 export const PREMISE_MARKER = "FORGE:PREMISE";
 export const ASK_MARKER = "FORGE:ASK";
@@ -84,7 +85,7 @@ export const closedEdgeNote = (closed) => (closed?.length ? `Note: ${closed.map(
 export function normalizeAsk(text) {
   return String(text ?? "").toLowerCase().replace(/#\d+/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
 }
-export const askKey = (text) => createHash("sha1").update(normalizeAsk(text)).digest("hex").slice(0, 12);
+export const askKey = (text) => createHash("sha256").update(normalizeAsk(text)).digest("hex").slice(0, 12);
 
 const askComment = (key, ask, unblocks) => `<!-- ${ASK_MARKER} key=${key} -->\n## Owner ask\n${JSON.stringify({ ask: String(ask).slice(0, 500), unblocks })}`;
 const readAsk = (body) => { try { return JSON.parse(String(body).split("\n").slice(2).join("\n")); } catch { return null; } };
@@ -100,7 +101,7 @@ export async function registerAsk({ repo, io, issue, ask }) {
     const list = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "open", "--label", "needs-human", "--limit", "100", "--search", `"${ASK_MARKER} key=${key}" in:comments`, "--json", "number,comments"])));
     for (const i of Array.isArray(list) ? list : []) {
       if (i?.number === issue) continue;
-      const c = (i.comments ?? []).find((x) => String(x?.body ?? "").includes(`${ASK_MARKER} key=${key}`));
+      const c = (i.comments ?? []).find((x) => String(x?.body ?? "").includes(`${ASK_MARKER} key=${key}`) && isTrustedIssueComment(x)); // only trusted authors may register an ask
       if (!c) continue;
       const cur = readAsk(c.body) ?? { ask, unblocks: [i.number] };
       const unblocks = [...new Set([...(cur.unblocks ?? []), i.number, issue])].sort((a, b) => a - b);
@@ -120,8 +121,10 @@ export async function sweepPremises({ repo, io, now = Date.now(), dryRun = false
   let list = [];
   try { list = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "open", "--label", "needs-human", "--limit", "100", "--json", "number,comments"]))); } catch { return rows; }
   for (const i of (Array.isArray(list) ? list : []).sort((a, b) => a.number - b.number)) {
-    const c = [...(i.comments ?? [])].reverse().find((x) => String(x?.body ?? "").includes(`${PREMISE_MARKER} `));
-    if (!c) continue;
+    // Only the current block counts: the newest trusted FORGE:NEEDS_HUMAN comment, and only when it carries the premise. A
+    // later block without one (credentials, spend, ci.red) supersedes an older premise; an untrusted premise never counts.
+    const c = [...(i.comments ?? [])].reverse().find((x) => String(x?.body ?? "").includes("FORGE:NEEDS_HUMAN") && isTrustedIssueComment(x));
+    if (!c || !String(c.body).includes(`${PREMISE_MARKER} `)) continue;
     let row;
     try {
       const p = parsePredicate(String(c.body).replace(/<!--\s*FORGE:PREMISE\s+(.*?)\s*-->/s, "Premise: $1"));

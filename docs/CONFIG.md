@@ -58,6 +58,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`verification`](#verification-optional) | No | Health-check patterns |
 | [`execution`](#execution-optional) | No | `forgedock orchestrate`: run lanes in sandboxes instead of host processes (`mode: local\|remote\|hybrid`, `max_remote`) |
 | [`verify`](#verify-optional) | No | Core work-on: run lane verification on CI runners instead of the host (`mode: local\|ci\|hybrid`) |
+| [`selftest`](#selftest-optional) | No | `forgedock selftest --live`: the disposable sandbox repo and fixture language of the live contract harness |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 | [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
 
@@ -148,7 +149,7 @@ agents:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `default_model` | string | No | `"sonnet"` | Short alias — `"sonnet"`, `"opus"`, or `"haiku"` — the same values the Agent/Task tool's `model` parameter accepts. This is the only form that works for interactive command-spec sub-agent spawning. |
-| `subagent_model` | string | No | `default_model`, else `"sonnet"` | Short alias, same accepted values as `default_model`. Overrides the model used for child agents spawned internally by a top-level command (see above). Omit to inherit `default_model`. |
+| `subagent_model` | string | No | `default_model`, else `"sonnet"` | Short alias, same accepted values as `default_model`. Overrides the model used for child agents spawned internally by a top-level command (see above). Omit to inherit `default_model`. In engine lanes (core work-on), only this field is read, with no `default_model` fallback. When set, it is the default model of subagents that have no model of their own. When unset, the operator's own `CLAUDE_CODE_SUBAGENT_MODEL` (if any) stays in effect. In every lane session, ForgeDock-defined agents such as the explorer keep their own model: an ambient `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` in the operator's settings is turned off (#4843, #4849). **Upgrade note (1.38.1):** a `_FORCE=1` cap in your settings.json no longer applies to ForgeDock-defined agents in lanes. To pin model-less subagents, set this field. |
 
 **Resolution order** (highest precedence first):
 1. `--model <id>` — CLI flag, `npx forgedock run` only (headless; main agent only).
@@ -437,6 +438,7 @@ orchestration:
 | `max_concurrent` | integer | No | Max concurrent top-level `/work-on` dispatches. It does not bound cascade growth; under `policy: all` it raises drain and spawn throughput together. Default: 12. |
 | `breaker.errors` / `breaker.window_min` | integer | No | `forgedock orchestrate` circuit breaker (#4121): after `errors` engine-errors within `window_min` minutes the batch stops admitting lanes, lets running lanes finish, and keeps the rest pending for `--resume`. `errors: 0` turns it off. Default: 3 in 30 |
 | `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held, gh unavailable) before its row is final. `host.busy` and `sandbox.capacity` (sandbox pool full) deferrals are not capped. Default: 3 |
+| `blocked_label` | string | No | `forgedock orchestrate` (#4773): an open issue carrying this label is admitted to the batch but not dispatched; removing the label releases it on the next scheduler pass. A `Blocked by #N` / `Depends on #N` line in the body of a trusted author (OWNER, MEMBER, COLLABORATOR or a bot) is a DAG edge to #N, and `--add` prints the edges it created. Empty turns the label off. Default: `blocked` |
 | `global_parallel` | integer | No | `forgedock orchestrate` (#4191): host-wide cap on running lanes across every batch and repo on the host, enforced through the host lane registry (`~/.forge/sched/`, or `FORGEDOCK_SCHED_DIR`). A freed slot goes to the highest-priority queued issue (`priority:P<n>` / `P<n>` labels, unlabelled P2); within a priority, slots are shared across repos by weight (#4193: `forgedock sched weight <owner/repo> N`, `--clear` resets; default equal, FIFO inside a repo), and priority always dominates weights; running lanes are never preempted and `--parallel` K still bounds each batch. `forgedock sched cap N` overrides it live for the whole host (`--clear` reverts); `forgedock sched show` lists the weights, slots and the queue. Default: unset (no global cap) |
 | `recovery.max_attempts` | integer | No | `forgedock orchestrate` in-batch recovery (#4267): how many recovery lanes the batch launches per issue for a `needs-human` with a mechanical code (`ci.red`, `base.conflict`, `ci-pending` on a conflicting PR, `contract.invalid` after a mid-run issue edit, `builder.block_untyped`). A recovery lane (`run-issue --recover <code>`) removes `needs-human`, posts a `FORGE:DECISION`, resumes the open PR and re-queues the issue with its dependents. If it ends anything but `merged`, the issue is labelled `needs-human` again with a recovery-evidence `FORGE:NEEDS_HUMAN` comment. Human codes are never recovered. Flat form: `recovery_max_attempts`. Default: 1; `0` disables in-batch recovery (a mechanical `needs-human` is final, as before). |
 | `base_sync.enabled` | boolean | No | `forgedock orchestrate` parked-PR base sync (#4525): every 10 min while the batch runs, an open PR of a `needs-human` row is merged with its moved base in a throwaway worktree. A clean merge, or one whose only conflicts are hunks where both sides purely added lines in a `union_globs` file, is pushed as a plain merge commit (never forced). Any other conflict is aborted, the branch left alone, and its paths are posted once per base sha as a `FORGE:DECISION` on the issue. Sequence/`_journal.json` files are never resolved here. Flat form: `base_sync_enabled`. Default: `true`; `false` opts out. |
@@ -593,6 +595,8 @@ engine:
 
 | `path` | string | No | `core` (default), `full`, `lean` or `auto`. `core` is the lean work-on (`bin/lean/`): a planning call that writes a frozen contract, an implement call in the same session, one read-only conformance reviewer, GitHub as the register (see `conformance`). `lean` and `auto` are aliases of `core`; `full` runs the legacy multi-phase pipeline and is required for `--retry` and `--wait-lease`. The `--path` flag overrides. `lean_reviewer_model` sets the reviewer model (default `claude-sonnet-5-5`); the builder uses `--model` or the CLI default. `forgedock orchestrate <issues...> [--parallel K] [--lane L]` runs the core per issue (K default 3, lane default `staging`) and honours `**Depends on**` ordering among the given issues. A lane that reports an open dependency pulls it into the batch, unless that dependency is labelled `needs-human` or already ended `needs-human` in the batch: then the issue and its dependents end `skipped (dependency #N needs-human)` without a lane for it (forge#4387). |
 | `conformance` | string | No | Core work-on conformance gate. The builder first writes a contract (requirements quoted verbatim from the issue and maintainers' comments, deliverables, preserve constraints, validate commands), which the engine freezes and posts as `FORGE:CONTRACT`; changes go only through typed amendments (`FORGE:AMENDMENT`). A deterministic precheck (scope, validation, deferrals) and a row-based conformance review follow, and the engine computes the verdict. `shadow` (default): the verdict is posted in `FORGE:REVIEW` and logged (`CONFORMANCE_SHADOW` event) but only what the previous reviewer blocked on still blocks (a requirement found not implemented, a regression), plus the precheck's equivalent: any `conformance.unimplemented` precheck or amendment failure (a validate command that failed or has no recorded result, a deliver requirement the builder reported as not implemented, an invalid amendment; #4160). These block before any reviewer run. Scope creep and omissions are recorded only. A review still incomplete or inconsistent after one targeted re-ask (only the missing ids) ends `needs-human`, or with `review_incomplete: degraded` merges with a `review-degraded` PR label and a tracked follow-up. Accepted deferrals are filed and linked, as in enforce. `scripts/calibration.mjs --shadow` reports the per-repo shadow verdict mix and when to switch to enforce. `enforce`: every failure blocks (one same-session builder resume, then `needs-human` with a `conformance.*`/`review.*` code, see docs/OUTCOME-CODES.md); deferrals the reviewer accepts are filed in one batched follow-up issue (`scripts/file-deferred-followups.sh`) and linked in the PR body and a `FORGE:TRACKED` comment before merge. |
+| `conformance_kinds` | string | No | Per-check-kind gate modes. A flat list `"code=mode, code=mode"`, for example `"conformance.omission=enforce, conformance.guard_broken=shadow"`; mode is `enforce` (blocks) or `shadow` (recorded in `FORGE:REVIEW` and the run log, never blocks). A kind listed here follows its own mode in a shadow and in an enforce lane; every other kind follows `conformance`. A `review.risk_paths` hit still enforces the whole lane. Invalid entries are dropped; absent changes nothing. **Enforcement rule:** enforce a kind only when its measured false-block rate is ~0 over enough blocks; keep the rest in shadow. Measure with `node scripts/conformance-calibrate.mjs --labels docs/eval/conformance-labels-v1.json [--replay <corpus.json>]`, which scores labelled lane verdicts (and an optional replay corpus) and prints precision, recall and false-block rate (false blocks / blocks) per kind, plus the `conformance_kinds` value the data supports (default: at least 3 blocks and 0 false blocks; `--min-blocks`, `--max-false-rate`). A deliver requirement whose test deliverable no executed passing validate runs is listed as unverified with its id (decision line, `REQUIREMENT_UNVERIFIED` event; report only). With `conformance_kinds` set, the lane row carries the failure codes seen (`kinds`) and the batch report adds per-kind would-block shares. |
+| `conformance_mutation` | string | No | `off` (default) or `report` (#4913). `report` reruns each deliver requirement's executed evidence test with the diff's non-test files reverted to the merge base (`git apply -R`, restored from HEAD afterwards, even on error); a test that still passes is vacuous and raises `conformance.mutation_survived` (`REQUIREMENT_MUTATION_SURVIVED` event, decision line). The kind is shadow (recorded only) unless `conformance_kinds` sets `conformance.mutation_survived=enforce`. A dirty tree, failed revert, timeout (124) or missing runner skips the check, never fails it. Capped at 120 s per gate. Judge promotion with `node scripts/conformance-calibrate.mjs --labels <labels.json> --events <run-log>`: it prints the survived-mutation share and the false-survived rate (#4929). |
 | `cli_idle_minutes` | number | No | Core builder idle timeout (#4112): the builder CLI runs with `--output-format stream-json` and is killed (code `cli.idle`) when it shows no stream activity for this many minutes. The run log records the last tool call and the live child processes. Default 15. |
 | `cli_busy_minutes` | number | No | Extended idle window for a core builder (#4405). When the idle timeout is reached but the session has a live heavy step (a heavy-shim step, test runner, linter or type checker child) or a queued or running heavy-queue entry of its own processes, the kill waits until `cli_idle_minutes` + this many minutes of silence. The run log records `CLI_IDLE_EXTENDED` once per silent stretch, and a later `CLI_IDLE_KILL` carries `heavyQueue` ({queued, running}) and `extended: true`. A silent session with no such child is still killed at `cli_idle_minutes`. Default 45 (the heavy queue's 30-minute maximum wait plus the 15-minute idle default). |
 | `cli_max_minutes` | number | No | Absolute ceiling for a core builder session (code `cli.timeout`), replacing the fixed 60-minute kill. A session that keeps making progress is never idle-killed. Default 180. On either kill, uncommitted work is committed as `wip(forge): checkpoint after <reason>` and the lane branch is pushed (with the push retry), the builder retries once from the checkpoint, and a second kill ends `deferred`; a rerun resumes from the branch. |
@@ -623,6 +627,102 @@ engine:
 
 ---
 
+## `prod_watch` (OPTIONAL)
+
+Settings for `forgedock prod-watch` (see [PROD-WATCH.md](PROD-WATCH.md)): read-only production signal sources triaged, rate-limited and filed as issues.
+
+```yaml
+prod_watch:
+  poll_minutes: 10
+  deployed_probe: "curl -fsS https://example.com/health"
+  target_watch: prod
+  alert_channel: "notify-oncall"
+  governor:
+    max_issues_per_hour: 5
+    max_open_prod_issues: 20
+    max_cost_usd_per_round: 1
+  sources:
+    alerts: {kind: alertmanager, run: "curl -fsS http://alertmanager/api/v2/alerts"}
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `poll_minutes` | number | No | Minutes between rounds. Default 5. |
+| `sources` | map | Yes | `name: {kind, list, read, run, close, queries}` flow map per source (memo, alertmanager, sql, prometheus). Only `list`/`read`/`run` run in the loop. |
+| `deployed_probe` | command | No | Exits 0 when the fix is deployed; enables the verify step. |
+| `governor` | map | No | `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, `cost_per_issue_usd`. Missing = unlimited. With a cost cap set, an LLM call that reports no cost is charged `cost_per_issue_usd`, or the whole cap when that is unset. |
+| `target_watch` | string | No | An `issue_watch` watch name; filed issues get its first `labels` entry. Otherwise the value is the label. Default label `prod-watch`. |
+| `kill_switch` | path | No | While this file exists, rounds do nothing. Default `.forge/prod-watch.off`. Relative paths resolve under the working directory; absolute paths are used as given. |
+| `alert_channel` | command | No | Receives title and body on stdin for a P0 incident; nothing else pages. |
+
+**Commands that use this section**: `forgedock prod-watch`
+
+---
+
+## `selftest` (OPTIONAL)
+
+Settings for `forgedock selftest --live` (see [SELFTEST.md](SELFTEST.md)): a harness that drives the real `gh`, git and `orchestrate` against a disposable sandbox repo, and the `FORGE:SELFTEST` result the staging->main review requires.
+
+```yaml
+selftest:
+  sandbox_repo: acme/forgedock-sandbox   # disposable repo; the harness creates and closes issues, PRs and branches in it
+  fixture: node                          # node (default) | python
+  nightly_interval_hours: 24             # opt-in: schedd runs `selftest --live` this often (default off)
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `sandbox_repo` | string | No | `owner/repo` the live harness runs in. `--repo` overrides it; with neither the command stops. Never point it at a real project. Setting it also turns on the release gate: `forgedock review-staging` then requires a passing `FORGE:SELFTEST` marker for the release PR head; unset, the gate is skipped. |
+| `fixture` | string | No | Toolchain of the two trivial fixture issues: `node` (default) or `python`. `--lang` overrides it. |
+| `nightly_interval_hours` | number | No | Off when unset or 0. When positive, the schedd daemon (host, never GitHub Actions) starts a detached `selftest --live` against `sandbox_repo` once this many hours have passed since the last run of that repo. On failure, including a run that cannot start, it files or edits one issue naming the failed step, in the repo schedd resolves for its working directory. See [SELFTEST.md](SELFTEST.md#nightly-run). |
+
+**Commands that use this section**: `forgedock selftest`, `forgedock review-staging` (release gate, only when `sandbox_repo` is set)
+
+---
+
+## `issue_watch` (OPTIONAL)
+
+Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name. The release keys need `mode: release` and at least a `threshold` or `immediate`.
+
+```yaml
+issue_watch:
+  watches:
+    nomilestone:
+      milestone: none
+      exclude_labels: [epic, post-deploy]
+      include_followups: defer-only
+      mode: batch
+      parallel: 12
+    release-1-4:
+      version: "1.4"
+      max_issues: 300
+      until: 2026-11-15T00:00:00Z
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `milestone` | string | No | Milestone title or slug, or `none`. |
+| `labels`, `exclude_labels` | list | No | Labels that must / must not be present. |
+| `search` | string | No | `gh search` query. |
+| `title_regex` | string | No | Regex tested against the title. |
+| `since` | ISO time | No | Only issues created at or after it. |
+| `version` | `x.y` | No | Target version from the milestone title or a `version:x.y` label. |
+| `lane` | string | No | Pin the lane; never a default branch. Default: the issue's own lane. |
+| `max_issues` | integer | No | Total claims; at N the watch drains and exits. Default: none (forever). |
+| `max_inflight` | integer | No | Claims in flight at once. Default 4. |
+| `until` | ISO time | No | Stop claiming at this time, drain and exit. |
+| `mode` | string | No | `per-issue` (default), `batch` or `release` (pool, then cut themed releases). |
+| `parallel` | integer | No | K of the batch in `batch` mode. Default 4. |
+| `include_followups` | string | No | `none` (default) or `defer-only`. |
+| `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
+| `threshold` | map | release | `{ min_issues, min_score, max_age_days }`; any one fires a release. |
+| `immediate` | list | release | `label:<name>` or `priority:P0..P3` entries that cut a release now with only their theme. |
+| `max_release_issues` | integer | release | Cap on a release set, closure included. Default 40. |
+| `theme_map` | block | release | `<theme>: [label:<x>, scope:<x>, path:<glob>]` rules, one theme per line. |
+| `tracker` | issue number | release | Issue that gets the `FORGE:RELEASE_PLAN` comment. Default: the first issue of the release. |
+
+---
+
 ## `followups` (OPTIONAL)
 
 Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issue per class per parent: `engineering`, `post-deploy`, `external` and `ops`. Each carries the label `followup:<class>` (`external` also `external-prerequisite`, and states the parent it is a prerequisite of) and inherits the parent's milestone. A requirement may set an optional `class` in the contract; otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`.
@@ -631,6 +731,18 @@ Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issu
 followups:
   default_milestone: "Backlog"   # optional: milestone title used when the parent's milestone has shipped and no later one is open
 ```
+
+## `rollouts` (OPTIONAL)
+
+```yaml
+rollouts:
+  files: "config/rollouts.json,src/flags.py"   # comma-separated rollout registry / env flag list paths
+  dormant_days: 14                            # dormancy report threshold (default 14)
+```
+
+A diff that adds a key to one of these files with a default of `false`, `0`, `off` or `null` (#4769) must be covered by an activation row in the contract: a `defer` requirement with bucket `owner:promote:<flag>` (a trailing `*` matches a prefix) or a `deliver` row whose why names the flag. Without one conformance fails with `activation_missing`, and an acceptance criterion naming `shadow`, `cohort` or `treated` fails with `mode_unreachable`. Without `rollouts` nothing changes.
+
+A post-deploy check whose output has a line `BLOCKED: <flag> = off ...` is not a failure: it posts one `FORGE:ROLLOUT_ASK` owner ask per flag on the rollup and parks `awaiting-measurement`; the ask is posted again only when the output (the evidence) changes. `dormancyReport` (`bin/lean/activation.mjs`) lists introduced flags still `off` after `dormant_days`, with days dormant and the parent issue, through an injected read-only `flagState(flag)` hook; a `keep-off` decision for a flag (or `PREFIX*`) silences it.
 
 ## `post_deploy` (OPTIONAL)
 
@@ -743,6 +855,10 @@ stats:
 | `alerts.outcome_share_factor` | number | No | Alert when an outcome code other than `completed` has at least this factor of its share in the previous window. The code must be on at least 2 lanes, and the previous window must have at least `min_lanes` lanes. A code new in this window counts. Default 2. |
 
 Each alert line names the event, the rate, the sample size (`count/sample` lanes) and one example reason. When no alert fires, nothing is printed. The flat form `stats.alerts_<key>` also works and wins. `forgedock stats --no-local` skips the alerts.
+
+### Phase ledger (#4908)
+
+No configuration. Every lane records start and end of the engine phases it reaches, so a lane's wall time is attributed instead of guessed: `queue_wait`, `sandbox_start` (claim, worktree, toolchain), `deps_install`, `validate`, `plan`, `implement`, `precheck`, `review`, `ci_wait`, `base_sync`, `merge`, each with `model_ms` and `usd` where model calls ran in it. A lane's phases sum to its `wall_ms`; `queue_wait` precedes the lane clock and is added by the batch runner. The ledger is the `phases` object on each `log.jsonl` outcome row and on `RUN_TERMINAL`, and `phase_<id>_ms|_model_ms|_usd` fields in `FORGE:TELEMETRY`. The batch report prints a `phases` line (p50/p90 per phase, largest share of wall time, `n/a` without ledger data) and `forgedock stats` prints a `Lane wall time by phase` table. The efficiency lines also list merged issues with no acceptance probe declared (`unprobed merged issues`).
 
 ## `verify` (OPTIONAL)
 
@@ -897,10 +1013,12 @@ execution:
 | `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
 | `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
 | `fallback_local` | boolean | No | `true`: a remote-placed lane runs on the host while the provider reports no agent online (`GET {endpoint}/status -> {"online": N}`, the built-in router answers it with `online`, `total` and per-agent `ok`/`paused`), so a batch completes locally with every pool agent offline or asleep (forge#4547). Default `false`: such lanes defer (`sandbox.capacity`). A missing or failing `/status` is unknown and never triggers it. |
+| `warm_sandboxes` | integer | No | Warm sandboxes per repo the pool agent keeps ready (checkout at the base ref, dependency cache primed). When `N > 0` the launch spec carries `warm: N` and the lane first calls `POST {endpoint}/sandboxes/claim`; a ready warm sandbox takes the lane (refreshed to the lane's base ref with an incremental fetch before work starts), and when none is ready, the claim fails or the endpoint lacks the route the lane starts cold. Default `0` (off): no claim call and the launch spec is unchanged (forge#4912). |
 | `unreachable_window_min` | number | No | Remote providers: how long a lane keeps polling (with backoff, up to 30s) after the provider's transport fails (connection refused/reset, `fetch failed`, timeout, 502/503/504) before it ends `deferred` with `sandbox.unreachable` (forge#4672). Inside the window the lane never ends and the sandbox is never torn down; after it the sandbox is kept and adopted on the next attempt or `--resume`; the engine-error breaker does not count it. `adopt` applies the same window. Default: 5 |
 | `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
-| `host_capabilities` | list | No | Host-only capabilities the dispatching host has and a sandbox does not relay (forge#4542): names such as `sops`, `prod_monitor`, `ops_credentials`. A lane whose issue text names one (built-in signals: `.secrets/*.enc.yaml`, `sops`, `ssh *-monitor`, `obs-psql`, `credentials.yaml`; a declared name written out; `host_capability_patterns`) is placed `local` in `remote` and `hybrid` mode with the reason `host capability: <name>`, since remote providers (computeshare included) relay none of them. A remote lane that still blocks as `credentials` naming only a declared capability ends `env.capability_remote` (recoverable) and is rerun locally once. |
+| `host_capabilities` | list | No | Host-only capabilities the dispatching host has and a sandbox does not relay (forge#4542): names such as `sops`, `prod_monitor`, `ops_credentials`. A lane whose issue text names one (built-in signals: `.secrets/*.enc.yaml`, `sops`, `ssh *-monitor`, `obs-psql`, `credentials.yaml`; a declared name written out; `host_capability_patterns`) is placed `local` in `remote` and `hybrid` mode with the reason `host capability: <name>`, unless the provider relays it (`relay_commands`, forge#4778; otherwise remote providers relay none). A remote lane that still blocks as `credentials` naming only a declared capability ends `env.capability_remote` (recoverable) and is rerun locally once. |
 | `host_capability_patterns` | list | No | `name:regex` entries (case-insensitive) that also mean the lane needs capability `name`, e.g. `vault:vault\s+kv`. An invalid entry is ignored. |
+| `relay_commands` | list | No | Read-only capability relay (forge#4778): `capability:command` entries, e.g. `prod_monitor:obs-psql` or `prod_monitor:obs-*` (exact name, or a prefix glob with one trailing `*`; no `/`, whitespace or other glob characters). A `remote`/`pool` lane needing a listed capability is placed remote: the sandbox runs the command unchanged (a `cs-relay` shim), the request goes sandbox -> pool agent -> router queue, and the dispatching host picks it up on its status poll, gates it against this list and runs it with no shell, a 120 s timeout and a 1 MB output cap, redacting known secrets; a refused command gets rc 126 and the key never leaves the host. List only read-only wrappers, never `sops` or `ops_credentials`. The frozen contract's simple validate / repro_test commands that pass the gate are pre-fetched at dispatch and shipped with the lane (96 KB cap). An older router or agent without the relay makes `cs-relay` exit 125, the lane blocks as `credentials` and is recovered locally once, as before. |
 | `cost_per_minute` | number | No | USD per sandbox-minute, used when the provider reports no cost of its own (the `container` provider never does). Default `0`. |
 
 **Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
@@ -917,6 +1035,10 @@ execution:
 | `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
 
 **Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`), requeued after the provider's retry-in (else 60s) and not counted toward `orchestration.max_deferrals`, so a queue deeper than the pool waits instead of being skipped (forge#4528). A pool that serves `GET {endpoint}/status -> {"free": N}` (integer, optional) also caps remote admissions to N per sample, so the extra lanes queue inside the batch instead of bouncing on a 503 (forge#4540); a missing, failing or malformed `/status` is unknown and never blocks admission. See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+
+**Cold start** (forge#4909): the dependency cache (`FORGE_DEPCACHE_ROOT`, default `~/.forge/depcache`, keyed by lockfile hash) is hardlinked into lane worktrees; when it sits on another filesystem than the worktree (EXDEV) files are copied instead, so a second lane with the same lockfile hash still records `deps: hit` rather than reinstalling. A lane refused for capacity (`sandbox.capacity`) on a pool that serves `/status -> {"free": N}` is relaunched only once a slot is free, not on the retry-in timer; the wait is recorded as the lane's queue time (`waits.queue`).
+
+**Warm start** (forge#4912): with `warm_sandboxes: N > 0` the lane asks `POST {endpoint}/sandboxes/claim` (same body as the launch spec; `200`/`201` = claimed, `204`/`404`/`405` = none ready) before a cold `POST /sandboxes`. The built-in router forwards the claim to a pool agent holding a ready warm sandbox of the same repo and size; the agent (`GET /warm` lists them, `POST /warm` sets a repo's size, `POST /warm/claim`) starts `N` sandboxes per repo from the `warm` of the launch specs it sees, hands the lane over through a mode-0600 claim file, and refills the pool. The claimed sandbox runs `git fetch` for the lane's ref and resets to it, so installed dependencies stay. Warm sandboxes count against the agent's reservation, are renewed by the agent itself and replaced at the agent's max lifetime. Capped at 8 per repo.
 
 **Hybrid placement** (`mode: hybrid`, forge#4256, `bin/lean/execution.mjs` `placeLane`, no model call). Each lane is placed when it is admitted. The first matching rule wins:
 
@@ -1225,6 +1347,7 @@ verification:
 | `ci_local` | object | No | Local CI gate settings (see below) |
 | `commands.<lang>.<step>` | string | No | Toolchain commands (`format`, `lint`, `typecheck`, `test`, `build`) per language key (`python`, `typescript`, ...); see `forge.yaml.example`. An absent key logs `SKIPPED — not configured` |
 | `commands.typescript.lint` | string | No | TypeScript lint. Validate runs it like `typescript.typecheck` (bounded by `FORGEDOCK_VERIFICATION_TIMEOUT_SECONDS`, default 120 s; a failure blocks). The core engine reads it from the trusted `forge.yaml` (main checkout or base ref, never the PR's tree), and `bin/lean/checks.mjs` prints it in place of the discovered lint. Without it, a turbo lint is scoped to the changed packages (`--filter=[base]`), not their dependents. Prefer a changed-files, cached lint |
+| `commands.typescript.test_changed`, `commands.typescript.typecheck_changed`, `commands.python.test_changed` | string | No | Changed-file scoped steps for `/review-pr` Phase 2 (repos where the full typecheck or suite is too slow or heavy). They run in the per-PR worktree and read the PR's changed files that still exist from `$FORGE_CHANGED_FILES` (newline-separated environment variable; never spliced into the command string). Reported as Phase 2 evidence with `EXIT <lang>.<step>=<code>` like the full-repo steps; a non-zero `typecheck_changed` blocks, a failing `test_changed` follows the REAL/flaky rule of `test`. Examples: `vitest related $FORGE_CHANGED_FILES --run`; `pytest -q $(printf '%s\n' $FORGE_CHANGED_FILES \| grep 'test_.*\.py$')`. For `typecheck_changed`, filter the compiler output to the changed files so pre-existing errors elsewhere do not block. `forgedock init` suggests them when vitest or pytest is detected |
 | `consumer_sweep.mode` | string | No | `advisory` (default): the validate consumer sweep (`scripts/consumer-sweep.sh`, V4.6) records unaddressed referencing sites and never fails. `blocking`: unaddressed sites fail validate with `consumer_unaddressed`, build runs one repair round, and sites still unaddressed are recorded as `CONSUMERS: unresolved` and passed to review as known risk (never `needs-human`). Flip to `blocking` only after `bash scripts/consumer-sweep.sh --eval-history 20` shows a mean of at most 2 flagged sites per merge and none above 10 on your repo |
 | `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
 

@@ -7,9 +7,10 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
+import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
+import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
 
@@ -97,6 +98,20 @@ describe("schedd host scheduler (#4192)", () => {
     process.env.FORGEDOCK_BATCH_DIR = h.root;
     try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGEDOCK_BATCH_DIR; else process.env.FORGEDOCK_BATCH_DIR = prev; }
   };
+
+  it("writes a heartbeat that advances, reports lastTick in status and removes it on a clean close (#4780)", async () => {
+    const h = host();
+    try {
+      const child = await h.daemon();
+      await until(() => readHeartbeat(h.sched) !== null, 30000);
+      const first = readHeartbeat(h.sched);
+      assert.equal(first.pid, child.pid);
+      const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
+      assert.ok(Number.isFinite(st.lastTick) && st.lastTick >= first.ts);
+      child.kill("SIGTERM");
+      await until(() => readHeartbeat(h.sched) === null && !existsSync(scheddPaths(h.sched).lock), 30000);
+    } finally { await h.cleanup(); }
+  });
 
   it("one daemon hosts every batch: registry slots are the daemon's, its RSS stays ≤ 150 MB, set-parallel goes through it", async () => {
     const h = host();
@@ -514,6 +529,12 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(env, { NODE_OPTIONS: "x", ANTHROPIC_API_KEY: "daemon-key", PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
   });
 
+  it("#4787: a plan without the token resumes with the daemon's token; SECRET_ENV covers *_KEY", () => {
+    assert.ok(SECRET_ENV.test("AWS_ACCESS_KEY") && SECRET_ENV.test("COMPUTESHARE_TOKEN") && !SECRET_ENV.test("KEYBOARD"));
+    const env = mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok", PATH: "/d" }, { PATH: "/" });
+    assert.equal(env.COMPUTESHARE_TOKEN, "daemon-tok");
+  });
+
   it("#4734: the pin keeps non-secret provider selectors, drops secrets and session ids, and droppedEnv names what was left out", () => {
     const client = { PATH: "/", GH_TOKEN: "fresh", CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BASE_URL: "http://proxy", ANTHROPIC_MODEL: "m", ANTHROPIC_API_KEY: "k",
       FORGEDOCK_POOL_TOKEN: "p", CLAUDE_CONFIG_DIR: "/acct", CLAUDE_CODE_SESSION_ID: "s", CLAUDE_PID: "1" };
@@ -565,12 +586,14 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       for (const bad of ["msg-token", "sess", "CLAUDE_CODE_", session, wrapper]) assert.equal(raw.includes(bad), false, `${bad} not pinned`);
       await withRoot(h, async () => {
         await capture(() => orchestrateFromCli(["--set-env", id, "MY_VAR=1"], h.client));
-        await capture(() => orchestrateFromCli(["--set-env", id, "GH_TOKEN=abc"], h.client));
+        // A value no env var can hold by chance: "abc" matched GITHUB_SHA on a CI push run (8b70782b...068abc...).
+        const secret = "gh-token-value-never-pinned";
+        await assert.rejects(() => orchestrateFromCli(["--set-env", id, `GH_TOKEN=${secret}`], h.client), /never stored in batch state/); // #4787
         assert.equal(openBatch(h.root, id).readPlan().env.MY_VAR, "1");
         const { lines } = await capture(() => orchestrateFromCli(["--show-env", id], h.client));
-        assert.match(lines.join("\n"), /^GH_TOKEN=<redacted>$/m);
+        assert.equal(/GH_TOKEN/.test(lines.join("\n")), false);
         assert.match(lines.join("\n"), /^MY_VAR=1$/m);
-        assert.equal(lines.join("\n").includes("abc"), false);
+        assert.equal(lines.join("\n").includes(secret), false);
         await capture(() => orchestrateFromCli(["--unset-env", id, "MY_VAR"], h.client));
         assert.equal("MY_VAR" in openBatch(h.root, id).readPlan().env, false);
         await assert.rejects(() => orchestrateFromCli(["--set-env", id, "NOEQUALS"], h.client), /KEY=VAL/);
@@ -611,5 +634,20 @@ describe("schedd due timer (#4627)", () => {
   it("without a due callback there is no timer", async () => {
     const d = await boot({ dueMs: 10 });
     await d.close();
+  });
+});
+
+describe("#4762 win32 socket path", () => {
+  it("win32 derives a stable per-dir named pipe; other platforms keep the unix socket file", () => {
+    const a = scheddPaths("/tmp/a", "win32"), b = scheddPaths("/tmp/b", "win32");
+    assert.match(a.sock, /^\\\\\.\\pipe\\forgedock-schedd-[0-9a-f]{12}$/);
+    assert.equal(a.sock, scheddPaths("/tmp/a", "win32").sock);
+    assert.notEqual(a.sock, b.sock);
+    assert.equal(a.lock, scheddPaths("/tmp/a").lock);
+    for (const pl of ["linux", "darwin"]) assert.equal(scheddPaths("/tmp/a", pl).sock, join("/tmp/a", "schedd.sock"));
+  });
+  it("the spawn script is a filesystem path, not a URL pathname", () => {
+    assert.ok(existsSync(SCHEDD_SCRIPT), SCHEDD_SCRIPT);
+    assert.doesNotMatch(SCHEDD_SCRIPT, /^\/[A-Za-z]:/);
   });
 });

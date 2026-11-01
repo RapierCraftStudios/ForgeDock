@@ -20,7 +20,7 @@
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
  *   {op:"hold"|"release", id, issues} → {type:"ok", changed, hosted} (#4592): merges into / removes from the batch's `hold` file; a hosted
  *                                   runner admits no held issue from its next pass (running lanes are not stopped)
- *   {op:"status"}                 → {type:"status", pid, batches:[{id, running}]}
+ *   {op:"status"}                 → {type:"status", pid, lastTick, batches:[{id, running}]} (#4780: `lastTick` = epoch ms of the last heartbeat; see schedd-health.mjs)
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
  * report, so live lanes are re-adopted through the batch runner's `adopt`. It exits after `idleMs` with no batch and no client.
@@ -36,17 +36,22 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { createConnection, createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
-import { batchRoot, listBatches, openBatch } from "./batch.mjs";
+import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
+import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
 export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
-export function scheddPaths(dir = schedDir()) {
-  return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
+/** #4762: win32 `net` servers only accept named pipes, so the socket is a per-dir pipe there (it vanishes with its server). */
+export function scheddPaths(dir = schedDir(), platform = process.platform) {
+  const sock = platform === "win32" ? `\\\\.\\pipe\\forgedock-schedd-${createHash("sha1").update(resolve(dir)).digest("hex").slice(0, 12)}` : join(dir, "schedd.sock");
+  return { dir, sock, lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
 }
 
 // Env keys a batch keeps for its lanes (account selectors, tool paths); persisted in plan.json (#4691). Session-scoped
@@ -57,7 +62,6 @@ const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_.*|TMPDIR|CLAUDE_CONFIG_DIR|CLA
 const LEGACY_PIN = /^(CLAUDE_.*|ANTHROPIC_.*|GH_.*|GITHUB_.*|FORGEDOCK_.*)$/;
 const SESSION_SCOPED = /^(CLAUDE_PID|CLAUDE_CODE_(SESSION|MESSAGING|ENTRYPOINT|EXECPATH|SSE).*)$/;
 // A secret never rides the allowlist: it resolves at lane start (env, keychain) unless the operator names it as a passthrough.
-export const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY)/i;
 const SESSION_DIR = /(^|\/)(arg0|claude[^/]*)(\/|$)/;
 
 /** A forge.yaml glob (`*` within a segment, `**` across segments, `?`) as an anchored RegExp. */
@@ -126,7 +130,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -137,7 +141,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     log(`schedd: already running (pid ${owner})`);
     return { running: false, owner };
   }
-  rmSync(p.sock, { force: true });
+  if (process.platform !== "win32") rmSync(p.sock, { force: true });
 
   const hosted = new Map(); // batch id -> {id, dir, subs:Set<fn>}
   const conns = new Set();
@@ -146,6 +150,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   let closing = null, resolveClosed, keepSock = false;
   let lastActive = Date.now();
   const touch = () => { lastActive = Date.now(); };
+  let lastTick = Date.now();
 
   /** Run one batch here. Resolves with {id, dir} once the batch exists, rejects when it fails before that. */
   const host = ({ argv, cwd, env, keepBreaker = false }, first = null) => new Promise((resolve, reject) => {
@@ -172,7 +177,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   });
 
   const handle = async (req, send) => {
-    if (req.op === "status") return send({ type: "status", pid, batches: [...hosted.keys()].map((id) => ({ id, running: true })) }, true);
+    if (req.op === "status") return send({ type: "status", pid, lastTick, batches: [...hosted.keys()].map((id) => ({ id, running: true })) }, true);
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -261,12 +266,18 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   });
   await new Promise((res, rej) => { server.once("error", rej); server.listen(p.sock, () => { server.off("error", rej); res(); }); });
   log(`schedd: pid ${pid} listening on ${p.sock}`);
+  // #4780: a heartbeat from the event loop itself; a starved or wedged loop stops it and the watchdog restarts the daemon.
+  const beat = () => { lastTick = Date.now(); try { writeHeartbeat({ dir, pid, now: () => lastTick }); } catch { /* a full disk must not stop the daemon */ } };
+  beat();
+  const beatTimer = setInterval(beat, HEARTBEAT_MS);
+  beatTimer.unref?.();
 
   const closed = new Promise((r) => { resolveClosed = r; });
   const close = () => {
     if (closing) return closing;
     clearInterval(idleTimer);
     clearInterval(lockTimer);
+    clearInterval(beatTimer);
     if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
@@ -279,7 +290,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const serverClosed = keepSock ? Promise.resolve(server.unref()) : new Promise((r) => server.close(() => r()));
     closing = Promise.all([serverClosed, stopped]).then(() => {
       try { if (parseInt(readFileSync(p.lock, "utf8"), 10) === pid) rmSync(p.lock, { force: true }); } catch { /* gone */ }
-      if (!keepSock) rmSync(p.sock, { force: true });
+      if (!keepSock && process.platform !== "win32") rmSync(p.sock, { force: true });
+      if (!keepSock) clearHeartbeat(dir);
       resolveClosed();
     });
     return closing;
@@ -294,7 +306,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     let owner = NaN;
     try { owner = parseInt(readFileSync(p.lock, "utf8"), 10); } catch { /* gone */ }
     if (owner !== pid) { keepSock = true; log(`schedd: lost lock (owner ${Number.isInteger(owner) ? `pid ${owner}` : "none"}), exiting`); close(); }
-    else if (!existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
+    else if (process.platform !== "win32" && !existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
   }, lockCheckMs);
   lockTimer.unref?.();
   // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
@@ -305,6 +317,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
   }, dueMs) : null;
   dueTimer?.unref?.();
+
+  // #4866: lane preflight at daemon start: each failing check is logged once with its typed code (batches re-check on every admission pass).
+  // Not awaited: gh and pool pings are slow, and startup (resume, socket) must not wait on them.
+  if (preflight) Promise.resolve().then(preflight).then((fails) => { for (const f of fails ?? []) log(`schedd: ${f.code}: ${f.detail}`); }).catch(() => { /* advisory */ });
+
+  // #4787: plans written before secrets were dropped still hold token values; scrub them on start.
+  for (const id of listBatches(root)) { try { const n = openBatch(root, id).scrubPlan(); if (n.length) log(`schedd: scrubbed ${n.join(", ")} from batch ${id}`); } catch { /* advisory */ } }
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {
@@ -360,8 +379,10 @@ export async function connectDaemon({ dir = schedDir(), spawnDaemon = defaultSpa
   }
 }
 
+export const SCHEDD_SCRIPT = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
+
 /** `forgedock schedd` in its own session, output to `schedd.log`. */
-export function defaultSpawn({ dir = schedDir(), script = new URL("../forgedock.mjs", import.meta.url).pathname, env = process.env } = {}) {
+export function defaultSpawn({ dir = schedDir(), script = SCHEDD_SCRIPT, env = process.env } = {}) {
   mkdirSync(dir, { recursive: true });
   const out = openSync(scheddPaths(dir).log, "a");
   try {
@@ -399,4 +420,4 @@ export function request(sock, msg, onMsg = () => {}) {
   });
 }
 
-export const scheddExists = (dir = schedDir()) => existsSync(scheddPaths(dir).sock);
+export const scheddExists = (dir = schedDir()) => existsSync(process.platform === "win32" ? scheddPaths(dir).lock : scheddPaths(dir).sock);

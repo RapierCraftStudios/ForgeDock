@@ -20,7 +20,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync, appendFileSync, writeFileSync, chmodSync } from "node:fs";
 import { cpus, freemem } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeAtomic } from "./batch.mjs";
 import { schedDir, pidAlive, DEFAULT_PRIORITY } from "./sched.mjs";
@@ -308,6 +308,27 @@ export function sumWaits(text, waits = {}) {
     if (Number.isInteger(j?.queued)) queueMax = Math.max(queueMax, j.queued);
   }
   return { waits, queueMax };
+}
+
+/**
+ * Admission-time form of the guardChain loop (#4866): every PATH dir holding a pass-through wrapper for a heavy-shimmed tool
+ * with no real binary behind it (so the wrapper's own `command -v` lands back on the shim). Returns [{name, dir}].
+ */
+export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = head, skip = [] } = {}) {
+  const out = [];
+  const dirs = String(path ?? "").split(delimiter).filter(Boolean);
+  for (const name of names) {
+    const wrappers = [];
+    for (const d of dirs) {
+      if (skip.includes(d)) continue;
+      const f = find(name, d, []);
+      if (f && isPassThroughWrapper(read(f), name)) wrappers.push(d);
+    }
+    if (!wrappers.length) continue;
+    const real = find(name, path, [...skip, ...wrappers]);
+    if (!real) for (const dir of wrappers) out.push({ name, dir });
+  }
+  return out;
 }
 
 export const SHIM_LOOP_MAX = 4;

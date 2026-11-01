@@ -158,11 +158,14 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
   return { failures: guardFailures(runs), runs, skipped, ms: now() - t0 };
 }
 
+/** The only override of a guard_broken failure, named for the builder (#4883); leads the detail so the resume prompt's truncation keeps it. */
+const supersedesHint = (guard) => `If this change intentionally changes the guarded behaviour (e.g. adding a code to an enum an exhaustiveness test enumerates), add {"kind":"supersedes","guard":"${guard}","why":"..."} to the amendments in the result file; the reviewer judges it.`;
+
 /** conformance.guard_broken rows (one per failing guard test): the guard's issue, its one-line why, the failing test and its output tail. */
 export function guardFailures(runs) {
   return (runs ?? []).filter((r) => r.rc !== 0).map((r) => ({
     code: OUTCOME_CODES.CONFORMANCE_GUARD_BROKEN, kind: "guard_broken", guard: `#${r.issue}`, test: r.test,
-    detail: `guard #${r.issue} broken (${String(r.why ?? "").slice(0, 200)}): base test ${r.test} fails against your tree (\`${r.command}\`, exit ${r.rc}):\n${tailOf(r.output)}`,
+    detail: `${supersedesHint(`#${r.issue}`)} guard #${r.issue} broken (${String(r.why ?? "").slice(0, 200)}): base test ${r.test} fails against your tree (\`${r.command}\`, exit ${r.rc}):\n${tailOf(r.output)}`,
   }));
 }
 
