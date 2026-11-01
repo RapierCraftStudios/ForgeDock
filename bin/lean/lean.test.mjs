@@ -15,7 +15,10 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, FORGEDOCK_CLI } from "./prompts.mjs";
+// #4969: the implement prompt names the absolute install path (FORGEDOCK_CLI); budgets measure it as a fixed placeholder so they do not vary with the checkout path.
+const budgetTokens = (s, cli = FORGEDOCK_CLI) => approxTokens(String(s).replaceAll(cli, "<FORGEDOCK_CLI>"));
+const assertBudget = (label, text, max, cli) => assert.ok(budgetTokens(text, cli) <= max, `${label} is ${budgetTokens(text, cli)} of ${max} tokens`);
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -1792,7 +1795,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
     assert.ok(approxTokens(plan) <= 2150, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
+    assertBudget("implement prompt with hotspot rule", builderImplementPrompt() + hotspotBuildRule(facts([])), 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2225,10 +2228,20 @@ describe("comment templates", () => {
     assert.equal(w.comments.filter((c) => c.includes("FORGE:INVESTIGATION")).length, 1);
   });
 
+  it("prompt budget measure ignores the install path length", () => {
+    const impl = builderImplementPrompt();
+    assert.ok(impl.includes(FORGEDOCK_CLI));
+    const deepCli = "/" + "very-long-checkout-dir/".repeat(12) + "bin/forgedock.mjs", deep = impl.replaceAll(FORGEDOCK_CLI, deepCli);
+    assert.ok(deepCli.length >= 200 && approxTokens(deep) > approxTokens(impl));
+    assert.equal(budgetTokens(deep, deepCli), budgetTokens(impl));
+    assertBudget("implement prompt at a 280-char install path", deep, 1650, deepCli);
+    assert.throws(() => assertBudget("implement prompt", impl, 10), /implement prompt is \d+ of 10 tokens/);
+  });
+
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 2050, `plan prompt is ${approxTokens(plan)} tokens`); // 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
+    assertBudget("implement prompt", impl, 1650); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -6788,7 +6801,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2050);
+    assertBudget("implement prompt", builderImplementPrompt(), 1650); assertBudget("plan prompt", builderPlanPrompt(7), 2050);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
