@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
@@ -1146,5 +1147,23 @@ describe("batch plan secrets (#4787)", () => {
     const last = saves.at(-1);
     assert.equal(last.phase, undefined);
     assert.deepEqual(last.deps, { 1: [2], 2: [], 3: [1], 4: [], 5: [] });
+  });
+
+  it("5 issues with slow gh/git calls reach their first admitted lane in a fraction of the serial setup time (#4963)", async () => {
+    const LAT = 30; // ms per gh/git call, standing in for a loaded host
+    const wait = () => new Promise((r) => setTimeout(r, LAT));
+    const firstLane = async (setupConcurrency, cache) => {
+      const io = { gh: async (a) => { await wait(); return a[0] === "repo" ? "main\n" : JSON.stringify({ milestone: null }); }, git: async () => { await wait(); return "abc\trefs/heads/staging\n"; } };
+      const t0 = Date.now(); let first = null;
+      await orchestrate({ issues: [1, 2, 3, 4, 5], parallel: 5, setupConcurrency, trusted: () => true, now: () => Date.now(), sleep: async () => {}, pollMs: 1,
+        readBody: async () => { await wait(); return ""; },
+        resolveLane: (n) => resolveLane({ issue: n, repo: "o/r", io, cwd: "/r", ...(cache ? { cache: makeLaneCache(), milestone: null } : {}) }),
+        runOne: async () => { first ??= Date.now() - t0; return { terminalReason: "merged" }; } });
+      return first;
+    };
+    const serial = await firstLane(1, false), fast = await firstLane(6, true);
+    // Serial: 5 issues x 4 calls x LAT = 600 ms; bounded + shared lookups: about 3 rounds = 90 ms. The 2-minute target is a 5x cut or better here.
+    assert.ok(fast < serial / 3, `fast ${fast} ms vs serial ${serial} ms`);
+    assert.ok(fast < 10 * LAT, `first lane after ${fast} ms`);
   });
 });
