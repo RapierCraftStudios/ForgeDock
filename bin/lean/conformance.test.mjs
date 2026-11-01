@@ -77,9 +77,20 @@ describe("#4655 multi-requirement amendment references", () => {
       assert.deepEqual(a.applied.map((x) => x.target), ["R1", "R2"], requirement);
     }
   });
-  it("an unknown id inside a list is still a problem; scope-note stays an unknown kind", () => {
+  it("an unknown id inside a list is still a problem; a truly unknown kind lists the valid kinds", () => {
     assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
-    assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
+    assert.match(applyAmendments(C, [{ kind: "note-to-self", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'note-to-self'; valid kinds are/);
+  });
+  it("deferred/scope_deferral/scope-note amendment aliases normalise", () => {
+    for (const kind of ["deferred", "scope_deferral", "scope-deferral", "Deferral"]) {
+      const a = applyAmendments(C, [{ kind, requirement: "R1", why: "w" }]);
+      assert.deepEqual(a.problems, [], kind);
+      assert.equal(a.applied.length, 1, kind);
+    }
+    for (const kind of ["scope-note", "scope_note"]) {
+      const p = applyAmendments(C, [{ kind, why: "w" }]).problems[0];
+      assert.match(p, /amendment kind 'decision' needs decision/, kind);
+    }
   });
   it("supersede-guard guards[] expands to per-guard supersedes", () => {
     const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);

@@ -322,7 +322,7 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "scope-note": "decision" }; // #4856
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
 const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
@@ -331,6 +331,7 @@ function normalizeAmendment(a) {
   if (!a || typeof a !== "object" || Array.isArray(a)) return a;
   const n = { ...a };
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
+  if (typeof n.kind === "string") n.kind = n.kind.trim().toLowerCase().replace(/_/g, "-"); // #4856: scope_deferral, Scope-Note
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
