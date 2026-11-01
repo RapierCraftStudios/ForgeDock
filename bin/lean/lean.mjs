@@ -659,11 +659,12 @@ export async function runCore(o) {
       if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
       return true;
-    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead && !(e?.pushRejected || e?.transientExhausted) ? await rescuePush(reason) : false; } // a push that was itself rejected or kept failing already had its retries (#4114)
+    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead ? await rescuePush(reason, e?.pushRejected) : false; }
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
-  async function rescuePush(reason) {
-    for (const ref of [branch, `forge-salvage/${issue}-${laneHead.sha.slice(0, 10)}`]) {
+  async function rescuePush(reason, rejected) {
+    // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
+    for (const ref of [...(rejected ? [] : [branch]), `forge-salvage/${issue}-${laneHead.sha.slice(0, 10)}`]) {
       try {
         await git(["push", "origin", `${laneHead.sha}:refs/heads/${ref}`]);
         laneHead.pushedTo = ref;
@@ -1070,6 +1071,10 @@ export async function runCore(o) {
       const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
+      if (!prs.length && !remote) { // #4958: commits the exit rescue could only push to a salvage branch resume from there
+        const salv = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/forge-salvage/${issue}-*`], { cwd })).split("\n").map((l) => l.trim().split(/\s+/)[1]).filter(Boolean).sort().at(-1);
+        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
+      }
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
     // #4593: a shipped milestone lane (fully merged into staging) cannot take new work; follow the open PR's live base.
