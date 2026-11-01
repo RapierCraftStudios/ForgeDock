@@ -7060,8 +7060,8 @@ describe("mutation check (engine.conformance_mutation, #4913)", () => {
   it("report: a vacuous test is recorded (shadow kind), the lane still merges, the tree is restored", async () => {
     const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report" });
     assert.equal(r.terminalReason, "merged"); assert.equal(applied(w), 1);
-    const seq = w.calls.filter((c) => c[0] === "git" && (c[1] === "apply" || (c[1] === "checkout" && c[2] === "HEAD"))).map((c) => c[1]);
-    assert.deepEqual(seq, ["apply", "checkout"]);
+    const seq = w.calls.filter((c) => c[0] === "git" && (c[1] === "apply" || (c[1] === "reset" && c[3] === "--hard"))).map((c) => c[1]);
+    assert.deepEqual(seq, ["apply", "reset"]);
   });
   it("report with the kind set to enforce blocks on a survivor", async () => {
     const w = setup(0); const r = await run(w, { conformance: "enforce", conformanceMutation: "report", conformanceKinds: { "conformance.mutation_survived": "enforce" } });

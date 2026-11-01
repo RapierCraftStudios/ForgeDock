@@ -1092,7 +1092,7 @@ export async function runMutationCheck({ targets, files, base, git, runCommand, 
   if (!nonTest.length) return skip("no non-test file changed");
   if (String(await git(["status", "--porcelain"]).catch(() => "x")).trim()) return skip("working tree not clean");
   const patch = `${tmp}/mutation-${process.pid}.patch`;
-  let reverted = false;
+  let reverted = false, restoreFailed = "";
   try {
     fs.writeFileSync(patch, await git(["diff", "--binary", `${base}...HEAD`, "--", ...nonTest]));
     try { await git(["apply", "-R", "--whitespace=nowarn", patch]); reverted = true; } catch { return skip("could not revert the change"); }
@@ -1105,8 +1105,17 @@ export async function runMutationCheck({ targets, files, base, git, runCommand, 
       results.push({ id: t.id, command: c.command, status: rc === 124 || rc === 127 ? "skipped" : rc === 0 ? "survived" : "killed" });
     }
   } finally {
-    if (reverted) await git(["checkout", "HEAD", "--", ...nonTest]).catch(() => { /* best effort */ });
+    // Release review #4931: the tree was clean, so HEAD is the exact restore point. `checkout HEAD -- <files>` failed as a
+    // whole on a file the change deleted (the revert re-creates it untracked) and restored nothing; reset + clean of
+    // those paths does not, and a tree still dirty there afterwards throws (fail closed: never push the reverted change).
+    if (reverted) {
+      await git(["reset", "-q", "--hard", "HEAD"]).catch(() => {});
+      await git(["clean", "-fdq", "--", ...nonTest]).catch(() => {});
+      const left = await git(["status", "--porcelain", "--", ...nonTest]).catch(() => "unreadable");
+      if (String(left).trim()) restoreFailed = String(left).trim();
+    }
     try { fs.rmSync(patch, { force: true }); } catch { /* best effort */ }
   }
+  if (restoreFailed) throw new Error(`mutation check could not restore the worktree: ${restoreFailed}`);
   return { results, skipped: "", ms: now() - t0 };
 }

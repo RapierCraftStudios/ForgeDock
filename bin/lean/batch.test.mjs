@@ -754,7 +754,7 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "invalid"], [2, "merged"]]);
   });
 
-  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease or an open lane PR; an expired or unreadable one runs", async () => {
+  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease; an expired or unreadable one runs, and the issue's own open lane PR runs (#4931)", async () => {
     const mk = (issue, opts) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
       if (a[0] === "issue" && a[a.length - 1] === "body") { if (opts.body instanceof Error) throw opts.body; return opts.body ?? "{}"; }
       if (a[0] === "issue") return issue;
@@ -766,8 +766,9 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     const held = await mk(OPEN, { body: lease(Date.now() + 600000) })(9);
     assert.equal(held.outcome, "deferred"); assert.equal(held.code, "lease.held"); assert.match(held.detail, /leased by core_1 until \d{4}-/);
     assert.equal(await mk(OPEN, { body: lease(Date.now() - 1000) })(9), null, "expired lease: run");
-    const pr = await mk(OPEN, { open: '[{"number":4919}]' })(9);
-    assert.equal(pr.outcome, "deferred"); assert.match(pr.detail, /PR #4919 is open on feat\/issue-9-lean/);
+    // #4931: an open feat/issue-9-lean PR is this issue's own lane (ci.red / base.conflict recovery, a relaunch after
+    // engine-error or ci-pending resumes it), never another lane's: the lane runs
+    assert.equal(await mk(OPEN, { open: '[{"number":4919}]' })(9), null, "own open lane PR: run (resume it)");
     assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
     assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
   });

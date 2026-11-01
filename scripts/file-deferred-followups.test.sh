@@ -45,7 +45,8 @@ reset() { : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited" "$T"/issue.*.json "$T"/comme
   echo '[]' > "$T/milestones.json"; : > "$T/parent.milestone"
   echo '{"items":[]}' > "$SEARCH_JSON"; echo '[]' > "$COMMENTS_JSON"; }
 # issue_json NUMBER STATE ASSOCIATION [PARENT] [STATE_REASON]: REST view of a follow-up carrying the DEFERRED_FROM marker
-issue_json() { printf '{"number":%s,"state":"%s","author_association":"%s","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #%s -->"}\n' "$1" "$2" "$3" "${4:-10}" > "$T/issue.$1.json"; if [ -n "${5:-}" ]; then sed -i "s/\"state\":\"$2\"/\"state\":\"$2\",\"state_reason\":\"$5\"/" "$T/issue.$1.json"; fi; }
+# (no sed -i: BSD sed on macOS reads the script as the backup suffix, so state_reason was never written there)
+issue_json() { printf '{"number":%s,"state":"%s",%s"author_association":"%s","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #%s -->"}\n' "$1" "$2" "${5:+\"state_reason\":\"$5\",}" "$3" "${4:-10}" > "$T/issue.$1.json"; }
 # claim_json ASSOCIATION NUMBER...: parent comments carrying claim markers
 claim_json() { local a="$1" out="" n; shift; for n in "$@"; do out="${out:+$out,}{\"author_association\":\"$a\",\"user\":{\"type\":\"User\"},\"body\":\"<!-- FORGE:DEFERRED_ISSUE: #$n -->\"}"; done; echo "[$out]" > "$COMMENTS_JSON"; }
 printf 'a/x.sh\twhy a\t\nb/y.sh\twhy b\tknown-flaw\nc/z.sh\twhy c\t\n' > "$T/items.tsv"
