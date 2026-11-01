@@ -2271,3 +2271,8 @@ Cite: #4865, #4894.
 
 `launchNightly` (`selftest-nightly.mjs`) owns the detached spawn that `scheddDue` used to inline. It attaches an `'error'` listener before `unref()`. Without one, an async spawn failure (EAGAIN, EMFILE, a removed cwd) was an uncaught exception, and `schedd.mjs` stops the daemon on that. Now the failure costs only that night's run. The review-staging skip line now names a malformed `selftest.sandbox_repo` value instead of saying "not set". Found in the delta review of release PR #4946.
 Cite: #4894.
+
+## Entry 2026-11-01 — Auto-add of epic and late children to a running batch
+
+`autochildren.mjs` (pure, no LLM) backs `orchestration.auto_add_children: off | decomposed | epic | all` (default `decomposed`, today's behaviour) and `forgedock orchestrate --auto-children <mode> [--epic N]`. Both flags live in `plan.argv`, so `--resume` keeps the mode. In `epic`/`all`, `drainChildren` in `orchestrate.mjs` runs beside `drainAdds`, at most once per `auto_add_children_poll_s` (default 120) with one `gh issue list` per pass. It adds open children (`**Parent**: #P` line or GitHub sub-issues) of every batch issue and every `--epic` root, including ones filed after the batch started. `needs-human` children and issues another live batch of the repo holds are left out. Each pass posts one decision and one `added` row listing the children and edges. `off` also stops the decomposed-lane join; `decomposed` and `epic` keep it. `decomposed` makes no list call.
+Cite: #4965.
