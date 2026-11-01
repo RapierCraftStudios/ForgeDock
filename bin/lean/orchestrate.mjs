@@ -26,6 +26,9 @@
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
+ * `getChildren()` + `autoChildren {mode, pollS, epics}` (#4965, `orchestration.auto_add_children`): with mode `epic`|`all`, at most once per `pollS`
+ * it reads one `{list, elsewhere}` and adds the open children (`**Parent**: #P`, sub-issues) of every batch issue and `epics` through the same
+ * path as `getAdded` (one decision and one `added` row listing the edges); mode `off` also stops the decomposed-lane join.
  * `getAdded()` (#4408, `forgedock orchestrate --add`) is read on every pass too: issues it returns that are not in the batch
  * join it through `addIssues` (the still-pending issues' `Depends on` are re-read first, so edges hold both ways), with one
  * batch decision and one `added` row; while it is set, lanes running with an empty queue still wake every `pollMs`.
@@ -112,6 +115,7 @@ import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
 import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
+import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -249,7 +253,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
-  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
+  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
+  getChildren = null, autoChildren = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -656,7 +661,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         return;
       }
     }
-    if (row.outcome === "decomposed" && subs.length) {
+    if (row.outcome === "decomposed" && subs.length && joinsDecomposed(autoChildren?.mode ?? "decomposed")) {
       await addIssues(subs, { head: true, parent: n }); // #4409: on the batch's critical path by construction
       decided({ issue: n, what: `added sub-issues ${subs.map((d) => `#${d}`).join(", ")} to the batch; dependents wait on them`, why: "the builder decomposed the issue",
         alternative: "end the batch row decomposed and let dependents wait for a later batch" });
@@ -848,11 +853,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   // #4408: issues added to the running batch; returns how many joined. Re-reading the cumulative list is a no-op.
   const drainAdds = async () => {
-    if (!getAdded) return 0;
+    const kids = await drainChildren();
+    if (!getAdded) return kids;
     let got = [];
     try { got = getAdded() ?? []; } catch { got = []; }
     const fresh = [...new Set((Array.isArray(got) ? got : []).filter((n) => Number.isSafeInteger(n) && n > 0 && !set.has(n)))];
-    if (!fresh.length) return 0;
+    if (!fresh.length) return kids;
     // An edge an operator wrote into a pending issue after the batch started (it waits on an added issue) holds too.
     for (const n of pending) {
       let body;
@@ -865,6 +871,38 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const list = fresh.map((n) => `#${n}`).join(", ");
     decided({ issue: null, what: `added ${list} to the batch (forgedock orchestrate --add)`, why: "operator request", alternative: "start a second batch" });
     update({ issue: null, outcome: "added", detail: list });
+    return fresh.length + kids;
+  };
+  // #4965: epic and late children (`orchestration.auto_add_children` epic|all): at most one `getChildren()` list call per poll window.
+  let nextChildScan = 0, childScanFailed = false;
+  const drainChildren = async () => {
+    if (!getChildren || !addsEpicChildren(autoChildren?.mode)) return 0;
+    const t = now();
+    if (t < nextChildScan) return 0;
+    nextChildScan = t + Math.max(0, autoChildren.pollS ?? DEFAULT_POLL_S) * 1000;
+    let list, elsewhere;
+    try { ({ list, elsewhere } = await getChildren()); } catch (e) {
+      if (!childScanFailed) { childScanFailed = true; decided({ issue: null, what: `auto_add_children: child scan failed (${firstLine(e?.message ?? e)}); retried every ${autoChildren.pollS ?? DEFAULT_POLL_S}s`, why: "the open-issue list could not be read", alternative: "add the children by hand with forgedock orchestrate --add" }); }
+      return 0;
+    }
+    childScanFailed = false;
+    const fresh = selectChildren({ list, roots: [...set, ...(autoChildren.epics ?? [])], skip: [...set, ...(elsewhere ?? [])] })
+      .filter((n) => { try { return !(reg?.holder && reg.holder(entryOf(n)) != null); } catch { return true; } });
+    if (!fresh.length) return 0;
+    for (const n of pending) {
+      let body;
+      try { body = await readBody(n); } catch { continue; }
+      if (drift?.holds) bodies.set(n, body);
+      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...(await declared(n, body))])]);
+    }
+    await addIssues(fresh);
+    save();
+    const list2 = fresh.map((n) => `#${n}`).join(", ");
+    const created = fresh.flatMap((n) => edges(n).map((d) => ({ from: n, to: d })));
+    for (const n of pending) if (!fresh.includes(n)) for (const d of edges(n)) if (fresh.includes(d)) created.push({ from: n, to: d });
+    const detail = created.length ? `${list2}; edges ${edgeText(created)}` : list2;
+    decided({ issue: null, what: `added ${list2} to the batch (orchestration.auto_add_children: ${autoChildren.mode})${created.length ? `; edges ${edgeText(created)}` : ""}`, why: "open children of a batch issue or epic", alternative: "add them by hand with forgedock orchestrate --add" });
+    update({ issue: null, outcome: "added", detail });
     return fresh.length;
   };
   // #4550: `--requeue` entries (batch `requeue` file) not applied yet: a terminal issue and the dependents skipped behind it
@@ -1164,7 +1202,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
-      if ((getAdded || getRequeued) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
+      if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run

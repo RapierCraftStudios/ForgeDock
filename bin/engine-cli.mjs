@@ -32,6 +32,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -1231,8 +1232,8 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1745,6 +1746,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
+  const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
+  const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
+    epics: argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : [])) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
@@ -1862,7 +1867,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
-  let rows;
+  let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -1870,6 +1875,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(preflight ? { preflight } : {}),
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
+      autoChildren,
+      ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
@@ -2292,6 +2299,13 @@ export async function schedFromCli(argv, deps = {}) {
 
 /** #4773: is the author of a `viewIssue` record (author plus the REST association, #4859) trusted (the engine admission's `isTrustedActor`)? */
 const bodyTrusted = (v) => isTrustedActor({ association: v?.authorAssociation, type: v?.author?.is_bot ? "Bot" : "User", login: v?.author?.login });
+
+/** forge.yaml `orchestration.auto_add_children` (#4965; default `decomposed`) and `auto_add_children_poll_s` (default 120). */
+export function readAutoChildren(cwd = process.cwd()) {
+  let o = {};
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestration ?? {}; } catch { o = {}; }
+  return { mode: _autoChildren.parseAutoMode(o.auto_add_children), pollS: _autoChildren.parsePollS(o.auto_add_children_poll_s) };
+}
 
 /**
  * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),

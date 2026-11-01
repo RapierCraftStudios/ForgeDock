@@ -400,6 +400,12 @@ branches:
 #   # base from the issue's milestone.
 #   global_parallel: 12
 #
+#   # Children a running batch adds by itself (#4965): off | decomposed | epic | all. `epic` adds the open
+#   # children (`**Parent**: #P` or sub-issues) of every batch issue, also those filed later. Per batch:
+#   # forgedock orchestrate --auto-children <mode> [--epic N]. Default: decomposed.
+#   auto_add_children: decomposed
+#   auto_add_children_poll_s: 120
+#
 #   # Maximum number of /work-on sub-agents dispatched concurrently. Guards
 #   # against saturating the Anthropic API rate limit in one burst on a large
 #   # ready set. Default: 12.
