@@ -9,7 +9,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
-import { readHeavy, liveLaneCap } from "../engine-cli.mjs";
+import { readHeavy, readAdmission, liveLaneCap } from "../engine-cli.mjs";
 
 // Injected pids, clock and host: `live` is the set of pids the registry sees as alive; `mem` the MemAvailable in MB.
 const world = ({ mem = 12000, cores = 4, swapFree = 0 } = {}) => {
@@ -335,5 +335,15 @@ describe("validation steps and the local lane cap (#4777)", () => {
     assert.equal(cap(), 4); h.c = 2; assert.equal(cap(), 2);
     assert.equal(liveLaneCap(1, { cfg: {}, host: { cores: () => 8, memAvailableMb: () => 64000 } })(), 1);
     assert.equal(liveLaneCap(3, { cfg: { enabled: false }, host: { cores: () => 8, memAvailableMb: () => 64000 } })(), 3);
+  });
+
+  it("batch cap follows the repo forge.yaml lane_cpu_reservation / lane_mem_mb, not the process cwd (#4828)", () => {
+    const d = tmpDir("lane-cap-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_cpu_reservation: 4\n  lane_mem_mb: 4096\n");
+    const host = { cores: () => 16, memAvailableMb: () => 2048 + 3 * 4096 + 10 };
+    assert.equal(liveLaneCap(null, { cfg: readAdmission(d), host })(), 3, "memory binds at 4096 MB per lane");
+    assert.equal(liveLaneCap(null, { cfg: {}, host })(), 6, "defaults: 2048 MB per lane");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_cpu_reservation: 8\n");
+    assert.equal(liveLaneCap(null, { cfg: readAdmission(d), host: { cores: () => 16, memAvailableMb: () => 64000 } })(), 2);
   });
 });
