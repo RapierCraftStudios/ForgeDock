@@ -2271,3 +2271,8 @@ Cite: #4865, #4894.
 
 `launchNightly` (`selftest-nightly.mjs`) owns the detached spawn that `scheddDue` used to inline. It attaches an `'error'` listener before `unref()`. Without one, an async spawn failure (EAGAIN, EMFILE, a removed cwd) was an uncaught exception, and `schedd.mjs` stops the daemon on that. Now the failure costs only that night's run. The review-staging skip line now names a malformed `selftest.sandbox_repo` value instead of saying "not set". Found in the delta review of release PR #4946.
 Cite: #4894.
+
+## Entry 2026-11-01 — Staging pre-dispatch scales to ~300 PRs (#4960)
+
+`review-staging-pre.sh scope` reads each bundle PR in its own subshell (`scope_one_pr`), `FORGE_SCOPE_PARALLELISM` at a time (default 8), through `gh_retry`, and merges the per-PR result files in PR order. A read that still fails degrades that PR only: no commits are credited (they stay unreviewed, so review widens), it is listed in `scope.json` `degraded_prs`, and scope stays `scoped`. Global failures (git log/diff, missing `trusted-comments.sh`, empty PR list) still set `full`. Progress goes to stderr every 25 PRs and per phase; `review-prepare.sh` prints a line per phase (index, slices). Rationale: `devdocs/decisions/4960-review-staging-scope-degrade-per-pr.md`.
+Cite: #4960.
