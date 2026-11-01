@@ -14,7 +14,8 @@
 #           gh read blocks (TYPE=gate-read-failure, never waived by an override): no GATE_PASS without real reads (forge#4470).
 #   scope   0B.1: writes DIR/<N>_scope.env (printf %q, read by 7A), DIR/<N>_bundle-pr-files.txt and DIR/<N>_scope.json
 #           {scope_mode, reviewed_pr_count, reviewed_commits, unreviewed_commits, unreviewed_files, cross_pr_files,
-#           deploy_wiring_files}; prints the one-line SCOPE_MODE summary. Every failed read widens scope to full.
+#           deploy_wiring_files, degraded_prs}; prints the one-line SCOPE_MODE summary. Per-PR reads run FORGE_SCOPE_PARALLELISM (default 8) at a time
+#           and retry; a PR whose read still fails is degraded (its commits stay unreviewed) and the rest stay scoped. Global failures widen to full.
 # Exit: 2 on a usage error.
 #
 # The `# BEGIN <name>` ... `# END <name>` blocks below are byte-identical copies of the spec's blocks ({GH_REPO} -> $GH_REPO);
@@ -335,46 +336,82 @@ bundle_delta_credit() {
 bundle_pr_kind() { local k; k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
 # END bundle-pr-kind
 # BEGIN bundle-scope-loop
-_WHY=""
+_WHY=""; DEGRADED_PRS=""
+# scope_one_pr PR DIR: every read for one bundle PR, run in its own subshell. Writes DIR/status ("ok", "issue" or "degraded <why>") and, for ok,
+# DIR/pf (the "<pr> <file>" lines), DIR/reviewed (0|1), DIR/commits, DIR/merges. A failed read is retried (gh_retry) and then degrades THIS PR only:
+# it is credited no commits, so they stay UNREVIEWED and are reviewed (widening, never narrowing); it never changes the bundle's scope mode (#4960).
+scope_one_pr() {
+  pr="$1"; _D="$2"
+  _degrade() { printf 'degraded %s\n' "$1" > "$_D/status"; }
+  # A number 0A could not classify may be an issue (subjects cite issues): a confirmed issue is skipped (forge#4127).
+  _J=$(gh_retry gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state,baseRefName,labels 2>/dev/null) || {
+    if [ "$(bundle_pr_kind "$GH_REPO" "$pr")" = issue ]; then echo issue > "$_D/status"; else _degrade "gh pr view failed and #$pr is not a confirmed issue"; fi
+    return 0; }
+  _HEAD=$(printf '%s' "$_J" | jq -r '.headRefOid') || { _degrade "unreadable pr view output"; return 0; }
+  # a malformed head id would make the sha match accept any comment (fail open): this PR gets no credit
+  case "$_HEAD" in *[!0-9a-f]*|"") _degrade "malformed head id"; return 0 ;; esac
+  [ "${#_HEAD}" -eq 40 ] || [ "${#_HEAD}" -eq 64 ] || { _degrade "malformed head id"; return 0; }
+  _HEAD7=$(printf '%s' "$_HEAD" | cut -c1-7)
+  # Capture each gh read into a variable FIRST and test its own exit status: in a pipeline `||` only sees the last stage (no pipefail),
+  # so a failed gh read piped into another command would silently look like "no comments" / "no files".
+  _CM=$(gh_retry gh api --paginate "repos/$GH_REPO/issues/$pr/comments" 2>/dev/null) || { _degrade "comments read failed"; return 0; }
+  _FILES=$(gh_retry gh pr diff "$pr" -R $GH_REPO --name-only 2>/dev/null) || { _degrade "file list read failed"; return 0; }
+  # Reviewed = trusted FORGE:REVIEW_ROUTE (a real review mode) whose sha is the PR's FINAL head, plus at least one review-agent comment
+  # carrying the full-length `Reviewed-SHA: <head>` line and a findings block (same predicate as review-pr.md Phase 5; a 7-char substring or a comment with no findings block never counts), and no degraded/blocked review marker. A PR pushed to after its review has a stale sha: the exact-head gate gives it no credit, and only the delta branch below (shared resolver `scripts/review-delta.sh`) may credit the commits an earlier trusted complete panel covered or a trusted `FORGE:REVIEW-CARRIED` base sync carried; everything else stays UNREVIEWED.
+  _ROUTE=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW_ROUTE mode=(?!spec-evolution-blocked)[^ ]+ spec=review-pr.md sha=${_HEAD7} -->") || { _degrade "marker count failed"; return 0; }
+  _AGENT=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${_HEAD}(\\r?\\n|$)") || { _degrade "marker count failed"; return 0; }
+  _DEGRADED=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:(REVIEW_DEGRADED|REVIEW_BLOCKED)") || { _degrade "marker count failed"; return 0; }
+  case "$_ROUTE$_AGENT$_DEGRADED" in ''|*[!0-9]*) _degrade "malformed marker count"; return 0 ;; esac
+  _NC=$(printf '%s' "$_J" | jq '.commits|length') || { _degrade "unreadable commit list"; return 0; }
+  _ALLC=$(printf '%s' "$_J" | jq -r '[.commits[].oid, .mergeCommit.oid // empty] | join(" ")') || { _degrade "unreadable commit list"; return 0; }
+  _MERGEC=$(printf '%s' "$_J" | jq -r '.mergeCommit.oid // empty') || { _degrade "unreadable commit list"; return 0; }
+  _REV=0; _COMMITS=""; _MERGES=""
+  if [ "$_ROUTE" -ge 1 ] && [ "$_AGENT" -ge 1 ] && [ "$_DEGRADED" -eq 0 ] && [ "$_NC" -lt 100 ]; then
+    _REV=1; _COMMITS="$_ALLC"; _MERGES="$_MERGEC"
+  elif [ "$_DEGRADED" -eq 0 ] && [ "$_NC" -lt 100 ]; then
+    # Stale head: the exact-head gate failed, so ask the shared resolver how much of the PR an earlier trusted complete panel covered. Additive only: it can move commits out of UNREVIEWED, never into it.
+    bundle_delta_credit
+    if [ "$DELTA_FULL" -eq 1 ]; then _REV=1; _COMMITS="$_ALLC"; _MERGES="$_MERGEC"
+    elif [ -n "$DELTA_COMMITS" ]; then _COMMITS="$DELTA_COMMITS"   # the PR's merge commit is not credited: it contains the post-review commits
+    fi
+  fi
+  printf '%s\n' "$_REV" > "$_D/reviewed"; printf '%s' "$_COMMITS" > "$_D/commits"; printf '%s' "$_MERGES" > "$_D/merges"
+  printf '%s\n' "$_FILES" | sort -u | sed "s|^|$pr |" > "$_D/pf"
+  echo ok > "$_D/status"
+}
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "${GH_REPO:-}" ]; then
   SCOPE_MODE=scoped
-  for pr in $ALL_PR_NUMBERS; do
-    # A number 0A could not classify may be an issue (subjects cite issues): a confirmed issue is skipped, only a genuine read failure falls open (forge#4127).
-    _J=$(gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state,baseRefName,labels 2>/dev/null) || {
-      if [ "$(bundle_pr_kind "$GH_REPO" "$pr")" = issue ]; then echo "0B.1: #$pr is an issue, not a bundle PR: skipped"; continue; fi
-      _WHY="gh pr view failed and #$pr is not a confirmed issue"; SCOPE_MODE=full; break; }
-    _HEAD=$(printf '%s' "$_J" | jq -r '.headRefOid')
-    case "$_HEAD" in *[!0-9a-f]*|"") SCOPE_MODE=full; break ;; esac   # a malformed head id would make the sha match accept any comment (fail open): review everything
-    [ "${#_HEAD}" -eq 40 ] || [ "${#_HEAD}" -eq 64 ] || { SCOPE_MODE=full; break; }
-    _HEAD7=$(printf '%s' "$_HEAD" | cut -c1-7)
-    # Capture each gh read into a variable FIRST and test its own exit status: in a pipeline `||` only sees the last stage (no pipefail),
-    # so a failed gh read piped into another command would silently look like "no comments" / "no files".
-    _CM=$(gh api --paginate "repos/$GH_REPO/issues/$pr/comments" 2>/dev/null) || { SCOPE_MODE=full; break; }
-    _FILES=$(gh pr diff "$pr" -R $GH_REPO --name-only 2>/dev/null) || { SCOPE_MODE=full; break; }
-    # Reviewed = trusted FORGE:REVIEW_ROUTE (a real review mode) whose sha is the PR's FINAL head, plus at least one review-agent comment
-    # carrying the full-length `Reviewed-SHA: <head>` line and a findings block (same predicate as review-pr.md Phase 5; a 7-char substring or a comment with no findings block never counts), and no degraded/blocked review marker. A PR pushed to after its review has a stale sha: the exact-head gate gives it no credit, and only the delta branch below (shared resolver `scripts/review-delta.sh`) may credit the commits an earlier trusted complete panel covered or a trusted `FORGE:REVIEW-CARRIED` base sync carried; everything else stays UNREVIEWED.
-    _ROUTE=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW_ROUTE mode=(?!spec-evolution-blocked)[^ ]+ spec=review-pr.md sha=${_HEAD7} -->") || { SCOPE_MODE=full; break; }
-    _AGENT=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${_HEAD}(\\r?\\n|$)") || { SCOPE_MODE=full; break; }
-    _DEGRADED=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:(REVIEW_DEGRADED|REVIEW_BLOCKED)") || { SCOPE_MODE=full; break; }
-    case "$_ROUTE$_AGENT$_DEGRADED" in ''|*[!0-9]*) SCOPE_MODE=full; break ;; esac
-    if [ "$_ROUTE" -ge 1 ] && [ "$_AGENT" -ge 1 ] && [ "$_DEGRADED" -eq 0 ] && [ "$(printf '%s' "$_J" | jq '.commits|length')" -lt 100 ]; then
-      REVIEWED_PR_COUNT=$((REVIEWED_PR_COUNT+1))
-      REVIEWED_COMMITS="$REVIEWED_COMMITS $(printf '%s' "$_J" | jq -r '[.commits[].oid, .mergeCommit.oid // empty] | join(" ")')"
-      REVIEWED_MERGES="$REVIEWED_MERGES $(printf '%s' "$_J" | jq -r '.mergeCommit.oid // empty')"
-    elif [ "$_DEGRADED" -eq 0 ] && [ "$(printf '%s' "$_J" | jq '.commits|length')" -lt 100 ]; then
-      # Stale head: the exact-head gate failed, so ask the shared resolver how much of the PR an earlier trusted complete panel covered. Additive only: it can move commits out of UNREVIEWED, never into it.
-      bundle_delta_credit
-      if [ "$DELTA_FULL" -eq 1 ]; then
-        REVIEWED_PR_COUNT=$((REVIEWED_PR_COUNT+1))
-        REVIEWED_COMMITS="$REVIEWED_COMMITS $(printf '%s' "$_J" | jq -r '[.commits[].oid, .mergeCommit.oid // empty] | join(" ")')"
-        REVIEWED_MERGES="$REVIEWED_MERGES $(printf '%s' "$_J" | jq -r '.mergeCommit.oid // empty')"
-      elif [ -n "$DELTA_COMMITS" ]; then
-        REVIEWED_COMMITS="$REVIEWED_COMMITS$DELTA_COMMITS"   # the PR's merge commit is not credited: it contains the post-review commits
-      fi
-    fi
-    printf '%s\n' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"
-  done
-  [ "$SCOPE_MODE" = scoped ] || echo "SCOPE_MODE=full: scoping fell open at bundle PR #$pr (${_WHY:-a gh read or marker count failed or returned malformed data})"
+  _W=$(mktemp -d "$_SD/scope-work.XXXXXX") || { SCOPE_MODE=full; _WHY="cannot create a scratch dir under $_SD"; }
+  if [ "$SCOPE_MODE" = scoped ]; then
+    _P="${FORGE_SCOPE_PARALLELISM:-8}"; case "$_P" in ''|*[!0-9]*|0) _P=8 ;; esac
+    _TOT=$(echo $ALL_PR_NUMBERS | wc -w | tr -d ' '); _N=0; _ACTIVE=0; _NEXT=25
+    echo "0B.1: reading $_TOT bundle PR(s), $_P at a time" >&2
+    for pr in $ALL_PR_NUMBERS; do
+      mkdir -p "$_W/$pr"
+      ( scope_one_pr "$pr" "$_W/$pr" ) &
+      _ACTIVE=$((_ACTIVE+1)); _N=$((_N+1))
+      if [ "$_ACTIVE" -ge "$_P" ]; then wait; _ACTIVE=0; fi
+      if [ "$_N" -ge "$_NEXT" ]; then echo "0B.1: $_N/$_TOT PR(s) dispatched" >&2; _NEXT=$((_NEXT+25)); fi
+    done
+    wait
+    echo "0B.1: all $_TOT PR read(s) done; merging" >&2
+    for pr in $ALL_PR_NUMBERS; do
+      _S=$(cat "$_W/$pr/status" 2>/dev/null) || _S=""   # a subshell that died leaves no status: degrade this PR
+      case "$_S" in
+        ok)
+          REVIEWED_PR_COUNT=$((REVIEWED_PR_COUNT + $(cat "$_W/$pr/reviewed")))
+          REVIEWED_COMMITS="$REVIEWED_COMMITS $(cat "$_W/$pr/commits")"
+          REVIEWED_MERGES="$REVIEWED_MERGES $(cat "$_W/$pr/merges")"
+          cat "$_W/$pr/pf" >> "$_PF" ;;
+        issue) echo "0B.1: #$pr is an issue, not a bundle PR: skipped" ;;
+        *) _WHY="${_S#degraded }"; [ -n "$_S" ] || _WHY="scope read of #$pr produced no result"
+           DEGRADED_PRS="$DEGRADED_PRS $pr"
+           echo "0B.1: scope degraded for PR #$pr ($_WHY): its commits stay UNREVIEWED; scope stays scoped for the rest" ;;
+      esac
+    done
+    rm -rf "$_W"
+  fi
+  [ "$SCOPE_MODE" = scoped ] || echo "SCOPE_MODE=full: scoping fell open (${_WHY:-a scope read failed})"
 fi
 # END bundle-scope-loop
 if [ "$SCOPE_MODE" = "scoped" ]; then
@@ -415,7 +452,7 @@ _jw() { printf '%s\n' "${1:-}" | tr ' ' '\n' | sed '/^$/d' | jq -R . | jq -s .; 
 _jn() { printf '%s\n' "${1:-}" | sed '/^$/d' | jq -R . | jq -s .; }
 jq -n --arg mode "$SCOPE_MODE" --argjson n "${REVIEWED_PR_COUNT:-0}" \
   --argjson rc "$(_jw "$REVIEWED_COMMITS")" --argjson uc "$(_jw "$UNREVIEWED_COMMITS")" \
-  --argjson uf "$(_jn "${UNREVIEWED_FILES:-}")" --argjson cf "$(_jn "${CROSS_PR_FILES:-}")" --argjson dw "$(_jn "${DEPLOY_WIRING_FILES:-}")" \
-  '{scope_mode: $mode, reviewed_pr_count: $n, reviewed_commits: $rc, unreviewed_commits: $uc, unreviewed_files: $uf, cross_pr_files: $cf, deploy_wiring_files: $dw}' \
+  --argjson uf "$(_jn "${UNREVIEWED_FILES:-}")" --argjson cf "$(_jn "${CROSS_PR_FILES:-}")" --argjson dw "$(_jn "${DEPLOY_WIRING_FILES:-}")" --argjson dp "$(_jw "$DEGRADED_PRS" | jq -c "map(tonumber)")" \
+  '{scope_mode: $mode, reviewed_pr_count: $n, reviewed_commits: $rc, unreviewed_commits: $uc, unreviewed_files: $uf, cross_pr_files: $cf, deploy_wiring_files: $dw, degraded_prs: $dp}' \
   > "$_SD/${PR_NUMBER}_scope.json" || { echo "review-staging-pre: could not write ${PR_NUMBER}_scope.json" >&2; exit 1; }
 exit 0
