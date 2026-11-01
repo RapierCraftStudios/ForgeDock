@@ -2,7 +2,13 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
-## Unreleased: live selftest gates the staging->main release review
+## Unreleased: `forgedock selftest`, opt-in release gate and nightly run; gate-marker check ignored
+
+- **New command** `forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--pr N]`. It runs a live contract harness against a disposable sandbox repo, plus a static check of every `gh --json` field list. See [SELFTEST.md](SELFTEST.md).
+- **Opt-in nightly run:** `selftest.nightly_interval_hours` makes the schedd daemon start a detached live selftest on that schedule and file one issue on failure. Restart schedd after upgrading to pick it up.
+- **Gate-marker check ignored:** the `Check for FORGE gate markers` check is no longer read as a CI failure by `review-staging`, `/review-pr-staging` or `/deploy-pr`. It only echoes the latest gate marker, so after a GATE_FAILURE it blocked its own GATE_PASS (#4941).
+
+### Live selftest gates the staging->main release review (when a sandbox repo is set)
 
 When forge.yaml sets `selftest.sandbox_repo`, `forgedock review-staging` stops with `REVIEW_RESULT: status: BLOCKED` unless the staging->main PR carries a `FORGE:SELFTEST result=pass` comment for its current head commit (a missing, failing, malformed or stale marker refuses). Run `forgedock selftest --live --repo <owner/sandbox> --pr <N>` (sandbox repo or `selftest.sandbox_repo` in forge.yaml, see [CONFIG.md](CONFIG.md#selftest-optional)) after the last push to the release PR; it posts the marker. Without `selftest.sandbox_repo` the gate is skipped (the CLI prints `SELFTEST: skipped` on stderr), so repos without a sandbox are not blocked. Details: [SELFTEST.md](SELFTEST.md).
 

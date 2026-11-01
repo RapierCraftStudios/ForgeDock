@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { runSelftestLive, stripState, selftestFromCli, STEPS } from "./selftest-live.mjs";
 
 /** A fake sandbox world. `d` toggles a defect: add4859 (--add skips), wipe4860 (body wiped), double (resume relaunches), orderBA, noRemoteAuth. */
@@ -90,7 +93,7 @@ describe("selftest --live steps (#4865)", () => {
     assert.equal((await runSelftestLive({ repo: "o/r", lang: "ruby", io: {} })).step, "setup");
   });
   it("stripState drops only the annotation", () => assert.equal(stripState("hi\n<!-- FORGE:STATE\n{}\n-->"), "hi"));
-  it("has the seven ordered phases", () => assert.deepEqual(STEPS.map((s) => s.name), ["create", "add", "body", "resume", "merge", "remote"]));
+  it("has the six ordered phases (cleanup runs after them)", () => assert.deepEqual(STEPS.map((s) => s.name), ["create", "add", "body", "resume", "merge", "remote"]));
 });
 
 describe("selftestFromCli", () => {
@@ -112,5 +115,40 @@ describe("selftestFromCli", () => {
     assert.equal(r.ok, false); assert.equal(r.step, "add");
     assert.ok(out.some((l) => /FAILED at step add/.test(l)));
     assert.match(posted[0], /FORGE:SELFTEST result=fail sha=a{40} step=add/);
+  });
+  it("the PR head is read from the release repo before the run", async () => {
+    const { io } = world({}); const order = [];
+    const gh = io.gh;
+    io.gh = async (a) => {
+      if (a[0] === "pr" && a[1] === "view" && a.includes("headRefOid")) { order.push(`head ${a[a.indexOf("-R") + 1]}`); return "b".repeat(40); }
+      if (a[0] === "pr" && a[1] === "comment") { order.push("post"); return ""; }
+      if (a[1] === "--help" || a[2] === "--help") return "JSON FIELDS\n  body, number, title\n";
+      if (a[0] === "issue" && a[1] === "create" && !order.includes("run")) order.push("run");
+      return gh(a);
+    };
+    await selftestFromCli(["--live", "--repo", "o/sandbox", "--pr", "9", "--release-repo", "o/rel"], { cwd: "/nonexistent", print: () => {}, io, timing: { pollMs: 1 } });
+    assert.deepEqual(order.slice(0, 2), ["head o/rel", "run"]);
+  });
+  it("refuses the project repo or the release repo as the sandbox", async () => {
+    const cwd = tmpDir("st-"); writeFileSync(join(cwd, "forge.yaml"), "project:\n  owner: o\n  repo: R\n");
+    const io = { gh: async (a) => (a[1] === "--help" || a[2] === "--help" ? "JSON FIELDS\n  body\n" : "") };
+    await assert.rejects(selftestFromCli(["--live", "--repo", "o/r"], { cwd, print: () => {}, io }), /this project's repo/);
+    await assert.rejects(selftestFromCli(["--live", "--repo", "o/x", "--pr", "3", "--release-repo", "o/x"], { cwd: "/nonexistent", print: () => {}, io }), /release repo/);
+  });
+  it("a flag without a value throws instead of being skipped", async () => {
+    await assert.rejects(selftestFromCli(["--live", "--repo", "o/s", "--pr"], { cwd: "/nonexistent", print: () => {}, io: { gh: async () => "" } }), /--pr needs a value/);
+    await assert.rejects(selftestFromCli(["--live", "--repo", "--pr", "4"], { cwd: "/nonexistent", print: () => {}, io: { gh: async () => "" } }), /--repo needs a value/);
+  });
+  it("forge.yaml is read per section: another section's mode or sandbox_repo is not picked up", async () => {
+    const cwd = tmpDir("st-"); writeFileSync(join(cwd, "forge.yaml"), "selftest:\n  fixture: node\nother:\n  sandbox_repo: x/y\n");
+    await assert.rejects(selftestFromCli(["--live"], { cwd, print: () => {}, io: { gh: async () => "" } }), /no sandbox repo/);
+  });
+  it("--nightly-report files a failure that happens before the harness starts (no sandbox repo)", async () => {
+    const calls = [];
+    const gh = async (a) => { calls.push(a); if (a[1] === "list") return "[]"; if (a[1] === "create") return "https://github.com/o/r/issues/5\n"; return a[1] === "--help" || a[2] === "--help" ? "JSON FIELDS\n  body\n" : ""; };
+    const r = await selftestFromCli(["--live", "--nightly-report", "o/r"], { cwd: "/nonexistent", print: () => {}, io: { gh } });
+    assert.equal(r.ok, false); assert.equal(r.step, "config");
+    const create = calls.find((a) => a[0] === "issue" && a[1] === "create");
+    assert.ok(create && create.includes("o/r")); assert.match(create.join(" "), /step config/);
   });
 });

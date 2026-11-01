@@ -11,6 +11,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 import { staticCheck, formatStatic, realGh } from "./selftest-static.mjs";
 import { postMarker } from "./selftest-gate.mjs";
+import { reportNightly } from "./selftest-nightly.mjs";
+import { parseForgeYaml } from "../forge-utils.mjs";
 
 export class StepError extends Error {
   constructor(step, message) { super(message); this.step = step; }
@@ -188,33 +190,59 @@ export function realIo(env = process.env, { pool = false } = {}) {
   });
 }
 
-const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
+/** The value after flag `f`, or null when absent. A flag with no value (end of argv, or another `--flag` next) throws. */
+const flag = (argv, f) => {
+  const i = argv.indexOf(f);
+  if (i < 0) return null;
+  const v = argv[i + 1];
+  if (v == null || String(v).startsWith("--") || !String(v).trim()) throw new Error(`${f} needs a value`);
+  return v;
+};
+const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
+const repoOrNull = (v) => (REPO_RE.test(String(v ?? "").trim()) ? String(v).trim() : null);
 
 /** `forgedock selftest [--static] | --live --repo <o/sandbox> [--lang node|python] [--pr N]`; non-zero exit names the failed step. */
 export async function selftestFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env, print = deps.print ?? ((l) => console.log(l));
   const usage = "usage: forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--lang node|python] [--pr <staging->main PR>]  (sandbox repo from --repo or forge.yaml selftest.sandbox_repo)";
   if (!argv.includes("--live") && !argv.includes("--static")) throw new Error(usage);
+  const nightlyRepo = argv.includes("--nightly-report") ? flag(argv, "--nightly-report") : null;
+  if (nightlyRepo) {
+    // #4894: the detached nightly run. Any failure, including one before the harness starts (no sandbox repo), is filed.
+    const rest = argv.filter((a, i) => a !== "--nightly-report" && argv[i - 1] !== "--nightly-report");
+    const lines = [];
+    let r;
+    try { r = await selftestFromCli(rest, { ...deps, print: (l) => { lines.push(l); print(l); } }); } catch (e) { r = { ok: false, step: "config", message: String(e?.message ?? e) }; }
+    if (!r.ok) await reportNightly({ repo: nightlyRepo, io: { gh: async (a) => (deps.io?.gh ?? realGh)(a) }, result: { step: r.step, message: r.message ?? lines.filter((l) => /FAILED|FAIL/.test(l)).join("\n") } });
+    return r;
+  }
   const gh = deps.io?.gh ?? realGh;
   const st = staticCheck({ root: deps.binRoot ?? join(dirname(CLI)), io: { gh: (a) => gh(a) } });
   print(formatStatic(st));
   let exitCode = st.ok ? 0 : 1, step = st.ok ? null : "static";
   if (argv.includes("--live")) {
-    let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* none */ }
-    const repo = flag(argv, "--repo") ?? /^\s+sandbox_repo:\s*["']?([\w.-]+\/[\w.-]+)/m.exec(raw.split(/^selftest:/m)[1] ?? "")?.[1];
+    let cfg = {}; try { cfg = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {}; } catch { /* none */ }
+    const repo = repoOrNull(flag(argv, "--repo") ?? cfg.selftest?.sandbox_repo);
     if (!repo) throw new Error(`no sandbox repo: pass --repo owner/sandbox or set selftest.sandbox_repo in forge.yaml\n${usage}`);
-    const lang = flag(argv, "--lang") ?? /^\s+fixture:\s*(\w+)/m.exec(raw.split(/^selftest:/m)[1] ?? "")?.[1] ?? "node";
-    const io = deps.io ?? realIo(env, { pool: /^\s+mode:\s*(remote|hybrid)/m.test(raw.split(/^execution:/m)[1] ?? "") });
+    const project = cfg.project?.owner && cfg.project?.repo ? `${cfg.project.owner}/${cfg.project.repo}` : null;
+    if (project && project.toLowerCase() === repo.toLowerCase()) throw new Error(`refusing to run in ${repo}: it is this project's repo (forge.yaml project), and the harness creates, merges, closes and deletes there; use a disposable sandbox repo`);
+    const lang = flag(argv, "--lang") ?? cfg.selftest?.fixture ?? "node";
+    const io = deps.io ?? realIo(env, { pool: ["remote", "hybrid"].includes(String(cfg.execution?.mode ?? "")) });
+    // The marker binds the head that was tested: read it (from the release repo) before the run, never after.
+    const pr = flag(argv, "--pr");
+    let releaseRepo = null, head = null;
+    if (pr) {
+      releaseRepo = flag(argv, "--release-repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
+      if (releaseRepo.toLowerCase() === repo.toLowerCase()) throw new Error(`refusing to run in ${repo}: it is the release repo`);
+      head = String(await io.gh(["pr", "view", String(pr), "-R", releaseRepo, "--json", "headRefOid", "--jq", ".headRefOid"])).trim();
+    }
     const r = await runSelftestLive({ repo, lang, io, ...(deps.timing ?? {}) });
     for (const n of r.notes) print(n);
     for (const e of r.cleanupErrors) print(`cleanup: ${e}`);
     if (r.ok) print(`selftest --live: all steps passed on ${repo}`);
     else { print(`selftest --live FAILED at step ${r.step}: ${r.message}`); exitCode = 1; step = r.step; }
-    const pr = flag(argv, "--pr");
-    if (pr) {
-      const head = String(await io.gh(["pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid"])).trim();
-      await postMarker((a) => io.gh(a), flag(argv, "--release-repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner, pr, { result: exitCode === 0 ? "pass" : "fail", sha: head, step });
-    }
+    if (pr) await postMarker((a) => io.gh(a), releaseRepo, pr, { result: exitCode === 0 ? "pass" : "fail", sha: head, step });
+    if (!r.ok) return { ok: false, step, message: r.message };
   }
   return { ok: exitCode === 0, step };
 }

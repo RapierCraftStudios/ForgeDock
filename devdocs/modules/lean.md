@@ -2258,3 +2258,11 @@ Cite: #4934.
 
 `bin/review-staging.mjs` `readConfig` now returns `sandboxRepo` (forge.yaml `selftest.sandbox_repo`), and the #4865 `selftestGate` check runs only when it is set. Unset, nothing is read and the CLI prints `SELFTEST: skipped (...)` on stderr; stdout stays the manifest (and pure JSON under `--json`). Before this, every staging->main review blocked on a missing marker, even in repos with no sandbox, where the harness cannot run. Found reviewing release PR #4946.
 Cite: #4865.
+
+## Entry 2026-11-01 — Release-review fixes to the selftest modules (PR #4946)
+
+- **`selftest-gate.mjs`:** `readMarkerComments` keeps only `isTrustedComment` comments (`bin/engine/phases.mjs`), and `MARKER_RE` is anchored to the comment start, so a drive-by or quoted marker never opens the gate. A gh error throws, and `review-staging` stops BLOCKED with "could not read the FORGE:SELFTEST markers" instead of claiming there are none. `selftest.sandbox_repo` turns the gate on only when it matches `owner/repo`.
+- **`selftest-nightly.mjs`:** `nightlyDue({launch})` only decides that a run is due, then launches. `scheddDue` spawns a detached `forgedock selftest --live --nightly-report <repo>`, because the harness's `orchestrate --add` calls back into schedd: inline, that deadlocked the daemon (watchdog kill) and held the due pass for up to 45 min. `reportNightly` holds the issue filing. A throwing harness reports step `harness`, a run that cannot start reports step `config`, the last-run file is per repo, and `neutralize` escapes every `<` and `>` (CodeQL js/bad-tag-filter).
+- **`selftest-live.mjs`:** forge.yaml is read with `parseForgeYaml`, per section. Flags without a value throw. The sandbox may not be the project or release repo. The `--pr` head is read with `-R <release repo>` before the run.
+- **`.forge/post-deploy-checks.json`:** removed. Its two checks were contradictory (one needed a pass, the other a fail), and their timeout was clamped to 900 s.
+Cite: #4865, #4894.
