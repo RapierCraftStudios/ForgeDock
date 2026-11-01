@@ -3803,6 +3803,26 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  it("#4958 a failed exit push is rescued to the lane branch by sha and the branch and sha are reported", async () => {
+    const odd = "fatal: unexpected sandbox git failure";
+    const w = world({ pushErrors: [odd, odd] });
+    const r = await run(w);
+    assert.equal(w.pushes, 3, "PR push, failed exit checkpoint, rescue push");
+    const rescue = w.calls.filter((c) => c[0] === "git" && c[1] === "push").at(-1);
+    assert.match(rescue.join(" "), /origin [0-9a-z]+:refs\/heads\/feat\/issue-7-lean$/);
+    assert.equal(r.laneHead.pushedTo, "feat/issue-7-lean"); assert.ok(r.laneHead.sha);
+    assert.ok(w.telemetry.some((t) => t.lane_branch === "feat/issue-7-lean" && t.lane_sha === r.laneHead.sha));
+  });
+
+  it("#4958 a rejected push (retries already spent) is reported as not pushed, never as pushed", async () => {
+    const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
+    const w = world({ pushErrors: [msg, msg, msg] });
+    const r = await run(w);
+    assert.equal(w.pushes, 2, "no extra rescue push for a rejection");
+    assert.equal(r.laneHead.pushedTo, null);
+    assert.ok(traj(w).some((c) => /Lane commits NOT pushed/.test(c)));
+  });
+
   it("#4118 GitHub's transient '[remote rejected] ... (failed)' and pack write errors are retried, then merge", async () => {
     for (const msg of ["To github.com:o/r.git\n ! [remote rejected] feat/issue-7-lean -> feat/issue-7-lean (failed)",
       "remote: error: unable to write file ./objects/pack/pack-1.pack: No such file or directory\n ! [remote rejected] x -> x (failed)"]) {
