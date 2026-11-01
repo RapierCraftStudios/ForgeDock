@@ -68,6 +68,16 @@ export function writeAtomic(file, data, { private: priv = false } = {}) {
   renameSync(tmp, file);
 }
 
+/** Env names whose values never reach batch state (#4787): tokens, keys, secrets and passwords. */
+export const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|(^|_)KEY$)/i;
+
+/** @returns {{env: object, names: string[]}} `env` without secret-named keys, and the dropped names (never values). */
+export function scrubEnv(env) {
+  if (!env || typeof env !== "object") return { env, names: [] };
+  const names = Object.keys(env).filter((k) => SECRET_ENV.test(k)).sort();
+  return { env: names.length ? Object.fromEntries(Object.entries(env).filter(([k]) => !SECRET_ENV.test(k))) : env, names };
+}
+
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
 
 const readAdded = (file) => {
@@ -76,7 +86,7 @@ const readAdded = (file) => {
 };
 
 /** `outcome`s `--requeue` may move back to pending (#4550). */
-export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
+export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
 
@@ -109,7 +119,21 @@ export function openBatch(root, id) {
     id, dir,
     exists: () => existsSync(f("plan.json")),
     readPlan: () => readJson(f("plan.json")),
-    writePlan: (plan) => put(f("plan.json"), JSON.stringify(plan, null, 2) + "\n"),
+    /** Secret-named `plan.env` keys are never written: their names go to `envSecrets`, the value is re-read from the environment on resume (#4787). */
+    writePlan: (plan) => {
+      const { env, names } = scrubEnv(plan?.env);
+      const out = names.length ? { ...plan, env, envSecrets: [...new Set([...(plan.envSecrets ?? []), ...names])].sort() } : plan;
+      put(f("plan.json"), JSON.stringify(out, null, 2) + "\n");
+    },
+    /** Rewrite an existing plan.json that holds secret env values (or is not 0600) as private and scrubbed; @returns the scrubbed names. */
+    scrubPlan: () => {
+      const plan = readJson(f("plan.json"));
+      if (!plan) return [];
+      const { names } = scrubEnv(plan.env);
+      if (names.length) self.writePlan(plan);
+      else { try { chmodSync(f("plan.json"), 0o600); } catch { /* best effort */ } }
+      return names;
+    },
     store: {
       load: () => readJson(f("state.json")),
       save: (state) => put(f("state.json"), JSON.stringify(state) + "\n"),
@@ -134,8 +158,8 @@ export function openBatch(root, id) {
       for (const x of Array.isArray(list) ? list : []) {
         const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
         if (!Number.isSafeInteger(n) || n < 1) { skipped.push({ issue: x, reason: "not an integer" }); continue; }
-        // #4687: an issue skipped in the batch (a dependency ended) is re-queued, not refused; any other row is "already in batch"
-        if (have.has(n) && st.results?.[n]?.outcome === "skipped" && !requeued.includes(n) && self.requeue([n], { reason: "--add", by: "operator" }).requeued.length) { requeued.push(n); continue; }
+        // #4687/#4791: an issue skipped (a dependency ended) or lane-refused in the batch is re-queued, not refused; any other row is "already in batch"
+        if (have.has(n) && ["skipped", "lane-refused"].includes(st.results?.[n]?.outcome) && !requeued.includes(n) && self.requeue([n], { reason: "--add", by: "operator" }).requeued.length) { requeued.push(n); continue; }
         if (have.has(n)) { skipped.push({ issue: n, reason: "already in batch" }); continue; }
         have.add(n); added.push(n);
       }

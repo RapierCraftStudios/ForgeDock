@@ -27,6 +27,8 @@ cat > "$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 a="$*"
 case "$a" in
+  "issue view"*"body,comments,labels"*) n="${a#issue view }"; n="${n%% *}"; cat "$FIX/pipeline-$n" 2>/dev/null || echo false ;;
+  "pr view"*"closingIssuesReferences"*) [ -f "$FIX/closing-fail" ] && exit 1; cat "$FIX/closing" 2>/dev/null; exit 0 ;;
   "issue view"*"labels,comments"*) cat "$FIX/escalated" 2>/dev/null || echo false ;;
   "issue view"*"--json title"*) echo "finding title" ;;
   "issue edit"*) printf 'ISSUE_EDIT %s\n' "$a" >> "$FIX/edits.log"; exit 0 ;;
@@ -853,6 +855,36 @@ if grep -vE '^[[:space:]]*#' "$ROOT/scripts/review-finalize.sh" | grep -qE 'grep
 grep -qF '"\(.mergeable)|\(.mergeStateStatus)"' "$ROOT/scripts/review-finalize.sh" && ok || bad "pre-merge jq must interpolate mergeable|mergeStateStatus"
 /bin/bash -n "$ROOT/scripts/review-finalize.sh" && ok || bad "/bin/bash -n"
 
+
+# --- manual-pr mode (forge#4770): hand-built PR, trail preflight skipped, every other gate enforced ---
+mgm() { local r="$1"; shift; run "$r" merge-gate --manual-pr --verdict APPROVED --has-purpose-regression false --calibration-needs-human false --trust-needs-human false \
+        --base-conflict false --other-blocking false "$@"; }
+gate_reset; mkctx 1 FULL "" ""; echo 1 > "$FIX/trail-rc"; mgm "$GATE"
+rc_is "manual: merges without a trail" "$RC" 0; has "manual: merges" "MERGE_OUTCOME=merged"; merged "manual"
+posted_has "manual: skip recorded" "FORGE:PHASE_TRAIL_SKIPPED"; [ ! -f "$FIX/trail-args" ] && ok || bad "manual: verifier ran"
+gate_reset; mkctx 1 FULL "" ""; echo 1 > "$FIX/ci-rc"; printf 'CI_GATE: FAIL\n' > "$FIX/ci-out"; mgm "$GATE"
+rc_is "manual: CI red still blocks" "$RC" 3; has "manual: CI red" "ci gate not green"; not_merged "manual: CI red"
+gate_reset; mkctx 1 FULL "" ""; printf '<!-- FORGE:REVIEW_ROUTE mode=FULL sha=%s -->\n' "$(printf '%s' "$OTHER_SHA" | cut -c1-7)" > "$FIX/route-bodies"; mgm "$GATE"
+rc_is "manual: stale reviewed head blocks" "$RC" 3; has "manual: stale" "stale review"; not_merged "manual: stale"
+gate_reset; mkctx 1 FULL "" ""; echo "CONFLICTING|DIRTY" > "$FIX/premerge"; mgm "$GATE"
+rc_is "manual: conflicting blocks" "$RC" 3; not_merged "manual: conflicting"
+gate_reset; mkctx 1 FULL "" ""; mgm "$GATE" --verdict "CHANGES REQUESTED"
+rc_is "manual: CHANGES REQUESTED blocks" "$RC" 3; not_merged "manual: CHANGES REQUESTED"
+gate_reset; mkctx 1 FULL "" ""; echo true > "$FIX/pipeline-42"; mgm "$GATE" --issue 42
+rc_is "manual: pipeline --issue refused" "$RC" 3; has "manual: pipeline --issue" "manual-pr refused"; not_merged "manual: pipeline --issue"
+gate_reset; mkctx 1 FULL "" ""; echo true > "$FIX/pipeline-42"; mgm "$GATE" --issue 42 --owner-requested
+rc_is "manual: owner flag does not override a pipeline --issue" "$RC" 3; not_merged "manual: owner vs pipeline issue"
+gate_reset; mkctx 1 FULL "" ""; echo 55 > "$FIX/closing"; echo true > "$FIX/pipeline-55"; mgm "$GATE"
+rc_is "manual: closing a pipeline issue refused" "$RC" 3; has "manual: closing ref" "manual-pr refused"; not_merged "manual: closing ref"
+gate_reset; mkctx 1 FULL "" ""; echo 55 > "$FIX/closing"; echo true > "$FIX/pipeline-55"; mgm "$GATE" --owner-requested
+rc_is "manual: owner instruction allows a closing ref" "$RC" 0; merged "manual: owner instruction"
+gate_reset; mkctx 1 FULL "" ""; echo 55 > "$FIX/closing"; echo false > "$FIX/pipeline-55"; mgm "$GATE"
+rc_is "manual: closing a non-pipeline issue allowed" "$RC" 0; merged "manual: non-pipeline closing ref"
+gate_reset; mkctx 1 FULL "" ""; touch "$FIX/closing-fail"; mgm "$GATE"
+rc_is "manual: unreadable closing refs fail closed" "$RC" 3; not_merged "manual: closing unreadable"
+# without --manual-pr the trail gate is unchanged (exit 4) and no --issue still blocks
+gate_reset; echo 1 > "$FIX/trail-rc"; printf 'PHASE_TRAIL: INCOMPLETE\nMISSING: FORGE:QUALITY_GATE -> run quality-gate\n' > "$FIX/trail-out"; mg "$GATE" --issue 42
+rc_is "manual: absent flag keeps exit 4" "$RC" 4; has "manual: absent flag" "PHASE_TRAIL_FAILED"; not_merged "manual: absent flag"
 # --- merge-gate: happy path ---
 gate_reset; mg "$GATE"
 rc_is "merge: happy" "$RC" 0; has "merge: happy" "MERGE_OUTCOME=merged"; has "merge: happy" "MERGE_STATE=MERGED"

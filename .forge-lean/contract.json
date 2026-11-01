@@ -1,0 +1,122 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "A usage-limit deferral is a known-time wait. It should hold until the reset and not count toward `max_deferrals`, like `sandbox.capacity` after #4528.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "Any `deferred` result should be accepted by `--requeue`.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/orchestrate.mjs",
+   "change": "deferPolicy handles rate_limited before the maxDeferrals cap; no deferral increment when pol.hold; comments updated (already on branch)",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/batch.mjs",
+   "change": "REQUEUABLE accepts 'deferred' (already on branch)",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/batch.test.mjs",
+   "change": "Regression tests for uncapped rate_limited and requeuable deferred (already on branch)",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "commands/orchestrate.md",
+   "change": "Spec: usage limit never capped; --requeue accepts deferred (already on branch)",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add '## Entry 2026-10-30 — Fix: usage-limit deferrals never capped; deferred requeuable (#4784)' ending with 'Cite: #4784.' so scripts/check-devdocs-freshness.sh passes for bin/lean/* (the orchestrate dossier glob is commands/orchestrate* only)",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "devdocs/modules/orchestrate.md",
+   "change": "Existing #4784 entry stays",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "Other deferral codes (merge.transient, gh.unavailable, cli.idle, sandbox.start_failed, lease-held) still cap at maxDeferrals; bin/lean/orchestrate.mjs deferPolicy"
+  },
+  {
+   "id": "P2",
+   "what": "host.busy and sandbox.capacity stay uncapped with host:true (bin/lean/batch.test.mjs #4528 tests)"
+  },
+  {
+   "id": "P3",
+   "what": "Per-account holds still gate admission; requeue refusals for merged/unknown/not-in-batch issues unchanged (bin/lean/batch.mjs requeue)"
+  },
+  {
+   "id": "P4",
+   "what": "bin/lean/lean.test.mjs orchestrate spec assertions on commands/orchestrate.md still match"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/batch.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-name-pattern='orchestrate spec' bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "bash scripts/check-devdocs-freshness.sh origin/staging"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Keep rate_limited out of UNCAPPED_DEFERRALS (host:true, no hold) and special-case it before the cap in deferPolicy",
+   "justification": "bin/lean/orchestrate.mjs deferPolicy: UNCAPPED returns host:true, which would drop the per-account hold",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Add 'deferred' to REQUEUABLE instead of a separate list",
+   "justification": "bin/lean/batch.mjs:79, shared by requeue() and drainRequeues",
+   "source": "precedent"
+  },
+  {
+   "id": "K3",
+   "choice": "Put the dossier entry in devdocs/modules/lean.md",
+   "justification": "devdocs/index.yaml:129-131 maps bin/lean/* there; scripts/check-devdocs-freshness.sh (a) requires the matching dossier",
+   "source": "doc"
+  }
+ ]
+}

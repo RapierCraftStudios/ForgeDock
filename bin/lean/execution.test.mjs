@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -43,6 +43,10 @@ const NO_BUDGET = { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd
 const ledgerIn = (root, { pid = process.pid, host = HOST } = {}) => (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n, host, pid });
 
 describe("execution config (#4253)", () => {
+  it("warm_sandboxes: positive integer kept, default 0 omitted (#4912)", () => {
+    assert.equal(parseExecution({ mode: "remote", warm_sandboxes: "2" }).warmSandboxes, 2);
+    for (const v of [undefined, "0", "-1", "x", "1.5"]) assert.ok(!("warmSandboxes" in parseExecution({ mode: "remote", ...(v === undefined ? {} : { warm_sandboxes: v }) })));
+  });
   it("pool is a known sandbox provider (#4546)", () => {
     assert.ok(SANDBOX_PROVIDERS.includes("pool"));
     assert.equal(parseExecution({ mode: "hybrid", max_remote: "1", provider: "pool" }).provider, "pool");
@@ -127,6 +131,8 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
   it("unreachable: classifies transport errors and parses the window key", () => {
     for (const e of [new TypeError("fetch failed"), Object.assign(new Error("x"), { code: "ECONNRESET" }), Object.assign(new Error("x"), { status: 502 }), Object.assign(new Error("x"), { name: "AbortError" })]) assert.equal(isTransportError(e), true);
     for (const e of [new Error("boom"), Object.assign(new Error("HTTP 404"), { status: 404 })]) assert.equal(isTransportError(e), false);
+    for (const t of ["fatal: git clone timed out after 300s", "git clone failed: early EOF"]) assert.equal(isCloneFailure(t), true); // #4866
+    for (const t of ["clone of repo ok", "", null]) assert.equal(isCloneFailure(t), false);
     assert.equal(parseExecution({}).unreachableWindowMin, undefined); // providerLanes defaults it to 5 min
     assert.equal(parseExecution({ unreachable_window_min: "2" }).unreachableWindowMin, 2);
   });
@@ -746,6 +752,34 @@ describe("host capabilities in placement (#4542)", () => {
     assert.deepEqual(contractHostNeeds(c, caps), { caps: ["promtool"], ids: ["V2"] });
     assert.deepEqual(contractHostNeeds(c, null), { caps: [], ids: [] });
     assert.deepEqual(contractHostNeeds(null, caps), { caps: [], ids: [] });
+  });
+
+  it("#4776 placementText ignores quoted evidence in the body (AlterLab #37290-#37317 fixture)", () => {
+    const rows = JSON.parse(readFileSync(new URL("../tests/fixtures/alterlab-capability-bodies.json", import.meta.url), "utf8"));
+    assert.equal(rows.length, 6);
+    for (const r of rows) {
+      assert.deepEqual(detectNeeds(placementText({ body: r.body })), r.needs, `#${r.issue}: ${r.note}`);
+      if (!r.needs.length) assert.ok(detectNeeds(r.body).includes("prod_monitor"), `#${r.issue} pinned before #4776`);
+    }
+  });
+
+  it("#4776 placementText: fences, quotes, comments and evidence sections are dropped, prose and decisions stay", () => {
+    const body = "Intro.\n```sh\nssh ovh-monitor obs-psql\n```\n> ssh ovh-monitor\n<!-- FORGE:STATE\n{\"reason\":\"prod_monitor\"}\n-->\n## Logs\nobs-psql here\n### Sub\nobs-psql sub\n## Plan\nneeds sops access\n";
+    assert.deepEqual(detectNeeds(placementText({ body })), ["sops"]);
+    assert.deepEqual(detectNeeds(placementText({ body: "~~~\nobs-psql\n~~~\nrun `obs-psql`" })), []);
+    assert.deepEqual(detectNeeds(placementText({ body: "needs the prod monitor" })), ["prod_monitor"]);
+    assert.deepEqual(detectNeeds(placementText({ body: "x", comments: [{ body: "<!-- FORGE:DECISION -->\nuse `ssh ovh-monitor obs-psql`" }] })), ["prod_monitor"]);
+  });
+
+  it("#4776 repro_test commands count: placementText and contractHostNeeds", () => {
+    const exec = parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "promtool" });
+    const caps = { hostCapabilities: ["promtool"] };
+    const c = { validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } };
+    assert.deepEqual(contractHostNeeds(c, caps), { caps: ["promtool"], ids: ["repro_test"] });
+    assert.deepEqual(contractHostNeeds({ validate: [], repro_test: "none" }, caps), { caps: [], ids: [] });
+    const comment = "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } }, "abcdef123456");
+    const t = placementText({ body: "b", comments: [{ body: comment }] });
+    assert.deepEqual(detectNeeds(t, exec), ["promtool"]);
   });
 
   it("#4785 orchestrate: a remote lane that ends env.tool_missing is relaunched locally", async () => {

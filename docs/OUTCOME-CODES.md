@@ -77,6 +77,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `review.failed` | Core work-on: the fix/regression review failed twice (or could not resume the builder) | lean | Reviewer verdict FAIL |
 | `review.no_verdict` | Core work-on: the reviewer returned no parseable verdict twice | lean | Unparsable reviewer output |
 | `contract.invalid` | Core work-on: the builder's contract.json stayed invalid after one correction (missing requirement rows, a quote not verbatim from the issue, a defer without a why, no validate commands) | lean | `validateContract` problems after the correction resume |
+| `contract.invalid_command` | Core work-on (#4761): a frozen validate command was rejected by its runner's own CLI (vitest `Unknown option` for `-q`, jest `Unrecognized CLI Parameter`, pytest `unrecognized arguments`) after the engine's normalised rerun (vitest `-q` → `--reporter=dot`) did not clear it. A contract defect, not `conformance.unimplemented`: no builder resume. `validateContract` also rejects vitest `-q`/`--quiet` up front. Ends `needs-human`; recoverable and mechanical | lean | `gate()` rerun `{rc, output}` classified by `conformance.mjs` `cliUsageError` |
 | `review.incomplete` | Core work-on: the conformance review twice returned no complete rows (a generic PASS, a missing requirement/scope/preserve row, evidence in a file that does not exist); nothing merged | lean | `checkCompleteness` problems on both reviewer runs |
 | `review.inconsistent` | Core work-on: the reviewer twice said NONCONFORMING without any failing row; the reviewer is re-asked, the builder's resume is not spent | lean | Verdict/row mismatch on both reviewer runs |
 | `conformance.omission` | Core work-on: an issue requirement is missing from or narrowed by the frozen contract, after one builder resume | lean | Review `issue_coverage` row not `covered` |
@@ -106,7 +107,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 `forgedock orchestrate` recovers mechanical outcomes inside the batch:
 
 - **recoverable**:
-  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.capability_remote` or `budget.exceeded`;
+  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`, `contract.invalid_command` or `budget.exceeded`;
   - `contract.invalid` when the issue was edited mid-run (`issueEdited`);
   - `ci-pending` on a conflicting PR, recovered as `base.conflict`.
 

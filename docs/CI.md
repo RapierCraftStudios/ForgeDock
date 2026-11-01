@@ -49,7 +49,23 @@ In your repository: **Settings → Secrets and variables → Actions → Variabl
 
 **Why this is required**: The gate-marker-check workflow verifies that gate markers (`FORGE:GATE_PASS` / `FORGE:GATE_FAILURE`) were posted by a trusted author — not hand-typed by an external contributor. If this variable is unset or empty, the gate rejects every marker and blocks all staging→main PRs. The gate will fail immediately with setup instructions rather than waiting 30 minutes and producing a cryptic timeout error.
 
-**What logins to include**: Add the GitHub login of the bot or user account that runs Claude Code sessions (the account that posts `/review-pr-staging` output). For automated CI setups this is typically the bot account; for manual runs it is your personal GitHub login.
+**What logins to include**: Add the GitHub login of the bot or user account that runs Claude Code sessions (the account that posts `/review-pr-staging` output). For automated CI setups this is typically the bot account; for manual runs it is your personal GitHub login. List a GitHub App bot both as `name` and `name[bot]`: comments report the first and the comment event the second.
+
+### 1b. Require the `forge/deploy-gate` status on main
+
+The workflow reports its verdict as the `forge/deploy-gate` commit status on the PR head:
+
+| Newest counted trusted marker on the PR | `forge/deploy-gate` |
+|---|---|
+| `FORGE:GATE_PASS` (final staging-review verdict for the current head) | success |
+| `FORGE:GATE_FAILURE` (for the current head, or naming no head) | failure |
+| none | pending, at any age |
+
+A pass counts only when it is the review's final verdict (`FORGE:GATE_PASS:TYPE=staging-review`) and its `**Head**:` line is the PR's current head. The review's pre-dispatch gate posts an earlier, plain `GATE_PASS` before any reviewer has run, and that one does not count. A push to staging after the review leaves the status pending until a delta review passes the new head.
+
+A posted marker re-runs the check, so the status follows the review. The workflow's own job check is not the gate. It stays green while a review runs, so the staging review's CI read is not blocked by the gate it is about to satisfy.
+
+The status blocks nothing until main requires it. In **Settings → Rules → Rulesets** (or branch protection for `main`), add `forge/deploy-gate` as a required status check. GitHub then refuses to merge a staging→main PR that has no passing review on record, including a merge by hand.
 
 ### 2. Copy the workflow template
 
