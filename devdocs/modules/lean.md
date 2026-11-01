@@ -2253,3 +2253,8 @@ Cite: #4934.
 ## Entry 2026-11-01 — Nightly live selftest (#4894)
 
 `selftest-nightly.mjs` is an opt-in schedd hook: `scheddDue` (`bin/engine-cli.mjs`) calls `nightlyDue` on each due pass, best effort, so other sweeps never stop. Off unless `forge.yaml` `selftest.nightly_interval_hours` is positive; the last run time is cached in `selftest-nightly.json` under the sched dir and written before the run. A failed run files one issue naming the failed step, marked `<!-- FORGE:SELFTEST_NIGHTLY -->`; the next failure edits the open issue with that marker instead of creating another (same dedupe as prodwatch). Runs on the host only; never throws. Docs: `docs/SELFTEST.md`, `docs/CONFIG.md`.
+
+## Entry 2026-11-01 — Selftest release gate is opt-in on `selftest.sandbox_repo`
+
+`bin/review-staging.mjs` `readConfig` now returns `sandboxRepo` (forge.yaml `selftest.sandbox_repo`), and the #4865 `selftestGate` check runs only when it is set. Unset, nothing is read and the CLI prints `SELFTEST: skipped (...)` on stderr; stdout stays the manifest (and pure JSON under `--json`). Before this, every staging->main review blocked on a missing marker, even in repos with no sandbox, where the harness cannot run. Found reviewing release PR #4946.
+Cite: #4865.
