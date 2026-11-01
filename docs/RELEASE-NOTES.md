@@ -4,7 +4,7 @@ Operator-facing notes for behavior changes that need action or awareness. Newest
 
 ## Unreleased: live selftest gates the staging->main release review
 
-`forgedock review-staging` now stops with `REVIEW_RESULT: status: BLOCKED` unless the staging->main PR carries a `FORGE:SELFTEST result=pass` comment for its current head commit (a missing, failing, malformed or stale marker refuses). Run `forgedock selftest --live --repo <owner/sandbox> --pr <N>` (sandbox repo or `selftest.sandbox_repo` in forge.yaml, see [CONFIG.md](CONFIG.md#selftest-optional)) after the last push to the release PR; it posts the marker. Details: [SELFTEST.md](SELFTEST.md).
+When forge.yaml sets `selftest.sandbox_repo`, `forgedock review-staging` stops with `REVIEW_RESULT: status: BLOCKED` unless the staging->main PR carries a `FORGE:SELFTEST result=pass` comment for its current head commit (a missing, failing, malformed or stale marker refuses). Run `forgedock selftest --live --repo <owner/sandbox> --pr <N>` (sandbox repo or `selftest.sandbox_repo` in forge.yaml, see [CONFIG.md](CONFIG.md#selftest-optional)) after the last push to the release PR; it posts the marker. Without `selftest.sandbox_repo` the gate is skipped (the CLI prints `SELFTEST: skipped` on stderr), so repos without a sandbox are not blocked. Details: [SELFTEST.md](SELFTEST.md).
 
 ## v1.30.0: environment failures are recoverable, scoped pre-PR checks, decomposed parents can close
 

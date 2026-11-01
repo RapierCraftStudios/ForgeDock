@@ -27,7 +27,7 @@ The first failing step stops the run.
 
 ## Release gate
 
-With `--pr N`, the result is posted on the PR as `<!-- FORGE:SELFTEST result=pass|fail sha=<head> step=<failed step|none> -->`. `forgedock review-staging` reads the newest marker and refuses (`REVIEW_RESULT: status: BLOCKED`, nothing reviewed) unless it is a pass for the PR's current head. A push after the selftest makes the marker stale: re-run it.
+With `--pr N`, the result is posted on the PR as `<!-- FORGE:SELFTEST result=pass|fail sha=<head> step=<failed step|none> -->`. When forge.yaml sets `selftest.sandbox_repo`, `forgedock review-staging` reads the newest marker and refuses (`REVIEW_RESULT: status: BLOCKED`, nothing reviewed) unless it is a pass for the PR's current head. A push after the selftest makes the marker stale: re-run it. Without `selftest.sandbox_repo` the gate is skipped and the CLI prints `SELFTEST: skipped` on stderr.
 
 ## Nightly run
 

@@ -138,7 +138,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -224,9 +224,12 @@ async function main(argv, io) {
   const head = await headSha(io, c, pr);
   if (a.delta && a.delta === head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: --delta ${head} is the current head of PR #${pr}: nothing changed since that pass, nothing to review`]);
   const sha7 = head.slice(0, 7);
-  // #4865: the release needs a passing live selftest for exactly this head (fail closed)
-  const selftest = selftestGate(await readMarkerComments(io.gh, c.ghRepo, pr).catch(() => []), head);
-  if (!selftest.ok) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: ${selftest.reason}; nothing reviewed (fail closed)`]);
+  // #4865: with selftest.sandbox_repo set, the release needs a passing live selftest for exactly this head (fail closed).
+  // Without a sandbox repo there is nothing the harness can run against, so the gate is skipped and says so.
+  if (c.sandboxRepo) {
+    const selftest = selftestGate(await readMarkerComments(io.gh, c.ghRepo, pr).catch(() => []), head);
+    if (!selftest.ok) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: ${selftest.reason}; nothing reviewed (fail closed)`]);
+  } else io.err("SELFTEST: skipped (selftest.sandbox_repo not set in forge.yaml; the release does not require a FORGE:SELFTEST marker)");
   let priorRoutes = 0;
   try {
     const out = await io.gh(["api", "--paginate", `repos/${c.ghRepo}/issues/${pr}/comments`, "--jq", '[.[] | select(.body | test("FORGE:REVIEW_ROUTE"))] | length']);

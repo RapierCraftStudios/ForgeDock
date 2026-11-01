@@ -200,7 +200,15 @@ describe("review-staging flow", () => {
 });
 
 describe("review-staging release gate (#4865)", () => {
-  const run = async (o) => { const w = world(o); const r = await reviewStagingFromCli(["42"], w.io); return { w, r }; };
+  const SANDBOX = { "/repo/forge.yaml": "project:\n  owner: o\n  repo: r\nbranches:\n  default: main\n  staging: staging\nselftest:\n  sandbox_repo: o/sandbox\n" };
+  const run = async (o) => { const w = world({ ...o, files: { ...SANDBOX, ...(o.files ?? {}) } }); const r = await reviewStagingFromCli(["42"], w.io); return { w, r }; };
+  it("without selftest.sandbox_repo the gate is skipped: no marker needed, and the skip is printed", async () => {
+    const w = world({ selftest: "" });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
+    assert.ok(w.scripts.length > 0);
+    assert.match(w.err.join("\n"), /SELFTEST: skipped \(selftest\.sandbox_repo not set/);
+    assert.ok(!w.gh.some((a) => a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")), "marker not read");
+  });
   it("stops BLOCKED without a FORGE:SELFTEST marker and reviews nothing", async () => {
     const { w } = await run({ selftest: "" });
     assert.match([...w.out, ...w.err].join("\n"), /REVIEW_RESULT: status: BLOCKED, blocker: no FORGE:SELFTEST/);
