@@ -1001,7 +1001,7 @@ describe("readVerify guard_command (#4792)", () => {
     assert.deepEqual(v.guardCommand, { ".py": "scripts/pytest {path}", ".mjs": "node --test" });
     assert.equal(v.mode, "ci"); assert.equal(v.maxRounds, 1);
     writeFileSync(join(d, "forge.yaml"), "verify:\n  mode: ci\n");
-    assert.deepEqual(readVerify(d).guardCommand, {});
+    assert.equal(readVerify(d).guardCommand, undefined);
   });
 });
 
