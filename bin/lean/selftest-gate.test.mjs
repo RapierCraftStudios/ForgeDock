@@ -29,3 +29,9 @@ describe("FORGE:SELFTEST gate (#4865)", () => {
     assert.match(calls[1].at(-1), /FORGE:SELFTEST result=pass/);
   });
 });
+
+import { readFileSync } from "node:fs";
+it("post-deploy checks file defines the selftest checks the contract names (#4865)", () => {
+  const checks = JSON.parse(readFileSync(new URL("../../.forge/post-deploy-checks.json", import.meta.url), "utf8"));
+  for (const id of ["selftest-live-run", "selftest-live-defect-detect"]) assert.ok(checks[id]?.run, id);
+});
