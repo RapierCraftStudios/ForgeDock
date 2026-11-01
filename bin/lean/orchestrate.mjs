@@ -20,7 +20,7 @@
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and deferrals other than a busy resource (`host.busy`,
- * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788) stop after `maxDeferrals`.
+ * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, held by the account hold, #4957) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
@@ -118,7 +118,7 @@ const SATISFIED = new Set(["merged", "invalid"]);
 const WATCH_EVERY_MS = 60_000; // #4595
 // Times one issue may be requeued behind a dependency before its dependency-open row is final.
 export const MAX_REQUEUES = 2;
-// Deferrals other than a busy resource (UNCAPPED_DEFERRALS) one issue may take before its deferred row is final.
+// Deferrals other than a busy resource (UNCAPPED_DEFERRALS) or a usage limit (`rate_limited`, #4957) one issue may take before its deferred row is final.
 export const DEFAULT_MAX_DEFERRALS = 3;
 // Relaunches of an issue whose lane ended engine-error.
 export const ENGINE_ERROR_RELAUNCHES = 1;
@@ -182,12 +182,14 @@ const posNum = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 
 export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_DEFERRALS }) {
   const code = r?.code ?? null;
   if (UNCAPPED_DEFERRALS.has(code)) return { delayMs: (posNum(r?.retryInSeconds) ?? HOST_BUSY_RETRY_S) * 1000, host: true };
-  const k = deferrals + 1;
-  if (k > maxDeferrals) return { capped: true };
+  // #4957: a usage limit is a known-time wait gated by the account hold, never capped: a capped row would end `deferred`
+  // and skip its dependents for good.
   if (code === "rate_limited") {
     const at = posNum(r?.resetAtEpochMs) && r.resetAtEpochMs > now ? r.resetAtEpochMs : now + (posNum(r?.retryInSeconds) ?? RATE_LIMIT_FALLBACK_S) * 1000;
     return { delayMs: at - now, hold: true };
   }
+  const k = deferrals + 1;
+  if (k > maxDeferrals) return { capped: true };
   if (posNum(r?.retryInSeconds)) return { delayMs: r.retryInSeconds * 1000 };
   // lease-held: "leased by X until <ISO>"
   const until = /\buntil (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(String(r?.detail ?? ""))?.[1];
@@ -632,7 +634,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
       }
       if (!pol.capped) {
-        if (!pol.host) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
+        if (!pol.host && !pol.hold) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
         // A usage limit is held per account; the hold, not a per-issue delay, gates the retry, so a lane on another
         // account runs it at once. If the hold cannot be recorded, the reset delay applies to this issue instead.
         let delayMs = pol.delayMs;

@@ -71,22 +71,38 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     const { now, sleep } = fakeClock();
     const seq = [
       { code: "host.busy", retryInSeconds: 60 },
-      { code: "rate_limited", resetAtEpochMs: null, retryInSeconds: 600 },
       { code: "merge.transient" },
       { code: "push.transient" },
       { code: "cli.idle" },
+      { code: "lease-held" },
     ];
     const starts = [];
     const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
       runOne: async () => { starts.push(now()); const d = seq.shift(); return { terminalReason: "deferred", detail: d.code, ...d }; } });
     const gaps = starts.slice(1).map((t, i) => (t - starts[i]) / 1000);
-    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
+    assert.deepEqual(gaps, [60, DEFER_BACKOFF_S, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
     assert.equal(rows[0].outcome, "deferred");
     assert.match(rows[0].detail, /gave up after 3 deferrals/);
     // the usage-limit reset time and a lease expiry are honoured
     assert.deepEqual(deferPolicy({ code: "rate_limited", resetAtEpochMs: 5000 }, { now: 1000 }), { delayMs: 4000, hold: true });
     assert.equal(deferPolicy({ code: "lease-held", detail: "leased by x until 1970-01-01T00:01:40.000Z" }, { now: 0 }).delayMs, 105000);
     assert.deepEqual(deferPolicy({ code: "host.busy" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
+  });
+
+  it("#4957: a blocker deferred on a usage limit past maxDeferrals keeps its dependents pending; the chain runs in order after the hold", async () => {
+    const { c, now, sleep } = fakeClock();
+    const bodies = { 1: "", 2: "Depends on #1", 3: "Depends on #2" };
+    const starts = [];
+    let limited = 0;
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, readBody: async (n) => bodies[n], now, sleep, maxDeferrals: 3,
+      runOne: async (n) => {
+        starts.push(n);
+        if (n === 1 && limited++ < 5) return { terminalReason: "deferred", code: "rate_limited", resetAtEpochMs: c.t + 600_000, detail: "usage limit hit" };
+        return { terminalReason: "merged" };
+      } });
+    assert.deepEqual(starts, [1, 1, 1, 1, 1, 1, 2, 3], "#2 and #3 never start before #1 merges");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.deepEqual(deferPolicy({ code: "rate_limited", resetAtEpochMs: 5000 }, { now: 1000, deferrals: 99 }), { delayMs: 4000, hold: true });
   });
 
   it("#4685 a breaker tripped by transport errors closes itself after the cooldown; any other stays tripped", async () => {
@@ -844,7 +860,7 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.unreachable", retryInSeconds: 60 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 60000, host: true }); // #4788
-    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
+    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "sandbox.start_failed"]) {
       assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
     }
   });
