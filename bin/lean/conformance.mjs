@@ -369,14 +369,14 @@ function amendmentProblem(a, tag) {
 
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
- * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
+ * defer|post-deploy {requirement: id}. Every amendment needs a why (or the engine's defaultWhy); `addedPaths` are lane-added files that count as decision anchors when a deliverable lists them. Returns {contract, applied[], toTrack[], problems[]}.
  * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
  * matching path is refused; the repo's generator or bot owns that file.
  * `decision` {decision:{choice, anchors, symbols?, supersedes?}} (#4695): every anchor must match a file of `baseFiles` (the
  * base tree; null skips the check); `supersedes` names the decision whose engine-authored preserve row it replaces and
  * drops that row; returns the records in `decisions`.
  */
-export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null } = {}) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null, addedPaths = [], defaultWhy = null } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [], decisions = [];
@@ -397,8 +397,9 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     }
     rows.push({ a: n, raw });
   }
-  for (const { a, raw } of rows) {
+  for (let { a, raw } of rows) {
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
+    if (a && blank(a.why) && !blank(defaultWhy)) a = { ...a, why: String(defaultWhy) }; // the engine demanded the change: its reason is the why
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
       if (genRes.some((re) => re.test(cleanPath(a.path)))) {
@@ -451,7 +452,10 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     } else if (a.kind === "decision") {
       const d = normaliseDecision({ ...a.decision, why: a.decision?.why ?? a.why });
       if (!d) { problems.push(amendmentProblem(a, tag)); continue; }
-      const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, baseFiles) : [];
+      // a file the lane adds and the contract lists as a deliverable is a new file the issue declared: a valid anchor
+      const listed = new Set(c.deliverables.map((x) => x.path));
+      const added = (Array.isArray(addedPaths) ? addedPaths : []).filter((x) => listed.has(x));
+      const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, [...baseFiles, ...added]) : [];
       if (dead.length) { problems.push(`decision anchor(s) ${dead.join(", ")} match no file on the base; anchor a path that exists there`); continue; }
       if (!blank(a.decision?.supersedes)) c.preserve = (c.preserve ?? []).filter((p) => p.decision !== a.decision.supersedes && p.id !== a.decision.supersedes);
       decisions.push(a.decision?.supersedes ? { ...d, supersedes: String(a.decision.supersedes) } : d);
