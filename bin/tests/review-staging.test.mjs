@@ -242,7 +242,7 @@ function postWorld(o = {}) {
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     run: async (cmd, args, opts) => {
-      if (cmd === "gh") { w.gh.push(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "0\n", stderr: "" }; }
+      if (cmd === "gh") { w.gh.push(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "[]", stderr: "" }; }
       const script = args[0].split("/").pop(), sub = args[1];
       w.scripts.push({ script, sub, args, env: opts.env });
       if (script === "review-staging-post.sh" && sub === "delivery") return o.delivery ?? { code: 0, stdout: "DELIVERY: OK (2/2 ...)", stderr: "" };
@@ -398,7 +398,7 @@ describe("review-staging --summary", () => {
   for (const [name, o, verdict] of [
     ["a CONFIRMED CRITICAL", { findings: [{ severity: "CRITICAL", confidence: "CONFIRMED" }] }, "BLOCK DEPLOY"],
     ["a CONFIRMED HIGH", { findings: [{ severity: "high", confidence: "confirmed" }] }, "NEEDS FIXES FIRST"],
-    ["failing CI", { ci: "2\n", ciCode: 1 }, "BLOCK DEPLOY"],
+    ["failing CI", { ci: '[{"name":"build","bucket":"fail"},{"name":"lint","bucket":"cancel"}]' }, "BLOCK DEPLOY"],
     ["an unreadable CI result", { ci: "", ciCode: 1 }, "BLOCK DEPLOY"],
   ]) {
     it(`${name}: GATE_FAILURE, ${verdict}, exit 1`, async () => {
@@ -432,6 +432,18 @@ describe("review-staging --summary", () => {
     });
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 1);
     assert.match(posted(w)[0], /Staging Review: NEEDS FIXES FIRST[\s\S]*1 CONFIRMED HIGH/);
+  });
+
+  it("a red gate-marker check alone does not block; any other red check still does", async () => {
+    const red = (name) => JSON.stringify([{ name: "build", bucket: "pass" }, { name, bucket: "fail" }]);
+    const w = await finalized({ ci: red("Check for FORGE gate markers") });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    assert.match(posted(w)[0], /FORGE:GATE_PASS/);
+    const w2 = await finalized({ ci: red("build-linux") });
+    assert.equal(await reviewStagingFromCli(["--summary"], w2.io), 1);
+    assert.match(posted(w2)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
+    const w3 = await finalized({ ci: "not json" });
+    assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1);
   });
 
   it("a LIKELY HIGH does not block; a deleted test-gate verdict fails closed", async () => {

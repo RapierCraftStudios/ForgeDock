@@ -29,7 +29,7 @@ describe("#4304: spec CI gates ignore forgedock/verify", () => {
     for (const [f, c] of reads) {
       assert.match(c, /--json name,bucket\b/, `${f}: ${c}`);
       assert.doesNotMatch(c, /status|conclusion/, `${f}: invalid gh pr checks fields`);
-      assert.match(c, /select\(\.name != "forgedock\/verify" and \.name != "forge\/deploy-gate"\)/, `${f}: ${c}`);
+      assert.match(c, /select\(\.name != "forgedock\/verify" and \.name != "forge\/deploy-gate" and \.name != "Check for FORGE gate markers"\)/, `${f}: ${c}`);
       assert.match(c, /\|\| echo "1"\)/, `${f}: an unreadable result must count as failing`);
     }
   });
@@ -43,6 +43,7 @@ describe("#4304: spec CI gates ignore forgedock/verify", () => {
       assert.equal(count(jq, [{ name: "lint", bucket: "fail" }, { name: "forgedock/verify", bucket: "pass" }]), "1", f);
       assert.equal(count(jq, [{ name: "e2e", bucket: "cancel" }]), "1", f);
       assert.equal(count(jq, [{ name: "ci", bucket: "pass" }, { name: "forge/deploy-gate", bucket: "fail" }]), "0", f);
+      assert.equal(count(jq, [{ name: "ci", bucket: "pass" }, { name: "Check for FORGE gate markers", bucket: "fail" }]), "0", f);
     }
   });
 });
