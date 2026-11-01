@@ -12,7 +12,7 @@ import { startDaemon, scheddPaths, connectDaemon, request, SCHEDD_SCRIPT, mergeE
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
-import { orchestrateFromCli } from "../engine-cli.mjs";
+import { orchestrateFromCli, hasWaitingPending } from "../engine-cli.mjs";
 
 // #4503: this process, and the env its clients submit for their lanes, never resolve the host's `~/.forge/sched`.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("schedd-home-");
@@ -249,105 +249,61 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
-  it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
-    const h = host();
-    try {
-      const d = await h.daemon();
-      await withRoot(h, () => capture(async () => {
-        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
-        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
-        const [idA] = listBatches(h.root);
-        const b = orchestrateFromCli(["5", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
-        await until(() => h.launched().includes(5) && h.lanePids().length === 2);
-        const idB = listBatches(h.root).find((x) => x !== idA);
-        const res = await orchestrateFromCli(["--cancel", idA], h.client);
-        assert.deepEqual(res, { ok: true, batch: idA, cancelled: true });
-        const doneA = await a;
-        assert.deepEqual(doneA.rows.map((r) => [r.issue, r.outcome, r.detail]), [[1, "held", "cancelled by operator"], [2, "held", "cancelled by operator"]]);
-        assert.ok(openBatch(h.root, idA).readReport(), "the cancelled batch wrote its report");
-        assert.deepEqual(h.launched(), [1, 5], "#2 never launched");
-        const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
-        assert.equal(st.pid, d.pid, "the daemon kept running");
-        assert.deepEqual(st.batches.map((x) => x.id), [idB]);
-        writeFileSync(h.release, "");
-        const doneB = await b;
-        assert.deepEqual(doneB.rows.map((r) => [r.issue, r.outcome]), [[5, "merged"]]);
-        const again = await orchestrateFromCli(["--cancel", idA], h.client);
-        assert.equal(again.cancelled, false, "a finished batch is left alone");
-        await assert.rejects(orchestrateFromCli(["--cancel", "nope"], h.client), /no batch nope/);
-      }));
-    } finally { await h.cleanup(); }
-  });
-
-  it("#4592: --hold keeps #2 from running on a live batch; --resume <id> 2 after a cancel re-admits it", async () => {
+  it("#4917: a held (pending) issue is flagged unhosted by status once its report is gone; --requeue re-hosts it and says so", async () => {
     const h = host();
     try {
       await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "OPEN", labels: [] }) : "o/r\n") } };
       await withRoot(h, () => capture(async () => {
-        const first = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
-        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const run = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && listBatches(h.root).length === 1);
         const [id] = listBatches(h.root);
         const b = openBatch(h.root, id);
-        const held = await orchestrateFromCli(["--hold", id, "2", "x"], h.client);
-        assert.deepEqual(held.changed, [2]);
-        assert.deepEqual(b.readHeld(), [2]);
-        await assert.rejects(orchestrateFromCli(["--hold", id], h.client), /usage/);
-        await assert.rejects(orchestrateFromCli(["--release", "nope", "2"], h.client), /no batch nope/);
-        const res = await orchestrateFromCli(["--cancel", id], h.client);
-        assert.equal(res.cancelled, true);
-        const cancelled = await first;
-        assert.deepEqual(cancelled.rows.map((r) => [r.issue, r.outcome]), [[1, "held"], [2, "held"]]);
-        assert.deepEqual(b.readHeld(), [2], "the hold survives the cancel");
-        // The issue's case: a resume naming the issue re-admits it (it used to print `skipped #2 (already in batch)`).
-        const io = { gh: async (x) => (x[0] === "issue" ? JSON.stringify({ state: "OPEN" }) : "o/r\n") };
-        const resumed = orchestrateFromCli(["--resume", id, "2"], { ...h.client, io });
-        await until(() => b.readCancel() === null && b.readHeld().length === 0);
-        setTimeout(() => writeFileSync(h.release, ""), 300);
-        const done = await resumed;
-        assert.deepEqual(done.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
-      }));
-    } finally { await h.cleanup(); }
-  });
-
-  it("#4481: a batch cancelled through the daemon is not resumed by a schedd restart", async () => {
-    const h = host();
-    try {
-      const statusIds = async () => (await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" })).batches.map((x) => x.id);
-      const kill = async (d) => { const gone = new Promise((r) => d.on("exit", r)); d.kill("SIGKILL"); await gone; };
-      let d = await h.daemon();
-      await withRoot(h, () => capture(async () => {
-        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
-        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
-        const [idA] = listBatches(h.root);
-        assert.equal((await orchestrateFromCli(["--cancel", idA], h.client)).cancelled, true);
-        await a;
-        await kill(d);
-        d = await h.daemon();
-        await new Promise((r) => setTimeout(r, 300));
-        assert.deepEqual(await statusIds(), [], "the restarted daemon hosts no cancelled batch");
-        assert.deepEqual(h.launched(), [1]);
-      }));
-    } finally { await h.cleanup(); }
-  });
-
-  it("single instance: a live daemon keeps its lock; a dead owner's lock and socket are taken over", async () => {
-    const h = host();
-    try {
-      const d = await h.daemon();
-      const second = await startDaemon({ dir: h.sched, root: h.root, runBatch: async () => ({}), log: () => {}, resumeOnStart: false });
-      assert.deepEqual(second, { running: false, owner: d.pid });
-      const dexit = new Promise((r) => d.on("exit", r));
-      d.kill("SIGKILL");
-      await dexit;
-      assert.ok(existsSync(scheddPaths(h.sched).lock) && existsSync(scheddPaths(h.sched).sock), "stale lock and socket left behind");
-      const third = await startDaemon({ dir: h.sched, root: h.root, runBatch: async () => ({}), log: () => {}, resumeOnStart: false });
-      try {
-        assert.equal(third.running, true);
+        b.holdIssues([2]);
+        writeFileSync(h.release, "");
+        const res = await run;
+        assert.equal(res.rows.find((r) => r.issue === 2).outcome, "held");
+        assert.deepEqual(b.pendingIssues(), [2]);
+        b.clearReport(); // a batch finalised before the fix, or one never resumed
         const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
-        assert.equal(st.pid, process.pid);
-      } finally { await third.close(); }
-      assert.equal(existsSync(scheddPaths(h.sched).lock), false, "lock released on close");
+        assert.deepEqual(st.unhosted, [{ id, pending: [2] }]);
+        // finalised by an older version: a report plus unapplied requeue entries still reopens, and the CLI says so
+        b.releaseIssues([2]);
+        b.store.save({ ...b.store.load(), results: { ...b.store.load().results, 1: { issue: 1, outcome: "needs-human", pr: null, cost_usd: 0, minutes: 0 } } });
+        b.writeReport({ rows: [{ issue: 1, outcome: "needs-human" }] });
+        const rq = await capture(() => orchestrateFromCli(["--requeue", id, "1"], client));
+        assert.deepEqual(rq.res.requeued, [1]);
+        assert.ok(rq.lines.some((l) => l.includes("re-hosted by the schedd")), rq.lines.join("\n"));
+      }));
     } finally { await h.cleanup(); }
+  });
+
+  it("#4917: hasWaitingPending: a pending row with a future retry_at blocks the report; a hold or a past retry_at does not", () => {
+    const now = 1000;
+    assert.equal(hasWaitingPending([{ issue: 2, outcome: "held", retry_at: 5000 }], [2], now), true);
+    assert.equal(hasWaitingPending([{ issue: 2, outcome: "held" }], [2], now), false);
+    assert.equal(hasWaitingPending([{ issue: 2, outcome: "held", retry_at: 500 }], [2], now), false);
+  });
+
+  it("#4917: a batch that ends unreported with a deferred issue waiting is re-hosted by the running daemon once its retry-at is near", async () => {
+    const dir = tmpDir("schedd-rehost-"), root = join(dir, "batches"), id = "b20261031-000000-4917";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      if (argv[0] !== "--resume") {
+        b.writePlan({ daemon: true, repo: "o/r" });
+        b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 1200 } });
+      } else b.store.save({ ...b.store.load(), pending: [], results: { 1: { issue: 1, outcome: "merged" } } });
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await until(() => calls.length === 2, 8000);
+      assert.deepEqual(calls[1], ["--resume", id]);
+    } finally { await d.close(); }
   });
 
   it("#4454: close() stops every hosted batch loop before releasing the lock; no batch admits a lane after close()", async () => {

@@ -191,6 +191,8 @@ export function openBatch(root, id) {
       }
       return { requeued, refused };
     },
+    /** #4917: the issues still `pending` in state.json (deferred or requeued included); [] when none or unreadable. */
+    pendingIssues: () => { const p = readJson(f("state.json"))?.pending; return Array.isArray(p) ? p.filter((n) => Number.isSafeInteger(n)) : []; },
     /** Every `--requeue` entry, in order; [] when missing or invalid. */
     readRequeued: () => readRequeueFile(f("requeue")),
     /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */

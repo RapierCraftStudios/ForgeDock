@@ -1201,9 +1201,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const [n, r] of results) if (r?.waiting) { const { waiting, ...rest } = r; results.set(n, rest); } // #4687: the batch ended: skipped for good
   save();
   const withRequeue = (r) => (r && requeuedInfo.has(r.issue) ? { ...r, requeued: { reason: requeuedInfo.get(r.issue).reason, by: requeuedInfo.get(r.issue).by, prior: requeuedInfo.get(r.issue).prior.map((p) => ({ outcome: p.outcome, detail: p.detail ?? null, pr: p.pr ?? null })) } } : r);
-  return order.map((n) => withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
+  // #4917: a pending issue waiting on a retry-at in the future carries `retry_at`, so the caller keeps the batch unfinished
+  const retryAt = (r) => (r && pending.includes(r.issue) && (notBefore.get(r.issue) ?? 0) > now() ? { ...r, retry_at: notBefore.get(r.issue) } : r);
+  return order.map((n) => retryAt(withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
     ...(recovering.has(n) ? { recovery: { code: recovering.get(n).code, attempts: recoveries.get(n) ?? recovering.get(n).attempt, outcome: recovering.get(n).outcome ?? "needs-human",
-      ...(recovering.get(n).result_code ? { result_code: recovering.get(n).result_code } : {}), detail: firstLine(recovering.get(n).detail ?? recovering.get(n).code) } } : {}) });
+      ...(recovering.get(n).result_code ? { result_code: recovering.get(n).result_code } : {}), detail: firstLine(recovering.get(n).detail ?? recovering.get(n).code) } } : {}) }));
 }
 
 /**
