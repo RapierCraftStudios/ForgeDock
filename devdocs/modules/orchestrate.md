@@ -235,6 +235,7 @@ Cite: #4550.
 ## Entry 2026-10-30 — Fix: usage-limit deferrals are never capped; `deferred` is requeuable (#4784)
 
 `deferPolicy` handles `rate_limited` before the `maxDeferrals` check: it returns `{delayMs, hold:true}` (reset time or `RATE_LIMIT_FALLBACK_S`) and the deferral counter is not incremented when `pol.hold`, so a usage limit waits for the reset instead of ending `deferred: gave up after N deferrals`. The per-account `holds` still gate admission; other codes (`merge.transient`, `gh.unavailable`, `cli.idle`, `sandbox.start_failed`, lease-held) still cap, and `host.busy`/`sandbox.capacity` stay uncapped with `host:true`. `batch.mjs` `REQUEUABLE` also accepts `deferred`, so `--requeue` and `drainRequeues` take a row that already gave up.
+Cite: #4784.
 
 ## Entry 2026-10-30 — Issue-level readiness: trusted `Blocked by` edges and the `blocked` label (#4773)
 
