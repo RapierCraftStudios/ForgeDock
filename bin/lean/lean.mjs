@@ -626,7 +626,7 @@ export async function runCore(o) {
   const signOffUnpushed = async () => {
     try {
       const r = await ensureSignedOff({ git, lane, branch });
-      if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten }); }
+      if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten, ...(r.dirty ? { dirty: r.dirty } : {}) }); }
     } catch (e) { throw Object.assign(e, { laneCode: OUTCOME_CODES.CI_DCO }); }
   };
   const gitPush = async (args) => {

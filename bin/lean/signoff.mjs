@@ -60,15 +60,17 @@ export async function ensureSignedOff({ git, lane, branch, env = process.env }) 
   }
   const fenv = { FD_BAD: bad.map((c) => c.sha).join(" "), FD_NAME: name, FD_EMAIL: email, FILTER_BRANCH_SQUELCH_WARNING: "1" };
   // filter-branch refuses on any modified or staged tracked file (#4905): park them in a commit object (not the shared stash stack), rewrite, put them back.
-  let parked = "";
-  if (await ok(["status", "--porcelain", "--untracked-files=no"])) {
+  let parked = "", dirty = []; // #4905: the dirty paths are reported so the source of the dirt (validate/format output) is visible in events and the error
+  const porcelain = await ok(["status", "--porcelain", "--untracked-files=no"]);
+  if (porcelain) {
+    dirty = porcelain.split("\n").map((l) => l.replace(/^\s*\S+\s+/, "")).slice(0, 20);
     const ident = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
     try { parked = String(await git(["stash", "create", "forge: signoff park"], { env: ident })).trim(); } catch { parked = ""; }
     if (parked) await git(["reset", "--hard", "-q", "HEAD"]);
   }
   let failure = null;
   try { await git(["filter-branch", "-f", "--env-filter", ENV_FILTER, "--msg-filter", MSG_FILTER, "--", "HEAD", ...exclude], { env: fenv }); }
-  catch (e) { failure = Object.assign(new Error(`could not rewrite ${bad.length} unpushed commit(s) for DCO: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`), { noIdentity: false }); }
+  catch (e) { failure = Object.assign(new Error(`could not rewrite ${bad.length} unpushed commit(s) for DCO: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}${dirty.length ? ` (dirty tracked files: ${dirty.join(", ")})` : ""}`), { noIdentity: false }); }
   let stashRef;
   if (parked) {
     try { await git(["stash", "apply", "-q", parked]); }
@@ -76,5 +78,5 @@ export async function ensureSignedOff({ git, lane, branch, env = process.env }) 
   }
   if (failure) throw failure;
   await ok(["for-each-ref", "--format=delete %(refname)", "refs/original/"]).then(async (l) => { for (const r of l.split("\n").map((x) => x.replace(/^delete /, "")).filter(Boolean)) await ok(["update-ref", "-d", r]); });
-  return stashRef ? { rewritten: bad.length, stashRef } : { rewritten: bad.length };
+  return { rewritten: bad.length, ...(dirty.length ? { dirty } : {}), ...(stashRef ? { stashRef } : {}) };
 }

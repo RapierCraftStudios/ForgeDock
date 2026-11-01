@@ -106,6 +106,7 @@ describe("ensureSignedOff", () => {
     writeFileSync(join(f.wt, "new.txt"), "untracked\n");
     const r = await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} });
     assert.equal(r.rewritten, 1);
+    assert.deepEqual(r.dirty, ["base.txt"]); // the source of the dirt is reported
     assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "modified\n");
     assert.equal(readFileSync(join(f.wt, "new.txt"), "utf8"), "untracked\n");
     assert.match(f.sh("status", "--porcelain"), /M base\.txt/);
@@ -116,7 +117,7 @@ describe("ensureSignedOff", () => {
     f.commit("b.txt", "unpushed placeholder", "placeholder");
     writeFileSync(join(f.wt, "base.txt"), "modified\n");
     const git = async (a, o) => { if (a[0] === "filter-branch") throw Object.assign(new Error("boom"), { stderr: "boom" }); return f.git(a, o); };
-    await assert.rejects(ensureSignedOff({ git, lane: "staging", branch: "feat/x", env: {} }), /could not rewrite 1 unpushed/);
+    await assert.rejects(ensureSignedOff({ git, lane: "staging", branch: "feat/x", env: {} }), /could not rewrite 1 unpushed.*dirty tracked files: base\.txt/s);
     assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "modified\n");
   });
 });
