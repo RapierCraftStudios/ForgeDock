@@ -2219,11 +2219,11 @@ Cite: #4908.
 ## Entry 2026-10-31 — schedd: a batch with pending issues is not finalised (#4917)
 
 `orchestrate` marks the row of a pending issue whose retry-at (`notBefore`) is still in
-the future with `retry_at`; `runBatch` (`bin/engine-cli.mjs`, `hasWaitingPending`) then
-writes no `report.json` (a cancel still ends the batch), and the running schedd
+the future with `retry_at`; `runBatch` (`bin/engine-cli.mjs`) writes no `report.json` while
+`state.json` `pending` is non-empty (a cancel still ends the batch), and the running schedd
 re-hosts the batch (`--resume`) once the retry-at is near (`rehostLater`, 1-60 s).
-Deliberate holds (budget, operator, drift, breaker with no retry-at) keep their report:
-a `--resume` frees them. `requeue`/`add` on an unhosted batch re-host it when a
+Deliberate holds (budget, operator, drift, breaker) also leave the batch unfinished
+(their issues stay pending): the loop still ends, and a `--resume` frees them. `requeue`/`add` on an unhosted batch re-host it when a
 requeue or add entry is still unapplied, and the CLI prints `re-hosted by the schedd`
 or `not re-hosted`. `schedd status` lists batch dirs with pending issues that are not hosted
 (`unhosted: [{id, pending}]`).
