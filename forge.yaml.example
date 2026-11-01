@@ -332,6 +332,11 @@ branches:
 
 # engine:
 #   work_on_review_model: sonnet
+#   # Host lane cap (#4777), on by default: local lanes are bounded by
+#   # min(--parallel, max(1, min(cores / lane_cpu_reservation, (MemAvailable - min_free_mem_mb) / lane_mem_mb))).
+#   # Remote sandbox lanes are exempt; `admission: enabled: false` removes the cap.
+#   lane_cpu_reservation: 1
+#   lane_mem_mb: 2048
 #   work_on_review_max_turns: 120
 #   review_pr_staging_max_turns: 80
 #   # Context pack (#4275): before the plan call the core compiles the issue's
@@ -411,11 +416,16 @@ branches:
 #   # ready set. Default: 12.
 #   max_concurrent: 12
 #
+#   # Label that holds an open issue out of dispatch (#4773). Default `blocked`, on: an issue
+#   # carrying it is admitted but not dispatched until the label is removed. Empty turns it off.
+#   blocked_label: blocked
+#
 #   # In-batch recovery (#4267): recovery lanes per issue for a mechanical
 #   # needs-human (ci.red, base.conflict, ...). A recovery that does not merge
 #   # is labelled needs-human again with its evidence. Default 1; 0 disables.
 #   recovery:
 #     max_attempts: 1
+#     mechanical_max_attempts: 2   # #4725: separate budget for env.*, base.conflict, conflicting-PR rows; default 2
 #
 #   # Parked-PR base sync (#4525): a needs-human PR whose base moved is merged
 #   # with the base while the batch runs. Clean or pure two-sided list-addition
