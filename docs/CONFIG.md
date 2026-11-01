@@ -667,12 +667,14 @@ Settings for `forgedock selftest --live` (see [SELFTEST.md](SELFTEST.md)): a har
 selftest:
   sandbox_repo: acme/forgedock-sandbox   # disposable repo; the harness creates and closes issues, PRs and branches in it
   fixture: node                          # node (default) | python
+  nightly_interval_hours: 24             # opt-in: schedd runs `selftest --live` this often (default off)
 ```
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `sandbox_repo` | string | No | `owner/repo` the live harness runs in. `--repo` overrides it; with neither the command stops. Never point it at a real project. |
 | `fixture` | string | No | Toolchain of the two trivial fixture issues: `node` (default) or `python`. `--lang` overrides it. |
+| `nightly_interval_hours` | number | No | Off when unset or 0. When positive, the schedd daemon (host, never GitHub Actions) runs `selftest --live` against `sandbox_repo` once this many hours have passed since the last run, and on failure files or edits one issue naming the failed step. See [SELFTEST.md](SELFTEST.md#nightly-run). |
 
 **Commands that use this section**: `forgedock selftest`
 

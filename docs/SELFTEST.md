@@ -29,4 +29,6 @@ The first failing step stops the run.
 
 With `--pr N`, the result is posted on the PR as `<!-- FORGE:SELFTEST result=pass|fail sha=<head> step=<failed step|none> -->`. `forgedock review-staging` reads the newest marker and refuses (`REVIEW_RESULT: status: BLOCKED`, nothing reviewed) unless it is a pass for the PR's current head. A push after the selftest makes the marker stale: re-run it.
 
-A nightly run through the schedd timer is tracked separately in #4894; until then run `selftest --live` from any scheduler.
+## Nightly run
+
+Off by default. Set `selftest.nightly_interval_hours` (see [CONFIG.md](CONFIG.md#selftest-optional)) and the schedd daemon runs `selftest --live` on the host once that many hours have passed since the last run (last run time cached in `selftest-nightly.json` under the sched dir). It never runs on GitHub Actions. A failing run files one issue titled `selftest --live failed at step <step> (nightly)` carrying `<!-- FORGE:SELFTEST_NIGHTLY -->`; the next failure edits that open issue instead of filing another. A passing run writes nothing. The issue lives in the repo schedd resolves for the working directory, and the sandbox repo must be set by `selftest.sandbox_repo`.
