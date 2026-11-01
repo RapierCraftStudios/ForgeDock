@@ -26,12 +26,15 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseForgeYaml } from "./forge-utils.mjs";
+import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
   "       forgedock review-staging [<PR>] --finalize --test-gate-output <file> [--notes-dropped <n>] [--json]\n" +
   "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]";
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** selftest.sandbox_repo turns the release gate on only when it names a repo (`null`, `~`, `false` or prose leave it off). */
+const SANDBOX_RE = /^[\w.-]+\/[\w.-]+$/;
 /** Persona file / catalog keys per canonical marker domain (review-pr-agents.md routing table). */
 const INDEX_KEY = { auth: "auth", billing: "billing", database: "database", api: "api", frontend: "frontend", infra: "infrastructure" };
 const CONFIG_DOMAIN = { scraper: "scraping" };
@@ -137,7 +140,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -223,6 +226,14 @@ async function main(argv, io) {
   const head = await headSha(io, c, pr);
   if (a.delta && a.delta === head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: --delta ${head} is the current head of PR #${pr}: nothing changed since that pass, nothing to review`]);
   const sha7 = head.slice(0, 7);
+  // #4865: with selftest.sandbox_repo set, the release needs a passing live selftest for exactly this head (fail closed).
+  // Without a sandbox repo there is nothing the harness can run against, so the gate is skipped and says so.
+  if (c.sandboxRepo) {
+    let marks;
+    try { marks = await readMarkerComments(io.gh, c.ghRepo, pr); } catch (e) { throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not read the FORGE:SELFTEST markers of PR #${pr} (${String(e?.message ?? e).split("\n")[0].slice(0, 200)}); nothing reviewed (fail closed)`]); }
+    const selftest = selftestGate(marks, head);
+    if (!selftest.ok) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: ${selftest.reason}; nothing reviewed (fail closed)`]);
+  } else io.err(`SELFTEST: skipped (selftest.sandbox_repo ${c.sandboxRaw ? `"${c.sandboxRaw.slice(0, 80)}" is not an owner/repo` : "not set"} in forge.yaml; the release does not require a FORGE:SELFTEST marker)`);
   let priorRoutes = 0;
   try {
     const out = await io.gh(["api", "--paginate", `repos/${c.ghRepo}/issues/${pr}/comments`, "--jq", '[.[] | select(.body | test("FORGE:REVIEW_ROUTE"))] | length']);
@@ -454,9 +465,19 @@ const TEST_GATE_NOTE = {
   BLOCK: (r) => `> **Test Gate: BLOCK (override/advisory)**: Runtime failures were detected but deploy is proceeding. Reason: ${r}. Filed \`test-failure\` issues track the failures.`,
 };
 
+/** Checks that never count as CI failures: each only reports this review's own gate marker or the lean gate summary. */
+export const CI_EXCLUDED_CHECKS = ["forgedock/verify", "forge/deploy-gate", "Check for FORGE gate markers"];
+
+const parseChecks = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
+
+/** Failing (fail/cancel) checks outside CI_EXCLUDED_CHECKS. */
+export function countFailingChecks(checks) {
+  return checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && (k?.bucket === "fail" || k?.bucket === "cancel")).length;
+}
+
 /** Phase 8 verdict from the deterministic inputs (CI, test gate, CONFIRMED CRITICAL/HIGH). */
 export function stagingVerdict({ ciFailing, testGateInvalid, confirmedCritical, confirmedHigh }) {
-  if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify and forge/deploy-gate excluded)` };
+  if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify, forge/deploy-gate and the gate-marker check excluded)` };
   if (testGateInvalid) return { verdict: "BLOCK DEPLOY", why: "test-gate result missing/invalid (fail closed)" };
   if (confirmedCritical > 0) return { verdict: "BLOCK DEPLOY", why: `${confirmedCritical} CONFIRMED CRITICAL finding(s)` };
   if (confirmedHigh > 0) return { verdict: "NEEDS FIXES FIRST", why: `${confirmedHigh} CONFIRMED HIGH finding(s)` };
@@ -472,10 +493,11 @@ async function summary(a, io) {
   const tg = testGateResult(io, sd, pr);
 
   // Phase 1E read: forgedock/verify is excluded; an unreadable result counts as failing (fail closed). forge/deploy-gate
-  // is excluded too: it reports this review's own marker, so an earlier GATE_FAILURE must not block the re-run that clears it.
+  // and the gate-marker check are excluded too: they report this review's own marker, so an earlier GATE_FAILURE must not block the re-run that clears it.
   let ciFailing = 1;
-  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket", "--jq", '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate") | select(.bucket == "fail" or .bucket == "cancel")] | length'], { env, cwd: io.cwd });
-  if (/^\d+$/.test(ci.stdout.trim())) ciFailing = Number(ci.stdout.trim());
+  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket"], { env, cwd: io.cwd });
+  const checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
+  if (checks) ciFailing = countFailingChecks(checks);
 
   const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
   const pass = v.verdict === "APPROVE FOR DEPLOY";
@@ -501,7 +523,7 @@ async function summary(a, io) {
     "### Risk Matrix",
     "| Domain | Result | Notes |",
     "|--------|--------|-------|",
-    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify and forge/deploy-gate excluded |`,
+    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded |`,
     `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
     "",
