@@ -158,7 +158,7 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs")
 export function realIo(env = process.env, { pool = false } = {}) {
   let self;
   const root = batchRoot(env);
-  const detached = (args) => { const p = spawn(process.execPath, [CLI, ...args], { detached: true, stdio: "ignore", env }); p.unref(); return { kill: async () => { try { process.kill(-p.pid, "SIGTERM"); } catch { /* gone */ } } }; };
+  const detached = (args) => { const p = spawn(process.execPath, [CLI, ...args], { detached: true, windowsHide: true, stdio: "ignore", env }); p.unref(); return { kill: async () => { try { process.kill(-p.pid, "SIGTERM"); } catch { /* gone */ } } }; };
   const waitBatch = async (before) => { for (let i = 0; i < 60; i++) { const id = listBatches(root).find((b) => !before.has(b)); if (id) return id; await new Promise((r) => setTimeout(r, 1000)); } throw new Error("orchestrate did not create a batch within 60s"); };
   return (self = {
     now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),

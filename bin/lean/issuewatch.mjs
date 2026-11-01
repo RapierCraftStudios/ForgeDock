@@ -366,7 +366,7 @@ function realIo(repo, env = process.env) {
     },
     launch: (n, lane) => {
       let res = null;
-      const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane], { detached: true, stdio: "ignore", cwd: process.cwd(), env });
+      const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env });
       p.on("close", (code) => { res = { code: code ?? 1 }; }); p.on("error", () => { res = { code: 1 }; });
       return { poll: () => res };
     },
@@ -375,7 +375,7 @@ function realIo(repo, env = process.env) {
       reported: (id) => existsSync(join(root, id, "report.json")),
       start: async (issues, parallel, lane) => {
         const before = new Set(listBatches(root));
-        spawn(process.execPath, [CLI, "orchestrate", ...issues.map(String), "--parallel", String(parallel), "--lane", lane, "--repo", repo], { detached: true, stdio: "ignore", cwd: process.cwd(), env }).unref();
+        spawn(process.execPath, [CLI, "orchestrate", ...issues.map(String), "--parallel", String(parallel), "--lane", lane, "--repo", repo], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env }).unref();
         for (let i = 0; i < 60; i++) { const id = listBatches(root).find((b) => !before.has(b)); if (id) return id; await new Promise((r) => setTimeout(r, 1000)); }
         throw new Error("orchestrate did not create a batch within 60s");
       },
