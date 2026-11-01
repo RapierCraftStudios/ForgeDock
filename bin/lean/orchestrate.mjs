@@ -878,7 +878,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!getChildren || !addsEpicChildren(autoChildren?.mode)) return 0;
     const t = now();
     if (t < nextChildScan) return 0;
-    nextChildScan = t + Math.max(1, autoChildren.pollS ?? DEFAULT_POLL_S) * 1000;
+    nextChildScan = t + Math.max(0, autoChildren.pollS ?? DEFAULT_POLL_S) * 1000;
     let list, elsewhere;
     try { ({ list, elsewhere } = await getChildren()); } catch (e) {
       if (!childScanFailed) { childScanFailed = true; decided({ issue: null, what: `auto_add_children: child scan failed (${firstLine(e?.message ?? e)}); retried every ${autoChildren.pollS ?? DEFAULT_POLL_S}s`, why: "the open-issue list could not be read", alternative: "add the children by hand with forgedock orchestrate --add" }); }
