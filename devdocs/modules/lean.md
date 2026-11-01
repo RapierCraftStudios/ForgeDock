@@ -330,6 +330,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    passing evidence validate (report only). `scripts/conformance-calibrate.mjs`
    scores `docs/eval/conformance-labels-v1.json` (+ `--replay`) per kind; enforce a
    kind only at ~0 false blocks.
+   Mutation check (#4913, `engine.conformance_mutation: report`, default off):
+   `runMutationCheck` (`conformance.mjs`) reverts the diff's non-test files to the
+   merge base (`git apply -R`), reruns each evidence validate command and restores
+   from HEAD in a `finally` (commits are never touched). A green rerun is
+   `conformance.mutation_survived`, shadow unless `conformance_kinds` enforces it;
+   a dirty tree, failed revert, timeout or missing runner skips, never fails.
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
