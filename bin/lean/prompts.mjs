@@ -166,7 +166,6 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. Every defer or post-deploy row has one "bucket": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (credentials, spend, settings, promotion of a default-off flag; disposition defer, never post-deploy) or new-issue (future work). One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is "deliver". A requirement you can do in this change is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
 A new default-off flag or rollout key needs an activation row: defer, bucket \`owner:promote:<flag>\`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
-A validate or repro command must pass bash -n (no prose notes), select tests that exist, and use the forge.yaml verification.test_runners runner for its path prefix, from that cwd.
 A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop.
@@ -201,7 +200,6 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
-- {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""}: swaps in a runnable equivalent of an unrunnable validate.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
 - {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
@@ -245,6 +243,12 @@ export function contextPackNote(pack) {
 }
 
 /** #4271: the bug-lane plan addition (lean.repro_test prefer on a bug/type:bug issue); "" when off, so the prompt is unchanged. */
+/** #4857: validate-command rules for the plan prompt (the implement session resumes it), kept out of the shared templates (their token caps are guarded). */
+export function unrunnableValidateNote(testRunners = null) {
+  const map = testRunners && typeof testRunners === "object" ? Object.entries(testRunners).map(([k, v]) => `${k}/ -> ${v}`).join("; ") : "";
+  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments.`;
+}
+
 export function reproPlanNote(on) {
   if (!on) return "";
   return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
@@ -363,7 +367,6 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0],"files":["<path>"]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as "paths") only when every sub-issue's files are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, when siblings would edit the same hub (a barrel or index export list, a union type, a shared test fixture, an index doc), pre-stage its slots in the earliest sub-issue and make the others depend on it, or give each sibling its own per-feature file; the engine serialises sub-issues that still share a file.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents. Optional "remainder":[{"title","body"}]: the agent-doable rest, filed as its own issue.
 "An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".
-An unrunnable validate or repro command (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and amend it with substitute-validate.
 A check that times out (rc 124) is host load, never a block or "human" product-decision: run the narrowest targeted command for your changed files and say the full one could not finish in time.
 Remote sandbox lacking a host-only capability (sops, prod_monitor, ops_credentials): name it in the summary; the host reruns the lane.`;
 
