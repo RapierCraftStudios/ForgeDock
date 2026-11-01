@@ -2038,3 +2038,8 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 Placement needs (`needsOf` in engine-cli `readBody`) now come from `placementText({body, comments})` (`execution.mjs`): the issue body, every `<!-- FORGE:DECISION` comment and the validate commands of the last parseable FORGE:CONTRACT comment, fetched in the same single `gh issue view` call. A rerun of an issue whose frozen contract runs `promtool` (declared in `execution.host_capabilities`), or whose decision says `ssh ovh-monitor obs-psql`, is placed local. On a first remote run, `runCore` checks the frozen contract right after the freeze: when `contractHostNeeds` finds a declared capability in a validate command and the lane is remote and not a recovery, it ends `env.capability_remote` before any implementation turn, and the host resumes it with the frozen contract. `orchestrate` `placeOf` now also relaunches `env.tool_missing` recoveries local (reason `host capability: recovering env.tool_missing`), so a sandbox that lacked the tool is not chosen again.
 Cite: #4785.
+
+## Entry 2026-10-30 — Fix: usage-limit deferrals never capped; `deferred` requeuable (#4784)
+
+`deferPolicy` (`orchestrate.mjs`) handles `rate_limited` before the `maxDeferrals` check: it returns `{delayMs, hold:true}` (reset time or `RATE_LIMIT_FALLBACK_S`) and the deferral counter is not incremented for a hold, so a usage limit waits for the reset instead of ending `deferred: gave up after N deferrals`. Other codes still cap; `host.busy`/`sandbox.capacity` stay uncapped with `host:true`. `REQUEUABLE` (`batch.mjs`) also accepts `deferred`, so `--requeue` and `drainRequeues` take a row that already gave up.
+Cite: #4784.
