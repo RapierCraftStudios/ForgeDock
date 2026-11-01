@@ -2032,6 +2032,10 @@ async function scheddDue() {
   await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
   try { const prem = await import("./lean/needs-human-premise.mjs"); await prem.sweepPremises({ repo, io: { gh: (a) => leanIo.gh(a), pkgVersion: prem.registryPkgVersion } }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
+  try { // #4894: opt-in nightly live selftest (forge.yaml selftest.nightly_interval_hours); best effort
+    const { nightlyDue } = await import("./lean/selftest-nightly.mjs");
+    await nightlyDue({ repo, cwd: process.cwd(), io: leanIo, runLive: async () => { const lines = []; const r = await (await import("./lean/selftest-live.mjs")).selftestFromCli(["--live"], { print: (l) => lines.push(l) }); return { ...r, message: lines.filter((l) => /FAILED|^static|FAIL/.test(l)).join("\n") }; } });
+  } catch { /* never stops the other sweeps */ }
 }
 
 /** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */
