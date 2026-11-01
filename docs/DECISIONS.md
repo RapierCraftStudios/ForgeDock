@@ -1,5 +1,9 @@
 # Decision engine (#4766)
 
+> **Status: not yet wired.** No production code calls `settle` yet: the issue-watch stage does not run it, so `decisions.mode`
+> (including `live`), `veto_hours` and `reversal_max` have no effect and no `decision_engine` telemetry is emitted. Only the policy
+> and authority-matrix reads (`loadPolicy`) are used today, by prodwatch. The flow below describes the intended behaviour.
+
 Settles a lane's decision-only `needs-human` escalation against the target repo's own north star instead of parking it.
 Only external actions stay with a human. Code: `bin/lean/decision-engine.mjs`. Config: [`decisions:`](CONFIG.md).
 
@@ -29,4 +33,4 @@ Only external actions stay with a human. Code: `bin/lean/decision-engine.mjs`. C
 ## Not in this module
 
 The `issue-watch` stage that lists `needs-human` issues and calls `settle` (`sweep_needs_human`, `--dry-run` via `classify`, caps, status counts)
-lands with #4765. Running a declared monitor query for `evidence` and folding `post-deploy` items into the release checklist are follow-ups.
+did not land with #4765 (merged without the sweep); a follow-up issue tracks it. Running a declared monitor query for `evidence` and folding `post-deploy` items into the release checklist are follow-ups.

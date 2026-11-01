@@ -157,3 +157,14 @@ test("#4766 tally, telemetry mapping and the batch report 'decided' section", ()
   assert.match(lines.join("\n"), /decided .*\n- #7: use option A/);
   assert.deepEqual(formatOutcomeLists([{ issue: 7, outcome: "merged" }]), []);
 });
+
+test("#4826 docs say 'not yet wired' exactly while no production module calls settle", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dir = new URL(".", import.meta.url);
+  const callers = readdirSync(dir).filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs") && f !== "decision-engine.mjs")
+    .filter((f) => /\b(settle|revertVeto)\b[^;]*from "\.\/decision-engine\.mjs"/.test(readFileSync(new URL(f, dir), "utf8")));
+  const wired = callers.length > 0;
+  for (const p of ["../../docs/DECISIONS.md", "../../docs/CONFIG.md"]) {
+    assert.equal(/not yet wired/i.test(readFileSync(new URL(p, import.meta.url), "utf8")), !wired, `${p}: banner must match wiring state (${callers.join(",") || "no callers"})`);
+  }
+});

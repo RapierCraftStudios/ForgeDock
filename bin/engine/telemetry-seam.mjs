@@ -8,7 +8,7 @@
  *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms; lean adds milestone, conformance_mode, shadow_would, the pr and
  *                          builder_tier/class/model/escalated 0|1, forge#4394)
  *   SANDBOX_USAGE       -> `sandbox_usage` (provider, sandbox_id, minutes, cost_usd, batch; one per settled remote lane, forge#4255)
- *   DECISION_ENGINE     -> `decision_engine` (decided, escalated, vetoed, reversed, mode, needs_human_before/after; forge#4766)
+ *   DECISION_ENGINE     -> `decision_engine` (decided, escalated, vetoed, reversed, mode, needs_human_before/after; forge#4766; emitted once the engine is wired)
  *   PRODWATCH_METRICS   -> `prodwatch_metrics` (source, sample, invalid, fp_rate, fix_ineffective_rate, recurrence_rate, signal_to_issue/merge/verified_ms; forge#4837)
  *   STRUCTURE_DELTA     -> `structure_delta` (edges_added/removed, import_files_added/removed, boundary_changed/loosened 0|1; forge#4159)
  *                          lean's merge-time record (forge#4165) adds milestone, the pr and string lists: deps_added and
