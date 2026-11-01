@@ -57,6 +57,15 @@ describe("#4965 auto_add_children", () => {
     r.open(); await r.done;
     assert.equal(r.log.filter((x) => x.outcome === "added").length, 2);
   });
+  it("a failing child scan is reported once as a decision, retried, and the batch still runs", async () => {
+    let calls = 0;
+    const r = await run({ mode: "epic", list: L(), extra: { getChildren: async () => { calls++; throw new Error("Unknown JSON field"); } } });
+    await new Promise((x) => setTimeout(x, 60));
+    r.open(); await r.done;
+    assert.ok(calls >= 2, "retried");
+    assert.equal(r.decisions.filter((d) => /child scan failed/.test(d.what)).length, 1);
+    assert.deepEqual(r.started, [1]);
+  });
   it("scans at most once per poll window: one list call per pass", async () => {
     const r = await run({ mode: "epic", list: L(), pollS: 3600 });
     await new Promise((x) => setTimeout(x, 80));

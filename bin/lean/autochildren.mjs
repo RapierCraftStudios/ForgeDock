@@ -3,6 +3,7 @@
 // Auto-add of epic and decomposition children to a running batch (#4965): `orchestration.auto_add_children`.
 // Pure and deterministic: the child scan reads one open-issue list per pass; no LLM call.
 import { parentOf } from "./context.mjs";
+import { parseHelpFields } from "./selftest-static.mjs";
 
 export const AUTO_MODES = ["off", "decomposed", "epic", "all"];
 export const DEFAULT_AUTO_MODE = "decomposed";
@@ -56,9 +57,22 @@ export function selectChildren({ list, roots, skip = [] }) {
   return [...out].filter((n) => !skipSet.has(n) && !labelsOf(byNum.get(n)).includes("needs-human")).sort((a, b) => a - b);
 }
 
-/** One list call: the open issues of `repo` with what `selectChildren` reads. */
-export async function readChildList({ gh, repo, limit = 1000 }) {
-  const raw = await gh(["issue", "list", "-R", repo, "--state", "open", "--limit", String(limit), "--json", "number,body,labels,parent,subIssues"]);
+const REQUIRED_FIELDS = ["number", "body", "labels"], OPTIONAL_FIELDS = ["parent", "subIssues"];
+
+/** The `--json` list this host's `gh issue list` accepts (read from its `--help`, K4): the required fields plus whichever sub-issue fields it advertises. */
+export async function hostListFields(gh) {
+  let have = [];
+  try { have = parseHelpFields(await gh(["issue", "list", "--help"])); } catch { have = []; }
+  return [...REQUIRED_FIELDS, ...OPTIONAL_FIELDS.filter((f) => have.includes(f))];
+}
+
+/**
+ * One open-issue list with what `selectChildren` reads. A host `gh` without `parent`/`subIssues` still lists with the
+ * required fields, so children are found by their `**Parent**: #P` line.
+ */
+export async function readChildList({ gh, repo, limit = 1000, fields = null }) {
+  const f = fields ?? (await hostListFields(gh));
+  const raw = await gh(["issue", "list", "-R", repo, "--state", "open", "--limit", String(limit), "--json", f.join(",")]);
   const v = JSON.parse(raw);
   return Array.isArray(v) ? v : [];
 }

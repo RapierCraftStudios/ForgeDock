@@ -3,7 +3,7 @@
 // #4965: auto-add of epic and decomposition children: mode parse, child selection, filters.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAutoMode, parseAutoModeFlag, parsePollS, selectChildren, readChildList, liveElsewhere, joinsDecomposed, addsEpicChildren, DEFAULT_POLL_S } from "./autochildren.mjs";
+import { parseAutoMode, parseAutoModeFlag, parsePollS, selectChildren, readChildList, hostListFields, liveElsewhere, joinsDecomposed, addsEpicChildren, DEFAULT_POLL_S } from "./autochildren.mjs";
 
 describe("#4965 modes", () => {
   it("default is decomposed; unknown yaml values fall back; the flag rejects them", () => {
@@ -47,12 +47,28 @@ describe("#4965 selectChildren", () => {
 });
 
 describe("#4965 readers", () => {
-  it("readChildList makes one gh call", async () => {
+  const help = (fields) => `Usage\n\nJSON FIELDS\n  ${fields.join(", ")}\n\nEXAMPLES\n  $ gh issue list\n`;
+  const fakeGh = (fields, calls) => async (a) => {
+    calls.push(a);
+    if (a.includes("--help")) return help(fields);
+    const j = a[a.indexOf("--json") + 1].split(",");
+    const bad = j.find((f) => !fields.includes(f));
+    if (bad) throw new Error(`Unknown JSON field: "${bad}"`);
+    return "[{\"number\":1}]";
+  };
+  it("readChildList asks the host gh for its fields, then makes one list call", async () => {
     const calls = [];
-    const r = await readChildList({ gh: async (a) => { calls.push(a); return "[{\"number\":1}]"; }, repo: "o/r" });
-    assert.equal(calls.length, 1);
-    assert.ok(calls[0].includes("list") && calls[0].includes("--state"));
+    const r = await readChildList({ gh: fakeGh(["number", "body", "labels", "parent", "subIssues", "title"], calls), repo: "o/r" });
+    assert.equal(calls.filter((a) => !a.includes("--help")).length, 1);
+    assert.equal(calls.at(-1)[calls.at(-1).indexOf("--json") + 1], "number,body,labels,parent,subIssues");
     assert.deepEqual(r, [{ number: 1 }]);
+  });
+  it("a host gh without parent/subIssues still lists, with the fields it has (children found by Parent line)", async () => {
+    const calls = [];
+    const gh = fakeGh(["number", "body", "labels", "title"], calls);
+    assert.deepEqual(await hostListFields(gh), ["number", "body", "labels"]);
+    assert.deepEqual(await readChildList({ gh, repo: "o/r" }), [{ number: 1 }]);
+    assert.equal(calls.at(-1)[calls.at(-1).indexOf("--json") + 1], "number,body,labels");
   });
   it("liveElsewhere holds the unsettled issues of other live batches of the repo only", () => {
     const mk = (o) => ({ readReport: () => o.report ?? null, readPlan: () => ({ repo: o.repo ?? "o/r" }), store: { load: () => ({ order: o.order, results: o.results ?? {} }) } });
@@ -94,6 +110,7 @@ appendFileSync(${JSON.stringify(launches)}, a[1] + "\\n"); writeFileSync(rf, JSO
     b.setParallel(2);
     const lists = [];
     const gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "list" && a.includes("--help")) return "JSON FIELDS\\n  number, body, labels, parent, subIssues\\n\\nEXAMPLES\\n";
       if (a[0] === "issue" && a[1] === "list" && a.includes("--state") && a.includes("number,body,labels,parent,subIssues")) { lists.push(a); return JSON.stringify([{ number: 9, body: "", labels: [] }, { number: 51, body: "**Parent**: #9", labels: [] }]); }
       if (a.includes("milestone")) return JSON.stringify({ milestone: null });
       if (a[0] === "repo") return "main\n";

@@ -1840,7 +1840,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
-  let rows;
+  let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -1849,7 +1849,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
-      ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
+      ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
