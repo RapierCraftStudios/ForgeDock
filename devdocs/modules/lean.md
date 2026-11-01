@@ -2191,6 +2191,11 @@ not `URL.pathname`, which gave `/C:/...` on Windows.
 `makeLeanIo` now passes `{ repo }` to `makeProjector`, so the projector's `gh issue view --json body` carries `-R <repo>` (callers without a repo keep cwd resolution). `getBody` throws on non-JSON output or a missing/non-string `body` instead of returning `""`, so `writeState` makes no `gh issue edit` call on an unreadable read. `writeState` also refuses a body that would drop existing non-STATE issue text.
 Cite: #4860.
 
+## Entry 2026-10-31 — Live selftest and release gate (#4865)
+
+`selftest-static.mjs` checks every `gh issue|pr view|list --json` field list in `bin/` against the host's `gh <cmd> --help`. `selftest-live.mjs` (`forgedock selftest --live --repo <sandbox>`) drives real gh, git and `orchestrate` through create, add, body, resume, merge, remote and cleanup, stopping at the first failure and naming it; all process access is injected through `io`. `selftest-gate.mjs` builds, parses and posts the `FORGE:SELFTEST` marker; `bin/review-staging.mjs` calls `selftestGate` after resolving the head and stops BLOCKED (fail closed) without a passing marker for that head. Docs: `docs/SELFTEST.md`.
+Cite: #4865.
+
 ## Entry 2026-10-31 — Lane preflight (#4866)
 
 `lanecheck.mjs` (pure, injected io) runs four checks: `preflight.pool_auth` (token resolves, router does not answer 401/403), `preflight.pool_version` (router `GET /agents` version vs CLI, names the upgrade command), `preflight.path_loop` (heavy.mjs `findShimLoops`: a PATH wrapper resolving a shimmed tool back to the shim, names the dir), `preflight.gh_fields` (gh lacks a `--json` field the engine uses). It runs at daemon start (`schedd.mjs`, logged once), on each `orchestrate` admission pass (`preflight` seam: a failure holds admission, all lanes or remote only by scope, one row per distinct code+detail, re-checked each pass, never the breaker) and on demand as `forgedock doctor --lanes`. A sandbox clone failure ends `deferred` `sandbox.clone` with retry-in (`execution.mjs`), never an engine-error. Distinct from the contract preflight in `preflight.mjs`.

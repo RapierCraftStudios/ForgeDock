@@ -58,6 +58,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`verification`](#verification-optional) | No | Health-check patterns |
 | [`execution`](#execution-optional) | No | `forgedock orchestrate`: run lanes in sandboxes instead of host processes (`mode: local\|remote\|hybrid`, `max_remote`) |
 | [`verify`](#verify-optional) | No | Core work-on: run lane verification on CI runners instead of the host (`mode: local\|ci\|hybrid`) |
+| [`selftest`](#selftest-optional) | No | `forgedock selftest --live`: the disposable sandbox repo and fixture language of the live contract harness |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 | [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
 
@@ -655,6 +656,25 @@ prod_watch:
 | `alert_channel` | command | No | Receives title and body on stdin for a P0 incident; nothing else pages. |
 
 **Commands that use this section**: `forgedock prod-watch`
+
+---
+
+## `selftest` (OPTIONAL)
+
+Settings for `forgedock selftest --live` (see [SELFTEST.md](SELFTEST.md)): a harness that drives the real `gh`, git and `orchestrate` against a disposable sandbox repo, and the `FORGE:SELFTEST` result the staging->main review requires.
+
+```yaml
+selftest:
+  sandbox_repo: acme/forgedock-sandbox   # disposable repo; the harness creates and closes issues, PRs and branches in it
+  fixture: node                          # node (default) | python
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `sandbox_repo` | string | No | `owner/repo` the live harness runs in. `--repo` overrides it; with neither the command stops. Never point it at a real project. |
+| `fixture` | string | No | Toolchain of the two trivial fixture issues: `node` (default) or `python`. `--lang` overrides it. |
+
+**Commands that use this section**: `forgedock selftest`
 
 ---
 
