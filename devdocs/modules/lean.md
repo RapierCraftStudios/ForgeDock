@@ -2326,6 +2326,12 @@ Cite: release review of #4979 (SPEC-1, SPEC-2, BUG-1, BUG-3); #4969.
 `gate()` now runs the failed-validate rerun (`rerunFailedValidatesRaw`) and `rerunSubstitutedOriginals` one after the other inside a single `phaseLedger.during("validate")`, beside the guard gate, so phase wall time is not split by two overlapping validate phases; the `rerunFailedValidates` wrapper is gone. An engine-level lean test covers the wiring (a runnable failing frozen command blocks, an unrunnable one merges, `SUBSTITUTE_RERUN` is logged).
 Cite: delta review of #4979 (SEC-11, SEC-12, SPEC-11, SPEC-13).
 
+## Entry 2026-11-02 — A substitute-validate is rejected when the diff removes a path its frozen command names
+
+`gate()` in `lean.mjs` collects deleted/renamed-away paths (`removedPathsOf`, `git diff --name-status -M base...HEAD`) when a validate is substituted and `precheck` (`conformance.mjs`) fails `substitute_removed_path` (`conformance.unimplemented`) if `removedNamedPaths` finds one named by `substituted.from`, before the rerun verdict. The rerun runs in the builder's tree, so a deleted test read as "unrunnable" and let the substitute stand.
+Decision: option 3 (diff check, no rerun) over rerun on base (fails for tests the issue adds) and restore-named-paths-from-base (needs a rerun and worktree mutation). Environment-unrunnable commands with intact files keep their substitute.
+Cite: delta review of #4979 (SEC-13); #4990.
+
 ## Entry 2026-11-02 — noopCommand judges the command after a leading shell keyword; frozen contracts cannot carry a substitution
 
 `noopCommand` (`conformance.mjs`) strips leading `if`/`then`/`else`/`elif`/`do`/`while`/`until` from each segment and judges the rest, so `if [ -f x ]; then pytest; fi` is a real check (before, any keyword-led segment counted as a no-op and such substitutes were rejected); bare `fi`/`done` stay no-ops. `applyAmendments` drops a `substituted` field from the frozen contract's validate rows before replaying amendments, so only a `substitute-validate` amendment sets it and its `from` is always the planned command. Earlier entries now name the failed-validate rerun by its function, `rerunFailedValidatesRaw`.

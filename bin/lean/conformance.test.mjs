@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -201,6 +201,19 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.equal(planted.validate[0].substituted, undefined);
     const plantedSub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak", substituted: { from: "true", why: "x" } }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "b" }]).contract;
     assert.equal(plantedSub.validate[0].substituted.from, "poetry run pytest -k leak");
+  });
+  it("#4990 a substitute whose frozen command names a removed path is rejected", async () => {
+    const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "node --test test/leak.test.js" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/weak.test.js", why: "w" }]).contract;
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const gone = precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { rc: 1, output: "no tests found" } }, removedPaths: ["test/leak.test.js"] });
+    assert.deepEqual(gone.failures.map((f) => f.kind), ["substitute_removed_path"]);
+    assert.equal(gone.failures[0].code, "conformance.unimplemented");
+    assert.match(gone.failures[0].detail, /test\/leak\.test\.js/);
+    const env = precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { rc: 1, output: "Unknown option `-q`" } }, removedPaths: ["docs/other.md"] });
+    assert.deepEqual(env.failures, [], "intact named files: env-unrunnable substitute stands");
+    assert.deepEqual(removedNamedPaths("node --test ./test/a.js 'b/c.js' tests/", ["test/a.js", "b/c.js", "tests/x.js", "z.js"]), ["test/a.js", "b/c.js", "tests/x.js"]);
+    assert.deepEqual(removedNamedPaths("pytest -k leak", ["leak.py"]), []);
+    assert.deepEqual(await removedPathsOf(async () => "D\ta.js\nR100\told.js\tnew.js\nM\tm.js\nA\tn.js", "b"), ["a.js", "old.js"]);
   });
   it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
     assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));
