@@ -172,7 +172,7 @@ describe("precheck (deterministic, no reviewer)", () => {
       const r = applyAmendments({ requirements: [], validate: [{ id: "V2", command: "poetry run pytest -k probe" }] }, [{ kind: "substitute-validate", validate: "V2", command: cmd, why: "w" }]);
       assert.ok(r.problems.some((p) => /runs no check/.test(p)), cmd);
     }
-    for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json", "[ -f a ] && npm test", "bash scripts/check.sh"]) assert.ok(!noopCommand(cmd), cmd);
+    for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json", "[ -f a ] && npm test", "bash scripts/check.sh", "if [ -f x ]; then pytest; fi", "if true; then node --test a.test.mjs; fi", "for f in a b; do node --test $f; done"]) assert.ok(!noopCommand(cmd), cmd); // SEC-22: keywords around a real check
     for (const cmd of ["test 1", "[ 1 ]", "sleep 0", "node -e 0", "true\ntrue", "if true; then :; fi", "python -c pass", "exit 1"]) assert.ok(noopCommand(cmd), JSON.stringify(cmd)); // SEC-12
   });
   it("#4979 SPEC-2 a substitute stands only when the frozen command cannot run", () => {
@@ -196,6 +196,11 @@ describe("precheck (deterministic, no reviewer)", () => {
     ]).contract;
     assert.equal(twice.validate[0].substituted.from, "poetry run pytest -k leak");
     assert.equal(twice.validate[0].command, "node --test test/leak.test.js");
+    // SEC-21: a planner-set substituted field on the frozen contract is dropped; only an amendment sets it
+    const planted = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak", substituted: { from: "true", why: "x" } }] }, []).contract;
+    assert.equal(planted.validate[0].substituted, undefined);
+    const plantedSub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak", substituted: { from: "true", why: "x" } }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "b" }]).contract;
+    assert.equal(plantedSub.validate[0].substituted.from, "poetry run pytest -k leak");
   });
   it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
     assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));
