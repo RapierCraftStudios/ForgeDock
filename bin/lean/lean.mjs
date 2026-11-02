@@ -5,6 +5,7 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
+import { existsSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
@@ -14,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -37,7 +38,7 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
@@ -2181,6 +2182,8 @@ export async function runCore(o) {
     }
     const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
+    /** #5005: a frozen forgedock entry-point path missing on this host is replaced by this install's own. */
+    const forgedockResolved = (c) => resolveForgedockPaths(String(c), { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI });
     async function rerunFailedValidatesRaw(contract) {
       if (!io.runCommand) return null;
       const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
@@ -2189,11 +2192,11 @@ export async function runCore(o) {
         const r = runs.find((x) => x?.id === v.id);
         if (!r || r.exit === undefined || r.exit === 0) continue;
         let x;
-        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
         // #4761: a runner usage error (vitest -q) is the frozen command's defect: try the normalised command once
         const fixed = cliUsageError(x ?? {}) ? normalizeRunnerCommand(v.command) : null;
         if (fixed && fixed !== String(v.command)) {
-          try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: fixed, cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+          try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(fixed), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
           const note = `Validate ${v.id} hit a runner usage error; reran normalised (\`${fixed}\`): exit ${x?.rc}`;
           if (!T.decisions.includes(note)) T.decisions.push(note);
         }
@@ -2210,7 +2213,7 @@ export async function runCore(o) {
       for (const v of contract.validate ?? []) {
         if (!v.substituted?.from) continue;
         let x;
-        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.substituted.from), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.substituted.from), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
       }
       if (Object.keys(out).length) ev({ event: "SUBSTITUTE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
