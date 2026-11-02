@@ -427,7 +427,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `origin/<lane>` that are authored/committed `*@localhost` or lack a `Signed-off-by` naming their
    author are rewritten (`git filter-branch` over that range only) with the lane identity
    (`GIT_AUTHOR_*`, else `git config`) and a sign-off; pushed commits are never in the range. No usable
-   identity or a failed rewrite ends `ci.dco`. Before `gh pr merge`, a failed check named DCO on the
+   identity ends `ci.dco`. A failed rewrite (#4997) ends `engine-error` `engine.dco_rewrite` (recoverable): tracked/staged changes are parked first with `git stash create` pinned on `refs/forgedock/dco-stash` (never the shared stash stack), `reset --hard`, then re-applied after `filter-branch`; if the apply conflicts the ref stays and the error names the sha. Before `gh pr merge`, a failed check named DCO on the
    current head (read from `checkStates`, required or not, any `merge_wait`) ends needs-human `ci.dco`
    (not recoverable: a new commit cannot fix history). `DCO_SIGNOFF_REWRITE` event.
    **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
@@ -2342,6 +2342,11 @@ Cite: delta review of #4979 (SEC-21, SEC-22, SPEC-22).
 
 `noopCommand` (`conformance.mjs`) now drops a bare `then`/`else`/`do` segment, so `if true\nthen\n  :\nfi` is a no-op. It also tracks the condition of each `if`/`elif`/`while`: when it is a constant false (`false`, `[ 0 = 1 ]`, `test -n ""`, a small fixed set, no shell parsing) the body up to `else`/`elif`/`fi`/`done` never runs and is ignored, so `if false; then pytest; fi` is a no-op. Real wrapped checks (`if [ -f x ]; then pytest; fi`, `for f in a b; do node --test $f; done`) stay real. Still a best-effort denylist behind the frozen-command rerun.
 Cite: delta review of #4979 (SPEC-31, SEC-32); #4995.
+
+## Entry 2026-11-02 — DCO sign-off rewrite runs on a clean tree; a failed rewrite is a mechanical engine-error
+
+`ensureSignedOff` (`signoff.mjs`) saves tracked changes with `git stash create` pinned on `refs/forgedock/dco-stash`, resets hard, runs `filter-branch`, then `stash apply`s them and deletes the ref (kept, sha named in the error, on apply conflict). `filter-branch` refused a dirty tree ("You have unstaged changes") and the lane ended needs-human with the commit unpushed. A failure now carries `engineCode: engine.dco_rewrite`; `signOffUnpushed` keeps `ci.dco` only for `noIdentity`, and `runCore`'s catch finishes `engine-error` with the code, which the batch runner relaunches like any engine-error (not in `RECOVERABLE_CODES`).
+Cite: #4997.
 
 ## Entry 2026-11-02 — `--add` of a new issue reopens a finished batch; the CLI says whether it is hosted
 
