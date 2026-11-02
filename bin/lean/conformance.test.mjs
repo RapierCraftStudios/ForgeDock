@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
@@ -809,11 +810,30 @@ describe("#4594 amend-requirement", () => {
   });
   it("amend-requirement with text on a defer requirement flips it to deliver and files no follow-up (#4984)", () => {
     const D = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "later", bucket: "new-issue", tracked: "#5" }] };
-    const a = applyAmendments(D, [{ ...am, requirement: D.requirements[1].id }]);
+    const a = applyAmendments(D, [{ ...am, requirement: D.requirements[1].id, why: "token stored hash-only; #5 is now delivered in the diff" }]);
     assert.deepEqual(a.problems, []); assert.deepEqual(a.toTrack, []);
     const r = a.contract.requirements[1];
     assert.equal(r.disposition, "deliver"); assert.equal(r.amendment.text, am.text);
     assert.ok(!("bucket" in r) && !("why" in r) && !("tracked" in r));
+  });
+  it("a trivial rewording of a deferred requirement keeps amended_from for the reviewer (#4996)", () => {
+    const D = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "later", bucket: "new-issue" }] };
+    const a = applyAmendments(D, [{ ...am, requirement: D.requirements[1].id, text: "done", why: "trivial" }]);
+    assert.deepEqual(a.problems, []);
+    const r = a.contract.requirements[1];
+    assert.equal(r.disposition, "deliver"); assert.equal(r.amended_from.disposition, "defer"); assert.equal(r.amended_from.quote, C.requirements[1].quote); assert.equal(r.amended_from.why, "later");
+  });
+  it("post-deploy flip with a check id is rejected without naming it, accepted when named (#4996)", () => {
+    const chk = "pd-check-1";
+    const D = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "post-deploy", why: "after deploy", bucket: "post-deploy", check: chk }] };
+    const bad = applyAmendments(D, [{ ...am, requirement: D.requirements[1].id }]);
+    assert.match(bad.problems[0], /does not name its pd-check-1/);
+    assert.equal(D.requirements[1].disposition, "post-deploy"); assert.equal(bad.contract.requirements[1].disposition, "post-deploy");
+    const ok = applyAmendments(D, [{ ...am, requirement: D.requirements[1].id, why: `${chk} now runs in the diff` }]);
+    assert.deepEqual(ok.problems, []); assert.equal(ok.contract.requirements[1].amended_from.check, chk);
+  });
+  it("the reviewer prompt tells it to compare amended_from with the amendment (#4996)", () => {
+    assert.match(readFileSync(new URL("./prompts.mjs", import.meta.url), "utf8"), /amended_from\.quote and amended_from\.why with amendment\.text/);
   });
   it("followupMap matches an item key whose backticks the script stripped (#4984)", () => {
     assert.deepEqual(followupMap("R2: wire pd.py in\t20\n", [{ key: "R2: wire `pd.py` in" }]), { "R2: wire `pd.py` in": 20 });
@@ -1088,7 +1108,7 @@ describe("mutation check (#4913)", () => {
   });
   it("#4931: a real repo whose change deleted a non-test file is fully restored", async () => {
     const { execFileSync } = await import("node:child_process");
-    const { writeFileSync, existsSync, readFileSync } = await import("node:fs");
+    const { writeFileSync, existsSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { tmpDir } = await import("../tests/_tmp.mjs");
     const d = tmpDir("mut-");
