@@ -15,9 +15,8 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, FORGEDOCK_CLI, CHECKS_CLI } from "./prompts.mjs";
-// #4969: prompts name absolute install paths (FORGEDOCK_CLI, and CHECKS_CLI in the host rules); budgets count them as fixed placeholders so they do not vary with the checkout path.
-const budgetTokens = (s, cli = FORGEDOCK_CLI, checks = CHECKS_CLI) => approxTokens(String(s).replaceAll(cli, "<FORGEDOCK_CLI>").replaceAll(checks, "<CHECKS_CLI>"));
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, FORGEDOCK_CLI, CHECKS_CLI, budgetTokens } from "./prompts.mjs";
+// #4969: budgets use budgetTokens (install paths as fixed placeholders) so they do not vary with the checkout path.
 const assertBudget = (label, text, max, cli, checks) => assert.ok(budgetTokens(text, cli, checks) <= max, `${label} is ${budgetTokens(text, cli, checks)} of ${max} tokens`);
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
