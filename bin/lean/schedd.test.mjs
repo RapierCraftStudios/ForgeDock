@@ -249,6 +249,26 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
+  it("#5000: add to a finished unhosted batch reopens it through the daemon and runs the new issue", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "OPEN", labels: [] }) : "o/r\n") } };
+      await withRoot(h, () => capture(async () => {
+        writeFileSync(h.release, "");
+        await orchestrateFromCli(["1", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], h.client);
+        const [id] = listBatches(h.root);
+        const b = openBatch(h.root, id);
+        const res = await orchestrateFromCli(["--add", id, "6"], client);
+        assert.deepEqual(res.added, [6]);
+        assert.equal(res.reopened, true, "the finished batch is hosted again");
+        await until(() => h.launched().includes(6));
+        await until(() => b.store.load()?.results?.[6]?.outcome === "merged");
+        assert.deepEqual(listBatches(h.root), [id], "no second batch");
+      }));
+    } finally { await h.cleanup(); }
+  });
+
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
     const h = host();
     try {

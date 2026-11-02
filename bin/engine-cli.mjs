@@ -1283,6 +1283,11 @@ async function addedEdges({ added, records, io, repo }) {
  * state`): skipped `closed` (`unreadable` when the read fails); the rest go to the batch's `add` file, through the daemon
  * when `viaDaemon(issues)` answers (non-null), else written here (batch.mjs `addIssues` skips issues already in the batch).
  */
+/** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
+const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
+
 async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1308,11 +1313,13 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   let res = { added: [], skipped: [], requeued: [] };
   if (open.length) {
     res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
-    if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // #4687: no daemon: the next --resume reruns it
+    if (res.reopened === undefined && (res.added?.length || res.requeued?.length) && b.readReport()) b.clearReport(); // #4687/#5000: no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, added: res.added ?? [], requeued: res.requeued ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
+  if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   out.edges = await addedEdges({ added: out.added, records, io, repo }); // #4773
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (out.added.length || out.requeued.length) print(hostedLine(id, res));
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
   return out;
 }
@@ -1371,7 +1378,9 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
     if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
+  if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (out.requeued.length) print(hostedLine(id, res));
   return out;
 }
 

@@ -967,6 +967,27 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.equal(b.readRequeued()[0].reason, "decided");
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
   });
+
+  it("#5000: --add/--requeue on a finished batch without a daemon clear the report and say it is not hosted", async () => {
+    const root = tmpDir("batch-add-finished-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [5], results: { 5: { outcome: "needs-human" } } });
+    b.writeReport({ rows: [], report: "x" });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN", labels: [], body: "", author: { login: "a" } }) };
+    const lines = [];
+    const run = async (argv) => { const l = console.log; console.log = (x) => lines.push(String(x)); try { return await orchestrateFromCli(argv, { batchRoot: root, io }); } finally { console.log = l; } };
+    const add = await run(["--add", "b1", "7"]);
+    assert.deepEqual(add.added, [7]);
+    assert.equal(b.readReport(), null, "a plain add reopens the finished batch for --resume");
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)), "the CLI says nothing is scheduled yet");
+    b.writeReport({ rows: [], report: "x" });
+    lines.length = 0;
+    const rq = await run(["--requeue", "b1", "5"]);
+    assert.deepEqual(rq.requeued, [5]);
+    assert.equal(b.readReport(), null);
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
+  });
 });
 
 describe("#4540: remote admissions are capped to the provider's free capacity", () => {

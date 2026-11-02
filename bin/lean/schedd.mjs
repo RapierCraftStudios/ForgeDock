@@ -215,8 +215,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { added, skipped, requeued = [] } = b.addIssues(req.issues ?? []);
-      // #4687: a re-queued skipped issue reopens a finished, unhosted batch like --requeue does
-      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      // #4687/#5000: a re-queued skipped issue or a newly added one reopens a finished, unhosted batch like --requeue does
+      const reopen = (added.length > 0 || requeued.length > 0) && !hosted.has(req.id) && !starting.has(req.id);
       if (reopen) await hostBounded({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, null, `batch ${req.id}`);
       return send({ type: "ok", added, skipped, requeued, hosted: hosted.has(req.id), reopened: reopen }, true);
     }

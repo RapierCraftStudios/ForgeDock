@@ -2343,7 +2343,12 @@ Cite: delta review of #4979 (SEC-21, SEC-22, SPEC-22).
 `noopCommand` (`conformance.mjs`) now drops a bare `then`/`else`/`do` segment, so `if true\nthen\n  :\nfi` is a no-op. It also tracks the condition of each `if`/`elif`/`while`: when it is a constant false (`false`, `[ 0 = 1 ]`, `test -n ""`, a small fixed set, no shell parsing) the body up to `else`/`elif`/`fi`/`done` never runs and is ignored, so `if false; then pytest; fi` is a no-op. Real wrapped checks (`if [ -f x ]; then pytest; fi`, `for f in a b; do node --test $f; done`) stay real. Still a best-effort denylist behind the frozen-command rerun.
 Cite: delta review of #4979 (SPEC-31, SEC-32); #4995.
 
-## Entry 2026-11-02 — DCO sign-off rewrite runs on a clean tree; a failed rewrite is recoverable engine-error
+## Entry 2026-11-02 — DCO sign-off rewrite runs on a clean tree; a failed rewrite is a mechanical engine-error
 
-`ensureSignedOff` (`signoff.mjs`) saves tracked changes with `git stash create` pinned on `refs/forgedock/dco-stash`, resets hard, runs `filter-branch`, then `stash apply`s them and deletes the ref (kept, sha named in the error, on apply conflict). `filter-branch` refused a dirty tree ("You have unstaged changes") and the lane ended needs-human with the commit unpushed. A failure now carries `engineCode: engine.dco_rewrite`; `signOffUnpushed` keeps `ci.dco` only for `noIdentity`, and `runCore`'s catch finishes `engine-error` with the code, which `classifyNeedsHumanBase` treats as recoverable.
+`ensureSignedOff` (`signoff.mjs`) saves tracked changes with `git stash create` pinned on `refs/forgedock/dco-stash`, resets hard, runs `filter-branch`, then `stash apply`s them and deletes the ref (kept, sha named in the error, on apply conflict). `filter-branch` refused a dirty tree ("You have unstaged changes") and the lane ended needs-human with the commit unpushed. A failure now carries `engineCode: engine.dco_rewrite`; `signOffUnpushed` keeps `ci.dco` only for `noIdentity`, and `runCore`'s catch finishes `engine-error` with the code, which the batch runner relaunches like any engine-error (not in `RECOVERABLE_CODES`).
 Cite: #4997.
+
+## Entry 2026-11-02 — `--add` of a new issue reopens a finished batch; the CLI says whether it is hosted
+
+The schedd `add` op (`schedd.mjs`) now reopens a finished, unhosted batch (hosts it as `--resume`) when an issue was newly added, not only when a skipped one was requeued. Without a daemon, `addToBatch` clears `report.json` for a plain add too. `addToBatch` and `requeueBatch` (`engine-cli.mjs`) print whether the batch was reopened, is hosted, or is queued but not hosted (run `--resume <id>`), and return `hosted`/`reopened`. Finalising a batch with `pending` non-empty stays #4917.
+Cite: #5000.
