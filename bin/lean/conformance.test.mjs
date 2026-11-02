@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { shellSyntaxError, unrunnableValidate, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
+import { shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -156,6 +156,29 @@ describe("precheck (deterministic, no reviewer)", () => {
     const bad = applyAmendments({ requirements: [], validate: [{ id: "V2", command: "x" }] }, [{ kind: "substitute-validate", validate: "V2", command: "echo (oops", why: "w" }]);
     assert.ok(bad.problems.some((p) => /not valid shell/.test(p)));
     assert.ok(applyAmendments({ requirements: [], validate: [] }, [{ kind: "substitute-validate", validate: "V9", command: "true", why: "w" }]).problems.length);
+  });
+  it("#4979 SPEC-2 a substitute that runs no check is rejected at amendment time", () => {
+    for (const cmd of ["true", ":", "exit 0", "echo ok", "true && echo done", "printf x | true"]) {
+      assert.ok(noopCommand(cmd), cmd);
+      const r = applyAmendments({ requirements: [], validate: [{ id: "V2", command: "poetry run pytest -k probe" }] }, [{ kind: "substitute-validate", validate: "V2", command: cmd, why: "w" }]);
+      assert.ok(r.problems.some((p) => /runs no check/.test(p)), cmd);
+    }
+    for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json"]) assert.ok(!noopCommand(cmd), cmd);
+  });
+  it("#4979 SPEC-2 a substitute stands only when the frozen command cannot run", () => {
+    const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "no pyproject at root" }]).contract;
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const run = (substitutedRuns) => precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns });
+    assert.deepEqual(run({ V1: { rc: 1, output: "Poetry could not find a pyproject.toml file in /repo" } }).failures, [], "unrunnable original: substitute stands");
+    assert.deepEqual(run({ V1: { rc: 127, output: "poetry: command not found" } }).failures, [], "missing runner");
+    assert.deepEqual(run({ V1: { rc: 0, output: "1 passed" } }).failures, [], "original passes anyway");
+    const runs = run({ V1: { rc: 1, output: "FAILED tests/test_leak.py::test_release - AssertionError" } });
+    assert.deepEqual(runs.failures.map((f) => f.kind), ["validate_failed"], "a failing original may not be hidden");
+    assert.match(runs.failures[0].detail, /frozen command runs and fails \(exit 1\)/);
+    assert.deepEqual(run(null).failures.map((f) => f.kind), ["substitute_unverified"], "no rerun: fail closed");
+    assert.deepEqual(run({ V1: { rc: 124, output: "" } }).failures.map((f) => f.kind), ["validate_timeout"]);
+    assert.deepEqual(precheck({ contract: sub, result: res, changedFiles: files, ciVerified: true, substitutedRuns: { V1: { rc: 1, output: "AssertionError" } } }).failures.map((f) => f.kind), ["validate_failed"], "CI never covers a hidden failure");
+    assert.equal(substituteVerdict(undefined), "unverified");
   });
   it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
     assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));

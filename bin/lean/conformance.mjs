@@ -415,7 +415,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // #4857: a runnable equivalent of an unrunnable frozen validate command; same id, same checks as a planned command
       const v = (c.validate ?? []).find((x) => x.id === a.validate);
       if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
-      const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
+      const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
       if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
       v.substituted = { from: v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
       applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
@@ -475,6 +475,22 @@ export function shellSyntaxError(command) {
   const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
   if (r.error || r.status === 0 || r.status == null) return null;
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
+}
+const NOOP_SEGMENT_RE = /^(?:true|:|exit(?:\s+0)?|echo(?:\s.*)?|printf(?:\s.*)?)$/;
+/** #4979 SPEC-2: a command every segment of which is a no-op builtin (true, :, exit 0, echo, printf) checks nothing. */
+export function noopCommand(command) {
+  const segs = String(command ?? "").split(/&&|\|\||;|\|/).map((s) => s.trim()).filter(Boolean);
+  return segs.length > 0 && segs.every((s) => NOOP_SEGMENT_RE.test(s));
+}
+/**
+ * #4979 SPEC-2: a substitute-validate stands only when the frozen command it replaced cannot run (died before any test,
+ * a runner usage error, a missing host tool, exit 127) or passes anyway. A frozen command that runs and fails is a real
+ * failure the substitute may not hide. `run` is the engine's rerun of the frozen command; null when none was made.
+ */
+export function substituteVerdict(run, { repoHas = () => false, command = "" } = {}) {
+  if (!run) return "unverified";
+  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
+  return run.rc === 124 ? "timeout" : "runs";
 }
 const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
@@ -549,7 +565,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -563,6 +579,14 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
+    // #4979 SPEC-2: a substitute counts only when the frozen command it replaced cannot run (or passes); checked first, never CI-covered
+    if (v.substituted) {
+      const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
+      const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
+      if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
+      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check` }); continue; }
+      if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
+    }
     const r = runs.find((x) => x?.id === v.id);
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
