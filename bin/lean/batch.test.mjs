@@ -888,6 +888,16 @@ describe("#4784: usage-limit deferrals", () => {
     b.store.save({ order: [1], results: { 1: { outcome: "deferred" } } });
     assert.deepEqual(b.requeue([1]).requeued, [1]);
   });
+  it("a requeuable deferred row: an issue that gave up after N deferrals (#4984)", async () => {
+    const { now, sleep } = fakeClock();
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
+      runOne: async () => ({ terminalReason: "deferred", code: "followup.unavailable", detail: "no tracking issue was returned for R2" }) });
+    assert.match(rows[0].detail, /gave up after 3 deferrals/);
+    const b = openBatch(tmpDir("batch-requeue-gaveup-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1], results: { 1: { outcome: rows[0].outcome, detail: rows[0].detail } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
+  });
 });
 
 describe("#4550: forgedock orchestrate --requeue", () => {

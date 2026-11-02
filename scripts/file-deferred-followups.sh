@@ -359,11 +359,21 @@ resolve_milestone() { # sets MS_TITLE (empty = none): the parent's milestone, or
             | if $next != "" then $next elif ($d != "" and ($all | map(select(.title == $d and .state == "open")) | length) > 0) then $d else "" end) end' 2>/dev/null) || MS_TITLE="$t"
 }
 
+parent_is_followup() { # 0 when the parent is an open, trusted, non-PR issue carrying a DEFERRED_FROM marker
+  gh api "repos/${REPO}/issues/${PARENT}" 2>/dev/null | jq -e --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" "$JQ_PRE"'
+      select(.pull_request == null) | select(trusted) | select(.state == "open") | select((.body // "") | test("FORGE:DEFERRED_FROM: #[0-9]+"))' >/dev/null 2>&1
+}
+
 # File one class ($CLS, items in $ITEMS_F): append to its canonical follow-up, or create one. Sets FILED_N, FILED_NEW.
 file_class() {
   local n_items; n_items=$(wc -l < "$ITEMS_F" | tr -d ' ')
   FILED_N=""; FILED_NEW=0
   CANON=$(cut -f1 "$TMP/canon.$CLS"); CSTATE=$(cut -f2 "$TMP/canon.$CLS")
+  # #4984: a parent that is itself an open follow-up tracks its deferred items in its own checklist (no follow-up of a follow-up).
+  if [ -z "$CANON" ] && parent_is_followup; then
+    append_items "$PARENT" open || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+    FILED_N="$PARENT"; return 0
+  fi
   if [ -n "$CANON" ]; then
     append_items "$CANON" "$CSTATE" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
     FILED_N="$CANON"; return 0

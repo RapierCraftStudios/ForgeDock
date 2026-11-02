@@ -776,6 +776,17 @@ describe("#4594 amend-requirement", () => {
     const r = a.contract.requirements.find((x) => x.id === "R1");
     assert.equal(r.disposition, "deliver"); assert.equal(r.amendment.text, am.text); assert.equal(r.amendment.why, am.why); assert.equal(r.quote, C.requirements[0].quote);
   });
+  it("amend-requirement with text on a defer requirement flips it to deliver and files no follow-up (#4984)", () => {
+    const D = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "later", bucket: "new-issue", tracked: "#5" }] };
+    const a = applyAmendments(D, [{ ...am, requirement: D.requirements[1].id }]);
+    assert.deepEqual(a.problems, []); assert.deepEqual(a.toTrack, []);
+    const r = a.contract.requirements[1];
+    assert.equal(r.disposition, "deliver"); assert.equal(r.amendment.text, am.text);
+    assert.ok(!("bucket" in r) && !("why" in r) && !("tracked" in r));
+  });
+  it("followupMap matches an item key whose backticks the script stripped (#4984)", () => {
+    assert.deepEqual(followupMap("R2: wire pd.py in\t20\n", [{ key: "R2: wire `pd.py` in" }]), { "R2: wire `pd.py` in": 20 });
+  });
   it("an unknown requirement is a problem; the frozen contract is untouched", () => {
     assert.match(applyAmendments(C, [{ ...am, requirement: "R9" }]).problems[0], /unknown requirement R9/);
     assert.equal(C.requirements[0].amendment, undefined);

@@ -441,6 +441,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
       r.amendment = { text: String(a.text).trim(), why: String(a.why).trim() }; r.amended = true;
+      // #4984: deliver text on a deferred requirement puts it in scope: it is delivered, not tracked in a follow-up
+      if (TRACKED.includes(r.disposition)) { r.disposition = "deliver"; for (const k of ["bucket", "why", "check", "tracked", "class"]) delete r[k]; }
     } else if (TRACKED.includes(a.kind) && a.requirement) {
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
@@ -1028,8 +1030,9 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
 /** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */
 export function followupMap(out, items) {
   const echoed = new Map();
-  for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(k.trim(), Number(n)); }
-  return Object.fromEntries(items.filter((i) => echoed.has(String(i.key).trim())).map((i) => [i.key, echoed.get(String(i.key).trim())]));
+  const norm = (k) => String(k).replace(/`/g, "").trim(); // #4984: the script strips backticks from the label it echoes
+  for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(norm(k), Number(n)); }
+  return Object.fromEntries(items.filter((i) => echoed.has(norm(i.key))).map((i) => [i.key, echoed.get(norm(i.key))]));
 }
 
 /**
