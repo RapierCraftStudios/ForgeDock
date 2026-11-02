@@ -417,7 +417,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
       const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
       if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
-      v.substituted = { from: v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
+      v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
       applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {

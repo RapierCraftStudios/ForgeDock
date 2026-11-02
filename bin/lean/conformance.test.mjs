@@ -157,6 +157,17 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.ok(bad.problems.some((p) => /not valid shell/.test(p)));
     assert.ok(applyAmendments({ requirements: [], validate: [] }, [{ kind: "substitute-validate", validate: "V9", command: "true", why: "w" }]).problems.length);
   });
+  it("#4985 a repeated substitute-validate keeps the frozen command as substituted.from", () => {
+    const base = { requirements: [], validate: [{ id: "V1", command: "poetry run pytest -k leak" }] };
+    const first = { kind: "substitute-validate", validate: "V1", command: "node --test a.test.mjs", why: "w1" };
+    const second = { kind: "substitute-validate", validate: "V1", command: "test -f package.json", why: "w2" };
+    for (const r of [applyAmendments(base, [first, second]), applyAmendments(applyAmendments(base, [first]).contract, [second])]) {
+      assert.deepEqual(r.problems, []);
+      assert.equal(r.contract.validate[0].substituted.from, "poetry run pytest -k leak");
+      assert.equal(r.contract.validate[0].command, "test -f package.json");
+      assert.equal(r.contract.validate[0].substituted.why, "w2");
+    }
+  });
   it("#4979 SPEC-2 a substitute that runs no check is rejected at amendment time", () => {
     for (const cmd of ["true", ":", "exit 0", "echo ok", "true && echo done", "printf x | true"]) {
       assert.ok(noopCommand(cmd), cmd);
