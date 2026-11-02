@@ -326,6 +326,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
+const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
@@ -379,6 +380,7 @@ function amendmentProblem(a, tag) {
 export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null, addedPaths = [], defaultWhy = null } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
+  for (const v of c.validate ?? []) if (v && typeof v === "object") delete v.substituted; // SEC-21: only a substitute-validate amendment sets it, never the frozen contract
   const applied = [], toTrack = [], problems = [], decisions = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
   const rows = [];
@@ -398,6 +400,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     rows.push({ a: n, raw });
   }
   for (let { a, raw } of rows) {
+    // an unrelated out-of-diff CI failure is not a contract change: informational, never a problem
+    if (a?.kind === UNRELATED_CI_KIND) { applied.push({ kind: a.kind, target: String(a.target ?? "unrelated check"), why: String(a.why ?? "").trim() || "unrelated to the diff" }); continue; }
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (a && blank(a.why) && !blank(defaultWhy)) a = { ...a, why: String(defaultWhy) }; // the engine demanded the change: its reason is the why
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
@@ -479,14 +483,15 @@ export function shellSyntaxError(command) {
   if (r.error || r.status === 0 || r.status == null) return null;
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
 }
-const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|(?:if|then|else|fi|do|done)(?:\s.*)?|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
+const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|fi|done|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
 /**
  * #4979 SPEC-2: a command every segment of which is a no-op (true, :, exit N, echo, printf, sleep, a constant test,
  * shell keywords, `node -e 0`, `python -c pass`) checks nothing. A best-effort denylist: the engine's rerun of the
  * frozen command (`substituteVerdict`) is the real gate.
  */
 export function noopCommand(command) {
-  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
+  // SEC-22: a leading shell keyword is stripped and the rest judged, so `if [ -f x ]; then pytest; fi` is a real check
+  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim().replace(/^(?:(?:if|then|else|elif|do|while|until)\s+)+/, "").trim()).filter(Boolean);
   return segs.length > 0 && segs.every((s) => NOOP_SEGMENT_RE.test(s));
 }
 /**
