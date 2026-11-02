@@ -163,7 +163,8 @@ describe("precheck (deterministic, no reviewer)", () => {
       const r = applyAmendments({ requirements: [], validate: [{ id: "V2", command: "poetry run pytest -k probe" }] }, [{ kind: "substitute-validate", validate: "V2", command: cmd, why: "w" }]);
       assert.ok(r.problems.some((p) => /runs no check/.test(p)), cmd);
     }
-    for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json"]) assert.ok(!noopCommand(cmd), cmd);
+    for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json", "[ -f a ] && npm test", "bash scripts/check.sh"]) assert.ok(!noopCommand(cmd), cmd);
+    for (const cmd of ["test 1", "[ 1 ]", "sleep 0", "node -e 0", "true\ntrue", "if true; then :; fi", "python -c pass", "exit 1"]) assert.ok(noopCommand(cmd), JSON.stringify(cmd)); // SEC-12
   });
   it("#4979 SPEC-2 a substitute stands only when the frozen command cannot run", () => {
     const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "no pyproject at root" }]).contract;
@@ -179,6 +180,13 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(run({ V1: { rc: 124, output: "" } }).failures.map((f) => f.kind), ["validate_timeout"]);
     assert.deepEqual(precheck({ contract: sub, result: res, changedFiles: files, ciVerified: true, substitutedRuns: { V1: { rc: 1, output: "AssertionError" } } }).failures.map((f) => f.kind), ["validate_failed"], "CI never covers a hidden failure");
     assert.equal(substituteVerdict(undefined), "unverified");
+    // SEC-11: a second substitute of the same id never replaces the frozen command the engine reruns
+    const twice = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [
+      { kind: "substitute-validate", validate: "V1", command: "nonexistent-xyz", why: "a" },
+      { kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "b" },
+    ]).contract;
+    assert.equal(twice.validate[0].substituted.from, "poetry run pytest -k leak");
+    assert.equal(twice.validate[0].command, "node --test test/leak.test.js");
   });
   it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
     assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));
