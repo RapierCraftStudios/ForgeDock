@@ -568,6 +568,18 @@ export function normalizeRunnerCommand(command) {
 export function cliUsageError({ rc, output } = {}) {
   return rc !== 0 && CLI_USAGE_RE.test(String(output ?? ""));
 }
+const FORGEDOCK_ENTRY_RE = /^\/.*\/forgedock\/bin\/(?:lean\/checks|forgedock)\.mjs$/;
+const FORGEDOCK_TOKEN_RE = /(?<![\w./-])\/[^\s'"`;&|()]*\/forgedock\/bin\/(lean\/checks|forgedock)\.mjs/g;
+/**
+ * #5005: a frozen validate command names forgedock's own entry point by the absolute path of the install that wrote it; on
+ * the host that runs it that path may not exist. Rewrites each such token whose file is missing to this install's path.
+ */
+export function resolveForgedockPaths(command, { exists = () => true, checksCli, forgedockCli } = {}) {
+  return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => {
+    const here = which === "forgedock" ? forgedockCli : checksCli;
+    return here && !exists(tok) ? here : tok;
+  });
+}
 const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
@@ -581,6 +593,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const py = PY_MISSING_RE.exec(out);
   if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
   const js = NODE_MISSING_RE.exec(out);
+  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "command" }; // #5005: the host's forgedock install is not at the frozen path
   if (js) {
     const spec = js[1], scoped = spec.startsWith("@");
     if (!scoped && spec.includes("/")) return null;
