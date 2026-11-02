@@ -417,6 +417,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
       const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
       if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
+      // SEC-11: a second substitute of the same id keeps the frozen command as `from`, so the engine always reruns the original
       v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
       applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
       continue;
@@ -476,10 +477,14 @@ export function shellSyntaxError(command) {
   if (r.error || r.status === 0 || r.status == null) return null;
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
 }
-const NOOP_SEGMENT_RE = /^(?:true|:|exit(?:\s+0)?|echo(?:\s.*)?|printf(?:\s.*)?)$/;
-/** #4979 SPEC-2: a command every segment of which is a no-op builtin (true, :, exit 0, echo, printf) checks nothing. */
+const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|(?:if|then|else|fi|do|done)(?:\s.*)?|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
+/**
+ * #4979 SPEC-2: a command every segment of which is a no-op (true, :, exit N, echo, printf, sleep, a constant test,
+ * shell keywords, `node -e 0`, `python -c pass`) checks nothing. A best-effort denylist: the engine's rerun of the
+ * frozen command (`substituteVerdict`) is the real gate.
+ */
 export function noopCommand(command) {
-  const segs = String(command ?? "").split(/&&|\|\||;|\|/).map((s) => s.trim()).filter(Boolean);
+  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
   return segs.length > 0 && segs.every((s) => NOOP_SEGMENT_RE.test(s));
 }
 /**

@@ -2318,6 +2318,8 @@ Cite: #4974.
 The prompt-budget assertions in `lean.test.mjs` measure prompts with `FORGEDOCK_CLI` (and any `.../bin/forgedock.mjs` path) replaced by `<cli>`, so they pass or fail the same from any checkout depth; their messages print the headroom (`N of 1650 tokens`). The prompt the builder receives is unchanged.
 Cite: release review of #4979 (SPEC-1, SPEC-2, BUG-1, BUG-3); #4969.
 
-## Entry 2026-11-02 — A repeated substitute-validate keeps the frozen command as substituted.from (#4985)
+## Entry 2026-11-02 — A repeated substitute-validate keeps the frozen command; wider no-op detection
 
-`applyAmendments` (`conformance.mjs`) records `substituted.from = v.substituted?.from ?? v.command`, so substituting the same validate id twice (in one call or re-applied on the result) leaves `from` at the frozen command while `command` and `why` take the latest substitute. `rerunSubstitutedOriginals` therefore always reruns the frozen check, never an earlier builder-chosen substitute. Cost: 0.
+`applyAmendments` keeps `substituted.from` at the frozen command when a validate is substituted twice (before, the second substitute recorded the first substitute as `from`, so the engine reran a builder-chosen command and a nonexistent first substitute, rc 127, passed `substituteVerdict`). `noopCommand` also splits on newlines and treats `false`, `exit N`, `sleep N`, a constant `test`/`[ ]`, shell keywords, `node -e 0` and `python -c pass` as no-ops; it stays a best-effort denylist behind the engine's rerun of the frozen command.
+`gate()` now runs the failed-validate rerun (`rerunFailedValidatesRaw`) and `rerunSubstitutedOriginals` one after the other inside a single `phaseLedger.during("validate")`, beside the guard gate, so phase wall time is not split by two overlapping validate phases; the `rerunFailedValidates` wrapper is gone. An engine-level lean test covers the wiring (a runnable failing frozen command blocks, an unrunnable one merges, `SUBSTITUTE_RERUN` is logged).
+Cite: delta review of #4979 (SEC-11, SEC-12, SPEC-11, SPEC-13).
