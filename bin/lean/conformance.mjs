@@ -444,9 +444,17 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
+      if (TRACKED.includes(r.disposition)) {
+        // SEC-31/SPEC-33: a flip that would orphan a check id or a filed tracking issue must name it and say why it is now delivered
+        const named = [r.check, r.tracked ? String(r.tracked).replace(/\D/g, "") : null].filter((k) => !blank(k));
+        const said = `${a.why} ${a.text}`;
+        const missing = named.filter((k) => !new RegExp(`(^|[^\\w-])#?${String(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(said));
+        if (missing.length) { problems.push(`amendment flips ${r.disposition} ${r.id} to deliver but does not name its ${missing.join(", ")} (check id or tracking issue) and why it is now delivered in the diff`); continue; }
+        // #4984: deliver text on a deferred requirement puts it in scope: it is delivered, not tracked in a follow-up; amended_from keeps the original for the reviewer
+        r.amended_from ??= Object.fromEntries(["quote", "disposition", "why", "bucket", "check", "tracked", "class"].filter((k) => r[k] != null).map((k) => [k, r[k]]));
+        r.disposition = "deliver"; for (const k of ["bucket", "why", "check", "tracked", "class"]) delete r[k];
+      }
       r.amendment = { text: String(a.text).trim(), why: String(a.why).trim() }; r.amended = true;
-      // #4984: deliver text on a deferred requirement puts it in scope: it is delivered, not tracked in a follow-up
-      if (TRACKED.includes(r.disposition)) { r.disposition = "deliver"; for (const k of ["bucket", "why", "check", "tracked", "class"]) delete r[k]; }
     } else if (TRACKED.includes(a.kind) && a.requirement) {
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
