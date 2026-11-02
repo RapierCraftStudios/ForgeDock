@@ -81,6 +81,15 @@ describe("#4655 multi-requirement amendment references", () => {
     assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
     assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
   });
+  it("an unrelated-ci-failure amendment (kind or type) is an informational no-op; other unknown kinds still fail", () => {
+    for (const a of [{ kind: "unrelated-ci-failure", target: "core rate-limit test", why: "diff touches no core file" }, { type: "unrelated-ci-failure", target: "t", why: "w" }]) {
+      const r = applyAmendments(C, [a]);
+      assert.deepEqual(r.problems, []);
+      assert.deepEqual(r.contract, C);
+      assert.equal(r.applied[0].kind, "unrelated-ci-failure");
+    }
+    assert.match(applyAmendments(C, [{ kind: "flaky-note", why: "w" }]).problems[0], /unknown kind 'flaky-note'; valid kinds are/);
+  });
   it("supersede-guard guards[] expands to per-guard supersedes", () => {
     const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);
     assert.deepEqual(a.problems, []);

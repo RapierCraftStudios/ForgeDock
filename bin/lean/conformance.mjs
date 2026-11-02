@@ -326,6 +326,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
+const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
@@ -398,6 +399,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     rows.push({ a: n, raw });
   }
   for (let { a, raw } of rows) {
+    // an unrelated out-of-diff CI failure is not a contract change: informational, never a problem
+    if (a?.kind === UNRELATED_CI_KIND) { applied.push({ kind: a.kind, target: String(a.target ?? "unrelated check"), why: String(a.why ?? "").trim() || "unrelated to the diff" }); continue; }
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (a && blank(a.why) && !blank(defaultWhy)) a = { ...a, why: String(defaultWhy) }; // the engine demanded the change: its reason is the why
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
