@@ -2324,3 +2324,9 @@ Cite: release review of #4979 (SPEC-1, SPEC-2, BUG-1, BUG-3); #4969.
 `applyAmendments` keeps `substituted.from` at the frozen command when a validate is substituted twice (before, the second substitute recorded the first substitute as `from`, so the engine reran a builder-chosen command and a nonexistent first substitute, rc 127, passed `substituteVerdict`). `noopCommand` also splits on newlines and treats `false`, `exit N`, `sleep N`, a constant `test`/`[ ]`, shell keywords, `node -e 0` and `python -c pass` as no-ops; it stays a best-effort denylist behind the engine's rerun of the frozen command.
 `gate()` now runs the failed-validate rerun (`rerunFailedValidatesRaw`) and `rerunSubstitutedOriginals` one after the other inside a single `phaseLedger.during("validate")`, beside the guard gate, so phase wall time is not split by two overlapping validate phases; the `rerunFailedValidates` wrapper is gone. An engine-level lean test covers the wiring (a runnable failing frozen command blocks, an unrunnable one merges, `SUBSTITUTE_RERUN` is logged).
 Cite: delta review of #4979 (SEC-11, SEC-12, SPEC-11, SPEC-13).
+
+## Entry 2026-11-02 — A substitute-validate is rejected when the diff removes a path its frozen command names
+
+`gate()` in `lean.mjs` collects deleted/renamed-away paths (`removedPathsOf`, `git diff --name-status -M base...HEAD`) when a validate is substituted and `precheck` (`conformance.mjs`) fails `substitute_removed_path` (`conformance.unimplemented`) if `removedNamedPaths` finds one named by `substituted.from`, before the rerun verdict. The rerun runs in the builder's tree, so a deleted test read as "unrunnable" and let the substitute stand.
+Decision: option 3 (diff check, no rerun) over rerun on base (fails for tests the issue adds) and restore-named-paths-from-base (needs a rerun and worktree mutation). Environment-unrunnable commands with intact files keep their substitute.
+Cite: delta review of #4979 (SEC-13); #4990.
