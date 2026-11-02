@@ -2203,6 +2203,20 @@ export async function runCore(o) {
       if (Object.keys(out).length) ev({ event: "VALIDATE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
       return out;
     }
+    /** #4979 SPEC-2: rerun the frozen command of every substituted validate, so precheck accepts a substitute only for a command that cannot run. */
+    async function rerunSubstitutedOriginals(contract) {
+      const out = {};
+      if (!io.runCommand) return out;
+      const env = laneEnv();
+      for (const v of contract.validate ?? []) {
+        if (!v.substituted?.from) continue;
+        let x;
+        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.substituted.from), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
+      }
+      if (Object.keys(out).length) ev({ event: "SUBSTITUTE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
+      return out;
+    }
     /** #4693: select the guards this diff intersects and rerun their base test files; zero cost when none is selected. Best effort: an error skips the gate. */
     let guardSel = [], guardNoted = ""; let guardEv = null; // #4705: this pass's guard_run event, emitted by the caller once the added wall time is known
     async function guardGate(files) {
@@ -2243,15 +2257,15 @@ export async function runCore(o) {
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
       const gateT0 = now(); let validateMs = 0;
-      const [validateRuns, guardFailures] = await Promise.all([rerunFailedValidates(effective).finally(() => { validateMs = now() - gateT0; }), guardGate(files)]); // #4693: guards run beside the validate rerun
+      const [validateRuns, guardFailures, substitutedRuns] = await Promise.all([rerunFailedValidates(effective).finally(() => { validateMs = now() - gateT0; }), guardGate(files), phaseLedger.during("validate", () => rerunSubstitutedOriginals(effective))]); // #4693: guards run beside the validate rerun
       // #4705: only the part not hidden behind the validate rerun; 0 when the gate errored or skipped
       const guardRunMs = guardEv && !guardEv.error ? Math.max(0, now() - gateT0 - validateMs) : 0;
       guardAddedMs += guardRunMs;
       if (guardEv) ev({ ...guardEv, added_wall_ms: guardRunMs });
-      const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
+      const repoHas = (validateRuns && Object.keys(validateRuns).length) || Object.keys(substitutedRuns ?? {}).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf() });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf(), substitutedRuns });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });

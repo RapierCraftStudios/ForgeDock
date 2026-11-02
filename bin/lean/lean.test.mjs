@@ -15,7 +15,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -30,6 +30,10 @@ import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig
 import { prepareToolchain } from "./toolchain.mjs";
 import { isExternalKill } from "./hostkill.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
+// #4969: prompt budgets are measured with the install root as a fixed placeholder, so they never depend on the checkout location
+const INSTALL_ROOT = FORGEDOCK_CLI.replace(/[\\/]bin[\\/]forgedock\.mjs$/, "");
+const INSTALL_PATH_RE = /\S*?[\\/](?=bin[\\/][\w.\\/-]+\.mjs)/g;
+const approxTokens = (s) => rawTokens(String(s).replaceAll(INSTALL_ROOT, "<root>").replace(INSTALL_PATH_RE, "<root>/"));
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
 
@@ -1792,7 +1796,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
     assert.ok(approxTokens(plan) <= 2150, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1650 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2228,7 +2232,7 @@ describe("comment templates", () => {
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 2050, `plan prompt is ${approxTokens(plan)} tokens`); // 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} of 1650 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -6788,7 +6792,8 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2050);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1650 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2050, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2050 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -7090,5 +7095,19 @@ describe("investigation verdict for the reviewer (#4959)", () => {
     assert.ok(!reviewerPrompt(args).includes("</investigation_verdict>"));
     assert.ok(reviewerPrompt({ ...args, investigationVerdict: "VALIDATED" }).includes("is not a failing row"));
     assert.ok(!REVIEW_RUBRIC.includes("is not a failing row"));
+  });
+});
+
+describe("prompt budgets (#4969)", () => {
+  it("do not depend on the install path length", () => {
+    const impl = builderImplementPrompt();
+    assert.ok(impl.includes(INSTALL_ROOT), "the implement prompt names files under the install root");
+    const deep = `/${"very-long-checkout-directory/".repeat(10)}forgedock`;
+    assert.ok(deep.length >= 200);
+    const moved = impl.replaceAll(INSTALL_ROOT, deep);
+    assert.notEqual(moved, impl);
+    assert.equal(approxTokens(moved), approxTokens(impl));
+    assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
+    assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
   });
 });

@@ -263,6 +263,22 @@ test("a passing guard adds no baseline worktree, and a failing one removes its w
   assert.equal(sh(bad.d, "worktree", "list").trim().split("\n").length, 1, "baseline worktree removed");
 });
 
+test("the baseline rerun uses the verify.guard_command runner, so a real break still blocks", async () => {
+  const { d, guard } = fixture();
+  revert(d);
+  const git = gitIn(d);
+  const { selected, mergeBase } = await selectGuards({ guards: [guard], files: files(d), git, base: "origin/main" });
+  const seen = [];
+  // run-it only exists through guard_command: the lane copy fails, the base copy passes
+  const r = await runGuards({ selected, mergeBase, contract: {}, guardCommand: { ".mjs": "run-it {path}" }, git, runCommand: async (a) => {
+    seen.push(a);
+    return a.cwd === d ? { rc: 1, output: "not ok 1 - price is 2\n" } : { rc: 0, output: "ok 1 - price is 2\n" };
+  }, cwd: d, env: {} });
+  assert.deepEqual(seen.map((s) => s.command), ["run-it src/a.test__guardbase.mjs", "run-it src/a.test.mjs"]);
+  assert.notEqual(seen[1].cwd, d, "baseline runs in the merge-base worktree");
+  assert.equal(r.failures.length, 1, JSON.stringify(r.skipped));
+});
+
 test("a baseline that cannot run is skipped, never blocking", async () => {
   const { d, guard } = fixture();
   revert(d);

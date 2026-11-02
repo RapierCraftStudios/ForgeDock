@@ -164,7 +164,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
     if (left <= 0) return { skip: `over the ${Math.round(capMs / 1000)}s guard cap` };
     const t = await baseTree();
     if (t.error) return { skip: `baseline unavailable (${t.error})` };
-    const bcmd = commandFor(j.path, contract);
+    const bcmd = commandFor(j.path, contract, guardCommand); // the same runner as the lane run (verify.guard_command, #4792)
     let b;
     try { b = await runCommand({ command: bcmd, cwd: t.dir, timeoutMs: left, env }); } catch (e) { b = { rc: 127, output: String(e?.message ?? e) }; }
     if (b?.rc === TIMEOUT_RC || b?.rc === 127) return { skip: `baseline unavailable (${b.rc === 127 ? "runner unavailable" : "over the guard cap"})` };
