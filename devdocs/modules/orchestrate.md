@@ -232,6 +232,11 @@ Cite: #4525.
 `forgedock orchestrate --requeue <id> N... [--reason]` appends `{issue, reason, by, at}` to the batch's `requeue` file (`batch.requeue`, refuses issues not in the batch or not terminal; the CLI refuses closed and `needs-human`-labelled issues). `orchestrate()` takes a `getRequeued` seam: `drainRequeues` moves the issue and the `skipped` dependents behind it back to pending (prior rows kept in state `requeued`, applied keys in `requeueApplied`), posts a `FORGE:DECISION`, and the report row is the latest outcome with a `requeued:` line. schedd `op:"requeue"` hosts a finished batch again; `--add` is unchanged.
 Cite: #4550.
 
+## Entry 2026-10-30 — Fix: usage-limit deferrals are never capped; `deferred` is requeuable (#4784)
+
+`deferPolicy` handles `rate_limited` before the `maxDeferrals` check: it returns `{delayMs, hold:true}` (reset time or `RATE_LIMIT_FALLBACK_S`) and the deferral counter is not incremented when `pol.hold`, so a usage limit waits for the reset instead of ending `deferred: gave up after N deferrals`. The per-account `holds` still gate admission; other codes (`merge.transient`, `gh.unavailable`, `cli.idle`, `sandbox.start_failed`, lease-held) still cap, and `host.busy`/`sandbox.capacity` stay uncapped with `host:true`. `batch.mjs` `REQUEUABLE` also accepts `deferred`, so `--requeue` and `drainRequeues` take a row that already gave up.
+Cite: #4784.
+
 ## Entry 2026-10-30 — Issue-level readiness: trusted `Blocked by` edges and the `blocked` label (#4773)
 
 `orchestrate()` takes `trusted(n)` (the body author passes `isTrustedActor`, read by `readBody` in `engine-cli.mjs`): a `Blocked by`/`Depends on` line is a DAG edge only then, matching the lane's own admission (`openDependency`). `getBlocked()` returns the open issues carrying `orchestration.blocked_label` (default `blocked`, one `gh issue list` per pass; a failed read keeps the last set): they are in the batch but `isReady` refuses them, one `blocked`/`unblocked` decision and row per change, and the batch polls while only blocked issues wait, so removing the label releases them on the next tick. `--add` prints `edges #B blocked by #A` for trusted bodies whose target is still open (closed or unreadable targets are no-ops).

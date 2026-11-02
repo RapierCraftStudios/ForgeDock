@@ -7,6 +7,9 @@ Operator-facing notes for behavior changes that need action or awareness. Newest
 - **New command** `forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--pr N]`. It runs a live contract harness against a disposable sandbox repo, plus a static check of every `gh --json` field list. See [SELFTEST.md](SELFTEST.md).
 - **Opt-in nightly run:** `selftest.nightly_interval_hours` makes the schedd daemon start a detached live selftest on that schedule and file one issue on failure. Restart schedd after upgrading to pick it up.
 - **Gate-marker check ignored:** the `Check for FORGE gate markers` check is no longer read as a CI failure by `review-staging`, `/review-pr-staging` or `/deploy-pr`. It only echoes the latest gate marker, so after a GATE_FAILURE it blocked its own GATE_PASS (#4941).
+- **`blocked` label now holds issues (#4773):** `orchestration.blocked_label` defaults to `blocked`. After upgrading, an open issue in a batch that carries a label named `blocked` is admitted but not dispatched until the label is removed. If you use `blocked` for another meaning, set `blocked_label: ""` (turns it off) or another label name. See [CONFIG.md](CONFIG.md#orchestration-optional) and `forge.yaml.example`.
+- **Host lane cap is on by default (#4777):** local lanes are bounded by cores and free memory (`engine.lane_cpu_reservation`, `engine.lane_mem_mb`), so `--parallel 12` on a small host runs fewer concurrent local lanes. Remote sandbox lanes are exempt; `admission: enabled: false` removes the cap.
+- **Mechanical recovery budget is 2 (#4725):** `orchestration.recovery.mechanical_max_attempts` defaults to 2 while `recovery.max_attempts` stays 1, so `env.*`, `base.conflict` and conflicting-PR rows get 2 recovery lanes.
 
 ### Live selftest gates the staging->main release review (when a sandbox repo is set)
 
