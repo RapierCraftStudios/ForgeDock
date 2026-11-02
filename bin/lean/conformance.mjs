@@ -532,14 +532,35 @@ export function substituteVerdict(run, { repoHas = () => false, command = "" } =
  * a whitespace token equal to the path, or a directory token above it. A builder that removes the target of its frozen
  * validate makes the engine's rerun read "unrunnable", so the substitute is judged on the diff instead.
  */
-export function removedNamedPaths(command, removed = []) {
-  const toks = String(command ?? "").split(/\s+/).map((t) => t.replace(/^['"`(]+|['"`);]+$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((t) => t && t !== ".");
-  return removed.filter((p) => toks.some((t) => p === t || p.startsWith(`${t}/`)));
+const TEST_FILE_RE = /\.(?:test|spec)\.[a-z0-9]+$|^test_[^/]+\.[a-z0-9]+$|_test\.[a-z0-9]+$|Tests?\.(?:java|kt|kts|cs|php|scala|swift)$|_spec\.rb$|^tests\.rs$|^conftest\.py$|\.bats$/;
+/** #5003: a runnable test FILE (by basename), unlike `isTestPath`, which also matches fixtures under tests/. */
+const isTestFile = (p) => TEST_FILE_RE.test(String(p).split("/").pop());
+/**
+ * #4990 SEC-13: the paths of `removed` (deleted, or the old side of a rename, in the diff) that a frozen command names.
+ * #5003: a token is stripped of quotes, a `--flag=` prefix and a pytest `::node` suffix; a glob is expanded against
+ * `baseFiles`; an exact path matches itself; a directory or bare-word token matches only a removed test file under it.
+ */
+export function removedNamedPaths(command, removed = [], baseFiles = []) {
+  const toks = String(command ?? "").split(/\s+/).map((t) => t.replace(/^['"`(]+|['"`);]+$/g, "").replace(/^-[^=\/]*=/, "").replace(/::.*$/, "").replace(/^['"`]+|['"`]+$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((t) => t && t !== ".");
+  const files = new Set(baseFiles);
+  return removed.filter((p) => toks.some((t) => {
+    if (/[*?]/.test(t)) return globRe(t).test(p) && (files.size === 0 || files.has(p));
+    return p === t || (p.startsWith(`${t}/`) && isTestFile(p));
+  }));
 }
-/** #4990: paths the lane's diff deletes or renames away from (the old side), per `git diff --name-status -M`. */
+/** #4990: paths the lane's diff deletes or renames away from (the old side). #5003: `-z` (unquoted), null on a git error (fail closed). */
 export async function removedPathsOf(git, base) {
-  const rows = String(await git(["diff", "--name-status", "-M", `${base}...HEAD`]).catch(() => "")).split("\n").map((l) => l.split("\t"));
-  return rows.filter((r) => /^[DR]/.test(r[0] ?? "") && r[1]).map((r) => r[1]);
+  let out;
+  try { out = String(await git(["diff", "--name-status", "-z", "-M", `${base}...HEAD`])); } catch { return null; }
+  const f = out.split("\0"), gone = [];
+  for (let i = 0; i < f.length; i++) {
+    const st = f[i];
+    if (!/^[A-Z]/.test(st)) continue;
+    const two = /^[RC]/.test(st);
+    if (/^[DR]/.test(st) && f[i + 1]) gone.push(f[i + 1]);
+    i += two ? 2 : 1;
+  }
+  return gone;
 }
 const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
@@ -614,7 +635,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -630,7 +651,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const v of contract.validate ?? []) {
     // #4979 SPEC-2: a substitute counts only when the frozen command it replaced cannot run (or passes); checked first, never CI-covered
     if (v.substituted) {
-      const gone = removedNamedPaths(v.substituted.from, removedPaths);
+      if (removedPaths === null) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the engine could not read the diff's removed paths to show the frozen command's target survives` }); continue; }
+      const gone = removedNamedPaths(v.substituted.from, removedPaths, baseFiles);
       if (gone.length) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_removed_path", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the diff removes ${gone.map((x) => `\`${x}\``).join(", ")} that the frozen command names: a substitute may not replace a check by deleting its target` }); continue; }
       const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
       const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
