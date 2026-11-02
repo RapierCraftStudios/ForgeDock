@@ -641,7 +641,7 @@ export async function runCore(o) {
     try {
       const r = await ensureSignedOff({ git, lane, branch });
       if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten }); }
-    } catch (e) { throw Object.assign(e, { laneCode: OUTCOME_CODES.CI_DCO }); }
+    } catch (e) { throw Object.assign(e, e?.noIdentity === true ? { laneCode: OUTCOME_CODES.CI_DCO } : { engineCode: OUTCOME_CODES.ENGINE_DCO_REWRITE }); } // #4997: a failed rewrite is mechanical (engine-error, recoverable), only a missing identity is a human block
   };
   const gitPush = async (args) => {
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() }); await signOffUnpushed(); } // #4590: never push .forge-lean/ or tool caches this branch added
@@ -2937,6 +2937,7 @@ export async function runCore(o) {
       if (owner) return finish("deferred", `git push was rejected (non-fast-forward): ${owner.detail}; another lane owns ${branch}`, { code: OUTCOME_CODES.LEASE_HELD, branch }, OUTCOME_CODES.LEASE_HELD);
     }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
+    if (e?.engineCode) return finish("engine-error", e?.message ?? String(e), { code: e.engineCode }, e.engineCode); // #4997
     return finish("engine-error", e?.message ?? String(e));
   }
 }

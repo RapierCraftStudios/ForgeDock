@@ -45,6 +45,7 @@ export const OUTCOME_CODES = Object.freeze({
   RUN_INTERRUPTED: "run.interrupted", // forge#4179: SIGTERM/SIGINT on a core run; teardown ran from the ledger, lane requeued
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
+  ENGINE_DCO_REWRITE: "engine.dco_rewrite", // forge#4997: the DCO sign-off rewrite of unpushed commits failed (git filter-branch); mechanical, recoverable by a relaunch
   ENGINE_VALIDATE_RESULT_LOST: "engine.validate_result_lost", // forge#4708: a validate result recorded before a CI fix round is missing after it and could not be carried forward
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
@@ -198,7 +199,7 @@ export const ENV_VALIDATE_TIMEOUT = "env.validate_timeout";
  * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
  * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
  */
-export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED]);
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED, OUTCOME_CODES.ENGINE_DCO_REWRITE]);
 /** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
 export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 
@@ -223,6 +224,7 @@ function classifyNeedsHumanBase(row) {
   const outcome = row.outcome ?? row.terminalReason;
   if (outcome === "ci-pending") return row.conflicting === true ? "recoverable" : "terminal";
   if (outcome === "budget-exceeded") return "recoverable";
+  if (outcome === "engine-error" && row.code === OUTCOME_CODES.ENGINE_DCO_REWRITE) return "recoverable"; // forge#4997
   if (outcome !== "needs-human") return "terminal";
   if (HUMAN_CODES.includes(row.code)) return "human";
   if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true || row.quoteMismatch === true ? "recoverable" : "terminal";
