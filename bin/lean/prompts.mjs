@@ -43,7 +43,7 @@ export const syncChecks = (mode = "local") => (mode === "ci" ? `${LIGHT} (the en
 /** CI failed on the pushed branch (#4167): one fix round in the builder's own session. */
 export function ciFailurePrompt(failures, mode = "local") {
   const list = failures.slice(0, 10).map((f) => `#### ${f.job ?? "check"}${f.url ? ` (${f.url})` : ""}\n${f.log ? `\`\`\`\n${f.log}\n\`\`\`` : "(no log available: open the url)"}`).join("\n\n");
-  return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). A failing check whose files this diff does not touch (a flaky or timing-dependent test) is not an amendment: name the check and why it is unrelated in ${IMPLEMENTATION_FILE} and change no code for it; unknown amendment kinds are rejected. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** The repo's declared check commands (forge.yaml learned.test_commands) failed before the PR (#4240): fixed in-session. */

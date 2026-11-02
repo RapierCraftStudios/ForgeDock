@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText, TRIGGERS, REWORK_TRIGGERS, firstPassOf, formatFirstPassSummary, sessionCostDelta } from "./fixround.mjs";
-import { fixSessionPrompt } from "./prompts.mjs";
+import { fixSessionPrompt, ciFailurePrompt } from "./prompts.mjs";
 
 describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
   it("every mechanical kind is fresh; block/contract/conflict kinds are not", () => {
@@ -113,5 +113,13 @@ describe("#4407 sessionCostDelta: per-attempt cost from a resumed session's runn
     sessionCostDelta(last, { resume: null, sessionId: "a", cost: 1 });
     assert.equal(sessionCostDelta(last, { resume: "a", sessionId: "b", cost: 1.5 }).delta, 0.5);
     assert.equal(sessionCostDelta(last, { resume: "b", sessionId: "b", cost: 2 }).delta, 0.5);
+  });
+});
+
+describe("#4987 CI fix prompt: unrelated failures", () => {
+  it("tells the builder an out-of-diff failing check is a note, not an amendment", () => {
+    const p = ciFailurePrompt([{ job: "core-tests" }], "ci");
+    assert.match(p, /not an amendment/);
+    assert.match(p, /unknown amendment kinds are rejected/);
   });
 });
