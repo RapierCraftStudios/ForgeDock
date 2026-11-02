@@ -2347,3 +2347,7 @@ Cite: delta review of #4979 (SPEC-31, SEC-32); #4995.
 
 The schedd `add` op (`schedd.mjs`) now reopens a finished, unhosted batch (hosts it as `--resume`) when an issue was newly added, not only when a skipped one was requeued. Without a daemon, `addToBatch` clears `report.json` for a plain add too. `addToBatch` and `requeueBatch` (`engine-cli.mjs`) print whether the batch was reopened, is hosted, or is queued but not hosted (run `--resume <id>`), and return `hosted`/`reopened`. Finalising a batch with `pending` non-empty stays #4917.
 Cite: #5000.
+
+### #5005 A missing forgedock install is `env.tool_missing`
+A frozen validate command names forgedock's own entry point (`.../forgedock/bin/lean/checks.mjs`, `.../forgedock/bin/forgedock.mjs`) by the absolute path of the install that wrote it, which may not exist on the host that runs it. `conformance.mjs` `resolveForgedockPaths(command, {exists, checksCli, forgedockCli})` rewrites each missing such token to the running install's path; `rerunFailedValidatesRaw` and `rerunSubstitutedOriginals` (`lean.mjs`) run commands through it (`CHECKS_CLI`/`FORGEDOCK_CLI`, `existsSync`) before `io.runCommand`. `missingTool` now returns `{tool:'forgedock', kind:'command'}` for a Node `Cannot find module` / `MODULE_NOT_FOUND` on those two absolute paths, so the failure is `env.tool_missing` (recoverable), not `conformance.unimplemented`. Other absolute, relative and repo-tracked module paths stay `validate_failed`. Cost: 0 LLM calls.
+Cite: #5005.
