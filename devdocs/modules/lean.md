@@ -2330,3 +2330,8 @@ Cite: delta review of #4979 (SEC-11, SEC-12, SPEC-11, SPEC-13).
 
 `noopCommand` (`conformance.mjs`) strips leading `if`/`then`/`else`/`elif`/`do`/`while`/`until` from each segment and judges the rest, so `if [ -f x ]; then pytest; fi` is a real check (before, any keyword-led segment counted as a no-op and such substitutes were rejected); bare `fi`/`done` stay no-ops. `applyAmendments` drops a `substituted` field from the frozen contract's validate rows before replaying amendments, so only a `substitute-validate` amendment sets it and its `from` is always the planned command. Earlier entries now name the failed-validate rerun by its function, `rerunFailedValidatesRaw`.
 Cite: delta review of #4979 (SEC-21, SEC-22, SPEC-22).
+
+## Entry 2026-11-02 — noopCommand drops bare keyword lines and treats a constant-false guarded body as a no-op
+
+`noopCommand` (`conformance.mjs`) now drops a bare `then`/`else`/`do` segment, so `if true\nthen\n  :\nfi` is a no-op. It also tracks the condition of each `if`/`elif`/`while`: when it is a constant false (`false`, `[ 0 = 1 ]`, `test -n ""`, a small fixed set, no shell parsing) the body up to `else`/`elif`/`fi`/`done` never runs and is ignored, so `if false; then pytest; fi` is a no-op. Real wrapped checks (`if [ -f x ]; then pytest; fi`, `for f in a b; do node --test $f; done`) stay real. Still a best-effort denylist behind the frozen-command rerun.
+Cite: delta review of #4979 (SPEC-31, SEC-32); #4995.
