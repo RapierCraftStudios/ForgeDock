@@ -484,6 +484,8 @@ export function shellSyntaxError(command) {
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
 }
 const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|fi|done|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
+const KEYWORD_RE = /^(if|then|else|elif|do|while|until)(?:\s+|$)/;
+const CONST_FALSE_RE = /^(?:false|\[\s+0\s+=\s+1\s+\]|\[\s+1\s+=\s+0\s+\]|test\s+0\s+=\s+1|test\s+-n\s+(?:""|'')|\[\s+-n\s+(?:""|'')\s+\])$/;
 /**
  * #4979 SPEC-2: a command every segment of which is a no-op (true, :, exit N, echo, printf, sleep, a constant test,
  * shell keywords, `node -e 0`, `python -c pass`) checks nothing. A best-effort denylist: the engine's rerun of the
@@ -491,8 +493,21 @@ const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?
  */
 export function noopCommand(command) {
   // SEC-22: a leading shell keyword is stripped and the rest judged, so `if [ -f x ]; then pytest; fi` is a real check
-  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim().replace(/^(?:(?:if|then|else|elif|do|while|until)\s+)+/, "").trim()).filter(Boolean);
-  return segs.length > 0 && segs.every((s) => NOOP_SEGMENT_RE.test(s));
+  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
+  const live = [];
+  let dead = false; // #4995: inside the body of an if/elif/while whose condition is a constant false
+  for (const raw of segs) {
+    let s = raw, cond = false, m;
+    while ((m = KEYWORD_RE.exec(s))) {
+      s = s.slice(m[0].length);
+      if (m[1] === "else" || m[1] === "elif") dead = false;
+      cond = m[1] === "if" || m[1] === "elif" || m[1] === "while";
+    }
+    if (s === "fi" || s === "done") dead = false;
+    if (cond) { if (CONST_FALSE_RE.test(s)) dead = true; else if (!dead && s) live.push(s); continue; }
+    if (!dead && s) live.push(s);
+  }
+  return segs.length > 0 && live.every((s) => NOOP_SEGMENT_RE.test(s));
 }
 /**
  * #4979 SPEC-2: a substitute-validate stands only when the frozen command it replaced cannot run (died before any test,

@@ -166,6 +166,10 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.ok(bad.problems.some((p) => /not valid shell/.test(p)));
     assert.ok(applyAmendments({ requirements: [], validate: [] }, [{ kind: "substitute-validate", validate: "V9", command: "true", why: "w" }]).problems.length);
   });
+  it("#4995 noopCommand bare keywords and constant-false guards", () => {
+    for (const cmd of ["if true\nthen\n  :\nfi", "while true\ndo\n  :\ndone", "if false; then pytest; fi", "if [ 0 = 1 ]; then pytest; fi", "if test -n \"\"; then node --test a.test.mjs; fi", "while false; do pytest; done", "if false\nthen\n  pytest\nfi"]) assert.ok(noopCommand(cmd), JSON.stringify(cmd));
+    for (const cmd of ["if [ -f x ]; then pytest; fi", "for f in a b; do node --test $f; done", "if false; then :; else pytest; fi", "if true\nthen\n  pytest\nfi", "if false; then :; elif [ -f x ]; then pytest; fi"]) assert.ok(!noopCommand(cmd), JSON.stringify(cmd));
+  });
   it("#4979 SPEC-2 a substitute that runs no check is rejected at amendment time", () => {
     for (const cmd of ["true", ":", "exit 0", "echo ok", "true && echo done", "printf x | true"]) {
       assert.ok(noopCommand(cmd), cmd);
