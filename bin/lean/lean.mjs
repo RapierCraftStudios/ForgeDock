@@ -2181,7 +2181,6 @@ export async function runCore(o) {
     }
     const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
-    function rerunFailedValidates(contract) { return phaseLedger.during("validate", () => rerunFailedValidatesRaw(contract)); }
     async function rerunFailedValidatesRaw(contract) {
       if (!io.runCommand) return null;
       const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
@@ -2257,7 +2256,9 @@ export async function runCore(o) {
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
       const gateT0 = now(); let validateMs = 0;
-      const [validateRuns, guardFailures, substitutedRuns] = await Promise.all([rerunFailedValidates(effective).finally(() => { validateMs = now() - gateT0; }), guardGate(files), phaseLedger.during("validate", () => rerunSubstitutedOriginals(effective))]); // #4693: guards run beside the validate rerun
+      // #4693: guards run beside the validate rerun; SPEC-11: the substituted-original rerun shares the one validate phase
+      const validatePhase = phaseLedger.during("validate", async () => ({ runs: await rerunFailedValidatesRaw(effective), subs: await rerunSubstitutedOriginals(effective) })).finally(() => { validateMs = now() - gateT0; });
+      const [{ runs: validateRuns, subs: substitutedRuns }, guardFailures] = await Promise.all([validatePhase, guardGate(files)]);
       // #4705: only the part not hidden behind the validate rerun; 0 when the gate errored or skipped
       const guardRunMs = guardEv && !guardEv.error ? Math.max(0, now() - gateT0 - validateMs) : 0;
       guardAddedMs += guardRunMs;

@@ -1366,6 +1366,24 @@ describe("conformance shadow mode (the default)", () => {
       assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);
     }
   });
+  it("#4979 the engine reruns a substituted validate's frozen command: a runnable failing one blocks, an unrunnable one lets the substitute stand", async () => {
+    const amendments = [{ kind: "substitute-validate", validate: "V1", command: "node --test test/foo2.test.js", why: "the frozen path does not exist" }];
+    const validation = [{ id: "V1", command: "node --test test/foo2.test.js", exit: 0 }];
+    const lane = (frozenOut) => {
+      const w = world({ validation, amendments, resumeValidation: validation, resumeAmendments: amendments }), ran = [];
+      w.io.runCommand = async (a) => { ran.push(a); return a.command === "node --test test/foo.test.js" ? frozenOut : { rc: 0, output: "" }; };
+      return { w, ran };
+    };
+    const dir = tmpDir("subst-");
+    const bad = lane({ rc: 1, output: "not ok 1 - foo handles null\nAssertionError: expected 1" });
+    const rb = await run(bad.w, { conformance: "enforce", dir });
+    assert.equal(rb.terminalReason, "needs-human"); assert.equal(bad.w.merges.length, 0);
+    assert.match(nhBody(bad.w), /frozen command runs and fails \(exit 1\)/);
+    assert.ok(bad.ran.some((a) => a.command === "node --test test/foo.test.js" && a.cwd === WT && a.env), "the frozen command is rerun in the worktree with the lane env");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "SUBSTITUTE_RERUN").map((e) => e.runs), [[{ id: "V1", rc: 1 }], [{ id: "V1", rc: 1 }]]);
+    const good = lane({ rc: 1, output: "no tests ran: no test files matched test/foo.test.js" });
+    assert.equal((await run(good.w, { conformance: "enforce" })).terminalReason, "merged");
+  });
   it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
     const w = world({ validation: v, resumeValidation: v });
