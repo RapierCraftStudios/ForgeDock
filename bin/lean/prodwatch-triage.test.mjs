@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES, trailerOf } from "./prodwatch-triage.mjs";
+import { fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES, trailerOf, neutralize, findMarked } from "./prodwatch-triage.mjs";
 import { parseSources, normalizeMemo } from "./prodwatch-sources.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 
@@ -130,5 +130,18 @@ describe("trailer-only markers (#4879)", () => {
     assert.equal(cluster(sig, [spoof])[0].duplicateOf ?? null, null);
     const real = { number: 10, body: `text\n\n${signalRef(fp)}\n` };
     assert.equal(cluster(sig, [real])[0].duplicateOf, 10);
+  });
+});
+
+describe("neutralize and findMarked", () => {
+  it("neutralize escapes a comment opener so a marker cannot be forged", () => {
+    assert.equal(neutralize("a <!-- FORGE:X -->"), "a &lt;!-- FORGE:X -->");
+    assert.equal(neutralize(null), "");
+  });
+  it("findMarked trusts the trailer only and honours accept", () => {
+    const m = "<!-- FORGE:M -->";
+    const issues = [{ number: 1, body: `quote ${m}\nmore` }, { number: 2, body: `text\n${m}` }];
+    assert.equal(findMarked(issues, m)?.number, 2);
+    assert.equal(findMarked(issues, m, () => false), undefined);
   });
 });
