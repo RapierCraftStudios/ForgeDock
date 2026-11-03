@@ -69,6 +69,22 @@ describe("amendments", () => {
   });
 });
 
+describe("amendment kind aliases (#4856)", () => {
+  it("deferral spellings apply as a tracked defer of R1", () => {
+    for (const kind of ["deferred", "deferral", "scope_deferral", "Scope-Deferral"]) {
+      const a = applyAmendments(C, [{ kind, requirement: "R1", why: "w" }]);
+      assert.deepEqual(a.problems, [], kind);
+      assert.equal(a.contract.requirements.find((r) => r.id === "R1").disposition, "defer", kind);
+      assert.deepEqual(a.toTrack.map((r) => r.id), ["R1"], kind);
+    }
+  });
+  it("scope-note and other unlisted kinds stay unknown and list the valid kinds", () => {
+    for (const kind of ["scope-note", "Scope_Note", "flaky-note"]) {
+      assert.match(applyAmendments(C, [{ kind, requirement: "R1", why: "w" }]).problems[0], new RegExp(`unknown kind '${kind}'; valid kinds are add-deliverable`));
+    }
+  });
+});
+
 describe("#4655 multi-requirement amendment references", () => {
   it("R1/R2, 'R1, R2' and an en-dash range split into one applied row per id", () => {
     for (const requirement of ["R1/R2", "R1, R2", "R1\u2013R2", "R1 and R2"]) {

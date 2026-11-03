@@ -328,7 +328,7 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer" };
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
 const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
@@ -338,6 +338,11 @@ function normalizeAmendment(a) {
   const n = { ...a };
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
+  // #4856: kinds compare case-insensitively with `_` as `-`; only a recognised kind or alias is rewritten, so unknown kinds keep their spelling in the error
+  if (typeof n.kind === "string") {
+    const k = n.kind.trim().toLowerCase().replace(/_/g, "-");
+    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k)) n.kind = k;
+  }
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
