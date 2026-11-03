@@ -29,4 +29,12 @@ describe("selftest static check (#4865)", () => {
     const r = staticCheck({ root: "/bin", io: { gh: () => { throw new Error("no gh"); }, list: () => ["/a.mjs"], read: () => 'x(["pr", "view", "--json", "title"])' } });
     assert.equal(r.ok, false);
   });
+  it("reports a non-literal --json list as unchecked, not as checked (#4952)", () => {
+    const t = 'x();\ngh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", fields]);\ngh(["pr", "list", "--json", `a,${f}`]);';
+    assert.deepEqual(extractJsonFields(t), [{ cmd: "issue view", fields: [], line: 2, unchecked: true }, { cmd: "pr list", fields: [], line: 3, unchecked: true }]);
+    const r = staticCheck({ root: "/bin", io: { gh, list: () => ["/bin/a.mjs"], read: () => t } });
+    assert.equal(r.ok, true); assert.equal(r.checked, 0); assert.equal(r.unchecked.length, 2);
+    assert.match(formatStatic(r), /a\.mjs:2: gh issue view --json field list is not a string literal: unchecked/);
+    assert.match(formatStatic(r), /0 field lists checked, 2 unchecked/);
+  });
 });

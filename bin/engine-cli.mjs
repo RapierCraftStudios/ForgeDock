@@ -1328,6 +1328,26 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
 const onlyReleased = (l, out = (t) => console.log(t)) => { if (!l.endsWith("(none)")) out(l); };
 
 /**
+ * #5031: the `baseWait` seam of `orchestrate` for issues admitted while a dependency's merge commit was not yet on their base:
+ * a detail string until every awaited commit is an ancestor of origin/<base> (fetched at most every 30s per base), else null.
+ */
+function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
+  const fetched = new Map();
+  return async (n) => {
+    const l = waits.get(n);
+    if (!l) return null;
+    const missing = [];
+    for (const w of l) {
+      if (now() - (fetched.get(w.base) ?? -Infinity) > 30000) { fetched.set(w.base, now()); try { await leanIo.git(["fetch", "origin", w.base], { cwd }); } catch { /* offline: the local ref */ } }
+      let on = false;
+      for (const ref of [`origin/${w.base}`, w.base]) if (!on) on = await io.git?.(["-C", cwd, "merge-base", "--is-ancestor", w.sha, ref]).then(() => true, () => false);
+      if (!on) missing.push(w);
+    }
+    return missing.length ? `waiting for ${missing.map((w) => `#${w.dep} (${w.sha.slice(0, 10)})`).join(", ")} on ${missing[0].base}` : null;
+  };
+}
+
+/**
  * `--hold <id> N...` / `--release <id> N...` (#4592): the batch's `hold` file, through the daemon (`viaDaemon(op, issues)`, null
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
@@ -1569,6 +1589,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root, print: (l) => onlyReleased(l, (t) => sink.line(t)) }); // #4592
   }
   let batch, plan = null;
+  const baseWaits = new Map(); // #5031: issue -> [{dep, sha, base}] merge commits not yet on its base at start
   if (resumeId) {
     batch = batchMod.openBatch(root, resumeId);
     batch.scrubPlan(); // #4787: a pre-fix plan.json keeps no secret; the lanes re-read it from the environment
@@ -1606,10 +1627,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         for (const ref of [`origin/${b}`, b]) if (await io.git?.(["-C", cwd, "merge-base", "--is-ancestor", sha, ref]).then(() => true, () => false)) return true;
         return false;
       };
-      const unmet = await unmetDependencies({ issues, repo, gh: io.gh, isAncestor, baseOf: async (n) => {
+      let unmet = await unmetDependencies({ issues, repo, gh: io.gh, isAncestor, baseOf: async (n) => {
         const r = await resolveLane({ issue: n, repo, io: gateIo, cwd, branches: gateBranches, requested: lane, override: laneOverride });
         return r.ok ? r.lane : null;
       } });
+      // #5031: a dependency merged but not yet on the base is admitted and held until its commit lands; any other unmet edge still refuses
+      for (const u of unmet.filter((x) => x.kind === "commit")) {
+        const list = baseWaits.get(u.issue) ?? []; list.push({ dep: u.dep, sha: u.sha, base: u.base }); baseWaits.set(u.issue, list);
+      }
+      for (const [n, l] of baseWaits) sink.line(`held: #${n} waits for ${l.map((w) => `#${w.dep} (${w.sha.slice(0, 10)}) on ${w.base}`).join(", ")}; admitted once the commit lands`);
+      unmet = unmet.filter((x) => x.kind !== "commit");
       if (unmet.length) throw new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
     }
     const base = deps.batchId ?? batchMod.newBatchId();
@@ -1892,7 +1919,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
