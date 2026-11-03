@@ -64,6 +64,7 @@ import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
+import { pickSalvage } from "./salvage-resume.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
@@ -1094,10 +1095,8 @@ export async function runCore(o) {
       const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
-      if (!prs.length && !remote) { // #4958: commits the exit rescue could only push to a salvage branch resume from there
-        const salv = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/forge-salvage/${issue}-*`], { cwd })).split("\n").map((l) => l.trim().split(/\s+/)[1]).filter(Boolean).sort().at(-1);
-        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; fromSalvage = true; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
-      }
+      const salv = (await pickSalvage({ io, cwd, issue, branch, hasBranch: Boolean(remote) }).catch((e) => { ev({ event: "SALVAGE_PICK_FAILED", error: String(e?.message ?? e).slice(0, 200) }); return null; }))?.ref; // release #5068 delta SPEC-2: never silent // #4958, #5063: the newest salvage ref that is not behind the lane branch
+      if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null }; fromSalvage = true; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
     // #4593: a shipped milestone lane (fully merged into staging) cannot take new work; follow the open PR's live base.
@@ -1148,7 +1147,7 @@ export async function runCore(o) {
         }
       }
     };
-    if (resumed) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* remote branch may not exist (PR-less resume) */ } }
+    if (resumed && !fromSalvage) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* remote branch may not exist (PR-less resume) */ } }
     // #4786: an open-PR-less remote branch whose only changes vs the base are tool state (.forge-lean/ scratch) holds no work: plan fresh, never resume its stale contract.
     const toolOnly = async (ref) => { const n = String(await io.git(["diff", "--name-only", `${base}...${ref}`], { cwd })).split("\n").map((x) => x.trim()).filter(Boolean); return n.every((f) => isToolState(f)); };
     let scratchOnly = false;

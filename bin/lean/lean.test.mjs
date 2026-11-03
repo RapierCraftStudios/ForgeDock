@@ -3943,6 +3943,21 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.includes("origin/feat/issue-7-lean")), "the worktree is built from the salvaged head");
   });
 
+  it("#5063 a rerun with an existing lane branch resumes from a newer salvage ref", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean\n" });
+    const g = w.io.git;
+    w.io.git = async (a, o2) => {
+      if (a[0] === "ls-remote" && a.at(-1) === "refs/heads/forge-salvage/7-*") return "abc\trefs/heads/forge-salvage/7-1234567890\n";
+      if (a[0] === "merge-base" && a[2] === "origin/feat/issue-7-lean") { w.calls.push(["git", ...a]); return ""; } // the lane branch is an ancestor of the salvage head
+      return g(a, o2);
+    };
+    await run(w);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "fetch" && c.includes("refs/heads/forge-salvage/7-1234567890:refs/remotes/origin/feat/issue-7-lean")), "origin/<branch> is moved to the salvage head");
+    const at = (f) => w.calls.findIndex(f);
+    const add = at((c) => c[1] === "worktree" && c[2] === "add");
+    assert.ok(add >= 0 && !w.calls.slice(0, add).some((c) => c[1] === "fetch" && c.length === 4 && c[3] === "feat/issue-7-lean"), "no refetch of the lane branch moves origin/<branch> off the salvage head before the worktree is built");
+  });
+
   it("#4118 GitHub's transient '[remote rejected] ... (failed)' and pack write errors are retried, then merge", async () => {
     for (const msg of ["To github.com:o/r.git\n ! [remote rejected] feat/issue-7-lean -> feat/issue-7-lean (failed)",
       "remote: error: unable to write file ./objects/pack/pack-1.pack: No such file or directory\n ! [remote rejected] x -> x (failed)"]) {

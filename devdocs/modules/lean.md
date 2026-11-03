@@ -161,7 +161,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `{branch, sha, pushedTo}` whenever the lane has commits ahead of base. When the normal push fails before git push
    (sign-off rewrite) or the push is rejected or exhausted, HEAD is pushed as is to the lane branch (not after a rejection), else to `forge-salvage/<issue>-<sha>`. The line goes into the terminal trajectory (or a `FORGE:LANE_BRANCH`
    comment for deferred/engine-error), `RUN_TERMINAL` (`lane_branch`, `lane_sha`) and the returned result (`laneHead`);
-   an unpushed head is stated as lost-on-teardown. A rerun or `--requeue` resumes from the pushed branch (existing `ls-remote` resume) or, when only a salvage branch exists, from `forge-salvage/<issue>-*` (`RESUME_FROM_SALVAGE`).
+   an unpushed head is stated as lost-on-teardown. A rerun or `--requeue` resumes from the pushed branch (existing `ls-remote` resume) or from `forge-salvage/<issue>-*` (`RESUME_FROM_SALVAGE`). `pickSalvage` (`salvage-resume.mjs`, #5063) picks the newest salvage ref by commit time (the sha suffix is not chronological); when the lane branch exists on origin or a PR is open, only a ref strictly ahead of `origin/<branch>` (descending from it) is resumed, behind or diverged refs are ignored.
    #4363 fresh fix sessions (`fixround.mjs` + `lean.mjs` `fixRound`): precheck, CI (verify and merge), docs,
    structure, enumerating and sequence rounds, and conformance/review FAILs whose failures all cite a `file:line`
    (`freshFix`/`citesFileLine`), run with `resume: null` on `fixModel` (forge.yaml `lean.fix_model`,
@@ -2164,7 +2164,7 @@ Cite: #4791.
 
 ## Entry 2026-10-30 — North-star decision engine (#4766)
 
-`decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls `settle` yet: #4765 merged without the issue-watch sweep, so `decisions.mode`/`live` is inert and docs mark it not yet wired (only `loadPolicy`/`effectiveMode` are used, by prodwatch and issue-watch). Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
+`decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). `issuewatch-decisions.mjs` (#4793) is the caller: an issue-watch stage (active for `decisions.mode: live` or `sweep_needs_human: true`) that settles the open `needs-human` issues matching the watch selectors, keyed on the newest `FORGE:NEEDS_HUMAN` comment id (read only from OWNER/MEMBER/COLLABORATOR or `ownLogins`; at most 20 judge calls per round), with `max_issues`/`max_launches` caps, a `--dry-run` classify, status counts, evidence hand-off to a `prod_monitor` lane, post-deploy-only fold into `postdeploy_rollup` + close, and veto reversal. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
 Cite: #4766.
 
 ## Read-only capability relay (#4778)
@@ -2452,3 +2452,17 @@ The release review of #5057 found the #4793 issue-watch decision stage (PR #5054
 - **BUG-6 (#5053).** A 401 on status or result that outlasts `unreachable_window_min` ends `sandbox.auth` (retry 300 s, capped by `max_deferrals`), not the uncapped `sandbox.unreachable`.
 
 Tests: `sandbox-provider.contract.test.mjs` "an unreachable router throws", `conformance.test.mjs` reproEnvMiss with repoHas, `execution.test.mjs` "#5053 ... ends sandbox.auth (capped)". Cost: 0 LLM calls.
+
+## Entry 2026-11-03 — release review of #5068: decision relaunch in batch/release watches, salvage pick fetches the lane branch
+
+The release review of #5068 (#4793 decision stage, #5063 salvage resume) found:
+- **MAT-1 (HIGH).** A live decision in a batch or release watch cleared `needs-human` but no lane ran: the watch kept the issue in `claimed`, which `tick` and the release pass never re-select. `decisionLaunch` (issuewatch.mjs) now requeues a batch watch's claimed issue into its batch (`io.batch.requeue` → `orchestrate --requeue`, which checks the label and reopens a finished batch) and, for a release watch or an issue the watch never took, releases the claim so the next pass selects it. Per-issue watches launch as before.
+- **CQ-1.** `issue-watch status` shows a failed decision round (`state.decisionError`), which was recorded but never displayed.
+- **MAT-4.** `max_launches` counts a relaunch only when `launch` reports one.
+- **MAT-2.** One `gh issue view` failure is an `error` row retried next round, not the end of the round.
+- **BUG-1.** `settle` finishes a full live `FORGE:DECISION` whose label clear or requeue failed (clears the label and requeues, no new judge call, not counted twice) instead of skipping it as already handled; vetoed, shadow, escalated and mixed decisions stay handled.
+- **BUG-2/SPEC-1/REG-1/CONC-3 (#5063).** `pickSalvage` fetches `origin/<branch>` before the ancestry check when the lane branch exists, so a missing local ref no longer hides the salvage and a stale one no longer resumes a ref behind the remote.
+
+Tests: `issuewatch-decisions.test.mjs` "release #5068 ..." (5), `salvage-resume.test.mjs` lane-branch fetch (2). Cost: 0 LLM calls.
+
+Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNER/MEMBER/COLLABORATOR or `ownLogins`), so a forged `FORGE:DECISION` can neither finish nor suppress a decision (SEC-1). `decisionLaunch` checks `inflight` only for per-issue watches: a batch issue stays inflight until its batch reports, so a running batch is requeued and a reported one has its claim released (SPEC-1). A failed salvage pick logs `SALVAGE_PICK_FAILED` instead of dropping the salvage silently (SPEC-2).
