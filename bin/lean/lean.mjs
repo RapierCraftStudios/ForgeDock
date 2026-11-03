@@ -64,7 +64,7 @@ import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
-import { ensureSignedOff } from "./signoff.mjs";
+import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -657,8 +657,8 @@ export async function runCore(o) {
   const gitPush = async (args) => {
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       try { await signOffUnpushed(); }
-      catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push the branch as-is before reporting
-        if (!e?.noIdentity) { try { await git(["push", "-u", "origin", branch]); ev({ event: "DCO_RESCUE_PUSH", branch }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
+      catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push them as-is before reporting; #5047: to a salvage ref, never the lane branch (the sign-off range excludes origin/<branch>)
+        if (!e?.noIdentity) { try { const sha = String(await git(["rev-parse", "HEAD"])).trim(), ref = salvageBranch(issue, sha); await git(["push", "origin", `${sha}:refs/heads/${ref}`]); laneHead = { branch, sha, pushedTo: ref }; ev({ event: "DCO_RESCUE_PUSH", branch: ref }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
         throw e;
       }
     } // #4590: never push .forge-lean/ or tool caches this branch added
@@ -679,14 +679,14 @@ export async function runCore(o) {
       if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
       return true;
-    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead ? await rescuePush(reason, e?.pushRejected) : false; }
+    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead ? await rescuePush(reason, e?.pushRejected || e?.engineCode === OUTCOME_CODES.ENGINE_DCO_REWRITE) : false; }
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
   async function rescuePush(reason, rejected) {
     // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
     try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
     // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
-    for (const ref of [...(rejected ? [] : [branch]), `forge-salvage/${issue}-${laneHead.sha.slice(0, 10)}`]) {
+    for (const ref of [...(rejected ? [] : [branch]), salvageBranch(issue, laneHead.sha)]) {
       try {
         await git(["push", "origin", `${laneHead.sha}:refs/heads/${ref}`]);
         laneHead.pushedTo = ref;
@@ -1089,14 +1089,14 @@ export async function runCore(o) {
 
     // ---- 2. worktree (resume an open PR / remote branch) ----
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
-    let resumed = null;
+    let resumed = null, fromSalvage = false;
     try {
       const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
       if (!prs.length && !remote) { // #4958: commits the exit rescue could only push to a salvage branch resume from there
         const salv = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/forge-salvage/${issue}-*`], { cwd })).split("\n").map((l) => l.trim().split(/\s+/)[1]).filter(Boolean).sort().at(-1);
-        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
+        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; fromSalvage = true; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
       }
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
@@ -1183,6 +1183,7 @@ export async function runCore(o) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
     wtCreated = true;
+    if (fromSalvage) await dropSalvageTracking({ git, branch }); // #5047: the salvaged commits are unpublished: the sign-off range must include them
     if (wtInfo?.sparse) {
       sparse = { excluded: wtInfo.excluded, maxKb: sparseMaxKb };
       ev({ event: "WORKTREE_SPARSE", excluded: wtInfo.excluded, excluded_bytes: wtInfo.bytes, max_kb: sparseMaxKb });

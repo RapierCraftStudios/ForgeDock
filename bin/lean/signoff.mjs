@@ -11,6 +11,17 @@ const SEP = "\x1f", END = "\x1e";
 const STASH_REF = "refs/forgedock/dco-stash";
 const PLACEHOLDER_RE = /@localhost$/i;
 
+/**
+ * #5047: where a lane's commits go when the sign-off rewrite failed. Never the lane branch: ensureSignedOff excludes everything on
+ * origin/<branch>, so unsigned commits published there could never be rewritten. A salvage branch is outside that range.
+ */
+export const salvageBranch = (issue, sha) => `forge-salvage/${issue}-${String(sha).slice(0, 10)}`;
+
+/** #5047: a lane resumed from a salvage branch has no published lane branch: its tracking ref must not exclude the commits from the sign-off range. */
+export async function dropSalvageTracking({ git, branch }) {
+  try { await git(["update-ref", "-d", `refs/remotes/origin/${branch}`]); return true; } catch { return false; }
+}
+
 /** True when the commit must be rewritten: placeholder author or committer, or no sign-off naming its author. */
 export function needsSignoff({ authorEmail, committerEmail, signedOff }) {
   if (PLACEHOLDER_RE.test(authorEmail ?? "") || PLACEHOLDER_RE.test(committerEmail ?? "")) return true;

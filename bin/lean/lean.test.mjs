@@ -3898,6 +3898,34 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(traj(w).some((c) => /Lane commits pushed: branch `forge-salvage\/7-/.test(c)));
   });
 
+  it("#5047 a failed DCO rewrite rescue-pushes to a salvage ref, never the lane branch", async () => {
+    const w = world();
+    const g = w.io.git;
+    const SEP = "\x1f", END = "\x1e";
+    w.io.git = async (a, o2) => {
+      if (a[0] === "log" && a.some((x) => String(x).startsWith("--format=%H"))) return `deadbeef${SEP}x@localhost${SEP}x@localhost${SEP}${SEP}parent${END}`;
+      if (a[0] === "config") return "Lane Bot";
+      if (a[0] === "filter-branch") throw new Error("boom");
+      return g(a, o2);
+    };
+    const r = await run(w);
+    const pushes = w.calls.filter((c) => c[0] === "git" && c[1] === "push").map((c) => c.join(" "));
+    assert.ok(pushes.length > 0);
+    assert.ok(pushes.some((p) => /origin [0-9a-z]+:refs\/heads\/forge-salvage\/7-/.test(p)), "the commits are published under a salvage ref");
+    assert.ok(!pushes.some((p) => /origin feat\/issue-7-lean$|:refs\/heads\/feat\/issue-7-lean$/.test(p)), `never the lane branch: ${pushes.join(" | ")}`);
+    assert.match(String(r.laneHead?.pushedTo), /^forge-salvage\/7-/);
+  });
+
+  it("#5047 a lane resumed from a salvage branch drops the origin/<branch> tracking ref so the sign-off range covers its commits", async () => {
+    const w = world({ prList: [] });
+    const g = w.io.git;
+    w.io.git = async (a, o2) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/forge-salvage/7-*" ? "abc\trefs/heads/forge-salvage/7-1234567890\n" : g(a, o2));
+    await run(w);
+    const wtAdd = w.calls.findIndex((c) => c[1] === "worktree" && c[2] === "add");
+    const drop = w.calls.findIndex((c) => c[1] === "update-ref" && c[2] === "-d" && c[3] === "refs/remotes/origin/feat/issue-7-lean");
+    assert.ok(wtAdd >= 0 && drop > wtAdd, "dropped after the worktree is built from it");
+  });
+
   it("#4958 when every rescue push is rejected the head is reported as NOT pushed", async () => {
     const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
     const w = world({ pushErrors: [msg, msg, msg, msg] });
