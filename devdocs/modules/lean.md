@@ -2407,3 +2407,10 @@ Cite: #4978.
 ## Entry 2026-11-03 — `sched show` lists remote (pool) lanes and an unreachable pool (#4964)
 
 Remote lanes never take a host slot (`grant()` returns before `tryAcquire`), so a pool-only batch looked idle in `sched show`. The host registry (`sched.mjs`) now carries additive `remote` (`{key: {pid, batch, repo, issue, sandbox, agent, at}}`) and `pool` (`{batch: {pid, state, reason, at}}`) maps: `noteRemote` / `dropRemote` / `notePool` are fail-open, `release(key)` also drops `remote[key]`, `reclaim` drops a dead dispatcher's entries, and `list()` returns both as arrays. They never touch `slots`, `queue`, `grantOrder` or the cap. `orchestrate.mjs` (optional-chained, so a registry stub without the methods works) publishes a lane when its handle arrives (`onStart`, adopt) and drops it in `done()`; it flags the pool unreachable when a configured `remote.capacity()` returns null or a lane defers with `sandbox.unreachable`, and clears it on the next sample. `schedFromCli show` prints `running N, queued M, remote K`, `remoteLines(st)` rows (`remote #2 o/r batch B sandbox fdrsbx-… agent legion`) and one `pool: unreachable (...)` line. Tests: `sched.test.mjs` "sched show lists remote (pool) lanes (#4964)", `orchestrate-blocked.test.mjs`.
+
+## Entry 2026-11-03 — Live selftest reuses shared polling and marker helpers (#5032)
+
+- **`retry.mjs`:** new `pollUntil(probe, {timeoutMs, pollMs, sleep, now})` returns the first truthy probe value, or null once the timeout passes (the probe runs at least once). `selftest-live.mjs` uses it in `waitFor`, `waitBatch` and `remote.run`; its timeouts and `gh` buffer are named constants. Behaviour is unchanged.
+- **`prodwatch-triage.mjs`:** exports `neutralize` (escapes only `<!--`, the marker-forgery guard `prodwatch.mjs` already used) and `findMarked(issues, marker, accept)`, which matches the marker in the `trailerOf` run only. `prodwatch.mjs` imports `neutralize`.
+- **`selftest-nightly.mjs`:** uses both helpers. The author check is the `accept` callback, so a marker quoted mid-body is no longer a dedupe hit. The body no longer escapes bare `<` and `>`.
+Cite: #5032.
