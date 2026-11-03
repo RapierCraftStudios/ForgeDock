@@ -472,7 +472,7 @@ orchestration:
 
 ## `decisions` (OPTIONAL)
 
-Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). The parser has one nesting level and no arrays, so lists are comma-separated.
+Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). **Not yet wired:** nothing calls `settle` in production, so `mode` (including `live`), `veto_hours` and `reversal_max` have no effect today; `policy` and `human_only` are read by prodwatch and issue-watch (`loadPolicy`) only. The parser has one nesting level and no arrays, so lists are comma-separated.
 
 | Key | Type | Description |
 |---|---|---|
