@@ -2382,3 +2382,7 @@ Cite: #4764.
 ## Entry 2026-11-03 — schedd: no re-host loop after a breaker trip or a passed retry-at (#5015)
 
 `rehostLater` (`schedd.mjs`, #4917) re-hosted a batch every second when the resumed run ended at once (a tripped breaker is kept with `keepBreaker`) while a pending issue's `notBefore` had already passed: no report is written, so each end scheduled another re-host at the 1 s floor. The timer now skips a batch whose saved `breaker` is tripped and not a transport trip (it waits for an operator `--resume`), and skips a retry-at that is already in the past when the run ends (that run saw it and did not admit, so a re-host would change nothing). Tests: `schedd.test.mjs` "#4917: a resume that leaves the waiting issue unadmitted..." and "#4917: a batch whose breaker tripped...". Found by the release review of #5013.
+
+## Entry 2026-11-03 — lane rescue push uses the post-rewrite head (#5014)
+
+`checkpoint()` (`lean.mjs`, #4958) captured `laneHead.sha` before `gitPush`, which untracks tool state and rewrites unpushed commits for DCO (`ensureSignedOff`) before it pushes. When that push then failed, `rescuePush` pushed the pre-rewrite commit and `lane_sha` / the `FORGE:LANE_BRANCH` line named a sha the branch no longer held. `rescuePush` now re-reads HEAD first (keeping the captured sha if `rev-parse` fails). Test: `lean.test.mjs` "#5014 the rescue pushes and reports the head after the pre-push sign-off rewrite...". Found by the release review of #5013.

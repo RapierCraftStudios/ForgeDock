@@ -3844,6 +3844,19 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(w.telemetry.some((t) => t.lane_branch === "feat/issue-7-lean" && t.lane_sha === r.laneHead.sha));
   });
 
+  it("#5014 the rescue pushes and reports the head after the pre-push sign-off rewrite, not the sha captured before it", async () => {
+    const odd = "fatal: unexpected sandbox git failure";
+    const w = world({ pushErrors: [odd, odd] });
+    const g = w.io.git;
+    let pushes = 0;
+    w.io.git = async (a, o2) => { if (a[0] === "push" && ++pushes === 2) w.head = "rewritten0000000000000000000000000000000"; return g(a, o2); }; // the exit push rewrote HEAD (DCO) then failed
+    const r = await run(w);
+    const rescue = w.calls.filter((c) => c[0] === "git" && c[1] === "push").at(-1);
+    assert.match(rescue.join(" "), /origin rewritten0+:refs\/heads\/feat\/issue-7-lean$/);
+    assert.equal(r.laneHead.sha, "rewritten0000000000000000000000000000000");
+    assert.ok(w.telemetry.some((t) => t.lane_sha === "rewritten0000000000000000000000000000000"));
+  });
+
   it("#4958 a rejected lane-branch push is rescued to a forge-salvage branch and reported as pushed there", async () => {
     const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
     const w = world({ pushErrors: [msg, msg] });
