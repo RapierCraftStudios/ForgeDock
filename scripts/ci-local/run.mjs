@@ -86,7 +86,7 @@ export async function acquireSlot(owner, deadline) {
 function exec(argv, { cwd, env, timeoutMs, onData }) {
   return new Promise((resolve) => {
     let child; let killed = false; let timer;
-    try { child = spawn(argv[0], argv.slice(1), { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { resolve({ code: 127, signal: null, error: e.message, timedOut: false }); return; }
+    try { child = spawn(argv[0], argv.slice(1), { cwd, env, detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { resolve({ code: 127, signal: null, error: e.message, timedOut: false }); return; }
     const kill = () => { try { process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ } setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } }, 3000).unref(); };
     const unreg = () => { cleanups.delete(hard); };
     const hard = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } };

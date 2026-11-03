@@ -288,6 +288,8 @@ describe("lane launch env (#4179)", () => {
     assert.equal(pid, 99);
     assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
     assert.equal(spawned[0].opts.env.KEEP, "1");
+    assert.equal(spawned[0].opts.windowsHide, true, "a detached lane must not open a console window on Windows");
+    assert.equal(spawned[0].opts.detached, true);
     assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
   });
 });
