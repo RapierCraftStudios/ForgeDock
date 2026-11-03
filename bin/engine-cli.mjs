@@ -1246,15 +1246,6 @@ async function addedEdges({ added, records, io, repo }) {
   return edges;
 }
 
-/**
- * #4917: true when a pending issue is waiting on a retry-at still in the future (its row carries `retry_at`, set by orchestrate for a
- * deferred or requeued issue). Deliberate holds (budget, operator, drift, breaker) have none and keep their report: a `--resume` frees them.
- */
-export function hasWaitingPending(rows, pending, now = Date.now()) {
-  const waiting = new Set(pending ?? []);
-  return (rows ?? []).some((r) => waiting.has(r?.issue) && Number(r.retry_at) > now);
-}
-
 /** #4917: whether the schedd re-hosted a finished batch after --add/--requeue, already hosts it, or no daemon answered. */
 function rehostLine(id, res) {
   if (res.reopened === true) return `batch ${id}: re-hosted by the schedd`;

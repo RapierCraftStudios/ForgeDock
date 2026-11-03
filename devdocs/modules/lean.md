@@ -2218,8 +2218,7 @@ Cite: #4908.
 
 ## Entry 2026-10-31 — schedd: a batch with pending issues is not finalised (#4917)
 
-`orchestrate` marks the row of a pending issue whose retry-at (`notBefore`) is still in
-the future with `retry_at`; `runBatch` (`bin/engine-cli.mjs`) writes no `report.json` while
+`runBatch` (`bin/engine-cli.mjs`) writes no `report.json` while
 `state.json` `pending` is non-empty (a cancel still ends the batch), and the running schedd
 re-hosts the batch (`--resume`) once the retry-at is near (`rehostLater`, 1-60 s).
 Deliberate holds (budget, operator, drift, breaker) also leave the batch unfinished
