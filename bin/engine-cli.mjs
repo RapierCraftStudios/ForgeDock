@@ -21,7 +21,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
-import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
+import { readBranches, resolveLane, isDefaultLane, makeLaneCache } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
@@ -1644,8 +1644,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const prefilter = argv.includes("--no-prefilter") ? null
     : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd), minAge: await readPostDeployMinAge(cwd) });
   const fetched = new Set();
+  const laneCache = makeLaneCache(), milestoneOf = new Map(); // #4963: shared default-branch / ls-remote reads; the milestone readBody already fetched
   const laneOf = async (n) => {
-    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride });
+    const known = milestoneOf.get(n); milestoneOf.delete(n); // used once: a later retry re-reads the live milestone
+    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride, cache: laneCache, milestone: known });
     if (r.ok && prefilter && !fetched.has(r.lane)) { fetched.add(r.lane); try { await leanIo.git(["fetch", "origin", r.lane], { cwd }); } catch { /* offline: use the local ref */ } }
     return r;
   };
@@ -1928,8 +1930,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author"); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
-        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author"); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
+        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
@@ -2301,11 +2303,12 @@ export async function schedFromCli(argv, deps = {}) {
     const st = reg.list();
     const who = (e) => `#${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} P${e.priority}`;
     console.log(deps.tick ?? health.tickText(health.stallCheck({ dir: schedMod.schedDir() })));
-    console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}`);
+    console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}, remote ${(st.remote ?? []).length}`);
     const ws = Object.entries(st.weights ?? {});
     console.log(`repo weights: ${ws.length ? ws.map(([r, n]) => `${r}=${n}`).join(", ") : "equal (none set)"}`);
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
+    for (const l of schedMod.remoteLines(st)) console.log(l); // #4964
     return st;
   }
   if (sub === "cap") {
