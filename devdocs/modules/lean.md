@@ -2346,7 +2346,7 @@ Cite: delta review of #4979 (SEC-11, SEC-12, SPEC-11, SPEC-13).
 
 ## Entry 2026-11-02 — A substitute-validate is rejected when the diff removes a path its frozen command names
 
-`gate()` in `lean.mjs` collects deleted/renamed-away paths (`removedPathsOf`, `git diff --name-status -M base...HEAD`) when a validate is substituted and `precheck` (`conformance.mjs`) fails `substitute_removed_path` (`conformance.unimplemented`) if `removedNamedPaths` finds one named by `substituted.from`, before the rerun verdict. The rerun runs in the builder's tree, so a deleted test read as "unrunnable" and let the substitute stand.
+`gate()` in `lean.mjs` collects deleted/renamed-away paths (`removedPathsOf`, `git diff --name-status -z -M base...HEAD`; a git error returns null and `precheck` fails closed `substitute_unverified`, #5003) when a validate is substituted and `precheck` (`conformance.mjs`) fails `substitute_removed_path` (`conformance.unimplemented`) if `removedNamedPaths` finds one named by `substituted.from` (tokens stripped of quotes, `--flag=` and `::node` ids; globs expanded against the base file list; a directory or bare-word token matches only a removed test file, #5003), before the rerun verdict. The rerun runs in the builder's tree, so a deleted test read as "unrunnable" and let the substitute stand.
 Decision: option 3 (diff check, no rerun) over rerun on base (fails for tests the issue adds) and restore-named-paths-from-base (needs a rerun and worktree mutation). Environment-unrunnable commands with intact files keep their substitute.
 Cite: delta review of #4979 (SEC-13); #4990.
 

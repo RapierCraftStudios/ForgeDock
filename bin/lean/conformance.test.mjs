@@ -232,9 +232,25 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.match(gone.failures[0].detail, /test\/leak\.test\.js/);
     const env = precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { rc: 1, output: "Unknown option `-q`" } }, removedPaths: ["docs/other.md"] });
     assert.deepEqual(env.failures, [], "intact named files: env-unrunnable substitute stands");
-    assert.deepEqual(removedNamedPaths("node --test ./test/a.js 'b/c.js' tests/", ["test/a.js", "b/c.js", "tests/x.js", "z.js"]), ["test/a.js", "b/c.js", "tests/x.js"]);
+    assert.deepEqual(removedNamedPaths("node --test ./test/a.js 'b/c.js' z.js", ["test/a.js", "b/c.js", "tests/x.js", "z.js"]), ["test/a.js", "b/c.js", "z.js"]);
     assert.deepEqual(removedNamedPaths("pytest -k leak", ["leak.py"]), []);
-    assert.deepEqual(await removedPathsOf(async () => "D\ta.js\nR100\told.js\tnew.js\nM\tm.js\nA\tn.js", "b"), ["a.js", "old.js"]);
+    assert.deepEqual(await removedPathsOf(async () => "D\0a.js\0R100\0old.js\0new.js\0M\0m.js\0A\0n.js\0", "b"), ["a.js", "old.js"]);
+  });
+  it("#5003 removed-path matching: node ids, globs, flag paths, directory tokens, -z, fail closed", async () => {
+    assert.deepEqual(removedNamedPaths("pytest tests/a.py::test_x", ["tests/a.py"]), ["tests/a.py"]);
+    assert.deepEqual(removedNamedPaths("pytest --junit=tests/a.py", ["tests/a.py"]), ["tests/a.py"]);
+    assert.deepEqual(removedNamedPaths('pytest "tests/a.py::T::t"', ["tests/a.py"]), ["tests/a.py"]);
+    const base = ["tests/test_a.py", "tests/test_b.py", "tests/fixtures/d.json", "src/x.py"];
+    assert.deepEqual(removedNamedPaths("pytest tests/test_*.py", ["tests/test_a.py", "tests/fixtures/d.json", "src/x.py"], base), ["tests/test_a.py"]);
+    assert.deepEqual(removedNamedPaths("pytest tests/", ["tests/fixtures/d.json"]), []);
+    assert.deepEqual(removedNamedPaths("pytest tests/", ["tests/test_a.py"]), ["tests/test_a.py"]);
+    assert.deepEqual(removedNamedPaths("npm test", ["test/fixtures/d.json"]), []);
+    assert.deepEqual(removedNamedPaths("npm test", ["test/a.test.js"]), ["test/a.test.js"]);
+    assert.deepEqual(await removedPathsOf(async (a) => (a.includes("-z") ? "D\0tests/é.py\0" : '"tests/\\303\\251.py"'), "b"), ["tests/é.py"]);
+    assert.equal(await removedPathsOf(async () => { throw new Error("git"); }, "b"), null);
+    const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "node --test test/leak.test.js" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/weak.test.js", why: "w" }]).contract;
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    assert.deepEqual(precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { rc: 1, output: "no tests found" } }, removedPaths: null }).failures.map((f) => f.kind), ["substitute_unverified"]);
   });
   it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
     assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));
