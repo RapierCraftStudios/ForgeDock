@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { ensureSignedOff, needsSignoff, offendersOf } from "./signoff.mjs";
+import { ensureSignedOff, needsSignoff, offendersOf, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 
 const CLEAN = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(AUTHOR|COMMITTER)_/.test(k)));
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", env: { ...CLEAN, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } }).trim();
@@ -142,5 +142,35 @@ describe("ensureSignedOff", () => {
     const git = async (a, o) => { if (a[0] === "filter-branch") throw new Error("boom"); return f.git(a, o); };
     await assert.rejects(ensureSignedOff({ git, lane: "staging", branch: "feat/x", env: {} }), (e) => e.engineCode === "engine.dco_rewrite" && e.noIdentity === false && /boom/.test(e.message));
     assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "churn\n");
+  });
+  it("#5047 unsigned commits on a salvage ref are rewritten once the lane is resumed from it, and the signed rewrite pushes as the lane branch", async () => {
+    const f = fixture();
+    const bad = f.commit("a.txt", "unsigned placeholder", "placeholder");
+    const ref = salvageBranch(7, bad);
+    assert.equal(ref, `forge-salvage/7-${bad.slice(0, 10)}`);
+    f.sh("push", "-q", "origin", `${bad}:refs/heads/${ref}`);
+    // the recovery lane fetches the salvage branch as origin/<branch>, builds the worktree from it, then drops that tracking ref
+    f.sh("fetch", "-q", "origin", `${ref}:refs/remotes/origin/feat/x`);
+    assert.equal((await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} })).rewritten, 0, "with the tracking ref the commits are excluded (the defect)");
+    assert.equal(await dropSalvageTracking({ git: f.git, branch: "feat/x" }), true);
+    const r = await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} });
+    assert.equal(r.rewritten, 1);
+    assert.match(f.sh("log", "-1", "--format=%B"), /Signed-off-by: Lane Bot <lane@example.com>/);
+    f.sh("push", "-q", "-u", "origin", "feat/x");
+    assert.notEqual(f.sh("rev-parse", "origin/feat/x"), bad);
+  });
+  it("#5047 an unsigned commit pushed to a salvage ref is not on the lane branch's exclusion range", async () => {
+    const f = fixture();
+    const bad = f.commit("a.txt", "unsigned placeholder", "placeholder");
+    f.sh("push", "-q", "origin", `${bad}:refs/heads/${salvageBranch(7, bad)}`);
+    assert.equal((await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} })).rewritten, 1);
+  });
+  it("#5047 signed history already pushed on origin/<branch> is never rewritten", async () => {
+    const f = fixture();
+    f.commit("s.txt", "signed", "--signoff");
+    f.sh("push", "-q", "-u", "origin", "feat/x");
+    const head = f.sh("rev-parse", "HEAD");
+    assert.equal((await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} })).rewritten, 0);
+    assert.equal(f.sh("rev-parse", "HEAD"), head);
   });
 });
