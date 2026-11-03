@@ -1596,6 +1596,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     plan = batch.readPlan();
     if (!plan) throw new Error(`no batch ${resumeId} in ${root}`);
     argv = plan.argv;
+    // #5031: a resume (operator or schedd restart) keeps the base waits recorded at start; a landed commit releases on the first check
+    for (const [n, l] of Object.entries(plan.baseWaits ?? {})) if (Array.isArray(l) && l.length) baseWaits.set(Number(n), l.filter((w) => w && typeof w.sha === "string" && typeof w.base === "string"));
   }
   const issues = issuesOf(argv);
   if (!issues.length) throw new Error(ORCH_USAGE);
@@ -1642,7 +1644,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const base = deps.batchId ?? batchMod.newBatchId();
     batch = batchMod.openBatch(root, base);
     for (let i = 2; batch.exists(); i++) batch = batchMod.openBatch(root, `${base}.${i}`); // never resume by accident
-    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(force ? { forced: force } : {}), ...(daemon ? { daemon: true, env: kept } : {}) };
+    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(force ? { forced: force } : {}), ...(baseWaits.size ? { baseWaits: Object.fromEntries(baseWaits) } : {}), ...(daemon ? { daemon: true, env: kept } : {}) };
     batch.writePlan(plan);
     batch.setParallel(parallel);
   } else {

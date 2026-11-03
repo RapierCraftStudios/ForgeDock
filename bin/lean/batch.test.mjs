@@ -1213,6 +1213,16 @@ describe("batch plan secrets (#4787)", () => {
     assert.deepEqual(last.deps, { 1: [2], 2: [], 3: [1], 4: [], 5: [] });
   });
 
+  it("a setup save never records an issue as read before its lane is resolved (#4963 resume safety)", async () => {
+    const saves = [];
+    const store = { load: () => null, save: (s) => saves.push(JSON.parse(JSON.stringify(s))) };
+    await orchestrate({ issues: [1, 2, 3, 4], parallel: 1, store, setupConcurrency: 4, trusted: () => true,
+      readBody: async () => "",
+      resolveLane: async (n) => { await new Promise((r) => setTimeout(r, 5 + n * 10)); return { ok: true, lane: "staging" }; },
+      runOne: async () => ({ terminalReason: "merged" }), now: () => Date.now(), sleep: async () => {}, pollMs: 1 });
+    for (const s of saves.filter((x) => x.phase === "setup")) for (const n of Object.keys(s.deps ?? {})) assert.ok(s.lanes?.[n], `setup save lists #${n} in deps without its lane`);
+  });
+
   it("5 issues with slow gh/git calls reach their first admitted lane in a fraction of the serial setup time (#4963)", async () => {
     const LAT = 30; // ms per gh/git call, standing in for a loaded host
     const wait = () => new Promise((r) => setTimeout(r, LAT));
