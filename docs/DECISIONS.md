@@ -2,7 +2,7 @@
 
 > **Status: not yet wired.** No production code calls `settle` yet: the issue-watch stage does not run it, so `decisions.mode`
 > (including `live`), `veto_hours` and `reversal_max` have no effect and no `decision_engine` telemetry is emitted. Only the policy
-> and authority-matrix reads (`loadPolicy`) are used today, by prodwatch. The flow below describes the intended behaviour.
+> and authority-matrix reads (`loadPolicy`) are used today, by prodwatch and issue-watch. The flow below describes the intended behaviour.
 
 Settles a lane's decision-only `needs-human` escalation against the target repo's own north star instead of parking it.
 Only external actions stay with a human. Code: `bin/lean/decision-engine.mjs`. Config: [`decisions:`](CONFIG.md).
