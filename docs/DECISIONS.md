@@ -31,7 +31,7 @@ Only external actions stay with a human. Code: `bin/lean/decision-engine.mjs`. C
 ## The issue-watch stage
 
 `bin/lean/issuewatch-decisions.mjs` runs inside `forgedock issue-watch` (every mode), not as a separate entry point. It is active when `decisions.mode: live`
-or the watch sets `sweep_needs_human: true`. Each round it lists open `needs-human` issues of trusted authors that match the watch selectors, takes the newest
+or the watch sets `sweep_needs_human: true`. `decisions.mode: live` is a repo setting, so it activates the stage in every watch of the repo (also watches that never opted in); set it only when each watch's selectors are meant to settle `needs-human` issues. Each round it lists open `needs-human` issues of trusted authors that match the watch selectors, takes the newest
 `FORGE:NEEDS_HUMAN` comment (its comment id is the escalation id `settle` is idempotent on) and the typed `terminalCode` from `FORGE:STATE`, and calls `settle`.
 
 - **Backlog.** An escalation older than the watch start is only touched by a watch with `sweep_needs_human: true`. `forgedock issue-watch run --dry-run` prints the `classify` result for every escalation (backlog marked) and writes nothing.
@@ -41,7 +41,7 @@ or the watch sets `sweep_needs_human: true`. Each round it lists open `needs-hum
 - **Post-deploy only.** Folded into the watch's `postdeploy_rollup` checklist, `needs-human` cleared and the issue closed; without a rollup it is kept.
 - **Shadow.** Only live mode acts: in shadow (the default) a post-deploy-only or evidence escalation posts a `FORGE:DECISION (shadow)` comment and changes nothing (no fold, close, label change or launch).
 - **Relaunch.** A live decision or evidence hand-off clears `needs-human` and launches the issue through the watcher's own lane launch (per-issue watches); batch and release watches re-select it on the next round.
-- **Trust.** Only `FORGE:NEEDS_HUMAN` and `FORGE:STATE` comments from OWNER/MEMBER/COLLABORATOR or the app bot count.
-- **Failures.** A judge or gh failure is not recorded as handled: the escalation is retried for up to three rounds. The judge call has a 2 minute timeout.
+- **Trust.** Only `FORGE:NEEDS_HUMAN` and `FORGE:STATE` comments from OWNER/MEMBER/COLLABORATOR or the engine's own logins (`ownLogins`; the ForgeDock App posts as CONTRIBUTOR) count, never other CONTRIBUTORs.
+- **Failures.** A judge or gh failure is not recorded as handled: the escalation is retried for up to three rounds. The judge call has a 2 minute timeout, and a round makes at most 20 judge calls even when `max_issues` is unset; the rest wait for the next round.
 - **Veto.** A `forge:decision-veto` label or a `veto` reply inside `veto_hours` reverts a live decision (`revertVeto`) and counts toward the reversal rate that forces shadow.
 - The judge is the only LLM call (`claude --print` in the real io).

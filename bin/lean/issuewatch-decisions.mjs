@@ -16,11 +16,12 @@ import { codeOf } from "./context.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { parseProdWatch } from "./prodwatch.mjs";
-import { isTrustedActor } from "../engine/phases.mjs";
+import { resolveOwnLogins } from "./prefilter.mjs";
 
 const ROWS_MAX = 200;
 const LIST_LIMIT = "200";
 const MAX_ATTEMPTS = 3; // a judge/gh failure is retried this many rounds, then the escalation is left to a human
+const JUDGE_ROUND_MAX = 20; // judge calls per round, whether or not the watch sets max_issues
 const MS_PER_HOUR = 3600_000;
 const commentId = (c) => /#issuecomment-(\d+)/.exec(String(c?.url ?? ""))?.[1] ?? c?.id ?? null;
 const marked = (body, m) => new RegExp(`^\\s*<!--\\s*FORGE:${m}\\b`).test(String(body ?? ""));
@@ -80,7 +81,12 @@ export async function decisionStep({ watch, repo, io, state, ctx, shared, launch
   const d = dec(state);
   const startedAt = state.started ?? io.now();
   if (!dryRun) state.started ??= startedAt;
-  const trusted = (c) => isTrustedActor({ association: c?.authorAssociation, type: shared.isBot(c) ? "Bot" : "", login: c?.author?.login });
+  let own = [];
+  try { own = (await resolveOwnLogins(io.gh)).logins; } catch { /* only the associations count */ }
+  const bare = (l) => String(l ?? "").trim().toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");
+  const trusted = (c) => shared.TRUSTED.has(c?.authorAssociation) || (bare(c?.author?.login) !== "" && own.includes(bare(c.author.login))); // never another CONTRIBUTOR
+  const round = { judged: 0 };
+  const rio = { ...io, judge: io.judge && ((q) => { if (round.judged >= JUDGE_ROUND_MAX) throw new Error("judge cap for this round reached"); round.judged++; return io.judge(q); }) };
   const rows = [];
   const issues = await ghJson(io, ["issue", "list", "-R", repo, "--state", "open", "--label", NEEDS_HUMAN_LABEL, "--limit", LIST_LIMIT, "--json", "number,title,body,labels,milestone,author,createdAt"]);
   const assoc = await listAssociations(io.gh, repo);
@@ -95,10 +101,11 @@ export async function decisionStep({ watch, repo, io, state, ctx, shared, launch
     if (backlog && !watch.sweep_needs_human && !dryRun) continue;
     const item = { issue: i.number, repo, escalationId: esc.id, text: esc.text, title: i.title, terminalCode: terminalCodeOf(view.body, view.comments, trusted), comments: view.comments };
     if (dryRun) { rows.push({ ...classify(item, ctx.policy), backlog }); continue; }
+    if (round.judged >= JUDGE_ROUND_MAX) break;
     const used = claimsUsed(state);
     if (watch.max_issues && used.issues >= watch.max_issues) break;
     if (watch.max_launches && used.launches >= watch.max_launches) break;
-    const row = await handle({ item, issue: i, watch, repo, io, state, ctx, shared, launch, d });
+    const row = await handle({ item, issue: i, watch, repo, io: rio, state, ctx, shared, launch, d });
     if (row.action === "error") { // not handled: retried next round, bounded
       d.attempts[esc.id] = (d.attempts[esc.id] ?? 0) + 1;
       if (d.attempts[esc.id] >= MAX_ATTEMPTS) d.handled[esc.id] = "error";

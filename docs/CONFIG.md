@@ -472,7 +472,7 @@ orchestration:
 
 ## `decisions` (OPTIONAL)
 
-Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). The issue-watch stage (#4793) calls `settle` for the open `needs-human` issues a watch selects: it runs when `mode: live`, or when the watch sets `sweep_needs_human: true`; `policy` and `human_only` are also read by prodwatch (`loadPolicy`). The parser has one nesting level and no arrays, so lists are comma-separated.
+Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). The issue-watch stage (#4793) calls `settle` for the open `needs-human` issues a watch selects: it runs when `mode: live` (a repo setting: every watch of the repo runs the stage), or when the watch sets `sweep_needs_human: true`; `policy` and `human_only` are also read by prodwatch (`loadPolicy`). The parser has one nesting level and no arrays, so lists are comma-separated.
 
 | Key | Type | Description |
 |---|---|---|

@@ -248,3 +248,21 @@ test("#4793 runWatch runs the stage under decisions.mode: live, stays inert othe
   assert.equal(capped.launched.length, 2);
   assert.deepEqual(capped.state.claimed.length, 2);
 });
+
+test("#4793 the engine's own App login counts as trusted though it is a CONTRIBUTOR; another CONTRIBUTOR does not", async () => {
+  const from = (login) => ({ ...esc(10, DECISION), authorAssociation: "CONTRIBUTOR", author: { login } });
+  const w = W();
+  assert.equal((await run(fakeIo([{ number: 1, comments: [from("rapiercraft-forgedock")] }]), w, st(w), ctxOf())).rows.length, 1);
+  assert.equal((await run(fakeIo([{ number: 1, comments: [from("some-contributor")] }]), w, st(w), ctxOf())).rows.length, 0);
+});
+
+test("#4793 judge calls are capped per round even when max_issues is unset", async () => {
+  const issues = Array.from({ length: 30 }, (_, k) => ({ number: k + 1, comments: [{ ...esc(100 + k, DECISION), url: `https://x/issues/${k + 1}#issuecomment-${100 + k}` }] }));
+  const io = fakeIo(issues);
+  const w = W(), state = st(w);
+  assert.equal(w.max_issues, null);
+  await run(io, w, state, ctxOf());
+  assert.equal(io.judged.length, 20);
+  await run(io, w, state, ctxOf()); // the rest is picked up next round
+  assert.equal(io.judged.length, 30);
+});
