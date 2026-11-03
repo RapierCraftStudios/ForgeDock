@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
+import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -118,5 +118,17 @@ describe("testRunnerProblems (#4857)", () => {
     assert.deepEqual(testRunnerProblems(C("poetry -C services/worker run pytest tests/test_a.py"), runners), []);
     assert.deepEqual(testRunnerProblems(C("node --test bin/lean/x.test.mjs"), runners), []);
     assert.deepEqual(testRunnerProblems(C("pytest services/worker/t.py"), null), []);
+  });
+});
+
+describe("#5020 repro_test is probed like a validate command", () => {
+  const c = { validate: [{ id: "V1", command: "node --test a.test.mjs" }], repro_test: { path: "t.py", id: "t", command: "madeuptool --run t.py" } };
+  it("contractCommands lists validate entries then the repro_test", () => {
+    assert.deepEqual(contractCommands(c).map((x) => x.id), ["V1", "repro_test"]);
+    assert.deepEqual(contractCommands({ repro_test: "none" }), []);
+  });
+  it("preflightProbes probes the repro command's tool", () => {
+    const { probes } = preflightProbes(c);
+    assert.ok(probes.some((p) => p.tool === "madeuptool" && p.ids.includes("repro_test")));
   });
 });

@@ -15,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -225,7 +225,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, validateRecipes = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -1287,7 +1287,11 @@ export async function runCore(o) {
         return null;
       }
       const rg = await heavyStep("precheck", () => io.redGreen({ cwd: wt, base, command: String(t.command), env: laneEnv() })).catch(() => null);
-      const words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
+      let words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
+      if (words.head === "FAILED" && io.runCommand) { // #5020: a head that failed because a tool or env is missing is env.repro_unrunnable, not a red-green verdict
+        const hr = await io.runCommand({ command: String(t.command), cwd: wt, timeoutMs: 120000, env: laneEnv() }).then((x) => x?.r ?? x).catch(() => null);
+        if (reproEnvMiss(hr, { command: String(t.command) })) words = { ...words, head: "UNRUNNABLE" };
+      }
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
       return words;
@@ -1392,6 +1396,14 @@ export async function runCore(o) {
      * #4328: probe the host for the tools and modules a contract's validate commands need; #4393: then flag `$NAME`s the lane
      * env leaves empty and run each remaining command once on the base worktree (io.preflightRun). The misses; [] without either hook.
      */
+    /** #5020: forge.yaml validate.recipes rewrite frozen commands; a check-less post-deploy requirement becomes a defer to the orchestrator. */
+    function freezeRewrites(c) {
+      const r = applyValidateRecipes(c, validateRecipes);
+      for (const x of r.applied) T.decisions.push(`validate recipe rewrote ${x.id}: \`${x.from}\` -> \`${x.to}\``);
+      const d = deferChecklessPostDeploy(r.contract);
+      if (d.converted.length) T.decisions.push(`Post-deploy with no registered check deferred to the orchestrator: ${d.converted.join(", ")}`);
+      return d.contract;
+    }
     async function preflightValidates(contract) {
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
@@ -1668,6 +1680,7 @@ export async function runCore(o) {
           return o.contract;
         };
         let contract = dropScope(await readContract());
+        contract = freezeRewrites(contract);
         await refreshIssue("contract validation");
         let vc = validateContract(contract, issueText, { repro: reproOn() });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
@@ -1676,7 +1689,7 @@ export async function runCore(o) {
           const problems = [...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)];
           T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
           await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
-          contract = dropScope(await readContract());
+          contract = freezeRewrites(dropScope(await readContract()));
           await refreshIssue("contract validation");
           vc = validateContract(contract, issueText, { repro: reproOn() });
           if (missed.length) misses = await preflightValidates(contract);
@@ -2141,7 +2154,8 @@ export async function runCore(o) {
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
-        await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all }));
+        try { await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all })); } // #5020: retried by ghw; a still-failing post is an anomaly, never an engine-error
+        catch (e) { T.anomalies.push(`FORGE:AMENDMENT comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
         T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
       }
       pendingDecisions = a.decisions; // #4737: persisted only once the PR merges

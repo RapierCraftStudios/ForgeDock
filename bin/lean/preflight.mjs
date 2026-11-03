@@ -101,6 +101,12 @@ function moduleNeeds(exe, args) {
  * probe (tool) a module probe depends on: skip the module probe when its interpreter is missing. A name `repoHas(name)` holds
  * or a deliverable's change text names (the change adds it) is not probed; paths and `$...` words are never probed.
  */
+/** #5020: the contract's runnable commands: each validate entry plus the repro_test, which fails the same ways. */
+export function contractCommands(contract) {
+  const out = (Array.isArray(contract?.validate) ? contract.validate : []).filter((v) => v?.id && typeof v.command === "string");
+  const t = contract?.repro_test;
+  return t && typeof t === "object" && typeof t.command === "string" && t.command.trim() ? [...out, { id: "repro_test", command: t.command }] : out;
+}
 export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIGHT_CAP } = {}) {
   const changes = (Array.isArray(contract?.deliverables) ? contract.deliverables : []).map((d) => String(d?.change ?? "")).join("\n");
   const named = (name) => new RegExp(`(^|[^\\w@/.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w/-])`).test(changes);
@@ -115,8 +121,7 @@ export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIG
       : `node -e ${sq(NODE_PROBE)} ${sq(tool)} >/dev/null 2>&1`;
     byKey.set(key, { ids: [id], tool, kind, interp, needs: kind === "command" ? null : interp, probe });
   };
-  for (const v of Array.isArray(contract?.validate) ? contract.validate : []) {
-    if (!v?.id || typeof v.command !== "string") continue;
+  for (const v of contractCommands(contract)) {
     for (const seg of shellSegments(v.command)) {
       let i = 0;
       while (i < seg.length && (/^[A-Za-z_]\w*=/.test(seg[i]) || ["!", "time", "exec", "command", "env"].includes(seg[i]))) i++;
@@ -238,7 +243,7 @@ const porcelain = (out) => new Map(String(out ?? "").split("\n").filter((l) => l
  */
 export async function runPreflight({ contract, run, git, env = {}, repoHas = () => false, knownPath = () => false, skipIds = [], now = () => Date.now(), perCommandMs = RUN_PROBE_MS, budgetMs = RUN_BUDGET_MS }) {
   const misses = [], skipped = [], reverted = [];
-  const todo = (Array.isArray(contract?.validate) ? contract.validate : []).filter((v) => v?.id && typeof v.command === "string" && !skipIds.includes(v.id));
+  const todo = contractCommands(contract).filter((v) => !skipIds.includes(v.id));
   if (!todo.length) return { misses, skipped, reverted };
   const status = async () => porcelain(await git(["status", "--porcelain", "--untracked-files=all"]).catch(() => ""));
   const before = await status(), deadline = now() + budgetMs;
