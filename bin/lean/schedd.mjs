@@ -187,8 +187,10 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (closing) return;
     let b, st;
     try { b = openBatch(root, id); if (b.readReport() || b.readCancel() || !b.pendingIssues().length) return; st = b.store.load(); } catch { return; }
+    if (st?.breaker && !st.breaker.transport) return; // a tripped breaker holds the batch for an operator --resume (a re-host would stop again at once)
     const at = Math.min(...b.pendingIssues().map((n) => Number(st?.notBefore?.[n]) || Infinity));
     if (!Number.isFinite(at)) return; // nothing waits on the clock: a deliberate hold stays for --resume
+    if (at <= Date.now()) return; // the run that just ended already saw this retry-at pass and did not admit: re-hosting would loop every second
     const t = setTimeout(() => {
       rehostTimers.delete(t);
       if (closing || hosted.has(id) || starting.has(id)) return;
