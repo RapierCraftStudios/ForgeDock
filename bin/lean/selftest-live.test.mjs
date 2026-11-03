@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { runSelftestLive, stripState, selftestFromCli, STEPS, FIXTURES, uniqueFixture } from "./selftest-live.mjs";
+import { runSelftestLive, stripState, selftestFromCli, STEPS, FIXTURES, uniqueFixture, isOwnBatch } from "./selftest-live.mjs";
 
 /** A fake sandbox world. `d` toggles a defect: add4859 (--add skips), wipe4860 (body wiped), double (resume relaunches), orderBA, noRemoteAuth. */
 function world(d = {}) {
@@ -123,6 +123,13 @@ describe("selftest --live steps (#4865)", () => {
     assert.deepEqual(r.cleanupErrors, []);
     assert.deepEqual(log, ["list forge/issue-10", "close 7", "del refs/heads/forge/issue-10", "list forge/issue-10-x", "del refs/heads/forge/issue-10-x"]);
     assert.ok(!w.calls.some((c) => /search/.test(c)), "no text search for PRs");
+  });
+  it("own batch is picked by repo and issues: a foreign concurrent batch is never adopted (#4952)", () => {
+    const mine = { repo: "o/Sandbox", argv: ["orchestrate", "10", "11", "--repo", "o/Sandbox"] };
+    assert.ok(isOwnBatch(mine, "o/sandbox", [10, 11]));
+    assert.ok(!isOwnBatch({ repo: "o/real", argv: ["orchestrate", "10", "11"] }, "o/sandbox", [10, 11]));
+    assert.ok(!isOwnBatch({ repo: "o/sandbox", argv: ["orchestrate", "7"] }, "o/sandbox", [10, 11]));
+    assert.ok(!isOwnBatch(null, "o/sandbox", [10]));
   });
   it("unknown fixture language fails at setup", async () => {
     assert.equal((await runSelftestLive({ repo: "o/r", lang: "ruby", io: {} })).step, "setup");

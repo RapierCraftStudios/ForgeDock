@@ -46,6 +46,10 @@ export function uniqueFixture(fx, lang, runId) {
   return { files: fx.files, a: one(fx.a), b: one(fx.b) };
 }
 
+/** Whether a batch plan is the one this harness started: the sandbox repo and every issue it passed (#4952). */
+export const isOwnBatch = (plan, repo, issues) =>
+  String(plan?.repo ?? "").toLowerCase() === repo.toLowerCase() && issues.every((n) => (plan?.argv ?? []).map(String).includes(String(n)));
+
 /** The issue body with its FORGE:STATE annotation removed. */
 export const stripState = (body) => String(body ?? "").replace(/<!--\s*FORGE:STATE[\s\S]*?-->/g, "").trim();
 
@@ -179,9 +183,7 @@ export function realIo(env = process.env, { pool = false } = {}) {
   const root = batchRoot(env);
   const detached = (args) => { const p = spawn(process.execPath, [CLI, ...args], { detached: true, windowsHide: true, stdio: "ignore", env }); p.unref(); return { kill: async () => { try { process.kill(-p.pid, "SIGTERM"); } catch { /* gone */ } } }; };
   // The batch of THIS start: new on disk, for the sandbox repo, and naming the issue we passed. A concurrent real batch is never adopted (#4952).
-  const ownBatch = (id, repo, issues) => {
-    try { const p = openBatch(root, id).readPlan(); return String(p?.repo ?? "").toLowerCase() === repo.toLowerCase() && issues.every((n) => (p?.argv ?? []).map(String).includes(String(n))); } catch { return false; }
-  };
+  const ownBatch = (id, repo, issues) => { try { return isOwnBatch(openBatch(root, id).readPlan(), repo, issues); } catch { return false; } };
   const waitBatch = async (before, repo, issues) => { for (let i = 0; i < BATCH_WAIT_TRIES; i++) { const id = listBatches(root).find((b) => !before.has(b) && ownBatch(b, repo, issues)); if (id) return id; await new Promise((r) => setTimeout(r, BATCH_WAIT_MS)); } throw new Error(`orchestrate did not create a batch for ${repo} ${issues.join(",")} within ${BATCH_WAIT_TRIES * BATCH_WAIT_MS / 1000}s`); };
   return (self = {
     now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
