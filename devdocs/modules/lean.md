@@ -161,7 +161,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `{branch, sha, pushedTo}` whenever the lane has commits ahead of base. When the normal push fails before git push
    (sign-off rewrite) or the push is rejected or exhausted, HEAD is pushed as is to the lane branch (not after a rejection), else to `forge-salvage/<issue>-<sha>`. The line goes into the terminal trajectory (or a `FORGE:LANE_BRANCH`
    comment for deferred/engine-error), `RUN_TERMINAL` (`lane_branch`, `lane_sha`) and the returned result (`laneHead`);
-   an unpushed head is stated as lost-on-teardown. A rerun or `--requeue` resumes from the pushed branch (existing `ls-remote` resume) or, when only a salvage branch exists, from `forge-salvage/<issue>-*` (`RESUME_FROM_SALVAGE`).
+   an unpushed head is stated as lost-on-teardown. A rerun or `--requeue` resumes from the pushed branch (existing `ls-remote` resume) or from `forge-salvage/<issue>-*` (`RESUME_FROM_SALVAGE`). `pickSalvage` (`salvage-resume.mjs`, #5063) picks the newest salvage ref by commit time (the sha suffix is not chronological); when the lane branch exists on origin or a PR is open, only a ref strictly ahead of `origin/<branch>` (descending from it) is resumed, behind or diverged refs are ignored.
    #4363 fresh fix sessions (`fixround.mjs` + `lean.mjs` `fixRound`): precheck, CI (verify and merge), docs,
    structure, enumerating and sequence rounds, and conformance/review FAILs whose failures all cite a `file:line`
    (`freshFix`/`citesFileLine`), run with `resume: null` on `fixModel` (forge.yaml `lean.fix_model`,
