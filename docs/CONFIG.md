@@ -1337,6 +1337,10 @@ verification:
   consumer_sweep:
     mode: advisory         # advisory (default) | blocking
     budget_seconds: 60     # wall-clock budget for the sweep
+
+  test_runners:            # path prefix -> runner command prefix (block-style map)
+    services/worker: "poetry -C services/worker run"
+    web: "pnpm --filter web exec"
 ```
 
 | Field | Type | Required | Description |
@@ -1353,6 +1357,7 @@ verification:
 | `commands.typescript.test_changed`, `commands.typescript.typecheck_changed`, `commands.python.test_changed` | string | No | Changed-file scoped steps for `/review-pr` Phase 2 (repos where the full typecheck or suite is too slow or heavy). They run in the per-PR worktree and read the PR's changed files that still exist from `$FORGE_CHANGED_FILES` (newline-separated environment variable; never spliced into the command string). Reported as Phase 2 evidence with `EXIT <lang>.<step>=<code>` like the full-repo steps; a non-zero `typecheck_changed` blocks, a failing `test_changed` follows the REAL/flaky rule of `test`. Examples: `vitest related $FORGE_CHANGED_FILES --run`; `pytest -q $(printf '%s\n' $FORGE_CHANGED_FILES \| grep 'test_.*\.py$')`. For `typecheck_changed`, filter the compiler output to the changed files so pre-existing errors elsewhere do not block. `forgedock init` suggests them when vitest or pytest is detected |
 | `consumer_sweep.mode` | string | No | `advisory` (default): the validate consumer sweep (`scripts/consumer-sweep.sh`, V4.6) records unaddressed referencing sites and never fails. `blocking`: unaddressed sites fail validate with `consumer_unaddressed`, build runs one repair round, and sites still unaddressed are recorded as `CONSUMERS: unresolved` and passed to review as known risk (never `needs-human`). Flip to `blocking` only after `bash scripts/consumer-sweep.sh --eval-history 20` shows a mean of at most 2 flagged sites per merge and none above 10 on your repo |
 | `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
+| `test_runners` | map (path prefix → runner) | No | Default unset (no runner enforced). For repos whose validate commands need a managed runner (uv, poetry, pnpm workspace). The lean engine checks it at contract freeze (`testRunnerProblems`, `bin/lean/preflight.mjs`): a validate command that touches a configured path prefix without containing that prefix's runner string is reported as a contract problem, instead of failing later as `contract.invalid_command` / `env.tool_missing`. Paths in the command are relative to the runner's cwd. Write it as a block-style map: `parseForgeYaml` does not read inline `{ ... }` maps. |
 
 **Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
 
