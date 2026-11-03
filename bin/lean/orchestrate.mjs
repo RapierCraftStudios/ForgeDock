@@ -257,7 +257,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null }) {
+  getChildren = null, autoChildren = null, baseWait = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -851,7 +851,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   save();
 
-  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? "held by operator" : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
+  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? "held by operator" : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
   // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
   // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
   // #4318: also on a throw out of the loop and on a signal (`onExit`); `cause` overrides the held reason. Runs once per process.
@@ -995,6 +995,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #4773: re-read the issues carrying the blocked label; one decision and row per change. A failed read keeps the last set.
   let blocked = new Set();
   const blockedHit = new Set(); // blocked issues that were pending this pass
+  // #5031: `baseWait(n)` (async, default off) returns a detail string while a dependency's merge commit is not yet on n's base, else null.
+  // The issue is admitted but not dispatched; it is re-checked every pass until released (a commit that landed stays landed). Fail-open.
+  const baseHeld = new Map(), baseHit = new Set(), baseDone = new Set();
+  const refreshBaseWaits = async () => {
+    if (!baseWait) return;
+    for (const n of pending) {
+      if (baseDone.has(n) || results.has(n)) continue;
+      let why = null;
+      try { why = (await baseWait(n)) ?? null; } catch { why = null; }
+      if (why && !baseHeld.has(n)) update({ issue: n, outcome: "held", detail: why });
+      if (why) { baseHeld.set(n, why); continue; }
+      if (baseHeld.delete(n)) { decided({ issue: n, what: "released: dependency commit is on the base", why: "the awaited merge commit landed", alternative: "keep waiting" }); update({ issue: n, outcome: "unblocked", detail: "dependency commit landed" }); }
+      baseDone.add(n);
+    }
+  };
   const refreshBlocked = async () => {
     if (!getBlocked) return;
     let got;
@@ -1131,8 +1146,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       integHeld.clear();
       opHeldHit.clear();
       blockedHit.clear();
+      baseHit.clear();
       refreshHeld();
       await refreshBlocked();
+      await refreshBaseWaits();
       checkGates();
       // #4866: lane preflight. A failing check holds admission (all lanes, or only remote ones by its scope), says why once per batch,
       // and is re-checked every pass so the batch resumes on its own; it is not an engine-error, so the breaker never sees it.
@@ -1150,6 +1167,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pfAll || (pfRemote && isRemote(n))) return false;
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
+        if (baseHeld.has(n)) { baseHit.add(n); return false; } // #5031
         if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
         if (integration?.holds) {
           let why = null;
@@ -1229,6 +1247,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
+      if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
@@ -1242,6 +1261,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
       else if (pending.length && (pfAll || pfRemote)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
       else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal
+      else if (pending.length && baseHit.size) await nap(wake ?? pollMs); // #5031: only issues waiting for a base commit: poll for it
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
