@@ -2443,3 +2443,12 @@ Now router-origin 401 bodies carry `hop:"router"`, an agent 401 relayed by `laun
 Open: the ForgeDock-only rate (9.4% vs 0.2%) is not provable from the repo. Candidates: a stale agent token after re-enroll or rotation (router forwards with the old token, so `hop:"agent"`); long ForgeDock lanes polling across a router restart or token reload (`hop:"router"`); a different token resolution on the dispatcher path. Diagnose with `journalctl --user -u computeshare-router | grep 'rejected'` and the hop in `~/.forge/batches/*/log.jsonl`. Tests: `computeshare.test.mjs`, `sandbox-provider.contract.test.mjs`, `execution.test.mjs` "#5053". Cost: 0 LLM calls. See `decisions/5053-pool-401-hops.md`.
 
 Follow-up (#5053): every 401 body also has a `reason` (`router auth: bad or missing token`, `agent auth: router token rejected by agent`, `agent auth: bad sandbox credential`); the transport error reads `HTTP 401 (agent a1 auth: router token rejected by agent)`. There is no repo allow-list in the router, so "repo not allowed" is not a 401 reason.
+
+## Entry 2026-11-03 — release review of #5057: decision stage reverted; pool-down probe, repro env miss, persistent 401
+
+The release review of #5057 found the #4793 issue-watch decision stage (PR #5054) not ready, so it is reverted and #4793 is reopened with the findings. Those findings are a live decision that clears `needs-human` without relaunching a lane, judge errors stored as handled, shadow mode still closing issues, a CONTRIBUTOR-forgeable escalation, and no judge timeout. Three fixes ship:
+- **REG-2/CONC-1 (#5048).** The pool transport's `capacity()` throws when the router answers neither `/status` nor `/agents`, and `remoteProvider.capacity()` passes that error on, so the engine wrapper's `capFailed` path really marks the pool down. `capFailed` stays set until the next successful sample, so every caller sees it.
+- **BUG-1 (#5020).** The repro head rerun passes the worktree's `repoHas` to `reproEnvMiss`, so a missing module the repo itself tracks is the change's failure, not `env.repro_unrunnable`.
+- **BUG-6 (#5053).** A 401 on status or result that outlasts `unreachable_window_min` ends `sandbox.auth` (retry 300 s, capped by `max_deferrals`), not the uncapped `sandbox.unreachable`.
+
+Tests: `sandbox-provider.contract.test.mjs` "an unreachable router throws", `conformance.test.mjs` reproEnvMiss with repoHas, `execution.test.mjs` "#5053 ... ends sandbox.auth (capped)". Cost: 0 LLM calls.

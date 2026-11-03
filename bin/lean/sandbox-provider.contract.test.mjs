@@ -330,10 +330,11 @@ describe("pool provider (#4546)", () => {
 
 describe("remote capacity (GET /status, #4540)", () => {
   const mk = (res) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => { if (res instanceof Error) throw res; if (url.endsWith("/agents")) return { status: 404, ok: false, text: async () => "", headers: { get: () => null } }; assert.equal(url, "https://pool.example/v1/status"); return { status: res.status, ok: res.status < 400, text: async () => res.body ?? "", headers: { get: () => null } }; } });
-  it("free integer is reported; 404, malformed, negative and transport errors are unknown (null)", async () => {
+  it("free integer is reported; 404, malformed and negative are unknown (null); an unreachable router throws (#5048)", async () => {
     assert.deepEqual(await mk({ status: 200, body: '{"free":3}' }).capacity(), { free: 3 });
     assert.deepEqual(await mk({ status: 200, body: '{"free":0}' }).capacity(), { free: 0 });
-    for (const r of [{ status: 404 }, { status: 200, body: "nope" }, { status: 200, body: '{"free":"2"}' }, { status: 200, body: '{"free":-1}' }, new Error("down")]) assert.equal(await mk(r).capacity(), null);
+    for (const r of [{ status: 404 }, { status: 200, body: "nope" }, { status: 200, body: '{"free":"2"}' }, { status: 200, body: '{"free":-1}' }]) assert.equal(await mk(r).capacity(), null);
+    await assert.rejects(() => mk(new Error("down")).capacity(), (e) => e.unreachable === true && /pool router unreachable/.test(e.message));
   });
   it("#4788: no online on /status: derived from /agents (ok && !paused); an unreadable /agents stays unknown", async () => {
     const mkA = (status, agents) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => {
@@ -347,12 +348,12 @@ describe("remote capacity (GET /status, #4540)", () => {
     assert.deepEqual(await mkA(200, down).capacity(), { online: 0, total: 1 });
     assert.equal(await mkA(404, "nope").capacity(), null);
   });
-  it("remoteProvider.capacity delegates, and is null without a transport capability or on a throw", async () => {
+  it("remoteProvider.capacity delegates, is null without a transport capability, and passes a transport error on (#5048)", async () => {
     const batch = openBatch(join(tmpDir("cap-"), "batches"), "bt");
     const p = (transport) => remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null });
     assert.deepEqual(await p({ capacity: async () => ({ free: 1 }) }).capacity(), { free: 1 });
     assert.equal(await p({}).capacity(), null);
-    assert.equal(await p({ capacity: async () => { throw new Error("x"); } }).capacity(), null);
+    await assert.rejects(() => p({ capacity: async () => { throw new Error("x"); } }).capacity(), /x/);
   });
 });
 

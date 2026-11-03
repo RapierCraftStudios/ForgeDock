@@ -94,19 +94,23 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async capacity() {
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
       const ok = (v) => Number.isInteger(v) && v >= 0;
-      let out = {};
+      let out = {}, reached = false, lastErr = null;
       try {
         const r = await call("GET", "/status");
+        reached = true;
         if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
-      } catch { out = {}; }
+      } catch (e) { out = {}; lastErr = e; }
       if (out.online === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
         try {
           const r = await call("GET", "/agents");
+          reached = true;
           const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
           if (list) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
-        } catch { /* liveness stays unknown */ }
+        } catch (e) { lastErr = e; /* liveness stays unknown */ }
       }
+      // #5048 (release review REG-2): a router that answered neither call is unreachable: throw, so the pool is marked down
+      if (!reached) throw Object.assign(new Error(`pool router unreachable: ${String(lastErr?.message ?? lastErr).slice(0, 160)}`), { unreachable: true });
       return Object.keys(out).length ? out : null;
     },
   };
@@ -224,7 +228,9 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       return r ?? null;
     },
     async capacity() {
-      try { return (await transport.capacity?.()) ?? null; } catch { return null; }
+      // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down
+      if (typeof transport.capacity !== "function") return null;
+      return (await transport.capacity()) ?? null;
     },
     /** #4612: a graceful stop at the lane's checkpoint; false when unsupported or failed. Never destroys the sandbox. */
     async stop(h) {
