@@ -100,7 +100,7 @@ export async function decisionStep({ watch, repo, io, state, ctx, shared, launch
     if (!esc || d.handled[esc.id]) continue;
     const backlog = esc.at < startedAt;
     if (backlog && !watch.sweep_needs_human && !dryRun) continue;
-    const item = { issue: i.number, repo, escalationId: esc.id, text: esc.text, title: i.title, terminalCode: terminalCodeOf(view.body, view.comments, trusted), comments: view.comments };
+    const item = { issue: i.number, repo, escalationId: esc.id, text: esc.text, title: i.title, terminalCode: terminalCodeOf(view.body, view.comments, trusted), comments: (view.comments ?? []).filter(trusted) }; // release #5068 SEC-1: a forged FORGE:DECISION can neither finish nor suppress a decision
     if (dryRun) { rows.push({ ...classify(item, ctx.policy), backlog }); continue; }
     if (round.judged >= JUDGE_ROUND_MAX) break;
     const used = claimsUsed(state);

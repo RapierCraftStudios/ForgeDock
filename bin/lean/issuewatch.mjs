@@ -357,18 +357,20 @@ const unsettle = (state, n) => { for (const k of ["failed", "unverified", "close
  */
 export function decisionLaunch({ i, watch, repo, io, state, handles, branches, defaults }) {
   const n = i.number;
-  if (state.inflight.includes(n)) return false;
+  // release #5068 delta SPEC-1: a batch issue stays inflight until its batch reports, so a running batch is requeued
+  // whatever inflight says; once the batch reported (tick moved it to failed, state.batch null) the claim is released
   if (watch.mode === "batch" && state.batch && state.claimed.includes(n)) {
     if (!io.batch?.requeue?.(state.batch, n, "issue-watch decision: needs-human settled")) return false;
     unsettle(state, n);
+    if (!state.inflight.includes(n)) state.inflight.push(n);
     return true;
   }
   if (watch.mode !== "per-issue") { // the next tick / release pass re-selects it (own registry claims stay eligible)
-    state.claimed = state.claimed.filter((x) => x !== n); delete state.lanes[n];
+    state.claimed = state.claimed.filter((x) => x !== n); state.inflight = state.inflight.filter((x) => x !== n); delete state.lanes[n];
     unsettle(state, n);
     return true;
   }
-  if (!claimIssue(repoDir(repo, io.env), n, watch.name)) return false;
+  if (state.inflight.includes(n) || !claimIssue(repoDir(repo, io.env), n, watch.name)) return false;
   const lane = laneFor(i, watch, { branches, defaults });
   if (!state.claimed.includes(n)) state.claimed.push(n);
   unsettle(state, n); state.inflight.push(n); state.lanes[n] = lane; handles.set(n, io.launch(n, lane));
