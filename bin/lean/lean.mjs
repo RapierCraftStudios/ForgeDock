@@ -2087,7 +2087,7 @@ export async function runCore(o) {
     async function amend() {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
-      baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
+      baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null;
       const addedPaths = wantsDecision ? String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").filter(Boolean) : [];
       const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
       const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
@@ -2267,7 +2267,7 @@ export async function runCore(o) {
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
       const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
-      const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : []; // #5003
+      const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
       const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf(), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
