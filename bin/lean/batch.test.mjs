@@ -888,6 +888,20 @@ describe("#4784: usage-limit deferrals", () => {
     b.store.save({ order: [1], results: { 1: { outcome: "deferred" } } });
     assert.deepEqual(b.requeue([1]).requeued, [1]);
   });
+  it("#4957: a blocker deferred on a usage limit past maxDeferrals keeps its dependents pending; the chain runs in order after the hold", async () => {
+    const { c, now, sleep } = fakeClock();
+    const bodies = { 1: "", 2: "Depends on #1", 3: "Depends on #2" };
+    const starts = [];
+    let limited = 0;
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, readBody: async (n) => bodies[n], now, sleep, maxDeferrals: 3,
+      runOne: async (n) => {
+        starts.push(n);
+        if (n === 1 && limited++ < 5) return { terminalReason: "deferred", code: "rate_limited", resetAtEpochMs: c.t + 600_000, detail: "usage limit hit" };
+        return { terminalReason: "merged" };
+      } });
+    assert.deepEqual(starts, [1, 1, 1, 1, 1, 1, 2, 3], "#2 and #3 never start before #1 merges");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+  });
   it("a requeuable deferred row: an issue that gave up after N deferrals (#4984)", async () => {
     const { now, sleep } = fakeClock();
     const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
