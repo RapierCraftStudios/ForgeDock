@@ -416,3 +416,29 @@ test("forgedock update upgrades pool agents only when a router is configured (#4
   assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async () => { throw new Error("boom"); }, warn: (m) => warns.push(m) }), "failed");
   assert.match(warns[0], /boom/);
 });
+
+test("router logs rejected requests and tags the hop that answered 401 (#5053)", async () => {
+  const warns = [];
+  let t = 5_000_000;
+  const fetchFn = async (url, init) => {
+    const u = new URL(url);
+    if (u.pathname === "/capacity") return new Response(JSON.stringify({ cpus_free: 8, mem_free_gb: 16 }), { status: 200 });
+    if (u.pathname === "/sandboxes" && init.method === "POST") return new Response(JSON.stringify({ id: "s1", state: "running" }), { status: 201 });
+    return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }); // the agent refuses the router
+  };
+  const router = createRouter({ state_dir: tmpDir("cs-401-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd" }, { fetchFn, now: () => t, log: { ...quiet, warn: (m) => warns.push(m) } });
+  router.store.data.agents.a1 = { url: "http://a1:7711", token: "t" };
+  await router.launch(spec("s1"));
+  const get = (url, auth) => new Promise((resolve) => {
+    let status = 0;
+    router.handle({ method: "GET", url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, socket: {} },
+      { writeHead(st) { status = st; }, end(b) { resolve({ status, body: b ? JSON.parse(b) : null }); } });
+  });
+  const bad = await get("/sandboxes/s1?token=secret", "wrong");
+  assert.equal(bad.status, 401);
+  assert.equal(bad.body.hop, "router");
+  assert.ok(warns.some((m) => m.includes("GET /sandboxes/s1 -> 401 sandbox=s1")) && !warns.join().includes("secret"));
+  const viaAgent = await get("/sandboxes/s1", "fd");
+  assert.equal(viaAgent.status, 401);
+  assert.deepEqual([viaAgent.body.hop, viaAgent.body.agent], ["agent", "a1"]);
+});

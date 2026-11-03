@@ -189,6 +189,16 @@ describe("remote adapter (#4254)", () => {
     await assert.rejects(() => q.status(h), /ECONNRESET/); // #4672: a transport error propagates; providerLanes retries it for the unreachable window
   });
 
+  it("#5053 httpTransport: a 401 on status is transient and names its hop; a launch 401 is not transient", async () => {
+    const reply = (status, body) => ({ status, ok: status < 300, text: async () => JSON.stringify(body), headers: { get: () => null } });
+    const t = httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => reply(401, { error: "unauthorized", hop: "agent", agent: "a1" }) });
+    await assert.rejects(t.status("x"), (e) => e.transient === true && e.hop === "agent" && /agent a1 auth/.test(e.message) && !e.message.includes(TOKEN));
+    await assert.rejects(t.result("x"), (e) => e.transient === true && e.status === 401);
+    await assert.rejects(t.launch({ id: "x" }), (e) => e.transient !== true && e.status === 401);
+    const r = httpTransport({ endpoint: "https://pool.example", fetchFn: async () => reply(401, { hop: "router" }) });
+    await assert.rejects(r.status("x"), /router auth/);
+  });
+
   it("httpTransport: bearer token, JSON protocol, 404 = gone/destroyed, 429 retryable; the token never in errors", async () => {
     const calls = [];
     const reply = (status, body, headers = {}) => ({ status, ok: status >= 200 && status < 300, text: async () => (body === undefined ? "" : JSON.stringify(body)), headers: { get: (k) => headers[k] ?? null } });
