@@ -15,10 +15,38 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>  [--config path]";
+const HELP_FLAGS = ["--help", "-h"];
+// Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
+const VERB_FLAGS = {
+  router: { value: ["--config"], bool: [] },
+  agent: { value: ["--config"], bool: [] },
+  status: { value: ["--config"], bool: [] },
+  upgrade: { value: ["--config"], bool: [] },
+  remove: { value: ["--config"], bool: [] },
+  enroll: { value: ["--config", "--cpus", "--mem"], bool: [] },
+  "install-command": { value: ["--config", "--cpus", "--mem"], bool: [] },
+  resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
+};
+
+function rejectUnknownFlags(cmd, rest) {
+  const spec = VERB_FLAGS[cmd];
+  if (!spec) return;
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i];
+    if (spec.value.includes(t)) { i++; continue; }
+    if (spec.bool.includes(t)) continue;
+    if (t.startsWith("-") && !/^-\d/.test(t)) throw new Error(`usage: unknown flag ${t} for 'forgedock pool ${cmd}'. ${USAGE.slice("usage: ".length)}`);
+  }
+}
+
 /** The `forgedock pool` verbs (and the `computeshare` script). Throws on usage or router errors; `deps` injects the HTTP client and config. */
 export async function runPoolCli(argv, deps = {}) {
   const [cmd, ...rest] = argv;
   const call = deps.call ?? httpCall;
+  // Help never reaches the router or starts a service (#5008).
+  if (HELP_FLAGS.includes(cmd) || cmd === "help" || rest.some((x) => HELP_FLAGS.includes(x))) { console.log(USAGE); return; }
+  rejectUnknownFlags(cmd, rest);
   const flag = (name, dflt) => { const i = rest.indexOf(`--${name}`); return i >= 0 ? rest[i + 1] : dflt; };
 
   function routerConfig() {
@@ -103,7 +131,7 @@ export async function runPoolCli(argv, deps = {}) {
       break;
     }
     default:
-      throw new Error("usage: forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>  [--config path]");
+      throw new Error(USAGE);
   }
 }
 

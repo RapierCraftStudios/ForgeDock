@@ -331,5 +331,12 @@ printf -- 'x/y.sh\towner: [bucket:owner] spend\t\tpost-deploy\n' > "$T/ow.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/ow.tsv" >/dev/null 2>&1
 check "owner bucket never lands in post-deploy, even when the row says so" "grep -q 'FORGE:DEFERRED_CLASS: external' '$T/created.901.body' && ! grep -q POSTDEPLOY_ROLLUP '$T/created.901.body'"
 
+# a parent that is itself an open follow-up and is the issue the lane closes: a NEW follow-up links it, its body is never edited
+reset
+printf '{"number":20,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"## Acceptance Criteria\\n\\n- [ ] `R1: old`\\n<!-- FORGE:DEFERRED_FROM: #10 -->"}\n' > "$T/issue.20.json"
+printf -- '-\tdefer: later\t\t\tR2: wire `pd.py` in\n' > "$T/fu.tsv"
+OUT=$(bash "$S" --parent 20 --repo o/r --items "$T/fu.tsv"); RC=$?
+check "follow-up parent: new follow-up issue, parent body unchanged" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && ! grep -q '^issue edit 20' '$GH_LOG' && [ ! -e '$ISSUE_BODY.edited' ] && grep -q '^\*\*Parent\*\*: #20\$' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_FROM: #20' '$T/created.901.body' && printf '%s\n' \"\$OUT\" | grep -q '^R2: wire pd.py in.901\$'"
+
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

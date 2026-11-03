@@ -374,6 +374,7 @@ file_class() {
   {
     printf '## Problem\n\n'
     printf 'Deferred from #%s: the items below were declared out of scope in its contract and are tracked here, in one issue per class (%s), instead of surfacing later as review findings.\n\n' "$PARENT" "$CLS"
+    printf '**Parent**: #%s\n\n' "$PARENT"
     if [ "$CLS" = "external" ]; then
       printf 'External prerequisite of #%s: these items wait on something outside the repo (credentials, an account, a third party).' "$PARENT"
       [ -n "${FORGE_EXTERNAL_PREREQ:-}" ] && printf ' Linked prerequisite: #%s.' "${FORGE_EXTERNAL_PREREQ#\#}"

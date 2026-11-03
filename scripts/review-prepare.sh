@@ -601,6 +601,7 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
             echo "Domain files (${domain}): ${files:-none}"
         else echo "Code index not available — agent will use grep exploration"; fi
     }
+    echo "review-prepare: code index phase done; building per-domain diff slices" >&2
     IDX_AUTH=$(build_index_slice auth); IDX_BILLING=$(build_index_slice billing); IDX_DATABASE=$(build_index_slice database)
     IDX_API=$(build_index_slice api); IDX_FRONTEND=$(build_index_slice frontend); IDX_INFRA=$(build_index_slice infrastructure)
 
@@ -639,6 +640,7 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
         printf '%s' "$paths" > "$TMP_DIR/slice-paths" || { echo "review-prepare: cannot write $TMP_DIR/slice-paths" >&2; exit 2; }
         SLICES_JSON=$(printf '%s' "$SLICES_JSON" | jq -c --arg d "$dom" --arg df "$df" --rawfile p "$TMP_DIR/slice-paths" '. + {($d): {paths: ($p | split("\n") | map(select(length > 0))), diff_file: $df}}')
     }
+    echo "review-prepare: slicing the diff ($(printf '%s\n' "$SLICE_FILES_SRC" | sed '/^$/d' | wc -l | tr -d ' ') file(s))" >&2
     slice security ALL ALL
     slice auth '^diff --git.*/(auth|session|jwt|oauth|permission|middleware|login|token)' "auth|session|login|logout|jwt|oauth|token|user|permission|middleware"
     slice billing '^diff --git.*/(billing|payment|credit|pricing|stripe|subscription|invoice|charge|refund)' "billing|credit|payment|charge|refund|subscription|pricing|tier"
@@ -649,6 +651,7 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
     slice infra '^diff --git.*/(docker|nginx|infra|\.github|deploy|ci|traefik|k8s|helm)' "docker|nginx|traefik|\.github|Makefile|deploy|infra"
     slice scraper '^diff --git.*/(scrape|scraper|stealth|browser_pool|headless|anti_bot|captcha|crawl)' "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha"
     slice spec-cli '^diff --git a/(commands|bin)/' "^(commands|bin)/"
+    echo "review-prepare: diff slices done" >&2
 fi
 
 # --- emit ---

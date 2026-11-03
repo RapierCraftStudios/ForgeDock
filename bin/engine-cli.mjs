@@ -32,6 +32,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -408,8 +409,8 @@ export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
-    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky");
-    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}) });
+    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
+    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) });
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -446,6 +447,30 @@ export function readPrecheckCommands(cwd = process.cwd()) {
 /** #4585: forge.yaml `verify.invariants`, a block list of repo-wide check commands; undefined when absent or empty. */
 export function readInvariants(cwd = process.cwd()) {
   return readYamlList(cwd, "verify", "invariants");
+}
+/** #4792: a block map under `section.key` (`    ".py": "cmd"` or `    py: cmd`); the one-level parser drops these lines. undefined when absent or empty. */
+export function readYamlMap(cwd, section, key) {
+  let raw;
+  try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
+  const out = {};
+  const head = new RegExp(`^${section}:\\s*(#.*)?$`), keyRe = new RegExp(`^\\s+${key}:\\s*(#.*)?$`);
+  let inSection = false, mapIndent = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) { inSection = head.test(line); mapIndent = null; continue; }
+    if (!inSection) continue;
+    const indent = line.length - line.trimStart().length;
+    if (mapIndent === null) { if (keyRe.test(line)) mapIndent = indent; continue; }
+    if (indent <= mapIndent) { mapIndent = keyRe.test(line) ? indent : null; continue; }
+    const m = /^\s+(?:"([^"]+)"|'([^']+)'|([^\s:#"']+))\s*:\s+(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[4].trim();
+    const q = /^"((?:[^"\\]|\\.)*)"\s*(#.*)?$/.exec(v) ?? /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(v);
+    if (q) v = v.startsWith('"') ? q[1].replace(/\\(["\\])/g, "$1") : q[1].replace(/''/g, "'");
+    else v = v.replace(/\s+#.*$/, "").trim();
+    if (v) out[m[1] ?? m[2] ?? m[3]] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 function readYamlList(cwd, section, key) {
   let raw;
@@ -496,11 +521,14 @@ function readPrecheckOptions(cwd = process.cwd()) {
  */
 export function readEnvConfig(cwd = process.cwd()) {
   try {
-    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.env ?? {};
+    const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"));
+    const e = y?.env ?? {};
+    const tr = y?.verification?.test_runners; // #4857: {path prefix: runner command prefix} for validate commands
+    const runners = tr && typeof tr === "object" && !Array.isArray(tr) ? Object.fromEntries(Object.entries(tr).filter(([k, v]) => k && typeof v === "string" && v.trim())) : {};
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -1204,8 +1232,8 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1255,6 +1283,11 @@ async function addedEdges({ added, records, io, repo }) {
  * state`): skipped `closed` (`unreadable` when the read fails); the rest go to the batch's `add` file, through the daemon
  * when `viaDaemon(issues)` answers (non-null), else written here (batch.mjs `addIssues` skips issues already in the batch).
  */
+/** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
+const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
+
 async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1280,11 +1313,13 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   let res = { added: [], skipped: [], requeued: [] };
   if (open.length) {
     res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
-    if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // #4687: no daemon: the next --resume reruns it
+    if (res.reopened === undefined && (res.added?.length || res.requeued?.length) && b.readReport()) b.clearReport(); // #4687/#5000: no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, added: res.added ?? [], requeued: res.requeued ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
+  if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   out.edges = await addedEdges({ added: out.added, records, io, repo }); // #4773
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (out.added.length || out.requeued.length) print(hostedLine(id, res));
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
   return out;
 }
@@ -1343,7 +1378,9 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
     if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
+  if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (out.requeued.length) print(hostedLine(id, res));
   return out;
 }
 
@@ -1379,7 +1416,7 @@ async function orchestrateClient(argv, deps = {}) {
     if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    if (sock) await schedd.request(sock, { op: "set-parallel", id, k });
+    if (sock) await schedd.request(sock, { op: "set-parallel", id, k }, undefined, { timeoutMs: schedd.REQUEST_MS });
     else {
       // No daemon: the batch is not running anywhere; the parallel file is all there is to change.
       const batchMod = await import("./lean/batch.mjs");
@@ -1394,17 +1431,17 @@ async function orchestrateClient(argv, deps = {}) {
   const addVia = (id) => async (issues) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
+    return sock ? schedd.request(sock, { op: "add", id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const requeueVia = (id) => async (issues, reason, by) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }) : null;
+    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const holdVia = (id) => async (op, issues) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op, id, issues }) : null;
+    return sock ? schedd.request(sock, { op, id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
@@ -1414,7 +1451,7 @@ async function orchestrateClient(argv, deps = {}) {
     return cancelBatch({ id, root: await batchRootOf(), stopRemote: argv.includes("--stop-remote"), viaDaemon: async () => {
       let sock = null;
       try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }) : null;
+      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
     } });
   }
   if (argv.includes("--requeue")) {
@@ -1720,6 +1757,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
+  const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
+  const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
+    epics: argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : [])) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
@@ -1837,7 +1878,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
-  let rows;
+  let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -1845,9 +1886,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(preflight ? { preflight } : {}),
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
+      autoChildren,
+      ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
@@ -1930,7 +1973,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   } catch { /* alerts never fail a batch */ }
   for (const l of report) sink.line(l);
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
-  try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
+  let unfinished = false;
+  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
 
@@ -2060,8 +2106,21 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv[0] === "status") {
     let sock;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { console.log("schedd: not running"); return { running: false }; }
-    const st = await schedd.request(sock, { op: "status" });
-    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}${Number.isFinite(st.lastTick) ? `, last tick ${Math.round((Date.now() - st.lastTick) / 1000)} s ago` : ""}`);
+    let st;
+    try { st = await schedd.request(sock, { op: "status" }, undefined, { timeoutMs: deps.statusMs ?? schedd.REQUEST_MS }); }
+    catch (e) {
+      if (e?.code !== "schedd.timeout") throw e;
+      console.log(`schedd: not responding (${e.message}); see ${schedd.scheddPaths(dir).log}`);
+      process.exitCode = 1;
+      return { running: true, responding: false };
+    }
+    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${Number.isFinite(st.lastTick) ? `, last tick ${Math.round((Date.now() - st.lastTick) / 1000)} s ago` : ""}`);
+    for (const b of st.batches) {
+      const age = b.lastProgressAgeSec == null ? "no progress yet" : `last progress ${b.lastProgressAgeSec}s ago`;
+      const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
+      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
+    }
+    for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }
   if (argv[0] === "watchdog") { // #4780: run by the schedd watchdog timer; signals a live daemon whose heartbeat went stale
@@ -2075,7 +2134,13 @@ export async function scheddFromCli(argv, deps = {}) {
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
-  if (!d.running) return d;
+  if (!d.running) {
+    // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies
+    if (!(deps.standby ?? Boolean(process.env.INVOCATION_ID))) return d;
+    const wait = deps.standbyMs ?? 5000, alive = deps.alive ?? ((await import("./lean/sched.mjs")).pidAlive);
+    do await (deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(wait); while (alive(d.owner));
+    return scheddFromCli(argv, deps);
+  }
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
@@ -2131,7 +2196,7 @@ export async function decisionsFromCli(argv, deps = {}) {
   const [sub, ...rest] = argv;
   if (sub !== "list") throw new Error(usage);
   const flag = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : null; };
-  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024 })).stdout));
+  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024, timeout: 60000 })).stdout));
   const repo = flag("--repo") ?? String(await run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
   if (rest.includes("--refresh")) {
     const jq = '.[] | select(.body | startswith("<!-- FORGE:DECISION {")) | {body, user, author_association, issue_url} | tojson';
@@ -2267,6 +2332,13 @@ export async function schedFromCli(argv, deps = {}) {
 
 /** #4773: is the author of a `viewIssue` record (author plus the REST association, #4859) trusted (the engine admission's `isTrustedActor`)? */
 const bodyTrusted = (v) => isTrustedActor({ association: v?.authorAssociation, type: v?.author?.is_bot ? "Bot" : "User", login: v?.author?.login });
+
+/** forge.yaml `orchestration.auto_add_children` (#4965; default `decomposed`) and `auto_add_children_poll_s` (default 120). */
+export function readAutoChildren(cwd = process.cwd()) {
+  let o = {};
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestration ?? {}; } catch { o = {}; }
+  return { mode: _autoChildren.parseAutoMode(o.auto_add_children), pollS: _autoChildren.parsePollS(o.auto_add_children_poll_s) };
+}
 
 /**
  * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),

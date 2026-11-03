@@ -15,7 +15,7 @@
  * running; a resumed dispatcher re-attaches to it by pid, checking `/proc/<pid>/cmdline` against its result path. These
  * detached lanes are the `local` execution (#4253); `execution.mjs` is the sandbox-provider seam for remote lanes.
  */
-import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -86,7 +86,7 @@ const readAdded = (file) => {
 };
 
 /** `outcome`s `--requeue` may move back to pending (#4550). */
-export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused"].includes(outcome) || /^dependency-/.test(String(outcome));
+export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
 
@@ -191,6 +191,8 @@ export function openBatch(root, id) {
       }
       return { requeued, refused };
     },
+    /** #4917: the issues still `pending` in state.json (deferred or requeued included); [] when none or unreadable. */
+    pendingIssues: () => { const p = readJson(f("state.json"))?.pending; return Array.isArray(p) ? p.filter((n) => Number.isSafeInteger(n)) : []; },
     /** Every `--requeue` entry, in order; [] when missing or invalid. */
     readRequeued: () => readRequeueFile(f("requeue")),
     /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */
@@ -220,6 +222,12 @@ export function openBatch(root, id) {
     clearCancel: () => rmSync(f("cancel"), { force: true }),
     /** Added issues the batch never took into its `order` (a finished or unhosted batch with pending adds). */
     unrunAdds: () => { const order = new Set(readJson(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
+    /** #4775: epoch ms of the batch's last progress (newest mtime of `state.json` / `log.jsonl`), or null when neither exists. */
+    lastProgressMs: () => {
+      let best = null;
+      for (const n of ["state.json", "log.jsonl"]) { try { const m = statSync(f(n)).mtimeMs; if (best === null || m > best) best = m; } catch { /* absent */ } }
+      return best;
+    },
     /** The lane updates in `log.jsonl`, in order (unparsable lines skipped). */
     readLog: () => {
       let text = "";
@@ -259,7 +267,7 @@ export function launchLane({ batch, issue, args = [], bin = process.execPath, sc
   const out = openSync(batch.logFile(issue), "a", 0o600);
   try {
     // FORGEDOCK_BATCH_ID names the lane's resource ledger dir (~/.forge/ledger/<batch>/, #4179).
-    const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env: { ...env, FORGEDOCK_BATCH_ID: batch.id }, detached: true, stdio: ["ignore", out, out] });
+    const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env: { ...env, FORGEDOCK_BATCH_ID: batch.id }, detached: true, windowsHide: true, stdio: ["ignore", out, out] });
     child.on?.("error", () => { /* surfaces as a dead pid without a result */ });
     child.unref?.();
     return { pid: child.pid };
