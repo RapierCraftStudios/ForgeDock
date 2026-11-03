@@ -17,7 +17,7 @@ describe("#4656 gate watchdog", () => {
   it("the batch runner reports GATE_DEADLOCK once per (gate, issue) for a parked issue on the gate, instead of waiting", async () => {
     const rows = [], decisions = [];
     const runOne = async (n) => n === 1
-      ? { terminalReason: "needs-human", code: "conformance.unimplemented", detail: "unknown requirement", pr: 9 }
+      ? { terminalReason: "needs-human", code: "conformance.regression", detail: "unknown requirement", pr: 9 }
       : { terminalReason: "merged", pr: 10 };
     const _unused = async (n) => n === 1
       ? { terminalReason: "needs-human", code: "ci.red", detail: "lint failed", pr: 9 }
@@ -29,13 +29,13 @@ describe("#4656 gate watchdog", () => {
     assert.equal(dl.length, 1);
     assert.match(dl[0].detail, /GATE_DEADLOCK issue=#1 gate=ship/);
     assert.ok(Array.isArray(res));
-    assert.deepEqual(relabels.map((r) => r.parked?.code), ["conformance.unimplemented"]);
+    assert.deepEqual(relabels.map((r) => r.parked?.code), ["conformance.regression"]);
   });
 });
 
 describe("#4656 parked class and migration", () => {
   it("parked is opt-in and leaves the default classes untouched", () => {
-    const row = { outcome: "needs-human", code: "conformance.unimplemented" };
+    const row = { outcome: "needs-human", code: "conformance.regression" };
     assert.equal(classifyNeedsHuman(row), "terminal");
     assert.equal(classifyNeedsHuman(row, { parked: true }), "parked");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "builder.blocked" }, { parked: true }), "human");
@@ -53,7 +53,7 @@ describe("#4656 parked class and migration", () => {
 describe("#4656 report routing", () => {
   it("a parked row past recovery is listed on the remediation queue line, not unrecovered or escalations", async () => {
     const { formatOutcomeLists } = await import("./orchestrate.mjs");
-    const lines = formatOutcomeLists([{ issue: 1, outcome: "needs-human", code: "conformance.unimplemented", pr: 9, parkedQueued: true }]);
-    assert.deepEqual(lines, ["remediation queue (/work-on:remediate): #1 (parked:conformance.unimplemented PR #9)"]);
+    const lines = formatOutcomeLists([{ issue: 1, outcome: "needs-human", code: "conformance.regression", pr: 9, parkedQueued: true }]);
+    assert.deepEqual(lines, ["remediation queue (/work-on:remediate): #1 (parked:conformance.regression PR #9)"]);
   });
 });
