@@ -457,6 +457,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       .sort((a, b) => a.p - b.p || a.b - b.b || a.s - b.s || b.w - a.w || a.i - b.i).map((x) => x.n);
   };
   const entryOf = (n) => ({ key: keyOf(n), batch: sched?.batch ?? batchId ?? null, repo: sched?.repo ?? null, issue: n, priority: prioOf(n), ...(sched?.exclusive ? { exclusive: true } : {}) });
+  // #4964: remote lanes are published to the registry for `sched show` only; they never take a slot
+  const endRemote = (n) => { if (remoteRun.delete(n)) reg?.dropRemote?.(keyOf(n)); };
+  const noteRemote = (n, h) => { reg?.noteRemote?.(keyOf(n), { ...entryOf(n), sandbox: h?.id ?? null, agent: h?.agent ?? null }); };
+  let poolDown = false;
+  const notePool = (down, reason) => { if (down === poolDown) return; poolDown = down; reg?.notePool?.(sched?.batch ?? batchId ?? "?", down ? { reason } : null); };
   const releaseSlot = (n) => { if (reg && slotted.delete(n)) reg.release(keyOf(n)); };
   const offerFresh = (ns) => { const fresh = ns.filter((n) => !offered.has(n)); if (!fresh.length) return; reg.offer(fresh.map(entryOf)); for (const n of fresh) offered.add(n); };
   const withdrawExcept = (keep) => {
@@ -511,6 +516,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
         let cap = null;
         try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
+        if (typeof remote.capacity === "function") notePool(cap === null, "capacity probe failed");
         // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
         if (cap && cap.online === 0) {
           poolOfflineSince ??= now();
@@ -596,7 +602,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { remote?.onUsage?.(n, r.sandbox, rec); } catch { /* the batch total still counts it */ }
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
-    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
+    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); };
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
@@ -644,6 +650,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (row.outcome === "deferred") {
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
       let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
+      if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n);
         try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
@@ -792,6 +799,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try {
           r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
+            if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
@@ -816,18 +824,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const a of adopting) a.live = a.first ? await a.first : false;
   for (const { n, rec, p, live } of adopting) {
     if (live) {
-      if (rec.remote) remoteRun.add(n);
+      if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
       else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
       track(n, p.then((r) => {
         if (r) return settle(n, r, rec, checked.get(n) ?? null);
         if (halted) return; // #4454: kept for the next resume
-        running.delete(n); releaseSlot(n); remoteRun.delete(n); requeueLost(n); save(); // ended without a result after all
+        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n); save(); // ended without a result after all
       }));
       continue;
     }
     const r = await p;
     if (!r) { requeueLost(n); continue; }
-    if (rec.remote) remoteRun.add(n);
+    if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
     else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle
     track(n, Promise.resolve(r).then((x) => settle(n, x, rec, checked.get(n) ?? null)));
     await running.get(n); // settled before scheduling
