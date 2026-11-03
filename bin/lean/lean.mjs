@@ -5,6 +5,7 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
+import { existsSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
@@ -14,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -37,7 +38,7 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
@@ -356,7 +357,7 @@ export async function runCore(o) {
   }
   async function heavyStep(phase, fn) { const g = await heavyAcquire(phase); try { return await fn(); } finally { try { g?.release?.(); } catch { /* fail-open */ } } }
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
-  let ledger = null, deleteLocalBranch = false;
+  let ledger = null, deleteLocalBranch = false, laneHead = null; // #4958: laneHead = {branch, sha, pushedTo}
   const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
   const protectedBranch = (b) => isProtectedLaneBranch(b, { issue, lane, branches, defaults });
   /** Teardown from the ledger (#4179), on every exit path: builder pids, checkpoint of unpushed work, run tmp, worktree, branch, docker. */
@@ -366,6 +367,7 @@ export async function runCore(o) {
     }
     // Never discard work silently: an unmerged lane commits and pushes what is left before its worktree goes.
     const saved = !wtCreated || reason === "merged" || (await checkpoint(`exit (${reason})`));
+    await reportLaneHead(reason);
     try { ghCache?.dispose?.(); } catch { /* best effort */ }
     if (runTmp) {
       try { if ((await io.runTmp.remove(runTmp)) !== false) ledgerDo((l) => l.release("tmp", runTmp)); } catch { /* best effort */ }
@@ -449,7 +451,7 @@ export async function runCore(o) {
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
-      context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
+      ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
     ev({ ...term, phases });
@@ -477,7 +479,7 @@ export async function runCore(o) {
     }
     await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
-      light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
+      ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
@@ -641,7 +643,7 @@ export async function runCore(o) {
     try {
       const r = await ensureSignedOff({ git, lane, branch });
       if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten }); }
-    } catch (e) { throw Object.assign(e, { laneCode: OUTCOME_CODES.CI_DCO }); }
+    } catch (e) { throw Object.assign(e, e?.noIdentity === true ? { laneCode: OUTCOME_CODES.CI_DCO } : { engineCode: OUTCOME_CODES.ENGINE_DCO_REWRITE }); } // #4997: a failed rewrite is mechanical (engine-error, recoverable), only a missing identity is a human block
   };
   const gitPush = async (args) => {
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() }); await signOffUnpushed(); } // #4590: never push .forge-lean/ or tool caches this branch added
@@ -659,10 +661,33 @@ export async function runCore(o) {
       const dirty = String(await git(["status", "--porcelain"])).trim();
       if (dirty) { await git(["add", "-A"]); if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); } // #4590: tool state is never staged
       const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
-      if (ahead) await gitPush(["push", "-u", "origin", branch]);
+      if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
       return true;
-    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return false; }
+    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead ? await rescuePush(reason, e?.pushRejected) : false; }
+  }
+  /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
+  async function rescuePush(reason, rejected) {
+    // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
+    try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
+    // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
+    for (const ref of [...(rejected ? [] : [branch]), `forge-salvage/${issue}-${laneHead.sha.slice(0, 10)}`]) {
+      try {
+        await git(["push", "origin", `${laneHead.sha}:refs/heads/${ref}`]);
+        laneHead.pushedTo = ref;
+        ev({ event: "CHECKPOINT_RESCUED", reason, ref, sha: laneHead.sha });
+        return !String(await git(["status", "--porcelain"])).trim(); // an uncommitted remainder keeps the worktree
+      } catch (e) { ev({ event: "CHECKPOINT_RESCUE_FAILED", reason, ref, error: String(e?.message ?? e).slice(0, 300) }); }
+    }
+    return false;
+  }
+  /** #4958: where the lane's commits ended up, for the terminal comment, RUN_TERMINAL and the returned result. */
+  async function reportLaneHead(reason) {
+    if (!laneHead || reason === "merged") return;
+    const { branch: b, sha, pushedTo } = laneHead;
+    const line = pushedTo ? `Lane commits pushed: branch \`${pushedTo}\` at ${sha.slice(0, 10)}; a rerun or --requeue resumes from it` : `Lane commits NOT pushed: ${sha.slice(0, 10)} on \`${b}\` exists only in this lane's worktree and is lost if its sandbox is torn down`;
+    T.anomalies.push(line);
+    if (!["invalid", "needs-human", "budget-exceeded"].includes(reason)) { try { await post("FORGE:LANE_BRANCH", `## Lane branch\n${line}`); } catch { /* best effort */ } }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
   const recoverNote = () => (recover ? `\n\nRecovery pass (${recover.code}): ${(RECOVER_HOW[recover.code] ?? "an earlier run ended needs-human for a mechanical reason; resolve it").replaceAll("BASE", lane)}.` : "");
@@ -1054,6 +1079,10 @@ export async function runCore(o) {
       const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
+      if (!prs.length && !remote) { // #4958: commits the exit rescue could only push to a salvage branch resume from there
+        const salv = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/forge-salvage/${issue}-*`], { cwd })).split("\n").map((l) => l.trim().split(/\s+/)[1]).filter(Boolean).sort().at(-1);
+        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
+      }
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
     // #4593: a shipped milestone lane (fully merged into staging) cannot take new work; follow the open PR's live base.
@@ -2181,6 +2210,8 @@ export async function runCore(o) {
     }
     const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
+    /** #5005: a frozen forgedock entry-point path missing on this host is replaced by this install's own. */
+    const forgedockResolved = (c) => resolveForgedockPaths(String(c), { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI });
     async function rerunFailedValidatesRaw(contract) {
       if (!io.runCommand) return null;
       const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
@@ -2189,11 +2220,11 @@ export async function runCore(o) {
         const r = runs.find((x) => x?.id === v.id);
         if (!r || r.exit === undefined || r.exit === 0) continue;
         let x;
-        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
         // #4761: a runner usage error (vitest -q) is the frozen command's defect: try the normalised command once
         const fixed = cliUsageError(x ?? {}) ? normalizeRunnerCommand(v.command) : null;
         if (fixed && fixed !== String(v.command)) {
-          try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: fixed, cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+          try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(fixed), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
           const note = `Validate ${v.id} hit a runner usage error; reran normalised (\`${fixed}\`): exit ${x?.rc}`;
           if (!T.decisions.includes(note)) T.decisions.push(note);
         }
@@ -2210,7 +2241,7 @@ export async function runCore(o) {
       for (const v of contract.validate ?? []) {
         if (!v.substituted?.from) continue;
         let x;
-        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.substituted.from), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.substituted.from), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
       }
       if (Object.keys(out).length) ev({ event: "SUBSTITUTE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
@@ -2937,6 +2968,7 @@ export async function runCore(o) {
       if (owner) return finish("deferred", `git push was rejected (non-fast-forward): ${owner.detail}; another lane owns ${branch}`, { code: OUTCOME_CODES.LEASE_HELD, branch }, OUTCOME_CODES.LEASE_HELD);
     }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
+    if (e?.engineCode) return finish("engine-error", e?.message ?? String(e), { code: e.engineCode }, e.engineCode); // #4997
     return finish("engine-error", e?.message ?? String(e));
   }
 }

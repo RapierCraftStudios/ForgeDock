@@ -3819,7 +3819,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const w = world({ pushErrors: Array(10).fill("fatal: the remote end hung up unexpectedly\nerror: RPC failed; HTTP 503") });
     const r = await run(w);
     assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "push.transient");
-    assert.equal(w.pushes, 8, "4 for the PR push, then 4 by the exit checkpoint that never discards unpushed work (#4179)");
+    assert.equal(w.pushes, 10, "4 for the PR push, 4 by the exit checkpoint that never discards unpushed work (#4179), 1 lane-branch rescue, 1 salvage rescue (#4958)");
     assert.equal(w.prs.length, 0);
   });
 
@@ -3827,10 +3827,61 @@ describe("batch robustness (#4112-#4115)", () => {
     for (const msg of ["remote: error: GH006: Protected branch update failed for refs/heads/x", "fatal: unable to access: The requested URL returned error: 403", "! [remote rejected] x -> x (pre-receive hook declined)"]) {
       const w = world({ pushErrors: [msg, msg, msg] });
       const r = await run(w);
-      assert.equal(w.pushes, 2, `${msg}: one rejected PR push, one rejected exit checkpoint (#4179), no retries`);
+      assert.equal(w.pushes, 3, `${msg}: one rejected PR push, one rejected exit checkpoint (#4179), no retries; the third error rejects the salvage rescue (#4958)`);
       assert.equal(r.terminalReason, "needs-human");
       assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length, 1, "the unpushed worktree is kept: only the setup remove ran");
     }
+  });
+
+  it("#4958 a failed exit push is rescued to the lane branch by sha and the branch and sha are reported", async () => {
+    const odd = "fatal: unexpected sandbox git failure";
+    const w = world({ pushErrors: [odd, odd] });
+    const r = await run(w);
+    assert.equal(w.pushes, 3, "PR push, failed exit checkpoint, rescue push");
+    const rescue = w.calls.filter((c) => c[0] === "git" && c[1] === "push").at(-1);
+    assert.match(rescue.join(" "), /origin [0-9a-z]+:refs\/heads\/feat\/issue-7-lean$/);
+    assert.equal(r.laneHead.pushedTo, "feat/issue-7-lean"); assert.ok(r.laneHead.sha);
+    assert.ok(w.telemetry.some((t) => t.lane_branch === "feat/issue-7-lean" && t.lane_sha === r.laneHead.sha));
+  });
+
+  it("#5014 the rescue pushes and reports the head after the pre-push sign-off rewrite, not the sha captured before it", async () => {
+    const odd = "fatal: unexpected sandbox git failure";
+    const w = world({ pushErrors: [odd, odd] });
+    const g = w.io.git;
+    let pushes = 0;
+    w.io.git = async (a, o2) => { if (a[0] === "push" && ++pushes === 2) w.head = "rewritten0000000000000000000000000000000"; return g(a, o2); }; // the exit push rewrote HEAD (DCO) then failed
+    const r = await run(w);
+    const rescue = w.calls.filter((c) => c[0] === "git" && c[1] === "push").at(-1);
+    assert.match(rescue.join(" "), /origin rewritten0+:refs\/heads\/feat\/issue-7-lean$/);
+    assert.equal(r.laneHead.sha, "rewritten0000000000000000000000000000000");
+    assert.ok(w.telemetry.some((t) => t.lane_sha === "rewritten0000000000000000000000000000000"));
+  });
+
+  it("#4958 a rejected lane-branch push is rescued to a forge-salvage branch and reported as pushed there", async () => {
+    const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
+    const w = world({ pushErrors: [msg, msg] });
+    const r = await run(w);
+    assert.equal(w.pushes, 3, "PR push, rejected exit checkpoint, one salvage push (no second lane-branch attempt)");
+    assert.match(w.calls.filter((c) => c[0] === "git" && c[1] === "push").at(-1).join(" "), /:refs\/heads\/forge-salvage\/7-/);
+    assert.match(r.laneHead.pushedTo, /^forge-salvage\/7-/);
+    assert.ok(traj(w).some((c) => /Lane commits pushed: branch `forge-salvage\/7-/.test(c)));
+  });
+
+  it("#4958 when every rescue push is rejected the head is reported as NOT pushed", async () => {
+    const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
+    const w = world({ pushErrors: [msg, msg, msg, msg] });
+    const r = await run(w);
+    assert.equal(r.laneHead.pushedTo, null);
+    assert.ok(traj(w).some((c) => /Lane commits NOT pushed/.test(c)));
+  });
+
+  it("#4958 a rerun with only a forge-salvage branch on origin resumes from it", async () => {
+    const w = world({ prList: [] });
+    const g = w.io.git;
+    w.io.git = async (a, o2) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/forge-salvage/7-*" ? "abc\trefs/heads/forge-salvage/7-1234567890\n" : g(a, o2));
+    await run(w);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "fetch" && c.includes("refs/heads/forge-salvage/7-1234567890:refs/remotes/origin/feat/issue-7-lean")));
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.includes("origin/feat/issue-7-lean")), "the worktree is built from the salvaged head");
   });
 
   it("#4118 GitHub's transient '[remote rejected] ... (failed)' and pack write errors are retried, then merge", async () => {

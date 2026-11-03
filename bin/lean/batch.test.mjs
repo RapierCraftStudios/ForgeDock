@@ -288,6 +288,8 @@ describe("lane launch env (#4179)", () => {
     assert.equal(pid, 99);
     assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
     assert.equal(spawned[0].opts.env.KEEP, "1");
+    assert.equal(spawned[0].opts.windowsHide, true, "a detached lane must not open a console window on Windows");
+    assert.equal(spawned[0].opts.detached, true);
     assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
   });
 });
@@ -888,6 +890,20 @@ describe("#4784: usage-limit deferrals", () => {
     b.store.save({ order: [1], results: { 1: { outcome: "deferred" } } });
     assert.deepEqual(b.requeue([1]).requeued, [1]);
   });
+  it("#4957: a blocker deferred on a usage limit past maxDeferrals keeps its dependents pending; the chain runs in order after the hold", async () => {
+    const { c, now, sleep } = fakeClock();
+    const bodies = { 1: "", 2: "Depends on #1", 3: "Depends on #2" };
+    const starts = [];
+    let limited = 0;
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, readBody: async (n) => bodies[n], now, sleep, maxDeferrals: 3,
+      runOne: async (n) => {
+        starts.push(n);
+        if (n === 1 && limited++ < 5) return { terminalReason: "deferred", code: "rate_limited", resetAtEpochMs: c.t + 600_000, detail: "usage limit hit" };
+        return { terminalReason: "merged" };
+      } });
+    assert.deepEqual(starts, [1, 1, 1, 1, 1, 1, 2, 3], "#2 and #3 never start before #1 merges");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+  });
   it("a requeuable deferred row: an issue that gave up after N deferrals (#4984)", async () => {
     const { now, sleep } = fakeClock();
     const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
@@ -966,6 +982,27 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.deepEqual(ok.requeued, [5]);
     assert.equal(b.readRequeued()[0].reason, "decided");
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
+  });
+
+  it("#5000: --add/--requeue on a finished batch without a daemon clear the report and say it is not hosted", async () => {
+    const root = tmpDir("batch-add-finished-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [5], results: { 5: { outcome: "needs-human" } } });
+    b.writeReport({ rows: [], report: "x" });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN", labels: [], body: "", author: { login: "a" } }) };
+    const lines = [];
+    const run = async (argv) => { const l = console.log; console.log = (x) => lines.push(String(x)); try { return await orchestrateFromCli(argv, { batchRoot: root, io }); } finally { console.log = l; } };
+    const add = await run(["--add", "b1", "7"]);
+    assert.deepEqual(add.added, [7]);
+    assert.equal(b.readReport(), null, "a plain add reopens the finished batch for --resume");
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)), "the CLI says nothing is scheduled yet");
+    b.writeReport({ rows: [], report: "x" });
+    lines.length = 0;
+    const rq = await run(["--requeue", "b1", "5"]);
+    assert.deepEqual(rq.requeued, [5]);
+    assert.equal(b.readReport(), null);
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
   });
 });
 

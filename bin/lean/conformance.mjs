@@ -328,7 +328,7 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer" };
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
 const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
@@ -338,6 +338,11 @@ function normalizeAmendment(a) {
   const n = { ...a };
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
+  // #4856: kinds compare case-insensitively with `_` as `-`; only a recognised kind or alias is rewritten, so unknown kinds keep their spelling in the error
+  if (typeof n.kind === "string") {
+    const k = n.kind.trim().toLowerCase().replace(/_/g, "-");
+    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k)) n.kind = k;
+  }
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
@@ -568,6 +573,18 @@ export function normalizeRunnerCommand(command) {
 export function cliUsageError({ rc, output } = {}) {
   return rc !== 0 && CLI_USAGE_RE.test(String(output ?? ""));
 }
+const FORGEDOCK_ENTRY_RE = /^\/.*\/forgedock\/bin\/(?:lean\/checks|forgedock)\.mjs$/;
+const FORGEDOCK_TOKEN_RE = /(?<![\w./-])\/[^\s'"`;&|()]*\/forgedock\/bin\/(lean\/checks|forgedock)\.mjs/g;
+/**
+ * #5005: a frozen validate command names forgedock's own entry point by the absolute path of the install that wrote it; on
+ * the host that runs it that path may not exist. Rewrites each such token whose file is missing to this install's path.
+ */
+export function resolveForgedockPaths(command, { exists = () => true, checksCli, forgedockCli } = {}) {
+  return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => {
+    const here = which === "forgedock" ? forgedockCli : checksCli;
+    return here && !exists(tok) ? here : tok;
+  });
+}
 const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
@@ -581,6 +598,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const py = PY_MISSING_RE.exec(out);
   if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
   const js = NODE_MISSING_RE.exec(out);
+  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "command" }; // #5005: the host's forgedock install is not at the frozen path
   if (js) {
     const spec = js[1], scoped = spec.startsWith("@");
     if (!scoped && spec.includes("/")) return null;

@@ -155,6 +155,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    A validate rerun that still times out (#4906) is infrastructure: `precheck()` counts it covered when CI verified the
    head, else `env.validate_timeout` (environment state, recoverable, no builder resume; teardown pushes the commits),
    never `conformance.unimplemented`.
+   Lane head report (#4958): the exit checkpoint (`checkpoint`/`rescuePush`/`reportLaneHead` in `lean.mjs`) records
+   `{branch, sha, pushedTo}` whenever the lane has commits ahead of base. When the normal push fails before git push
+   (sign-off rewrite) or the push is rejected or exhausted, HEAD is pushed as is to the lane branch (not after a rejection), else to `forge-salvage/<issue>-<sha>`. The line goes into the terminal trajectory (or a `FORGE:LANE_BRANCH`
+   comment for deferred/engine-error), `RUN_TERMINAL` (`lane_branch`, `lane_sha`) and the returned result (`laneHead`);
+   an unpushed head is stated as lost-on-teardown. A rerun or `--requeue` resumes from the pushed branch (existing `ls-remote` resume) or, when only a salvage branch exists, from `forge-salvage/<issue>-*` (`RESUME_FROM_SALVAGE`).
    #4363 fresh fix sessions (`fixround.mjs` + `lean.mjs` `fixRound`): precheck, CI (verify and merge), docs,
    structure, enumerating and sequence rounds, and conformance/review FAILs whose failures all cite a `file:line`
    (`freshFix`/`citesFileLine`), run with `resume: null` on `fixModel` (forge.yaml `lean.fix_model`,
@@ -427,7 +432,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `origin/<lane>` that are authored/committed `*@localhost` or lack a `Signed-off-by` naming their
    author are rewritten (`git filter-branch` over that range only) with the lane identity
    (`GIT_AUTHOR_*`, else `git config`) and a sign-off; pushed commits are never in the range. No usable
-   identity or a failed rewrite ends `ci.dco`. Before `gh pr merge`, a failed check named DCO on the
+   identity ends `ci.dco`. A failed rewrite (#4997) ends `engine-error` `engine.dco_rewrite` (recoverable): tracked/staged changes are parked first with `git stash create` pinned on `refs/forgedock/dco-stash` (never the shared stash stack), `reset --hard`, then re-applied after `filter-branch`; if the apply conflicts the ref stays and the error names the sha. Before `gh pr merge`, a failed check named DCO on the
    current head (read from `checkStates`, required or not, any `merge_wait`) ends needs-human `ci.dco`
    (not recoverable: a new commit cannot fix history). `DCO_SIGNOFF_REWRITE` event.
    **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
@@ -2007,6 +2012,7 @@ The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
 `normalizeAmendment` maps the near-synonyms `supersede-guard`, `supersede` and `supersedes-guard` to `supersedes` (#4916), and the `applyAmendments` rows pre-pass expands a `supersedes` amendment carrying `guards: [...]` into one `{guard, why}` row per id (same `why`; a single `guard` is kept too). Each row still hits the `GUARD_ID_RE` check and the reviewer still judges it; other unknown kinds keep the valid-kinds error.
+#4856: `normalizeAmendment` compares kinds case-insensitively with `_` as `-` (`Scope_Deferral`), and `AMEND_SLIPS` also maps `deferred`, `deferral` and `scope-deferral` to `defer`. Only recognised kinds are rewritten, so `scope-note` and any other unlisted kind keep their spelling in the unknown-kind error (it lists `AMEND_KINDS`).
 
 ## Entry 2026-10-27 — AlterLab engine gaps (#4685)
 - A remote lane's `credentials` block naming a missing tool/module (`missingToolBlock`, lean.mjs) ends `env.tool_missing` (recoverable), not `builder.blocked`.
@@ -2249,6 +2255,17 @@ Cite: #4901.
 `phaseledger.mjs` records which engine phase a lane is in (`createLedger`, `enter`, `during`); `lean.mjs` marks the phase boundaries and puts `phases` ({id: {ms, model_ms?, usd?}}) on `RUN_TERMINAL` and the lane result, flattened to `phase_<id>_*` for FORGE:TELEMETRY. `orchestrate.mjs` `phasesOf` adds `queue_wait` to the batch row; the batch report and `forgedock stats` print p50/p90 per phase and the largest phase (`n/a` without data). The efficiency lines list merged issues with no acceptance probe.
 Cite: #4908.
 
+## Entry 2026-10-31 — schedd: a batch with pending issues is not finalised (#4917)
+
+`runBatch` (`bin/engine-cli.mjs`) writes no `report.json` while
+`state.json` `pending` is non-empty (a cancel still ends the batch), and the running schedd
+re-hosts the batch (`--resume`) once the retry-at is near (`rehostLater`, 1-60 s).
+Deliberate holds (budget, operator, drift, breaker) also leave the batch unfinished
+(their issues stay pending): the loop still ends, and a `--resume` frees them. `requeue`/`add` on an unhosted batch re-host it when a
+requeue or add entry is still unapplied, and the CLI prints `re-hosted by the schedd`
+or `not re-hosted`. `schedd status` lists batch dirs with pending issues that are not hosted
+(`unhosted: [{id, pending}]`).
+
 ## Entry 2026-10-31 — one lane per issue across batches and remote lanes (#4920)
 
 A lane's default lease holder is `core_<host>_<pid>_<nonce>`: a sandbox's pid is 1, so `core_<pid>` made every remote lane the same holder and the lease never refused one. After writing the lease a lane reads it back and defers `lease-held` when another lane's id replaced the one it saw. `lanelock.mjs` (`otherLaneOwner`) reads GitHub, never host-local state: a live FORGE:STATE lease held by another, or an open `feat/issue-N-lean` PR that is not this lane's. `makeDispatchCheck` uses it before every lane start, so `orchestrate` records a `deferred` row (`lease.held`) and launches no sandbox, across batches and daemon restarts. A non-fast-forward push rejection with such an owner ends `deferred` `lease.held`; every other permanent push rejection stays needs-human.
@@ -2342,3 +2359,30 @@ Cite: delta review of #4979 (SEC-21, SEC-22, SPEC-22).
 
 `noopCommand` (`conformance.mjs`) now drops a bare `then`/`else`/`do` segment, so `if true\nthen\n  :\nfi` is a no-op. It also tracks the condition of each `if`/`elif`/`while`: when it is a constant false (`false`, `[ 0 = 1 ]`, `test -n ""`, a small fixed set, no shell parsing) the body up to `else`/`elif`/`fi`/`done` never runs and is ignored, so `if false; then pytest; fi` is a no-op. Real wrapped checks (`if [ -f x ]; then pytest; fi`, `for f in a b; do node --test $f; done`) stay real. Still a best-effort denylist behind the frozen-command rerun.
 Cite: delta review of #4979 (SPEC-31, SEC-32); #4995.
+
+## Entry 2026-11-02 — DCO sign-off rewrite runs on a clean tree; a failed rewrite is a mechanical engine-error
+
+`ensureSignedOff` (`signoff.mjs`) saves tracked changes with `git stash create` pinned on `refs/forgedock/dco-stash`, resets hard, runs `filter-branch`, then `stash apply`s them and deletes the ref (kept, sha named in the error, on apply conflict). `filter-branch` refused a dirty tree ("You have unstaged changes") and the lane ended needs-human with the commit unpushed. A failure now carries `engineCode: engine.dco_rewrite`; `signOffUnpushed` keeps `ci.dco` only for `noIdentity`, and `runCore`'s catch finishes `engine-error` with the code, which the batch runner relaunches like any engine-error (not in `RECOVERABLE_CODES`).
+Cite: #4997.
+
+## Entry 2026-11-02 — `--add` of a new issue reopens a finished batch; the CLI says whether it is hosted
+
+The schedd `add` op (`schedd.mjs`) now reopens a finished, unhosted batch (hosts it as `--resume`) when an issue was newly added, not only when a skipped one was requeued. Without a daemon, `addToBatch` clears `report.json` for a plain add too. `addToBatch` and `requeueBatch` (`engine-cli.mjs`) print whether the batch was reopened, is hosted, or is queued but not hosted (run `--resume <id>`), and return `hosted`/`reopened`. Finalising a batch with `pending` non-empty stays #4917.
+Cite: #5000.
+
+### #5005 A missing forgedock install is `env.tool_missing`
+A frozen validate command names forgedock's own entry point (`.../forgedock/bin/lean/checks.mjs`, `.../forgedock/bin/forgedock.mjs`) by the absolute path of the install that wrote it, which may not exist on the host that runs it. `conformance.mjs` `resolveForgedockPaths(command, {exists, checksCli, forgedockCli})` rewrites each missing such token to the running install's path; `rerunFailedValidatesRaw` and `rerunSubstitutedOriginals` (`lean.mjs`) run commands through it (`CHECKS_CLI`/`FORGEDOCK_CLI`, `existsSync`) before `io.runCommand`. `missingTool` now returns `{tool:'forgedock', kind:'command'}` for a Node `Cannot find module` / `MODULE_NOT_FOUND` on those two absolute paths, so the failure is `env.tool_missing` (recoverable), not `conformance.unimplemented`. Other absolute, relative and repo-tracked module paths stay `validate_failed`. Cost: 0 LLM calls.
+Cite: #5005.
+
+## Entry 2026-11-03 — detached spawns hide the Windows console
+
+Node gives a `detached: true` child its own console window on Windows, so every lane and lane sub-step opened a visible, focus-stealing terminal. Every detached spawn under `bin/` and `scripts/` now also passes `windowsHide: true` (a no-op off Windows): `launchLane` (`batch.mjs`), `runCheckCommand` (`effects.mjs`), the `issuewatch.mjs` launch/orchestrate spawns, `spawnProbe` (`probe.mjs`), schedd `defaultSpawn`, `selftest-live.mjs`, `launchNightly`, `bin/pool/agent.mjs`, `bin/runner.mjs` and `scripts/ci-local/run.mjs`. Spawn semantics (session, stdio, env, cwd) are unchanged. `bin/tests/windows-hide.test.mjs` scans non-test sources and fails on a `detached: true` options object lacking `windowsHide: true`.
+Cite: #4764.
+
+## Entry 2026-11-03 — schedd: no re-host loop after a breaker trip or a passed retry-at (#5015)
+
+`rehostLater` (`schedd.mjs`, #4917) re-hosted a batch every second when the resumed run ended at once (a tripped breaker is kept with `keepBreaker`) while a pending issue's `notBefore` had already passed: no report is written, so each end scheduled another re-host at the 1 s floor. The timer now skips a batch whose saved `breaker` is tripped and not a transport trip (it waits for an operator `--resume`), and skips a retry-at that is already in the past when the run ends (that run saw it and did not admit, so a re-host would change nothing). Tests: `schedd.test.mjs` "#4917: a resume that leaves the waiting issue unadmitted..." and "#4917: a batch whose breaker tripped...". Found by the release review of #5013.
+
+## Entry 2026-11-03 — lane rescue push uses the post-rewrite head (#5014)
+
+`checkpoint()` (`lean.mjs`, #4958) captured `laneHead.sha` before `gitPush`, which untracks tool state and rewrites unpushed commits for DCO (`ensureSignedOff`) before it pushes. When that push then failed, `rescuePush` pushed the pre-rewrite commit and `lane_sha` / the `FORGE:LANE_BRANCH` line named a sha the branch no longer held. `rescuePush` now re-reads HEAD first (keeping the captured sha if `rev-parse` fails). Test: `lean.test.mjs` "#5014 the rescue pushes and reports the head after the pre-push sign-off rewrite...". Found by the release review of #5013.

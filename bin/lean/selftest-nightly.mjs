@@ -37,7 +37,7 @@ function writeLast(dir, repo, ts) {
  */
 export function launchNightly({ cli, repo, cwd = process.cwd(), spawnFn = spawn }) {
   try {
-    const c = spawnFn(process.execPath, [cli, "selftest", "--live", "--nightly-report", repo], { cwd, detached: true, stdio: "ignore" });
+    const c = spawnFn(process.execPath, [cli, "selftest", "--live", "--nightly-report", repo], { cwd, detached: true, windowsHide: true, stdio: "ignore" });
     c.on("error", () => {});
     c.unref();
     return c;

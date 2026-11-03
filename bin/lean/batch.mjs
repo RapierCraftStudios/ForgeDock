@@ -191,6 +191,8 @@ export function openBatch(root, id) {
       }
       return { requeued, refused };
     },
+    /** #4917: the issues still `pending` in state.json (deferred or requeued included); [] when none or unreadable. */
+    pendingIssues: () => { const p = readJson(f("state.json"))?.pending; return Array.isArray(p) ? p.filter((n) => Number.isSafeInteger(n)) : []; },
     /** Every `--requeue` entry, in order; [] when missing or invalid. */
     readRequeued: () => readRequeueFile(f("requeue")),
     /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */
@@ -265,7 +267,7 @@ export function launchLane({ batch, issue, args = [], bin = process.execPath, sc
   const out = openSync(batch.logFile(issue), "a", 0o600);
   try {
     // FORGEDOCK_BATCH_ID names the lane's resource ledger dir (~/.forge/ledger/<batch>/, #4179).
-    const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env: { ...env, FORGEDOCK_BATCH_ID: batch.id }, detached: true, stdio: ["ignore", out, out] });
+    const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env: { ...env, FORGEDOCK_BATCH_ID: batch.id }, detached: true, windowsHide: true, stdio: ["ignore", out, out] });
     child.on?.("error", () => { /* surfaces as a dead pid without a result */ });
     child.unref?.();
     return { pid: child.pid };

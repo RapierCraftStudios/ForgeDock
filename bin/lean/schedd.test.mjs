@@ -249,6 +249,55 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
+  it("#5000: add to a finished unhosted batch reopens it through the daemon and runs the new issue", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "OPEN", labels: [] }) : "o/r\n") } };
+      await withRoot(h, () => capture(async () => {
+        writeFileSync(h.release, "");
+        await orchestrateFromCli(["1", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], h.client);
+        const [id] = listBatches(h.root);
+        const b = openBatch(h.root, id);
+        const res = await orchestrateFromCli(["--add", id, "6"], client);
+        assert.deepEqual(res.added, [6]);
+        assert.equal(res.reopened, true, "the finished batch is hosted again");
+        await until(() => h.launched().includes(6));
+        await until(() => b.store.load()?.results?.[6]?.outcome === "merged");
+        assert.deepEqual(listBatches(h.root), [id], "no second batch");
+      }));
+    } finally { await h.cleanup(); }
+  });
+
+  it("#4917: a held (pending) issue is flagged unhosted by status once its report is gone; --requeue re-hosts it and says so", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "OPEN", labels: [] }) : "o/r\n") } };
+      await withRoot(h, () => capture(async () => {
+        const run = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && listBatches(h.root).length === 1);
+        const [id] = listBatches(h.root);
+        const b = openBatch(h.root, id);
+        b.holdIssues([2]);
+        writeFileSync(h.release, "");
+        const res = await run;
+        assert.equal(res.rows.find((r) => r.issue === 2).outcome, "held");
+        assert.deepEqual(b.pendingIssues(), [2]);
+        b.clearReport(); // a batch finalised before the fix, or one never resumed
+        const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
+        assert.deepEqual(st.unhosted, [{ id, pending: [2] }]);
+        // finalised by an older version: a report plus unapplied requeue entries still reopens, and the CLI says so
+        b.releaseIssues([2]);
+        b.store.save({ ...b.store.load(), results: { ...b.store.load().results, 1: { issue: 1, outcome: "needs-human", pr: null, cost_usd: 0, minutes: 0 } } });
+        b.writeReport({ rows: [{ issue: 1, outcome: "needs-human" }] });
+        const rq = await capture(() => orchestrateFromCli(["--requeue", id, "1"], client));
+        assert.deepEqual(rq.res.requeued, [1]);
+        assert.ok(rq.lines.some((l) => l.includes("reopened and hosted by the schedd")), rq.lines.join("\n"));
+      }));
+    } finally { await h.cleanup(); }
+  });
+
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
     const h = host();
     try {
@@ -348,6 +397,66 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       } finally { await third.close(); }
       assert.equal(existsSync(scheddPaths(h.sched).lock), false, "lock released on close");
     } finally { await h.cleanup(); }
+  });
+
+  it("#4917: a batch that ends unreported with a deferred issue waiting is re-hosted by the running daemon once its retry-at is near", async () => {
+    const dir = tmpDir("schedd-rehost-"), root = join(dir, "batches"), id = "b20261031-000000-4917";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      if (argv[0] !== "--resume") {
+        b.writePlan({ daemon: true, repo: "o/r" });
+        b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 1200 } });
+      } else b.store.save({ ...b.store.load(), pending: [], results: { 1: { issue: 1, outcome: "merged" } } });
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await until(() => calls.length === 2, 8000);
+      assert.deepEqual(calls[1], ["--resume", id]);
+    } finally { await d.close(); }
+  });
+
+  it("#4917: a resume that leaves the waiting issue unadmitted (breaker tripped, retry-at passed) is not re-hosted again", async () => {
+    const dir = tmpDir("schedd-rehost-loop-"), root = join(dir, "batches"), id = "b20261031-000000-4918";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      // first run: deferred issue 1 waits 300 ms; every resume ends at once (a tripped breaker), leaving it pending with a past retry-at
+      if (argv[0] !== "--resume") { b.writePlan({ daemon: true, repo: "o/r" }); b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 300 } }); }
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await until(() => calls.length >= 2, 8000);
+      await new Promise((r) => setTimeout(r, 3500));
+      assert.equal(calls.length, 2, `re-hosted ${calls.length - 1} times; a past retry-at the resume did not act on must not loop`);
+    } finally { await d.close(); }
+  });
+
+  it("#4917: a batch whose breaker tripped (not transport) is not re-hosted by the timer", async () => {
+    const dir = tmpDir("schedd-rehost-brk-"), root = join(dir, "batches"), id = "b20261031-000000-4919";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      b.writePlan({ daemon: true, repo: "o/r" });
+      b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 300 }, breaker: { at: Date.now(), errors: 3 } });
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await new Promise((r) => setTimeout(r, 2000));
+      assert.equal(calls.length, 1, "a tripped breaker holds the batch for an operator --resume");
+    } finally { await d.close(); }
   });
 
   it("#4454: close() stops every hosted batch loop before releasing the lock; no batch admits a lane after close()", async () => {
