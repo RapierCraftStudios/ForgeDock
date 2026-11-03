@@ -10,11 +10,13 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 import { staticCheck, formatStatic, realGh } from "./selftest-static.mjs";
+import { pollUntil } from "./retry.mjs";
 import { postMarker } from "./selftest-gate.mjs";
 import { reportNightly } from "./selftest-nightly.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 
 const BATCH_WAIT_TRIES = 60, BATCH_WAIT_MS = 1000;
+const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000, DEFAULT_POLL_MS = 5000, GH_MAX_BUFFER = 64 * 1024 * 1024;
 
 export class StepError extends Error {
   constructor(step, message) { super(message); this.step = step; }
@@ -56,14 +58,10 @@ export const stripState = (body) => String(body ?? "").replace(/<!--\s*FORGE:STA
 const num = (out) => { const m = /\/issues\/(\d+)/.exec(String(out)) ?? /^(\d+)$/m.exec(String(out)); if (!m) throw new Error(`no issue number in: ${String(out).slice(0, 120)}`); return Number(m[1]); };
 
 async function waitFor(ctx, step, what, cond, onTick) {
-  const { io, timeoutMs } = ctx, t0 = io.now();
-  for (;;) {
-    if (onTick) await onTick();
-    const v = await cond();
-    if (v) return v;
-    if (io.now() - t0 > timeoutMs) fail(step, `timed out waiting for ${what}`);
-    await io.sleep(ctx.pollMs);
-  }
+  const { io, timeoutMs, pollMs } = ctx;
+  const v = await pollUntil(async () => { if (onTick) await onTick(); return cond(); }, { timeoutMs, pollMs, sleep: io.sleep, now: io.now });
+  if (!v) fail(step, `timed out waiting for ${what}`);
+  return v;
 }
 
 /** Step "body": every issue body still holds its creation text (#4860). */
@@ -145,7 +143,7 @@ export const STEPS = [
  * Run the steps in order; the first failure stops them, cleanup always runs.
  * @returns {{ok:boolean, step:string|null, message:string|null, notes:string[], cleanupErrors:string[]}}
  */
-export async function runSelftestLive({ repo, lang = "node", io, timeoutMs = 45 * 60 * 1000, pollMs = 5000 }) {
+export async function runSelftestLive({ repo, lang = "node", io, timeoutMs = DEFAULT_TIMEOUT_MS, pollMs = DEFAULT_POLL_MS }) {
   const fx = FIXTURES[lang];
   if (!fx) return { ok: false, step: "setup", message: `unknown fixture language ${lang} (node|python)`, notes: [], cleanupErrors: [] };
   const ctx = { io, repo, fx, lang, runId: `r${io.now?.().toString(36) ?? "0"}`, timeoutMs, pollMs, issues: {}, bodies: {}, created: [], notes: [], run: null };
@@ -184,10 +182,10 @@ export function realIo(env = process.env, { pool = false } = {}) {
   const detached = (args) => { const p = spawn(process.execPath, [CLI, ...args], { detached: true, windowsHide: true, stdio: "ignore", env }); p.unref(); return { kill: async () => { try { process.kill(-p.pid, "SIGTERM"); } catch { /* gone */ } } }; };
   // The batch of THIS start: new on disk, for the sandbox repo, and naming the issue we passed. A concurrent real batch is never adopted (#4952).
   const ownBatch = (id, repo, issues) => { try { return isOwnBatch(openBatch(root, id).readPlan(), repo, issues); } catch { return false; } };
-  const waitBatch = async (before, repo, issues) => { for (let i = 0; i < BATCH_WAIT_TRIES; i++) { const id = listBatches(root).find((b) => !before.has(b) && ownBatch(b, repo, issues)); if (id) return id; await new Promise((r) => setTimeout(r, BATCH_WAIT_MS)); } throw new Error(`orchestrate did not create a batch for ${repo} ${issues.join(",")} within ${BATCH_WAIT_TRIES * BATCH_WAIT_MS / 1000}s`); };
+  const waitBatch = async (before, repo, issues) => { const id = await pollUntil(() => listBatches(root).find((b) => !before.has(b) && ownBatch(b, repo, issues)), { timeoutMs: BATCH_WAIT_TRIES * BATCH_WAIT_MS, pollMs: BATCH_WAIT_MS }); if (id) return id; throw new Error(`orchestrate did not create a batch for ${repo} ${issues.join(",")} within ${BATCH_WAIT_TRIES * BATCH_WAIT_MS / 1000}s`); };
   return (self = {
     now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    gh: async (args) => { const r = spawnSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }); if (r.status !== 0) throw new Error(r.stderr.trim() || `gh exited ${r.status}`); return r.stdout; },
+    gh: async (args) => { const r = spawnSync("gh", args, { encoding: "utf8", maxBuffer: GH_MAX_BUFFER }); if (r.status !== 0) throw new Error(r.stderr.trim() || `gh exited ${r.status}`); return r.stdout; },
     cli: async (args) => { const r = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env }); return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr }; },
     cliVersion: async () => JSON.parse(readFileSync(join(dirname(CLI), "..", "package.json"), "utf8")).version,
     orchestrate: {
@@ -203,10 +201,10 @@ export function realIo(env = process.env, { pool = false } = {}) {
     // Step 6: one lane through the pool. The issue's FORGE:STATE records the placement and the lane's FORGE:TELEMETRY rows
     // carry the engine's forge_version (the sandbox's, not the CLI's: the #4818 stale-image defect).
     remote: pool ? { run: async ({ repo, issue, timeoutMs, pollMs }) => {
-      const run = await self.orchestrate.start(repo, [issue], 1), t0 = Date.now();
+      const run = await self.orchestrate.start(repo, [issue], 1);
       let row = null;
       try {
-        while (!row && Date.now() - t0 < timeoutMs) { row = (await self.orchestrate.state(run.id))?.results?.[issue] ?? null; if (!row) await self.sleep(pollMs); }
+        row = await pollUntil(async () => (await self.orchestrate.state(run.id))?.results?.[issue] ?? null, { timeoutMs, pollMs, sleep: self.sleep, now: self.now });
       } finally { await run.kill(); await self.orchestrate.stop(run.id).catch(() => {}); }
       if (!row) throw new Error(`#${issue} produced no result within ${Math.round(timeoutMs / 1000)}s`);
       const v = JSON.parse(await self.gh(["issue", "view", String(issue), "-R", repo, "--json", "body,comments"]));

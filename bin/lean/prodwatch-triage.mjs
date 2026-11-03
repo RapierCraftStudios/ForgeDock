@@ -37,6 +37,12 @@ export const signalRef = (fp) => `<!-- FORGE:SIGNAL_REF fp=${fp} -->`;
 /** The run of FORGE marker comments at the very end of a body: the only place the engine writes markers, so the only place they are trusted. */
 export const trailerOf = (body) => /(?:<!--\s*FORGE:[^>]*?-->\s*)+$/.exec(String(body ?? ""))?.[0] ?? "";
 
+/** Untrusted text is escaped so a literal comment opener cannot forge a FORGE marker in a body or prompt. */
+export const neutralize = (s) => String(s ?? "").replace(/<!--/g, "&lt;!--");
+
+/** The first issue whose trailing marker run holds `marker` and that passes `accept`; a marker quoted mid-body is not trusted. */
+export const findMarked = (issues, marker, accept = () => true) => (issues ?? []).find((i) => trailerOf(i?.body).includes(marker) && accept(i));
+
 /** fingerprint -> issue number for every open issue carrying a SIGNAL_REF marker in its trailer (first issue wins). */
 function refsOf(openIssues) {
   const map = new Map();

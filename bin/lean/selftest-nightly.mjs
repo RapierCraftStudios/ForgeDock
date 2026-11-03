@@ -9,9 +9,9 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { schedDir } from "./sched.mjs";
+import { neutralize, findMarked } from "./prodwatch-triage.mjs";
 
 export const NIGHTLY_MARKER = "<!-- FORGE:SELFTEST_NIGHTLY -->";
-const neutralize = (s) => String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 /** One last-run file per repo: two repos on one host never share (and so never skip) each other's schedule. */
 const stateFile = (repo) => `selftest-nightly-${String(repo).replace(/[^\w.-]+/g, "_")}.json`;
 
@@ -53,8 +53,8 @@ export async function reportNightly({ repo, io, now = () => Date.now(), result }
   // login trusts nobody (a new issue is filed instead).
   let me = "";
   try { me = String(await io.gh(["api", "user", "--jq", ".login"])).trim().toLowerCase(); } catch { /* untrusted */ }
-  const open = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"FORGE:SELFTEST_NIGHTLY" in:body`, "--limit", "30", "--json", "number,body,author"])))
-    .find((i) => me && String(i.author?.login ?? "").toLowerCase() === me && String(i.body ?? "").includes(NIGHTLY_MARKER));
+  const issues = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"FORGE:SELFTEST_NIGHTLY" in:body`, "--limit", "30", "--json", "number,body,author"])));
+  const open = findMarked(issues, NIGHTLY_MARKER, (i) => me && String(i.author?.login ?? "").toLowerCase() === me);
   if (open) {
     await io.gh(["issue", "edit", String(open.number), "-R", repo, "--title", title, "--body", body]);
     return { issue: open.number, action: "edit" };

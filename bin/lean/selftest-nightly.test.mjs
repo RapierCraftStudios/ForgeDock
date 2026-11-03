@@ -97,3 +97,10 @@ test("an unreadable login trusts nobody: a new issue is filed", async () => {
   const r = await nightlyDue({ ...s, repo: "o/r", io, runLive: async () => ({ ok: false, step: "add", message: "m" }) });
   assert.equal(r.action, "create");
 });
+
+test("a marker quoted mid-body by the trusted author is not a dedupe hit (shared trailer rule)", async () => {
+  const s = setup(YAML), io = fakeIo([{ number: 5, body: `quote: ${NIGHTLY_MARKER}\nmore text`, author: { login: "bot" } }]);
+  const r = await nightlyDue({ ...s, repo: "o/r", io, runLive: async () => ({ ok: false, step: "add", message: "m" }) });
+  assert.equal(r.action, "create");
+  assert.ok(!io.calls.some((a) => a[1] === "edit"));
+});
