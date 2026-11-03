@@ -221,6 +221,19 @@ function detectInstallPaths() {
 
 const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 
+/**
+ * True when a link at ~/.claude/<kind>/<rel> points at a ForgeDock-owned
+ * source: the package file, or its copy in the persisted ~/.forge home
+ * (persistHome(), #1943, makes npm installs link there). Path-only, so links
+ * left dangling after ~/.forge is deleted still count as ours (#4962).
+ */
+function isOwnedLinkTarget(dest, src, kind, rel) {
+  return (
+    dest === src ||
+    resolve(dest) === resolve(join(HOME, ".forge", kind, rel))
+  );
+}
+
 // PIPELINE_SCRIPTS (the allowlist of universal pipeline-agent scripts linked
 // to ~/.claude/scripts/) is defined in journey.mjs — forge()'s
 // linkPipelineScripts() step is what writes them there (forge#1885,
@@ -1183,7 +1196,7 @@ async function uninstall() {
       const stats = await lstat(target);
       if (stats.isSymbolicLink()) {
         const current = await readlink(target);
-        if (current === file) {
+        if (isOwnedLinkTarget(current, file, "commands", rel)) {
           await unlink(target);
           console.log(`  ${RED}Removed${RESET}: ${rel}`);
           removed++;
@@ -1259,7 +1272,7 @@ async function uninstall() {
       const stats = await lstat(target);
       if (stats.isSymbolicLink()) {
         const current = await readlink(target);
-        if (current === file) {
+        if (isOwnedLinkTarget(current, file, "scripts", rel)) {
           await unlink(target);
           console.log(`  ${RED}Removed${RESET}: scripts/${rel}`);
           scriptsRemoved++;
@@ -2507,9 +2520,15 @@ async function doctor(fix = false) {
             const lstats = await lstat(tgt);
             if (lstats.isSymbolicLink()) {
               const dest = await readlink(tgt);
-              if (dest !== src) {
+              if (dest !== src && !isOwnedLinkTarget(dest, src, "commands", rel)) {
                 broken++;
                 brokenLinks.push(rel);
+                symlinkOk = false;
+              } else if (dest !== src && readFileSync(tgt, "utf-8") !== readFileSync(src, "utf-8")) {
+                // Linked into the persisted ~/.forge home: valid only while
+                // that copy matches the package source (#4962).
+                broken++;
+                brokenLinks.push(`${rel} (stale ~/.forge copy)`);
                 symlinkOk = false;
               } else {
                 try {
@@ -3111,34 +3130,41 @@ async function doctor(fix = false) {
   // server presence is orthogonal to the core ForgeDock install — but missing
   // it causes /qa-sweep to silently fail mid-sweep.
   {
+    // Claude Code registers servers in ~/.claude.json (user + per-project) and
+    // project .mcp.json; the legacy mcp_servers.json is still honoured (#4962).
     const mcpServersPath = join(GLOBAL_CLAUDE_DIR, "mcp_servers.json");
     let playwrightFound = false;
     let fileReadable = false;
     let hasMcpServers = false;
-
-    try {
-      const mcpRaw = readFileSync(mcpServersPath, "utf-8");
-      const mcpConfig = JSON.parse(mcpRaw);
-      // Read + parse succeeded — the file exists and contains valid JSON.
+    const readJson = (p) => {
+      try {
+        return JSON.parse(readFileSync(p, "utf-8"));
+      } catch {
+        return null;
+      }
+    };
+    const userCfg = readJson(join(HOME, ".claude.json"));
+    const sources = [
+      readJson(mcpServersPath),
+      userCfg,
+      userCfg?.projects?.[process.cwd()],
+      readJson(join(process.cwd(), ".mcp.json")),
+    ];
+    for (const cfg of sources) {
+      if (!cfg || typeof cfg !== "object") continue;
       fileReadable = true;
-      const servers = mcpConfig?.mcpServers;
-      if (servers && typeof servers === "object") {
-        hasMcpServers = true;
-        // Search for a registered server whose name or command references playwright
-        for (const [name, entry] of Object.entries(servers)) {
-          const nameLower = name.toLowerCase();
-          const cmdStr = [
-            entry?.command ?? "",
-            ...(Array.isArray(entry?.args) ? entry.args : []),
-          ].join(" ").toLowerCase();
-          if (nameLower.includes("playwright") || cmdStr.includes("playwright")) {
-            playwrightFound = true;
-            break;
-          }
+      const servers = cfg.mcpServers;
+      if (!servers || typeof servers !== "object") continue;
+      hasMcpServers = true;
+      for (const [name, entry] of Object.entries(servers)) {
+        const cmdStr = [
+          entry?.command ?? "",
+          ...(Array.isArray(entry?.args) ? entry.args : []),
+        ].join(" ").toLowerCase();
+        if (name.toLowerCase().includes("playwright") || cmdStr.includes("playwright")) {
+          playwrightFound = true;
         }
       }
-    } catch {
-      // File absent or unreadable — treat as no MCP servers configured
     }
 
     if (!fileReadable) {

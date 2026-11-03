@@ -600,7 +600,9 @@ export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygi
     if (owned.length) parts.push(`${owned.length} ${t}${owned.length === 1 ? "" : "s"} ${fmtSize(owned.reduce((s, i) => s + (i.sizeBytes ?? 0), 0))}`);
   }
   const reclaimable = items.filter((i) => i.owned && i.action === "reclaim").length;
-  const stale = items.filter((i) => !i.owned && i.ageMs != null && i.ageMs >= (ttlMs?.[i.type] ?? LEDGER_TTL_MS)).length;
+  // Unrelated docker projects (compose etc.) are not ours to nag about (#4962): only ForgeDock-named docker resources count.
+  const forgeNamed = (i) => (i.type !== "container" && i.type !== "volume") || /^(forgedock|forge-|fdrsbx)/i.test(String(i.id));
+  const stale = items.filter((i) => !i.owned && forgeNamed(i) && i.ageMs != null && i.ageMs >= (ttlMs?.[i.type] ?? LEDGER_TTL_MS)).length;
   const bits = [`owned: ${parts.length ? parts.join(", ") : "none"}`];
   if (applied) bits.push(`reclaimed ${applied.reclaimed.length} of ${reclaimable}${applied.failed.length ? ` (${applied.failed.length} failed)` : ""}${applied.deferred?.length ? ` (${applied.deferred.length} deferred)` : ""}`);
   else bits.push(`${reclaimable} reclaimable`);
