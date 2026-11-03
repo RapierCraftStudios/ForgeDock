@@ -1762,12 +1762,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom(), needs: needsOf.get(n) ?? [], relays });
       })();
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
-      let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity; // #4547: online = agents alive, null unknown
+      let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity, capFailed = false; // #5048: capFailed = last probe rejected // #4547: online = agents alive, null unknown
       const capacity = () => {
+        if (capFailed) { capFailed = false; throw new Error("capacity probe failed"); } // #5048: reported once; orchestrate marks the pool down
         const t = deps.now ? deps.now() : Date.now();
         if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
           capLast = t;
-          Promise.resolve().then(() => provider.capacity()).then((c) => { capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; capAt++; }, () => { capSample = null; onlineSample = null; capAt++; });
+          Promise.resolve().then(() => provider.capacity()).then((c) => { capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
         }
         return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
       };
