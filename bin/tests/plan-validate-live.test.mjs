@@ -60,6 +60,26 @@ describe("parallel start gate", () => {
     const u = await run({ state: "CLOSED", closedByPullRequestsReferences: [{ number: 3 }] });
     assert.match(u[0].why, /not merged into milestone\/m2/);
   });
+  const synced = (oid) => async (a) => (a[0] === "pr" ? JSON.stringify({ baseRefName: "staging", mergedAt: "x", mergeCommit: { oid } }) : gh({ state: "CLOSED", closedByPullRequestsReferences: [{ number: 3 }] })(a));
+  it("passes when the merge commit is an ancestor of the lane though the PR base differs", async () => {
+    const seen = [];
+    const isAncestor = async (sha, base) => { seen.push([sha, base]); return true; };
+    assert.deepEqual(await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: synced("abc1234567890"), isAncestor }), []);
+    assert.deepEqual(seen, [["abc1234567890", "milestone/m2"]]);
+  });
+  it("refuses naming the merge commit when it is not on the lane", async () => {
+    const u = await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: synced("abc1234567890"), isAncestor: async () => false });
+    assert.match(u[0].why, /merge commit abc1234567 is not on milestone\/m2/);
+  });
+  it("lists only the unmet dependency of a batch", async () => {
+    const g = async (a) => {
+      if (a[0] === "issue" && a[2] === "7") return JSON.stringify({ body: "Depends on #8, #9", milestone: { title: "M2" } });
+      if (a[0] === "issue") return JSON.stringify({ state: "CLOSED", closedByPullRequestsReferences: [{ number: Number(a[2]) }] });
+      return JSON.stringify({ baseRefName: "staging", mergedAt: "x", mergeCommit: { oid: `sha${a[2]}` } });
+    };
+    const u = await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: g, isAncestor: async (s) => s === "sha8" });
+    assert.deepEqual(u.map((x) => x.dep), [9]);
+  });
   it("passes when the dependency is merged into the lane", async () => {
     const g = async (a) => (a[0] === "pr" ? JSON.stringify({ baseRefName: "milestone/m2", mergedAt: "x" }) : gh({ state: "CLOSED", closedByPullRequestsReferences: [{ number: 3 }] })(a));
     assert.deepEqual(await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: g }), []);

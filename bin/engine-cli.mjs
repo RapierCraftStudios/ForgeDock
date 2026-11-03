@@ -1602,7 +1602,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const { unmetDependencies } = await import("../scripts/plan-validate-live.mjs");
       const gateBranches = readBranches(cwd);
       const gateIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
-      const unmet = await unmetDependencies({ issues, repo, gh: io.gh, baseOf: async (n) => {
+      const isAncestor = async (sha, b) => {
+        for (const ref of [`origin/${b}`, b]) if (await io.git?.(["-C", cwd, "merge-base", "--is-ancestor", sha, ref]).then(() => true, () => false)) return true;
+        return false;
+      };
+      const unmet = await unmetDependencies({ issues, repo, gh: io.gh, isAncestor, baseOf: async (n) => {
         const r = await resolveLane({ issue: n, repo, io: gateIo, cwd, branches: gateBranches, requested: lane, override: laneOverride });
         return r.ok ? r.lane : null;
       } });
