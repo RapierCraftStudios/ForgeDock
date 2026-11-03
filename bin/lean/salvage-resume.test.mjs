@@ -36,4 +36,16 @@ describe("pickSalvage (#5063)", () => {
     assert.equal((await pick(w, true)).ref, "refs/heads/forge-salvage/7-old");
     assert.equal(await pick(world({ refs: [{ sha: "d", name: "div", ct: 5 }] }), true), null);
   });
+  it("branch exists: the lane branch is fetched before the ancestry check (release #5068 BUG-2)", async () => {
+    const w = world({ refs: [{ sha: "a", name: "aaaa", ct: 20 }], ahead: ["a"] });
+    await pick(w, true);
+    const fetchAt = w.calls.findIndex((a) => a[0] === "fetch" && a.includes("+refs/heads/b:refs/remotes/origin/b"));
+    const baseAt = w.calls.findIndex((a) => a[0] === "merge-base");
+    assert.ok(fetchAt >= 0 && fetchAt < baseAt, JSON.stringify(w.calls));
+  });
+  it("no lane branch: the lane branch is not fetched", async () => {
+    const w = world({ refs: [{ sha: "a", name: "aaaa", ct: 20 }] });
+    await pick(w, false);
+    assert.ok(!w.calls.some((a) => a[0] === "fetch" && a.includes("+refs/heads/b:refs/remotes/origin/b")));
+  });
 });

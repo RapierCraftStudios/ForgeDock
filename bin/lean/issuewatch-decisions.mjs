@@ -94,7 +94,8 @@ export async function decisionStep({ watch, repo, io, state, ctx, shared, launch
   for (const raw of issues) {
     const i = { ...raw, authorAssociation: assoc.get(raw.number) };
     if (!shared.TRUSTED.has(i.authorAssociation) || !shared.matches(i, sel)) continue;
-    const view = await ghJson(io, ["issue", "view", String(i.number), "-R", repo, "--json", "comments,body,labels"]);
+    let view; // release #5068 MAT-2: one unreadable issue is retried next round, never ends the round for the rest
+    try { view = await ghJson(io, ["issue", "view", String(i.number), "-R", repo, "--json", "comments,body,labels"]); } catch (e) { rows.push({ issue: i.number, action: "error", reason: String(e?.message ?? e).slice(0, 200) }); continue; }
     const esc = escalationOf(view.comments, trusted);
     if (!esc || d.handled[esc.id]) continue;
     const backlog = esc.at < startedAt;
@@ -126,11 +127,11 @@ async function handle({ item, issue, watch, repo, io, state, ctx, shared, launch
   const n = item.issue;
   try {
     const post = poster(io, repo), setLabels = labeller(io, repo);
-    const back = async () => { if (!d.launched.includes(n)) d.launched.push(n); await launch(issue); }; // label cleared: a lane takes it again
+    const back = async () => { if ((await launch(issue)) && !d.launched.includes(n)) d.launched.push(n); }; // label cleared: a lane takes it again; release #5068 MAT-4: counted only when it does
     const deps = { judge: (q) => (io.judge ? io.judge(q) : null), post, setLabels, requeue: back, records: (await io.records?.()) ?? [], stats: d.stats, emit: io.emit };
     const row = await settle(item, ctx.policy, deps);
     if (row.action === "error") return row;
-    if (row.action === "decided") { d.stats.decided++; if (!row.kept) d.live.push({ issue: n, escalationId: item.escalationId, at: io.now() }); }
+    if (row.action === "decided" && !row.resumed) { d.stats.decided++; if (!row.kept) d.live.push({ issue: n, escalationId: item.escalationId, at: io.now() }); }
     const key = `Escalation: ${item.escalationId}`;
     if (row.action !== "post-deploy-only" && row.action !== "evidence-needed") return row;
     if (effectiveMode(ctx.policy, d.stats).mode !== "live") { // shadow: say what would happen, change nothing

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decisionStep, decisionsActive, decisionContext, decisionCounts, escalationOf, terminalCodeOf, claimsUsed } from "./issuewatch-decisions.mjs";
-import { validateWatch, matchesSelectors, formatStatus, runWatch, labelNames, isBot, TRUSTED } from "./issuewatch.mjs";
+import { validateWatch, matchesSelectors, formatStatus, runWatch, labelNames, isBot, TRUSTED, decisionLaunch } from "./issuewatch.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -105,7 +105,7 @@ test("#4793 max_issues and max_launches cap the stage", async () => {
   const w1 = W({ max_issues: 2 }), s1 = st(w1);
   assert.equal((await run(mk(), w1, s1, ctxOf())).rows.length, 2);
   const w2 = W({ max_launches: 1 }), s2 = st(w2);
-  assert.equal((await run(mk(), w2, s2, ctxOf())).rows.length, 1);
+  assert.equal((await run(mk(), w2, s2, ctxOf(), { launch: () => true })).rows.length, 1);
   const w3 = W({ max_issues: 2 }), s3 = st(w3, { claimed: [9] }); // an earlier claim uses a slot
   assert.equal((await run(mk(), w3, s3, ctxOf())).rows.length, 1);
 });
@@ -130,7 +130,7 @@ test("#4793 evidence escalation goes back to a prod-monitor lane only when forge
   assert.equal(declared.hasSource, true);
   const io = fakeIo([{ number: 1, comments: [esc(10, text)] }]);
   const w = W(), state = st(w);
-  const { rows } = await run(io, w, state, declared);
+  const { rows } = await run(io, w, state, declared, { launch: () => true });
   assert.equal(rows[0].action, "evidence-needed");
   assert.ok(io.writes.some((a) => a[1] === "comment" && /prod monitor/.test(a[a.indexOf("--body") + 1])));
   assert.ok(io.writes.some((a) => a.includes("--remove-label")));
@@ -265,4 +265,57 @@ test("#4793 judge calls are capped per round even when max_issues is unset", asy
   assert.equal(io.judged.length, 20);
   await run(io, w, state, ctxOf()); // the rest is picked up next round
   assert.equal(io.judged.length, 30);
+});
+
+test("release #5068 MAT-1: a batch watch requeues a claimed issue into its batch; release and unclaimed issues release the claim", () => {
+  const calls = [];
+  const io = { batch: { requeue: (id, n) => { calls.push([id, n]); return true; } } };
+  const b = W({ mode: "batch" }), sb = st(b, { batch: "b1", claimed: [5], failed: [5] });
+  assert.equal(decisionLaunch({ i: { number: 5 }, watch: b, repo: "o/r", io, state: sb, handles: new Map() }), true);
+  assert.deepEqual(calls, [["b1", 5]]);
+  assert.deepEqual(sb.failed, []);
+  assert.deepEqual(sb.claimed, [5]); // still the batch's
+  const refused = { batch: { requeue: () => false } };
+  assert.equal(decisionLaunch({ i: { number: 5 }, watch: b, repo: "o/r", io: refused, state: st(b, { batch: "b1", claimed: [5] }), handles: new Map() }), false);
+  const sb2 = st(b, { batch: "b1", claimed: [] }); // a backlog issue the batch never took: the next tick adds it
+  assert.equal(decisionLaunch({ i: { number: 6 }, watch: b, repo: "o/r", io, state: sb2, handles: new Map() }), true);
+  assert.deepEqual(calls.length, 1);
+  const r = W({ mode: "release", immediate: ["priority:P0"] }), sr = st(r, { claimed: [7, 8], lanes: { 7: "staging" }, failed: [7] });
+  assert.equal(decisionLaunch({ i: { number: 7 }, watch: r, repo: "o/r", io, state: sr, handles: new Map() }), true);
+  assert.deepEqual(sr.claimed, [8]); // re-selectable by the next release pass
+  assert.deepEqual(sr.failed, []);
+  assert.equal(decisionLaunch({ i: { number: 9 }, watch: r, repo: "o/r", io, state: st(r, { inflight: [9] }), handles: new Map() }), false);
+});
+
+test("release #5068 MAT-4: a launch that does not happen is not counted against max_launches", async () => {
+  const io = fakeIo([{ number: 1, comments: [esc(10, DECISION)] }]);
+  const w = W(), state = st(w);
+  await run(io, w, state, ctxOf(), { launch: () => false });
+  assert.deepEqual(state.decisions.launched, []);
+});
+
+test("release #5068 MAT-2: one unreadable issue does not end the round", async () => {
+  const io = fakeIo([1, 2].map((n) => ({ number: n, comments: [esc(10 + n, DECISION)] })));
+  const gh = io.gh;
+  io.gh = async (a) => { if (a[1] === "view" && a[2] === "1") throw new Error("HTTP 502"); return gh(a); };
+  const w = W(), state = st(w);
+  const { rows } = await run(io, w, state, ctxOf(), { launch: () => true });
+  assert.deepEqual(rows.map((r) => [r.issue, r.action]), [[1, "error"], [2, "decided"]]);
+});
+
+test("release #5068 BUG-1: a live decision whose label clear failed is finished next round, not skipped", async () => {
+  const posted = { ...esc(20, "x"), body: "<!-- FORGE:DECISION -->\n## Decision\nEscalation: 11\n### Decision 1\nuse A" };
+  const io = fakeIo([{ number: 1, comments: [{ ...esc(11, DECISION), url: "https://x/issues/1#issuecomment-11" }, posted] }]);
+  const w = W(), state = st(w), launched = [];
+  const { rows } = await run(io, w, state, ctxOf(), { launch: (i) => launched.push(i.number) });
+  assert.equal(rows[0].action, "decided");
+  assert.ok(io.writes.some((a) => a.includes("--remove-label")));
+  assert.deepEqual(launched, [1]);
+  assert.equal(io.judged.length, 0); // not judged again
+  assert.equal(state.decisions.stats.decided, 0); // not counted twice
+  const vetoed = { ...posted, body: "<!-- FORGE:DECISION -->\n## Decision vetoed\nEscalation: 11\n" };
+  const io2 = fakeIo([{ number: 1, comments: [{ ...esc(11, DECISION), url: "https://x/issues/1#issuecomment-11" }, posted, vetoed] }]);
+  const s2 = st(w);
+  await run(io2, w, s2, ctxOf(), { launch: () => true });
+  assert.ok(!io2.writes.some((a) => a.includes("--remove-label")));
 });

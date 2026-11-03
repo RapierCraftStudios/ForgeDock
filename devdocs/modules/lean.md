@@ -2452,3 +2452,14 @@ The release review of #5057 found the #4793 issue-watch decision stage (PR #5054
 - **BUG-6 (#5053).** A 401 on status or result that outlasts `unreachable_window_min` ends `sandbox.auth` (retry 300 s, capped by `max_deferrals`), not the uncapped `sandbox.unreachable`.
 
 Tests: `sandbox-provider.contract.test.mjs` "an unreachable router throws", `conformance.test.mjs` reproEnvMiss with repoHas, `execution.test.mjs` "#5053 ... ends sandbox.auth (capped)". Cost: 0 LLM calls.
+
+## Entry 2026-11-03 — release review of #5068: decision relaunch in batch/release watches, salvage pick fetches the lane branch
+
+The release review of #5068 (#4793 decision stage, #5063 salvage resume) found:
+- **MAT-1 (HIGH).** A live decision in a batch or release watch cleared `needs-human` but no lane ran: the watch kept the issue in `claimed`, which `tick` and the release pass never re-select. `decisionLaunch` (issuewatch.mjs) now requeues a batch watch's claimed issue into its batch (`io.batch.requeue` → `orchestrate --requeue`, which checks the label and reopens a finished batch) and, for a release watch or an issue the watch never took, releases the claim so the next pass selects it. Per-issue watches launch as before.
+- **MAT-4.** `max_launches` counts a relaunch only when `launch` reports one.
+- **MAT-2.** One `gh issue view` failure is an `error` row retried next round, not the end of the round.
+- **BUG-1.** `settle` finishes a full live `FORGE:DECISION` whose label clear or requeue failed (clears the label and requeues, no new judge call, not counted twice) instead of skipping it as already handled; vetoed, shadow, escalated and mixed decisions stay handled.
+- **BUG-2/SPEC-1/REG-1/CONC-3 (#5063).** `pickSalvage` fetches `origin/<branch>` before the ancestry check when the lane branch exists, so a missing local ref no longer hides the salvage and a stale one no longer resumes a ref behind the remote.
+
+Tests: `issuewatch-decisions.test.mjs` "release #5068 ..." (4), `salvage-resume.test.mjs` lane-branch fetch (2). Cost: 0 LLM calls.
