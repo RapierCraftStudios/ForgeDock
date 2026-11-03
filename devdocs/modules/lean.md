@@ -2378,3 +2378,7 @@ Cite: #5005.
 
 Node gives a `detached: true` child its own console window on Windows, so every lane and lane sub-step opened a visible, focus-stealing terminal. Every detached spawn under `bin/` and `scripts/` now also passes `windowsHide: true` (a no-op off Windows): `launchLane` (`batch.mjs`), `runCheckCommand` (`effects.mjs`), the `issuewatch.mjs` launch/orchestrate spawns, `spawnProbe` (`probe.mjs`), schedd `defaultSpawn`, `selftest-live.mjs`, `launchNightly`, `bin/pool/agent.mjs`, `bin/runner.mjs` and `scripts/ci-local/run.mjs`. Spawn semantics (session, stdio, env, cwd) are unchanged. `bin/tests/windows-hide.test.mjs` scans non-test sources and fails on a `detached: true` options object lacking `windowsHide: true`.
 Cite: #4764.
+
+## Entry 2026-11-03 — schedd: no re-host loop after a breaker trip or a passed retry-at (#5015)
+
+`rehostLater` (`schedd.mjs`, #4917) re-hosted a batch every second when the resumed run ended at once (a tripped breaker is kept with `keepBreaker`) while a pending issue's `notBefore` had already passed: no report is written, so each end scheduled another re-host at the 1 s floor. The timer now skips a batch whose saved `breaker` is tripped and not a transport trip (it waits for an operator `--resume`), and skips a retry-at that is already in the past when the run ends (that run saw it and did not admit, so a re-host would change nothing). Tests: `schedd.test.mjs` "#4917: a resume that leaves the waiting issue unadmitted..." and "#4917: a batch whose breaker tripped...". Found by the release review of #5013.
