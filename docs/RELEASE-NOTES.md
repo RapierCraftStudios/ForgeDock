@@ -4,6 +4,7 @@ Operator-facing notes for behavior changes that need action or awareness. Newest
 
 ## Unreleased: `forgedock selftest`, opt-in release gate and nightly run; gate-marker check ignored
 
+- **Pre-deploy check, needs-human decision stage (#4793):** `decisions.mode: live` in forge.yaml now turns on the issue-watch decision stage in every watch of the repo, not only watches that set `sweep_needs_human`. Before upgrading, confirm each watch's selectors should settle `needs-human` issues, or leave `decisions.mode` at `shadow` (shadow only comments). Escalations are read only from OWNER/MEMBER/COLLABORATOR or the engine's own logins, with at most 20 judge calls per round. See [DECISIONS.md](DECISIONS.md).
 - **New command** `forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--pr N]`. It runs a live contract harness against a disposable sandbox repo, plus a static check of every `gh --json` field list. See [SELFTEST.md](SELFTEST.md).
 - **Opt-in nightly run:** `selftest.nightly_interval_hours` makes the schedd daemon start a detached live selftest on that schedule and file one issue on failure. Restart schedd after upgrading to pick it up.
 - **Gate-marker check ignored:** the `Check for FORGE gate markers` check is no longer read as a CI failure by `review-staging`, `/review-pr-staging` or `/deploy-pr`. It only echoes the latest gate marker, so after a GATE_FAILURE it blocked its own GATE_PASS (#4941).

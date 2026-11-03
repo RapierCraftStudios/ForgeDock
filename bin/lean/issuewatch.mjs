@@ -19,15 +19,19 @@ import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_ST
 import { postDeployOnly } from "./prefilter.mjs";
 import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
+import { decisionContext, decisionsActive, decisionStep, decisionCounts, formatDecisionDryRun, claimsUsed } from "./issuewatch-decisions.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
 
-const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker"];
-const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches"];
+export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
+const readFile = (f) => readFileSync(f, "utf8");
+const JUDGE_TIMEOUT_MS = 120_000; // a hung `claude --print` must not stall the watch round
+const CLAUDE_MAX_BUFFER = 8 * 1024 * 1024;
 const VERIFY_WAIT_MS = 60 * 60000; // how long a merge commit's CI may stay pending before verification fails
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
 
@@ -74,7 +78,9 @@ export function validateWatch(name, cfg = {}) {
   };
   const w = { name, milestone: cfg.milestone || null, labels: list(cfg.labels), exclude_labels: list(cfg.exclude_labels), search: cfg.search || null, title_regex: cfg.title_regex || null,
     since: cfg.since || null, version: cfg.version ? String(cfg.version) : null, lane: cfg.lane || null, max_issues: int("max_issues", null), max_inflight: int("max_inflight", 4),
-    until: cfg.until || null, mode: cfg.mode || "per-issue", parallel: int("parallel", 4), include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null };
+    until: cfg.until || null, mode: cfg.mode || "per-issue", parallel: int("parallel", 4), include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null,
+    max_launches: int("max_launches", null), sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true" };
+  if (cfg.sweep_needs_human !== undefined && !/^(true|false)$/i.test(String(cfg.sweep_needs_human))) throw new Error(`watch ${name}: sweep_needs_human must be true or false`);
   if (!["per-issue", "batch", "release"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue, batch or release`);
   if (w.mode === "release") validateRelease(name, cfg, w, int);
   else for (const k of ["threshold", "immediate", "max_release_issues", "theme_map", "tracker"]) if (cfg[k] !== undefined) throw new Error(`watch ${name}: ${k} needs mode: release`);
@@ -107,7 +113,7 @@ function validateRelease(name, cfg, w, int) {
 export const loadWatches = (raw) => Object.fromEntries(Object.entries(parseWatches(raw)).map(([n, c]) => [n, validateWatch(n, c)]));
 
 // ── selectors ────────────────────────────────────────────────────────────────────────────────────────────────
-const labelNames = (i) => (i.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
+export const labelNames = (i) => (i.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
 
 /** An issue's target version: x.y from its milestone title, else from a `version:x.y` label; null when none. */
 export function issueVersion(issue) {
@@ -135,7 +141,7 @@ export const hasUnresolvedDefer = (body) => noComments(body).split("\n").some((l
 
 // Bot authorship comes from the author only, never the body: a `FORGE:DEFERRED` marker in an outsider's issue is not
 // the App. `gh` reports the ForgeDock App as a bare login with no `[bot]` suffix (#4467), so it is matched by slug.
-const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || l.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "") === APP_SLUG; };
+export const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || l.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "") === APP_SLUG; };
 const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
 
 /** `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch). */
@@ -270,11 +276,12 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   for (const n of [...(state.pendingVerify ?? [])]) if (await closed(n)) await verify(n);
   if (watch.mode === "batch" && state.batch && io.batch.reported(state.batch)) { state.inflight.forEach(fail); state.batch = null; }
 
-  const capped = (watch.max_issues && state.claimed.length >= watch.max_issues) || (watch.until && now >= Date.parse(watch.until));
+  const used = claimsUsed(state); // the decision stage (#4793) draws on the same caps
+  const capped = (watch.max_issues && used.issues >= watch.max_issues) || (watch.max_launches && used.launches >= watch.max_launches) || (watch.until && now >= Date.parse(watch.until));
   if (capped && state.phase === "running") state.phase = "draining";
   if (state.phase === "draining") { if (!state.inflight.length && !Object.keys(state.verifyFrom ?? {}).length) state.phase = "done"; return state; } // a merge mid-verification holds the drain
 
-  const room = Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - state.claimed.length : Infinity);
+  const room = Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - used.issues : Infinity, watch.max_launches ? watch.max_launches - used.launches : Infinity);
   const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
   if (watch.search) args.push("--search", watch.search);
   const candidates = [];
@@ -316,7 +323,7 @@ async function releaseStep({ watch, repo, io, state, dir, branches = {}, default
     return all;
   };
   const eligible = (i) => matchesSelectors(i, watch) && classifyIssue(i, watch) === "claim" && !state.claimed.includes(i.number) && unclaimedOrOwn(registry(), i.number, watch.name); // release #4820 CONC-1: own claims stay eligible
-  const p = loadPolicy({ io: { readFile: (f) => readFileSync(f, "utf8") }, cwd });
+  const p = loadPolicy({ io: { readFile }, cwd });
   return releaseTick({ watch, repo, io, state, defaults, listOpen, eligible, claim: (n) => claimIssue(repoDir(repo, io.env), n, watch.name), laneFor: (i) => laneFor(i, watch, { branches, defaults }), dagOrder,
     policy: { path: p.policyPath, text: p.policyText }, dryRun });
 }
@@ -336,6 +343,7 @@ export function formatStatus(s, watch, now = Date.now()) {
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
   return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
+    ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
     ...(watch.mode === "release" ? [`  pool: ${(s.pool ?? []).length}  releases: ${(s.releases ?? []).length + (s.release ? 1 : 0)}${s.release ? `  active: ${s.release.theme} (${s.release.issues.length} issues, batch ${s.release.batch})` : ""}  llm-classified: ${s.llm ?? 0}`] : [])].join("\n");
 }
 
@@ -343,8 +351,22 @@ export function formatStatus(s, watch, now = Date.now()) {
 export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {}, cwd }) {
   const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
   const handles = new Map();
+  const ctx = decisionContext({ loadPolicy, readFile, cwd: cwd ?? process.cwd() });
+  const shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
+  const launch = (i) => { // a decided or evidence-gathered issue goes back to a lane; batch and release watches re-select it once needs-human is cleared
+    const n = i.number;
+    if (watch.mode !== "per-issue" || state.inflight.includes(n) || !claimIssue(repoDir(repo, io.env), n, watch.name)) return false;
+    const lane = laneFor(i, watch, { branches, defaults });
+    if (!state.claimed.includes(n)) state.claimed.push(n);
+    for (const k of ["failed", "unverified", "closed", "pendingVerify"]) if (state[k]) state[k] = state[k].filter((x) => x !== n);
+    delete state.retries[n]; state.inflight.push(n); state.lanes[n] = lane; handles.set(n, io.launch(n, lane));
+    return true;
+  };
   try {
     do {
+      if (state.phase === "running" && decisionsActive(watch, ctx.policy)) { // #4793: a failed round must not stop the watch
+        try { await decisionStep({ watch, repo, io, state, ctx, shared, launch }); state.decisionError = null; } catch (e) { state.decisionError = String(e?.message ?? e).slice(0, 200); }
+      }
       if (watch.mode === "release") await releaseStep({ watch, repo, io, state, dir, branches, defaults, cwd }); else await tick({ watch, repo, io, state, dir, branches, defaults, handles });
       writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
       if (state.phase === "done" || once) break;
@@ -355,6 +377,7 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
 }
 
 // ── real io + CLI ───────────────────────────────────────────────────────────────────────────────────────────
+const judgePrompt = ({ decision, options, policy, policyPath, precedent }) => `You settle one decision for a repository from its own policy file (${policyPath ?? "none"}) and prior decisions. Reply with only a JSON object {"choice","clause","rejected","reversibility":"reversible|one-way","confidence":"high|medium|low","anchors":[]}. "clause" quotes the policy clause or precedent that supports the choice; leave it empty when none applies.\n\nPolicy:\n${policy}\n\nPrior decisions:\n${JSON.stringify((precedent ?? []).slice(0, 20))}\n\nDecision needed:\n${decision}\n${(options ?? []).length ? `Options: ${options.join(" | ")}\n` : ""}`;
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
 function realIo(repo, env = process.env) {
   const gh = (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
@@ -363,6 +386,10 @@ function realIo(repo, env = process.env) {
     classify: (issues, themes) => { // the one LLM judgment of release mode: issues no theme_map rule classifies
       const prompt = `Classify each GitHub issue into exactly one theme of [${themes.join(", ")}], or "general" when none fits. Reply with only a JSON object {"<number>": "<theme>"}.\n\n${issues.map((i) => `#${i.number} ${i.title}\n${String(i.body ?? "").slice(0, 600)}`).join("\n---\n")}`;
       return JSON.parse(/\{[\s\S]*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }))[0]);
+    },
+    judge: ({ decision, options, policy, policyPath, precedent }) => { // #4793: the one LLM judgment of the decision stage
+      const prompt = judgePrompt({ decision, options, policy, policyPath, precedent });
+      return JSON.parse(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: CLAUDE_MAX_BUFFER, timeout: JUDGE_TIMEOUT_MS }))[0]);
     },
     launch: (n, lane) => {
       let res = null;
@@ -403,13 +430,19 @@ export async function issueWatchFromCli(argv, deps = {}) {
     print(s ? formatStatus(s, watch, io.now()) : `watch ${name}: no status yet`);
     return { ok: true };
   }
+  const ctx = decisionContext({ loadPolicy, readFile, cwd }), shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
+  if (argv.includes("--dry-run") && watch.mode !== "release") { // #4793: classification of the needs-human escalations, nothing written
+    const { rows } = await decisionStep({ watch, repo, io, state: readJson(join(dir, "status.json")) ?? fresh(watch, repo), ctx, shared, dryRun: true });
+    print(formatDecisionDryRun(rows));
+    return { ok: true, dryRun: { rows } };
+  }
   if (argv.includes("--dry-run")) {
-    if (watch.mode !== "release") throw new Error("--dry-run needs a watch with mode: release");
     const real = deps.io ?? realIo(repo, env), branches = readBranches(cwd);
     const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
     const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
     const r = await releaseStep({ watch, repo, io: real, state, dir, branches, defaults, dryRun: true, cwd });
     print(r.decision ? formatDryRun(r.decision, r.pool, r.themes) : "release in flight; nothing to cut");
+    if (decisionsActive(watch, ctx.policy)) print(formatDecisionDryRun((await decisionStep({ watch, repo, io: real, state, ctx, shared, dryRun: true })).rows));
     return { ok: true, dryRun: r };
   }
   mkdirSync(dir, { recursive: true });
