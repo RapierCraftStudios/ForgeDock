@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { grantOrder, openSched, priorityFromLabels } from "./sched.mjs";
+import { grantOrder, openSched, priorityFromLabels, remoteLines } from "./sched.mjs";
 import { orchestrate, estimateLaneMinutes, laneHistory, formatEstimateSummary, EST_DEFAULT_MIN, POST_DEPLOY_EST_MIN } from "./orchestrate.mjs";
 import { schedFromCli } from "../engine-cli.mjs";
 
@@ -510,5 +510,62 @@ describe("live local lane cap (#4777)", () => {
     const rows = await p;
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
     assert.equal(peak, 2);
+  });
+});
+
+describe("sched show lists remote (pool) lanes (#4964)", () => {
+  const show = async (sched) => { const lines = []; const l = console.log; console.log = (m) => lines.push(String(m)); try { const st = await schedFromCli(["show"], { sched }); return { st, lines }; } finally { console.log = l; } };
+
+  it("remote lanes get their own rows and a remote N count, and take no host slot or cap", async () => {
+    const { handle } = world();
+    const a = handle(501), b = handle(502);
+    a.setCap(1);
+    a.noteRemote("B#2", { batch: "B", repo: "o/r", issue: 2, sandbox: "fdrsbx-B-2", agent: "legion" });
+    a.noteRemote("B#3", { batch: "B", repo: "o/r", issue: 3, sandbox: "fdrsbx-B-3" });
+    const { st, lines } = await show(b);
+    assert.equal(st.slots.length, 0);
+    assert.equal(st.remote.length, 2);
+    assert.ok(lines.some((m) => /running 0, queued 0, remote 2$/.test(m)), lines.join("\n"));
+    assert.ok(lines.includes("  remote #2 o/r batch B sandbox fdrsbx-B-2 agent legion  dispatcher 501"), lines.join("\n"));
+    assert.equal(b.tryAcquire("C#1", {}, null).ok, true, "cap 1 is still free: remote lanes hold no slot");
+    a.dropRemote("B#2");
+    assert.deepEqual(b.list().remote.map((r) => r.key), ["B#3"]);
+    a.release("B#3");
+    assert.equal(b.list().remote.length, 0);
+  });
+
+  it("a dead dispatcher's remote lane and pool notice are reclaimed", () => {
+    const { handle, live } = world();
+    const a = handle(511), b = handle(512);
+    a.noteRemote("B#2", { batch: "B", issue: 2 });
+    a.notePool("B", { reason: "capacity probe failed" });
+    assert.equal(b.list().remote.length, 1);
+    live.delete(511);
+    assert.deepEqual([b.list().remote.length, b.list().pool.length], [0, 0]);
+  });
+
+  it("an unreachable pool is one line; none once cleared", async () => {
+    const { handle } = world();
+    const a = handle(521);
+    a.notePool("B", { reason: "capacity probe failed" });
+    const down = (await show(a)).lines.filter((m) => m.startsWith("pool:"));
+    assert.deepEqual(down, ["pool: unreachable (batch B: capacity probe failed)"]);
+    a.notePool("B", null);
+    assert.equal((await show(a)).lines.filter((m) => m.startsWith("pool:")).length, 0);
+    assert.deepEqual(remoteLines({}), []);
+  });
+
+  it("orchestrate publishes a remote lane while it runs, drops it after, and never acquires a slot", async () => {
+    const { handle } = world();
+    const reg = handle(531);
+    let seen = null, acquired = 0;
+    const spy = { ...reg, tryAcquire: (...x) => { acquired++; return reg.tryAcquire(...x); } };
+    await orchestrate({ issues: [7], parallel: 1, pollMs: 5, trusted: () => true, readBody: async () => "", sched: { registry: spy, batch: "B", repo: "o/r" },
+      remote: { max: 1, isRemote: () => true, capacity: () => ({ free: 1, online: 1 }) },
+      runOne: async (n, lane, ctx) => { ctx.onStart?.({ handle: { id: "fdrsbx-B-7", agent: "legion" }, remote: true }); seen = reg.list(); return { terminalReason: "merged" }; } });
+    assert.equal(acquired, 0);
+    assert.deepEqual(seen.remote.map((r) => [r.issue, r.sandbox, r.agent]), [[7, "fdrsbx-B-7", "legion"]]);
+    assert.equal(seen.slots.length, 0);
+    assert.equal(reg.list().remote.length, 0);
   });
 });

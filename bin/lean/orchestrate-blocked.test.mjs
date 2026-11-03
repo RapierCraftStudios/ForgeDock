@@ -85,3 +85,15 @@ describe("#4917: a deferred issue still waiting when the last running lane ends"
     assert.deepEqual(saved.running, {});
   });
 });
+
+describe("remote lanes with a registry lacking the #4964 methods", () => {
+  it("a remote-placed lane runs and settles when the registry stub has no noteRemote/dropRemote/notePool", async () => {
+    const calls = [];
+    const registry = { tryAcquire: () => { calls.push("acquire"); return { ok: true }; }, offer() {}, withdraw() {}, release() {}, setLanePid() {}, adoptSlot() {}, holder: () => null };
+    const rows = await orchestrate({ issues: [4], parallel: 1, pollMs: 5, trusted: () => true, readBody: async () => "", sched: { registry, batch: "B", repo: "o/r" },
+      remote: { max: 1, isRemote: () => true, capacity: () => null },
+      runOne: async (n, lane, ctx) => { ctx.onStart?.({ handle: { id: "s-4" }, remote: true }); return merged; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.deepEqual(calls, [], "a remote lane never takes a host slot");
+  });
+});
