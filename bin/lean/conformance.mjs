@@ -431,7 +431,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // #4857: a runnable equivalent of an unrunnable frozen validate command; same id, same checks as a planned command
       const v = (c.validate ?? []).find((x) => x.id === a.validate);
       if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
-      const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
+      const bad = blank(a.command) ? "no command" : substituteShellProblem(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
       if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
       // SEC-11: a second substitute of the same id keeps the frozen command as `from`, so the engine always reruns the original
       v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
@@ -480,7 +480,9 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
       if (!TRACKED.includes(r.disposition)) {
         if (a.bucket != null) r.bucket = a.bucket; // #4724
-        if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
+        if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { // #5020: no runnable check: a manual or credentialed action is deferred to the orchestrator, never a conformance failure
+          r.disposition = "defer"; r.why = a.why; r.amended = true; r.bucket = String(a.bucket ?? "").startsWith("owner:") ? a.bucket : ORCHESTRATOR_BUCKET; toTrack.push(r); continue;
+        }
         r.disposition = a.kind; r.why = a.why; r.amended = true; r.bucket ??= "post-deploy"; toTrack.push(r); // #4724: an amendment without a bucket defaults to post-deploy
         if (a.kind === "post-deploy") r.check = a.check ?? r.check; // #4626
       }
@@ -508,12 +510,56 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
 
 const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportError: No module named '?([\w.]+)'?/;
 const NODE_MISSING_RE = /Cannot find (?:module|package) '([^']+)'/;
+const POETRY_NOT_FOUND_RE = /^\s*Command not found: (\S+)/m;
 const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /([^\s:'"`]+): not found\b/;
 /** #4857: why a command is not valid bash (`bash -n`), or null when it parses (or bash is unavailable). Catches prose left on a command. */
 export function shellSyntaxError(command) {
   const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
   if (r.error || r.status === 0 || r.status == null) return null;
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
+}
+/** #5020: like shellSyntaxError, but fails closed: when bash cannot run the check the command is not shown to parse. */
+export function substituteShellProblem(command) {
+  const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
+  if (r.error || r.status == null) return "bash -n could not run, so the command is unverified";
+  return r.status === 0 ? null : shellSyntaxError(command) ?? "syntax error";
+}
+export const ORCHESTRATOR_BUCKET = "owner:orchestrator";
+/**
+ * #5020: a post-deploy requirement that names no check id (a manual or production-credential action) becomes a `defer` with an
+ * `owner:orchestrator` bucket, the legal disposition the engine files as a follow-up. Pure; returns {contract, converted[]}.
+ */
+export function deferChecklessPostDeploy(contract) {
+  const converted = [];
+  const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
+    if (r?.disposition !== "post-deploy" || CHECK_ID_RE.test(String(r?.check ?? ""))) return r;
+    converted.push(r.id);
+    return { ...r, disposition: "defer", bucket: String(r.bucket ?? "").startsWith("owner:") ? r.bucket : ORCHESTRATOR_BUCKET, why: r.why ?? "post-deploy action with no registered check: deferred to the orchestrator" };
+  });
+  return { contract: converted.length ? { ...contract, requirements } : contract, converted };
+}
+/**
+ * #5020: apply forge.yaml `validate.recipes` ([{match, replace}], match a regex source) to each validate command and the
+ * repro_test command at freeze, first matching recipe per command. Pure; returns {contract, applied[{id, from, to}]}.
+ */
+export function applyValidateRecipes(contract, recipes) {
+  const list = (Array.isArray(recipes) ? recipes : []).map((r) => { try { return typeof r?.replace === "string" && r?.match ? { re: new RegExp(String(r.match)), replace: r.replace } : null; } catch { return null; } }).filter(Boolean);
+  if (!list.length || !contract || typeof contract !== "object") return { contract, applied: [] };
+  const applied = [];
+  const rewrite = (id, cmd) => {
+    if (typeof cmd !== "string") return cmd;
+    for (const { re, replace } of list) if (re.test(cmd)) { const to = cmd.replace(re, replace); if (to !== cmd) applied.push({ id, from: cmd, to }); return to; }
+    return cmd;
+  };
+  const out = { ...contract };
+  if (Array.isArray(contract.validate)) out.validate = contract.validate.map((v) => (v && typeof v === "object" ? { ...v, command: rewrite(v.id, v.command) } : v));
+  const t = contract.repro_test;
+  if (t && typeof t === "object" && !Array.isArray(t)) out.repro_test = { ...t, command: rewrite("repro_test", t.command) };
+  return { contract: applied.length ? out : contract, applied };
+}
+/** #5020: the env.* verdict for a repro command that failed on head because a tool is missing (e.g. an uninstalled Poetry env); null when the failure is the test's own. */
+export function reproEnvMiss(run, opts) {
+  return run && run.rc !== 0 && run.rc !== 124 ? missingTool(run, opts) : null;
 }
 const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|fi|done|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
 const KEYWORD_RE = /^(if|then|else|elif|do|while|until)(?:\s+|$)/;
@@ -645,6 +691,8 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
     const tool = scoped ? spec.split("/").slice(0, 2).join("/") : spec;
     return local(tool) || (scoped && !tool.includes("/")) ? null : { tool, kind: "node-module" };
   }
+  const po = POETRY_NOT_FOUND_RE.exec(out)?.[1]; // #5020: `poetry run pytest` in an env that was never installed
+  if (po) return local(po) ? null : { tool: po, kind: "command" };
   const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? String(command).trim().split(/\s+/)[0] : null);
   if (!cmd || cmd.includes("/") || local(cmd)) return null;
   return { tool: cmd, kind: "command" };
@@ -688,6 +736,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const v of contract.validate ?? []) {
     // #4979 SPEC-2: a substitute counts only when the frozen command it replaced cannot run (or passes); checked first, never CI-covered
     if (v.substituted) {
+      const shellBad = substituteShellProblem(v.command); // #5020: re-checked before the substitute is used
+      if (shellBad) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} substitute \`${v.command}\` is not valid shell (bash -n: ${shellBad})` }); continue; }
       if (removedPaths === null) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the engine could not read the diff's removed paths to show the frozen command's target survives` }); continue; }
       const gone = removedNamedPaths(v.substituted.from, removedPaths, baseFiles);
       if (gone.length) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_removed_path", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the diff removes ${gone.map((x) => `\`${x}\``).join(", ")} that the frozen command names: a substitute may not replace a check by deleting its target` }); continue; }

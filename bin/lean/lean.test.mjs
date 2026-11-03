@@ -4076,6 +4076,13 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(n, 1);
   });
 
+  it("#5020 forge.yaml validate.recipes rewrite the frozen validate command and the freeze records it", async () => {
+    const w = world({});
+    const r = await run(w, { validateRecipes: [{ match: "^node --test ", replace: "node --test --test-reporter=dot " }] });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("node --test --test-reporter=dot test/foo.test.js")));
+  });
+
   // ---- #4112 ----
   const fakeCli = async (name, body) => {
     const { writeFileSync, chmodSync } = await import("node:fs");

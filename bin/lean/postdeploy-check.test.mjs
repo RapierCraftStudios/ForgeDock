@@ -96,7 +96,9 @@ describe("post-deploy named checks (#4626)", () => {
     assert.ok(validateContract(c, Q).problems.some((p) => /needs a check id/.test(p)));
     assert.ok(!validateContract({ ...c, requirements: [{ ...c.requirements[0], check: "smoke" }] }, Q).problems.some((p) => /check id/.test(p)));
     const frozen = { ...c, requirements: [{ id: "R1", quote: Q, disposition: "deliver" }] };
-    assert.ok(applyAmendments(frozen, [{ kind: "post-deploy", requirement: "R1", why: "w" }], Q).problems.some((p) => /check id/.test(p)));
+    const deferred = applyAmendments(frozen, [{ kind: "post-deploy", requirement: "R1", why: "w" }], Q); // #5020: no check id defers to the orchestrator
+    assert.deepEqual(deferred.problems, []);
+    assert.equal(deferred.contract.requirements[0].disposition, "defer");
     const ok = applyAmendments(frozen, [{ kind: "post-deploy", requirement: "R1", why: "w", check: "smoke" }], Q);
     assert.equal(ok.contract.requirements[0].check, "smoke");
     const pc = precheck({ contract: { ...c, requirements: [{ ...c.requirements[0], check: "ghost" }] }, result: { requirements: [] }, changedFiles: [], checkIds: new Set(["smoke"]) });
