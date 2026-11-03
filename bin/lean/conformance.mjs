@@ -32,7 +32,7 @@ export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE } from "./postdeploy-check.mjs";
-import { normaliseDecision, deadAnchors } from "./decisions.mjs";
+import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -325,10 +325,14 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate", "out-of-band"];
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "verification-substitution": "substitute-validate", "out-of-band-verification": "out-of-band" };
+// #5036: annotation-only kinds change no requirement: recorded for the reviewer, never a problem (like UNRELATED_CI_KIND)
+const INFO_KINDS = ["scope-note", "scope", "scope-clarification", "interpretation", "environment", "validation-unavailable"];
+// #5036: deferral-shaped kinds (scope narrowing/reduction, defer-*, deferred-*) are `defer` once they name a requirement
+const DEFER_FAMILY_RE = /^(?:scope-(?:narrowing|reduction)|defer-.+|deferred-.+)$/;
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
 const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
@@ -341,7 +345,8 @@ function normalizeAmendment(a) {
   // #4856: kinds compare case-insensitively with `_` as `-`; only a recognised kind or alias is rewritten, so unknown kinds keep their spelling in the error
   if (typeof n.kind === "string") {
     const k = n.kind.trim().toLowerCase().replace(/_/g, "-");
-    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k)) n.kind = k;
+    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k) || INFO_KINDS.includes(k)) n.kind = k;
+    else if (DEFER_FAMILY_RE.test(k) && (!blank(n.requirement) || /^R\d+$/.test(String(n.id ?? "")))) n.kind = "defer";
   }
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
@@ -368,6 +373,7 @@ function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
     : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+      : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
@@ -407,6 +413,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
   for (let { a, raw } of rows) {
     // an unrelated out-of-diff CI failure is not a contract change: informational, never a problem
     if (a?.kind === UNRELATED_CI_KIND) { applied.push({ kind: a.kind, target: String(a.target ?? "unrelated check"), why: String(a.why ?? "").trim() || "unrelated to the diff" }); continue; }
+    if (INFO_KINDS.includes(a?.kind)) { applied.push({ kind: a.kind, target: String(a.target ?? a.requirement ?? a.id ?? "note").slice(0, 60), why: String(a.why ?? a.text ?? a.note ?? "").trim() || "informational" }); continue; }
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (a && blank(a.why) && !blank(defaultWhy)) a = { ...a, why: String(defaultWhy) }; // the engine demanded the change: its reason is the why
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
@@ -429,6 +436,14 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // SEC-11: a second substitute of the same id keeps the frozen command as `from`, so the engine always reruns the original
       v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
       applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
+      continue;
+    } else if (a.kind === "out-of-band" && !blank(a.requirement) && !blank(a.evidence ?? a.job)) {
+      // #5036: the existing out_of_band path for a deliver requirement; evidence names the job that measures it
+      const r = c.requirements.find((x) => x.id === a.requirement);
+      if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
+      if (r.disposition !== "deliver") { problems.push(`out-of-band ${r.id}: applies only to a deliver requirement`); continue; }
+      r.verify = "out_of_band"; r.evidence = String(a.evidence ?? a.job).trim(); r.amended = true;
+      applied.push({ kind: a.kind, target: r.id, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
@@ -472,11 +487,15 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     } else if (a.kind === "decision") {
       const d = normaliseDecision({ ...a.decision, why: a.decision?.why ?? a.why });
       if (!d) { problems.push(amendmentProblem(a, tag)); continue; }
-      // a file the lane adds and the contract lists as a deliverable is a new file the issue declared: a valid anchor
+      // #5036: any file the lane adds is a valid anchor; one the contract does not list becomes a deliverable
       const listed = new Set(c.deliverables.map((x) => x.path));
-      const added = (Array.isArray(addedPaths) ? addedPaths : []).filter((x) => listed.has(x));
+      const added = Array.isArray(addedPaths) ? addedPaths : [];
       const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, [...baseFiles, ...added]) : [];
       if (dead.length) { problems.push(`decision anchor(s) ${dead.join(", ")} match no file on the base; anchor a path that exists there`); continue; }
+      for (const f of added) {
+        if (listed.has(f) || (Array.isArray(baseFiles) && baseFiles.includes(f)) || !d.anchors.some((x) => anchorMatches(x, f))) continue;
+        c.deliverables.push({ id: `A${c.deliverables.length + 1}`, path: f, change: `new file anchoring decision: ${d.choice.slice(0, 80)}`, amended: true }); listed.add(f);
+      }
       if (!blank(a.decision?.supersedes)) c.preserve = (c.preserve ?? []).filter((p) => p.decision !== a.decision.supersedes && p.id !== a.decision.supersedes);
       decisions.push(a.decision?.supersedes ? { ...d, supersedes: String(a.decision.supersedes) } : d);
       applied.push({ kind: a.kind, target: d.choice.slice(0, 60), why: String(a.why).trim() });
