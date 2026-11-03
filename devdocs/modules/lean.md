@@ -406,7 +406,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    commit object, not the shared stash stack; `reset --hard`) because filter-branch refuses a dirty tree, then
    re-applied; if the re-apply fails they stay reachable at `refs/forge/signoff-stash` (returned as `stashRef`)
    (#4905); the parked paths are reported as `dirty` on the `DCO_SIGNOFF_REWRITE` event and in a failed-rewrite error, to expose what dirties the tree. A failed rewrite (not `noIdentity`) makes `gitPush` rescue-push the branch as-is before reporting
-   `ci.dco` (`DCO_RESCUE_PUSH` / `DCO_RESCUE_PUSH_FAILED` events). Before `gh pr merge`, a failed check named DCO on the
+   `ci.dco` (`DCO_RESCUE_PUSH` / `DCO_RESCUE_PUSH_FAILED` events). A failed needs-human comment or label call in `needsHuman` is recorded as a `NEEDS_HUMAN_LABEL_FAILED` event and a trajectory anomaly instead of being swallowed (#4905). Before `gh pr merge`, a failed check named DCO on the
    current head (read from `checkStates`, required or not, any `merge_wait`) ends needs-human `ci.dco`
    (not recoverable: a new commit cannot fix history). `DCO_SIGNOFF_REWRITE` event.
    **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,

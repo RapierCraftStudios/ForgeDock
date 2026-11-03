@@ -497,6 +497,10 @@ export async function runCore(o) {
       return true;
     } catch { return false; }
   }
+  const labelFailed = (step, e) => { // #4905: a failed needs-human comment/label call is recorded, not swallowed (the issue showed needs-human with no label)
+    const error = String(e?.message ?? e).slice(0, 200);
+    T.anomalies.push(`needs-human ${step} failed: ${error}`); ev({ event: "NEEDS_HUMAN_LABEL_FAILED", step, error });
+  };
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, { ask: askText, note: askNote = "", ...extra } = {}) {
     // #4725: a recorded premise (`Premise: <kind>:<arg>`) that already holds is no blocker: no label, the lane runs again.
     const predicate = parsePredicate(why);
@@ -512,8 +516,10 @@ export async function runCore(o) {
         link = reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : reg.entry ?? "";
       }
       const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
-      await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
-      await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
+      try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`); }
+      catch (e) { labelFailed("comment", e); }
+      try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); }
+      catch (e) { labelFailed("label", e); }
     } catch { /* best effort */ }
     return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
   }
