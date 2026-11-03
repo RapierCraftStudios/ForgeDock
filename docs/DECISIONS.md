@@ -1,8 +1,6 @@
 # Decision engine (#4766)
 
-> **Status: not yet wired.** No production code calls `settle` yet: the issue-watch stage does not run it, so `decisions.mode`
-> (including `live`), `veto_hours` and `reversal_max` have no effect and no `decision_engine` telemetry is emitted. Only the policy
-> and authority-matrix reads (`loadPolicy`) are used today, by prodwatch and issue-watch. The flow below describes the intended behaviour.
+> **Status: wired (#4793).** The issue-watch stage runs `settle` each round for the open `needs-human` issues that match the watch's selectors.
 
 Settles a lane's decision-only `needs-human` escalation against the target repo's own north star instead of parking it.
 Only external actions stay with a human. Code: `bin/lean/decision-engine.mjs`. Config: [`decisions:`](CONFIG.md).
@@ -30,7 +28,20 @@ Only external actions stay with a human. Code: `bin/lean/decision-engine.mjs`. C
 `decision_engine` telemetry ([TELEMETRY.md](TELEMETRY.md)): decided, escalated, vetoed, reversed, needs-human before/after. A reversal rate above
 `reversal_max` turns the engine back to shadow. The batch report lists every decision under `decided`.
 
-## Not in this module
+## The issue-watch stage
 
-The `issue-watch` stage that lists `needs-human` issues and calls `settle` (`sweep_needs_human`, `--dry-run` via `classify`, caps, status counts)
-did not land with #4765 (merged without the sweep); a follow-up issue tracks it. Running a declared monitor query for `evidence` and folding `post-deploy` items into the release checklist are follow-ups.
+`bin/lean/issuewatch-decisions.mjs` runs inside `forgedock issue-watch` (every mode), not as a separate entry point. It is active when `decisions.mode: live`
+or the watch sets `sweep_needs_human: true`. Each round it lists open `needs-human` issues of trusted authors that match the watch selectors, takes the newest
+`FORGE:NEEDS_HUMAN` comment (its comment id is the escalation id `settle` is idempotent on) and the typed `terminalCode` from `FORGE:STATE`, and calls `settle`.
+
+- **Backlog.** An escalation older than the watch start is only touched by a watch with `sweep_needs_human: true`. `forgedock issue-watch run --dry-run` prints the `classify` result for every escalation (backlog marked) and writes nothing.
+- **Caps.** Each handled issue counts against `max_issues`; each requeue (a live decision or an evidence hand-off) against `max_launches`, which also stops the watch claiming past it.
+- **Status.** `issue-watch status` gains `needs-human decisions: decided N  evidence-gathered N  folded N  external-kept N`.
+- **Evidence.** A block of "missing read-only production data" on a repo whose forge.yaml declares `prod_watch.sources` clears `needs-human` and goes back to a lane with a comment naming the prod monitor capability (placement `prod_monitor`); without a declared source it keeps the label.
+- **Post-deploy only.** Folded into the watch's `postdeploy_rollup` checklist, `needs-human` cleared and the issue closed; without a rollup it is kept.
+- **Shadow.** Only live mode acts: in shadow (the default) a post-deploy-only or evidence escalation posts a `FORGE:DECISION (shadow)` comment and changes nothing (no fold, close, label change or launch).
+- **Relaunch.** A live decision or evidence hand-off clears `needs-human` and launches the issue through the watcher's own lane launch (per-issue watches); batch and release watches re-select it on the next round.
+- **Trust.** Only `FORGE:NEEDS_HUMAN` and `FORGE:STATE` comments from OWNER/MEMBER/COLLABORATOR or the app bot count.
+- **Failures.** A judge or gh failure is not recorded as handled: the escalation is retried for up to three rounds. The judge call has a 2 minute timeout.
+- **Veto.** A `forge:decision-veto` label or a `veto` reply inside `veto_hours` reverts a live decision (`revertVeto`) and counts toward the reversal rate that forces shadow.
+- The judge is the only LLM call (`claude --print` in the real io).

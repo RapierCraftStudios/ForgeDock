@@ -401,3 +401,21 @@ for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs
     assert.deepEqual(state.pendingVerify, []);
   });
 }
+
+test("#4793 sweep_needs_human and max_launches are watch keys; max_launches caps the claims of a tick", async () => {
+  assert.equal(W({ sweep_needs_human: true, max_launches: 1 }).max_launches, 1);
+  assert.throws(() => W({ max_launches: "x" }), /max_launches/);
+  const env = tmp();
+  const io = fakeIo(env, [iss(1), iss(2), iss(3)]);
+  const w = W({ max_launches: 2 });
+  const state = await runWatch({ watch: w, repo: "o/r", io, dir: env, branches: {}, defaults: [], once: true, cwd: tmp() });
+  assert.equal(state.claimed.length, 2);
+  assert.equal(io.launched.length, 2);
+});
+
+test("#4793 formatStatus lists decided / evidence-gathered / folded / external-kept from the stage rows", () => {
+  const w = W();
+  const s = { name: "w", repo: "o/r", phase: "running", claimed: [], inflight: [], merged: [], verified: [], failed: [],
+    decisions: { rows: [{ action: "decided" }, { action: "evidence-needed" }, { action: "post-deploy-only" }, { action: "external", kept: true }, { action: "external", kept: true }] } };
+  assert.match(formatStatus(s, w, 0), /needs-human decisions: decided 1  evidence-gathered 1  folded 1  external-kept 2/);
+});

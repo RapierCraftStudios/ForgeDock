@@ -238,7 +238,9 @@ test("CLI: --dry-run prints the cut without writing; refuses a non-release watch
   const r = await issueWatchFromCli(["run", "--name", "sr", "--dry-run"], { cwd, env: io.env, io, print: (l) => out.push(l) });
   assert.match(out.join("\n"), /would cut: billing \(2 issues/);
   assert.equal(io.batches.length, 0); assert.ok(r.dryRun);
-  await assert.rejects(issueWatchFromCli(["run", "--name", "plain", "--dry-run"], { cwd, env: io.env, io, print() {} }), /mode: release/);
+  const plain = [];
+  await issueWatchFromCli(["run", "--name", "plain", "--dry-run"], { cwd, env: io.env, io, print: (l) => plain.push(l) }); // #4793: a non-release watch dry-run classifies needs-human escalations
+  assert.match(plain.join("\n"), /no needs-human escalations to classify/);
   const w = loadWatches(`issue_watch:\n  watches:\n    sr:\n      mode: release\n      threshold: { min_issues: 2 }\n`).sr;
   assert.match(formatStatus({ name: "sr", repo: "o/r", phase: "running", claimed: [1], inflight: [1], merged: [], verified: [], failed: [], pool: [2, 3], llm: 2, releases: [], release: { theme: "billing", issues: [1], batch: "b1" } }, w), /pool: 2.*active: billing.*llm-classified: 2/);
 });
