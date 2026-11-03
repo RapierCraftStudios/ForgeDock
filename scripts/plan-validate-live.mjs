@@ -58,11 +58,12 @@ export async function readLive({ gh, repo }) {
 
 /**
  * Parallel-start gate: dependencies of `issues` (not themselves in the batch) that are not merged into `baseOf(issue)`.
- * A dep is merged when it is CLOSED by a PR that is merged with that base. Unreadable issues are skipped (fail open:
+ * A dep is merged when it is CLOSED by a PR that is merged with that base, or whose merge commit is an ancestor of
+ * that base (`isAncestor(sha, base)`, e.g. it arrived through a milestone sync). Unreadable issues are skipped (fail open:
  * the engine's own openDependency still guards each lane); an unreadable dep counts as unmet.
  * @returns {Promise<Array<{ issue: number, dep: number, base: string, why: string }>>}
  */
-export async function unmetDependencies({ issues, baseOf, gh, repo }) {
+export async function unmetDependencies({ issues, baseOf, gh, repo, isAncestor }) {
   const r = repo ? ["-R", repo] : [];
   const view = async (n, fields) => parse(await gh(["issue", "view", String(n), ...r, "--json", fields]));
   const inBatch = new Set(issues);
@@ -80,11 +81,15 @@ export async function unmetDependencies({ issues, baseOf, gh, repo }) {
         if (String(d?.state).toUpperCase() !== "CLOSED") why = "not closed";
         else {
           let merged = false;
+          let missing = null;
           for (const pr of d.closedByPullRequestsReferences ?? []) {
-            const p = parse(await gh(["pr", "view", String(pr.number), ...r, "--json", "baseRefName,mergedAt"]));
-            if (p?.mergedAt && p.baseRefName === base) { merged = true; break; }
+            const p = parse(await gh(["pr", "view", String(pr.number), ...r, "--json", "baseRefName,mergedAt,mergeCommit"]));
+            if (!p?.mergedAt) continue;
+            const sha = p.mergeCommit?.oid;
+            if (p.baseRefName === base || (sha && isAncestor && await isAncestor(sha, base))) { merged = true; break; }
+            if (sha) missing ??= sha;
           }
-          if (!merged) why = `closed but not merged into ${base}`;
+          if (!merged) why = missing ? `merge commit ${missing.slice(0, 10)} is not on ${base}` : `closed but not merged into ${base}`;
         }
       } catch { why = "unreadable"; }
       if (why) unmet.push({ issue: n, dep, base, why });
