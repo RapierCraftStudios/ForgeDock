@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -594,5 +594,15 @@ describe("review-staging --delta (#4360)", () => {
     assert.equal(await reviewStagingFromCli(FIN, w.io), 0);
     assert.equal(JSON.parse(w.files[`${SD}/42_finalize.json`]).delta, null);
     assert.ok(!w.out[0].includes("DELTA_FROM="));
+  });
+});
+
+describe("CI exclusion list drift (#4952)", () => {
+  it("commands/deploy-pr.md excludes exactly the checks CI_EXCLUDED_CHECKS does", () => {
+    const md = readFileSync(`${REPO_ROOT}/commands/deploy-pr.md`, "utf8");
+    // each `select(.name != "a" and .name != "b" ...)` jq filter in the spec is one copy of the list
+    const filters = [...md.matchAll(/select\((\.name != "[^"]+"(?: and \.name != "[^"]+")*)\)/g)].map((m) => [...m[1].matchAll(/\.name != "([^"]+)"/g)].map((x) => x[1]));
+    assert.ok(filters.length >= 2, "the spec's jq exclusion filters were found");
+    for (const names of filters) assert.deepEqual([...names].sort(), [...CI_EXCLUDED_CHECKS].sort());
   });
 });

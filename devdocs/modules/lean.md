@@ -2392,6 +2392,13 @@ Cite: #4764.
 
 `checkpoint()` (`lean.mjs`, #4958) captured `laneHead.sha` before `gitPush`, which untracks tool state and rewrites unpushed commits for DCO (`ensureSignedOff`) before it pushes. When that push then failed, `rescuePush` pushed the pre-rewrite commit and `lane_sha` / the `FORGE:LANE_BRANCH` line named a sha the branch no longer held. `rescuePush` now re-reads HEAD first (keeping the captured sha if `rev-parse` fails). Test: `lean.test.mjs` "#5014 the rescue pushes and reports the head after the pre-push sign-off rewrite...". Found by the release review of #5013.
 
+## Entry 2026-11-03 — Live selftest harness hardening (#4952)
+
+- **`selftest-live.mjs`:** `waitBatch` adopts only the new batch whose `plan.json` names the sandbox repo and the started issue, never "the first new id". The resume step kills the client and then runs `orchestrate --cancel` (`io.orchestrate.stop`), waits for the lane to stop, resumes, and fails if the pre-cancel lane pid is still there; cleanup stops the batch too. A lane is torn down by a cancel, so "re-adoption" now means the resumed batch picks the issue up again. Fixture paths and titles carry a run id (`uniqueFixture`). Each created issue is tracked as soon as it exists. Branch cleanup keeps only `forge/issue-<n>` (exact, `issue-5` never matches `issue-50`) and finds PRs by that head branch.
+- **`selftest-static.mjs`:** a `--json` list that is not a string literal (`gh-assoc.mjs`, `prodwatch.mjs`, `pre-tool-use.mjs`, `autochildren.mjs`) is returned in `unchecked` and printed; it does not fail the check and is not counted as checked.
+- **`selftest-nightly.mjs`:** the dedupe edits an open marker issue only when its author is the authenticated `gh api user` login; otherwise (or if the login is unreadable) it files a new issue.
+- `bin/tests/review-staging.test.mjs` asserts the `commands/deploy-pr.md` jq exclusion filters equal `CI_EXCLUDED_CHECKS`.
+
 ## Entry 2026-11-03 — milestone-start gate accepts dependencies already on the lane (#4978)
 
 `unmetDependencies` (`scripts/plan-validate-live.mjs`) treated a closed dependency as merged only when its closing PR's base equalled the dependent's lane, so a dependency merged into staging and reached by a milestone sync was always flagged. It now also fetches the PR's `mergeCommit` and passes when `isAncestor(sha, lane)` holds; `runBatch` (`engine-cli.mjs`) injects that as `git merge-base --is-ancestor <sha> origin/<lane>` (local `<lane>` as fallback). The base-equality fast path stays. A refusal names the commit (`merge commit <sha10> is not on <lane>`) and lists only the true positives; with no known commit the old text is kept. Holding such issues instead of refusing is deferred. Cost: 0 LLM calls.

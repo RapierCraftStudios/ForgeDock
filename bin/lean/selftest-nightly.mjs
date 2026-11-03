@@ -49,8 +49,12 @@ export async function reportNightly({ repo, io, now = () => Date.now(), result }
   const step = result?.step ?? "unknown";
   const title = `selftest --live failed at step ${step} (nightly)`;
   const body = `The nightly \`forgedock selftest --live\` failed at step **${neutralize(step)}**.\n\n${neutralize(String(result?.message ?? "").slice(0, 2000))}\n\nLast failure: ${new Date(now()).toISOString()}\n\n${NIGHTLY_MARKER}\n`;
-  const open = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"FORGE:SELFTEST_NIGHTLY" in:body`, "--limit", "30", "--json", "number,body"])))
-    .find((i) => String(i.body ?? "").includes(NIGHTLY_MARKER));
+  // #4952: the marker is public text, so only an issue authored by the actor running the harness is edited; an unreadable
+  // login trusts nobody (a new issue is filed instead).
+  let me = "";
+  try { me = String(await io.gh(["api", "user", "--jq", ".login"])).trim().toLowerCase(); } catch { /* untrusted */ }
+  const open = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"FORGE:SELFTEST_NIGHTLY" in:body`, "--limit", "30", "--json", "number,body,author"])))
+    .find((i) => me && String(i.author?.login ?? "").toLowerCase() === me && String(i.body ?? "").includes(NIGHTLY_MARKER));
   if (open) {
     await io.gh(["issue", "edit", String(open.number), "-R", repo, "--title", title, "--body", body]);
     return { issue: open.number, action: "edit" };

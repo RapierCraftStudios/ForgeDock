@@ -18,15 +18,20 @@ export function listSources(dir) {
   return out.sort();
 }
 
-/** @returns {{cmd:string, fields:string[], line:number}[]} the literal gh `--json` field lists of `text` (cmd e.g. "issue view"). */
+/**
+ * The `gh issue|pr view|list --json <fields>` uses of `text`. A literal field list is `{cmd, fields, line}`; a list the
+ * scan cannot read (a variable or template, e.g. `"--json", fields`) is `{cmd, fields: [], unchecked: true, line}`.
+ * @returns {{cmd:string, fields:string[], line:number, unchecked?:true}[]} cmd e.g. "issue view"
+ */
 export function extractJsonFields(text) {
-  const out = [];
-  const re = /\[([^[\]]*?)["'`]--json["'`]\s*,\s*["'`]([A-Za-z0-9_,]+)["'`]/g;
+  const out = [], re = /["'`]--json["'`]\s*,\s*/g;
   for (let m; (m = re.exec(text));) {
-    const words = [...m[1].matchAll(/["'`]([a-z-]+)["'`]/g)].map((x) => x[1]);
-    const i = words.findIndex((w, k) => (w === "issue" || w === "pr") && (words[k + 1] === "view" || words[k + 1] === "list"));
-    if (i < 0) continue;
-    out.push({ cmd: `${words[i]} ${words[i + 1]}`, fields: m[2].split(",").filter(Boolean), line: text.slice(0, m.index).split("\n").length });
+    const before = text.slice(Math.max(0, m.index - 300), m.index), seg = before.slice(before.lastIndexOf(";") + 1);
+    const cmds = [...seg.matchAll(/["'`](issue|pr)["'`]\s*,\s*["'`](view|list)["'`]/g)];
+    if (!cmds.length) continue;
+    const c = cmds.at(-1), lit = /^["'`]([A-Za-z0-9_,]+)["'`]\s*[,\])]/.exec(text.slice(m.index + m[0].length));
+    const row = { cmd: `${c[1]} ${c[2]}`, fields: lit ? lit[1].split(",").filter(Boolean) : [], line: text.slice(0, m.index).split("\n").length };
+    out.push(lit ? row : { ...row, unchecked: true });
   }
   return out;
 }
@@ -47,14 +52,15 @@ export function parseHelpFields(help) {
 
 /**
  * @param {{root:string, io:{gh:(args:string[])=>string, read?:(p:string)=>string, list?:(d:string)=>string[]}}} a
- * @returns {{ok:boolean, checked:number, missing:{file:string,line:number,cmd:string,field:string}[], errors:string[]}}
+ * @returns {{ok:boolean, checked:number, unchecked:{file:string,line:number,cmd:string}[], missing:{file:string,line:number,cmd:string,field:string}[], errors:string[]}}
  */
 export function staticCheck({ root, io }) {
   const read = io.read ?? ((p) => readFileSync(p, "utf8")), list = io.list ?? listSources;
-  const known = new Map(), errors = [], missing = [];
+  const known = new Map(), errors = [], missing = [], unchecked = [];
   let checked = 0;
   for (const file of list(root)) {
     for (const u of extractJsonFields(read(file))) {
+      if (u.unchecked) { unchecked.push({ file, line: u.line, cmd: u.cmd }); continue; } // reported, never silently skipped (#4952)
       if (!known.has(u.cmd)) {
         let fields = [];
         try { fields = parseHelpFields(io.gh([...u.cmd.split(" "), "--help"])); } catch (e) { errors.push(`gh ${u.cmd} --help failed: ${e.message}`); }
@@ -67,7 +73,7 @@ export function staticCheck({ root, io }) {
       for (const field of u.fields) if (!set.has(field)) missing.push({ file, line: u.line, cmd: u.cmd, field });
     }
   }
-  return { ok: !missing.length && !errors.length, checked, missing, errors };
+  return { ok: !missing.length && !errors.length, checked, unchecked, missing, errors };
 }
 
 export const realGh = (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
@@ -76,6 +82,7 @@ export function formatStatic(r) {
   return [
     ...r.missing.map((m) => `${m.file}:${m.line}: gh ${m.cmd} --json field "${m.field}" is not offered by this gh`),
     ...r.errors,
-    `static check: ${r.ok ? "ok" : "FAILED"} (${r.checked} field lists checked)`,
+    ...(r.unchecked ?? []).map((u) => `${u.file}:${u.line}: gh ${u.cmd} --json field list is not a string literal: unchecked`),
+    `static check: ${r.ok ? "ok" : "FAILED"} (${r.checked} field lists checked, ${(r.unchecked ?? []).length} unchecked)`,
   ].join("\n");
 }
