@@ -51,6 +51,13 @@ describe("duplicate exports (#4406)", () => {
     assert.deepEqual(await dups(d), []);
   });
 
+  it("standalone scripts each defining main are not duplicate exports; a real duplicate still is", async () => {
+    const d = repo({ "scripts/openapi_diff.py": "def main():\n  pass\n\ndef shared_helper():\n  pass\n" }, { "scripts/seed_minimal.py": "def main():\n  pass\n\ndef shared_helper():\n  pass\n" });
+    assert.deepEqual(await dups(d), []);
+    const e = repo({ "svc/pyproject.toml": "", "svc/a.py": "def main():\n  pass\n" }, { "svc/b.py": "def main():\n  pass\n\ndef resolve_x():\n  pass\n" });
+    assert.deepEqual(await dups(e), []);
+  });
+
   it("Python modules of one package collide too; unreadable git yields []", async () => {
     const d = repo({ "svc/pyproject.toml": "", "svc/a.py": "def resolve_tenant():\n  pass\n" }, { "svc/b.py": "def resolve_tenant():\n  pass\n" });
     assert.deepEqual(await dups(d), [{ symbol: "resolve_tenant", path: "svc/b.py", others: ["svc/a.py"] }]);

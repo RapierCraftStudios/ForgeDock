@@ -528,15 +528,18 @@ describe("execution budget and sandbox cost (#4255)", () => {
     const prov = fakeProvider({ finish: (n) => ({ terminalReason: "merged", pr: 100 + n, cost_usd: 2 }), usage: async (h) => ({ minutes: 5 * h.issue, cost_usd: 0.1 * h.issue }) });
     const events = [];
     const file = join(work, "day.json");
-    const res = await quiet(() => orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter"], base(work, { batchId: "bc1",
+    const printed = []; // #4917: #3 stays pending (budget hold), so the batch is not finalised: no report.json, the printed report carries the sandbox lines
+    const log0 = console.log; console.log = (l) => { printed.push(String(l)); };
+    const res = await (async () => { try { return await orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter"], base(work, { batchId: "bc1",
       execution: parseExecution({ mode: "remote", max_remote: "1", budget_minutes: "15" }), sandboxProvider: prov,
       sandboxLedger: (n) => makeLedger({ root: ledRoot, batch: "bc1", lane: `sandbox-${n}`, owner: "t", issue: n }),
-      executionBudget: openExecutionBudget({ budget: parseExecution({ budget_minutes: "15" }).budget, file }), emitTelemetry: (rec) => { events.push(rec); } })));
+      executionBudget: openExecutionBudget({ budget: parseExecution({ budget_minutes: "15" }).budget, file }), emitTelemetry: (rec) => { events.push(rec); } })); } finally { console.log = log0; } })();
     assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.sandbox?.minutes ?? null]), [[1, "merged", 5], [2, "merged", 10], [3, "held", null]]);
-    const rep = openBatch(join(work, "batches"), "bc1").readReport();
-    assert.deepEqual(rep.rows[1].sandbox, { minutes: 10, cost_usd: 0.2, attempts: 1 });
-    assert.match(rep.report, /sandbox: 2 lanes, 15\.0 min, \$0\.30 \(token cost \$4\.00\); budget: batch 15 min/);
-    assert.match(rep.report, /sbx-min/);
+    assert.equal(openBatch(join(work, "batches"), "bc1").readReport(), null);
+    assert.deepEqual(res.rows[1].sandbox, { minutes: 10, cost_usd: 0.2, attempts: 1 });
+    const text = printed.join("\n");
+    assert.match(text, /sandbox: 2 lanes, 15\.0 min, \$0\.30 \(token cost \$4\.00\); budget: batch 15 min/);
+    assert.match(text, /sbx-min/);
     assert.deepEqual(events.filter((e) => e.event === "SANDBOX_USAGE").map((e) => [e.issue, e.minutes, e.cost_usd, e.batch]), [[1, 5, 0.1, "bc1"], [2, 10, 0.2, "bc1"]]);
     assert.equal(Object.keys(JSON.parse(readFileSync(file, "utf8")).days[new Date().toISOString().slice(0, 10)]).length, 2);
   });

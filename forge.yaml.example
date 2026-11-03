@@ -332,16 +332,13 @@ branches:
 
 # engine:
 #   work_on_review_model: sonnet
+#   # Host lane cap (#4777), on by default: local lanes are bounded by
+#   # min(--parallel, max(1, min(cores / lane_cpu_reservation, (MemAvailable - min_free_mem_mb) / lane_mem_mb))).
+#   # Remote sandbox lanes are exempt; `admission: enabled: false` removes the cap.
+#   lane_cpu_reservation: 1
+#   lane_mem_mb: 2048
 #   work_on_review_max_turns: 120
 #   review_pr_staging_max_turns: 80
-#   # Host admission (#4105) and the implicit local lane cap (#4777). Unless
-#   # enabled: false, local lanes are capped at
-#   # max(1, min(cores / lane_cpu_reservation, (MemAvailable - min_free_mem_mb) / lane_mem_mb)),
-#   # below --parallel on a small host; remote sandbox lanes are exempt.
-#   admission:
-#     min_free_mem_mb: 2048
-#     lane_cpu_reservation: 1   # cores reserved per local lane
-#     lane_mem_mb: 2048         # memory reserved per local lane
 #   # Context pack (#4275): before the plan call the core compiles the issue's
 #   # links, prior attempts, reverted/decided PRs on the same symbols and repo-fact
 #   # pointers into a budgeted pack, posted as FORGE:CONTEXT and logged as
@@ -408,19 +405,27 @@ branches:
 #   # base from the issue's milestone.
 #   global_parallel: 12
 #
+#   # Children a running batch adds by itself (#4965): off | decomposed | epic | all. `epic` adds the open
+#   # children (`**Parent**: #P` or sub-issues) of every batch issue, also those filed later. Per batch:
+#   # forgedock orchestrate --auto-children <mode> [--epic N]. Default: decomposed.
+#   auto_add_children: decomposed
+#   auto_add_children_poll_s: 120
+#
 #   # Maximum number of /work-on sub-agents dispatched concurrently. Guards
 #   # against saturating the Anthropic API rate limit in one burst on a large
 #   # ready set. Default: 12.
 #   max_concurrent: 12
 #
+#   # Label that holds an open issue out of dispatch (#4773). Default `blocked`, on: an issue
+#   # carrying it is admitted but not dispatched until the label is removed. Empty turns it off.
+#   blocked_label: blocked
+#
 #   # In-batch recovery (#4267): recovery lanes per issue for a mechanical
 #   # needs-human (ci.red, base.conflict, ...). A recovery that does not merge
 #   # is labelled needs-human again with its evidence. Default 1; 0 disables.
-#   # Mechanical codes (base.conflict, env.*, conflicting ci-pending) have their
-#   # own budget (#4725), default 2, never below max_attempts.
 #   recovery:
 #     max_attempts: 1
-#     mechanical_max_attempts: 2
+#     mechanical_max_attempts: 2   # #4725: separate budget for env.*, base.conflict, conflicting-PR rows; default 2
 #
 #   # Parked-PR base sync (#4525): a needs-human PR whose base moved is merged
 #   # with the base while the batch runs. Clean or pure two-sided list-addition
@@ -909,6 +914,14 @@ branches:
 #   # Example: if your services are named "acme-api", "acme-worker", add "acme-"
 #   internal_service_patterns:
 #     - "acme-"
+#
+#   # Managed test runners (optional, default unset): map a path prefix to the
+#   # runner command prefix that validate commands touching it must use. Checked
+#   # at contract freeze (testRunnerProblems), so a command that skips the runner
+#   # is rejected up front instead of failing as env.tool_missing.
+#   # test_runners:
+#   #   services/worker: "poetry -C services/worker run"
+#   #   web: "pnpm --filter web exec"
 #
 #   # Toolchain commands for lint, format, typecheck, test, and build steps.
 #   # Used by: review-pr, review-pr-staging, work-on (Phase 3H, validate), rollback,

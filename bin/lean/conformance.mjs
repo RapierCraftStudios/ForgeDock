@@ -326,8 +326,9 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
+const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer" };
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
 const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
@@ -337,6 +338,11 @@ function normalizeAmendment(a) {
   const n = { ...a };
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
+  // #4856: kinds compare case-insensitively with `_` as `-`; only a recognised kind or alias is rewritten, so unknown kinds keep their spelling in the error
+  if (typeof n.kind === "string") {
+    const k = n.kind.trim().toLowerCase().replace(/_/g, "-");
+    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k)) n.kind = k;
+  }
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
@@ -369,16 +375,17 @@ function amendmentProblem(a, tag) {
 
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
- * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
+ * defer|post-deploy {requirement: id}. Every amendment needs a why (or the engine's defaultWhy); `addedPaths` are lane-added files that count as decision anchors when a deliverable lists them. Returns {contract, applied[], toTrack[], problems[]}.
  * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
  * matching path is refused; the repo's generator or bot owns that file.
  * `decision` {decision:{choice, anchors, symbols?, supersedes?}} (#4695): every anchor must match a file of `baseFiles` (the
  * base tree; null skips the check); `supersedes` names the decision whose engine-authored preserve row it replaces and
  * drops that row; returns the records in `decisions`.
  */
-export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null } = {}) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null, addedPaths = [], defaultWhy = null } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
+  for (const v of c.validate ?? []) if (v && typeof v === "object") delete v.substituted; // SEC-21: only a substitute-validate amendment sets it, never the frozen contract
   const applied = [], toTrack = [], problems = [], decisions = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
   const rows = [];
@@ -397,8 +404,11 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     }
     rows.push({ a: n, raw });
   }
-  for (const { a, raw } of rows) {
+  for (let { a, raw } of rows) {
+    // an unrelated out-of-diff CI failure is not a contract change: informational, never a problem
+    if (a?.kind === UNRELATED_CI_KIND) { applied.push({ kind: a.kind, target: String(a.target ?? "unrelated check"), why: String(a.why ?? "").trim() || "unrelated to the diff" }); continue; }
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
+    if (a && blank(a.why) && !blank(defaultWhy)) a = { ...a, why: String(defaultWhy) }; // the engine demanded the change: its reason is the why
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
       if (genRes.some((re) => re.test(cleanPath(a.path)))) {
@@ -414,9 +424,10 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // #4857: a runnable equivalent of an unrunnable frozen validate command; same id, same checks as a planned command
       const v = (c.validate ?? []).find((x) => x.id === a.validate);
       if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
-      const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
+      const bad = blank(a.command) ? "no command" : shellSyntaxError(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
       if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
-      v.substituted = { from: v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
+      // SEC-11: a second substitute of the same id keeps the frozen command as `from`, so the engine always reruns the original
+      v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
       applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
@@ -438,6 +449,16 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
+      if (TRACKED.includes(r.disposition)) {
+        // SEC-31/SPEC-33: a flip that would orphan a check id or a filed tracking issue must name it and say why it is now delivered
+        const named = [r.check, r.tracked ? String(r.tracked).replace(/\D/g, "") : null].filter((k) => !blank(k));
+        const said = `${a.why} ${a.text}`;
+        const missing = named.filter((k) => !new RegExp(`(^|[^\\w-])#?${String(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(said));
+        if (missing.length) { problems.push(`amendment flips ${r.disposition} ${r.id} to deliver but does not name its ${missing.join(", ")} (check id or tracking issue) and why it is now delivered in the diff`); continue; }
+        // #4984: deliver text on a deferred requirement puts it in scope: it is delivered, not tracked in a follow-up; amended_from keeps the original for the reviewer
+        r.amended_from ??= Object.fromEntries(["quote", "disposition", "why", "bucket", "check", "tracked", "class"].filter((k) => r[k] != null).map((k) => [k, r[k]]));
+        r.disposition = "deliver"; for (const k of ["bucket", "why", "check", "tracked", "class"]) delete r[k];
+      }
       r.amendment = { text: String(a.text).trim(), why: String(a.why).trim() }; r.amended = true;
     } else if (TRACKED.includes(a.kind) && a.requirement) {
       const r = c.requirements.find((x) => x.id === a.requirement);
@@ -451,7 +472,10 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     } else if (a.kind === "decision") {
       const d = normaliseDecision({ ...a.decision, why: a.decision?.why ?? a.why });
       if (!d) { problems.push(amendmentProblem(a, tag)); continue; }
-      const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, baseFiles) : [];
+      // a file the lane adds and the contract lists as a deliverable is a new file the issue declared: a valid anchor
+      const listed = new Set(c.deliverables.map((x) => x.path));
+      const added = (Array.isArray(addedPaths) ? addedPaths : []).filter((x) => listed.has(x));
+      const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, [...baseFiles, ...added]) : [];
       if (dead.length) { problems.push(`decision anchor(s) ${dead.join(", ")} match no file on the base; anchor a path that exists there`); continue; }
       if (!blank(a.decision?.supersedes)) c.preserve = (c.preserve ?? []).filter((p) => p.decision !== a.decision.supersedes && p.id !== a.decision.supersedes);
       decisions.push(a.decision?.supersedes ? { ...d, supersedes: String(a.decision.supersedes) } : d);
@@ -471,6 +495,77 @@ export function shellSyntaxError(command) {
   const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
   if (r.error || r.status === 0 || r.status == null) return null;
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
+}
+const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|fi|done|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
+const KEYWORD_RE = /^(if|then|else|elif|do|while|until)(?:\s+|$)/;
+const CONST_FALSE_RE = /^(?:false|\[\s+0\s+=\s+1\s+\]|\[\s+1\s+=\s+0\s+\]|test\s+0\s+=\s+1|test\s+-n\s+(?:""|'')|\[\s+-n\s+(?:""|'')\s+\])$/;
+/**
+ * #4979 SPEC-2: a command every segment of which is a no-op (true, :, exit N, echo, printf, sleep, a constant test,
+ * shell keywords, `node -e 0`, `python -c pass`) checks nothing. A best-effort denylist: the engine's rerun of the
+ * frozen command (`substituteVerdict`) is the real gate.
+ */
+export function noopCommand(command) {
+  // SEC-22: a leading shell keyword is stripped and the rest judged, so `if [ -f x ]; then pytest; fi` is a real check
+  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
+  const live = [];
+  let dead = false; // #4995: inside the body of an if/elif/while whose condition is a constant false
+  for (const raw of segs) {
+    let s = raw, cond = false, m;
+    while ((m = KEYWORD_RE.exec(s))) {
+      s = s.slice(m[0].length);
+      if (m[1] === "else" || m[1] === "elif") dead = false;
+      cond = m[1] === "if" || m[1] === "elif" || m[1] === "while";
+    }
+    if (s === "fi" || s === "done") dead = false;
+    if (cond) { if (CONST_FALSE_RE.test(s)) dead = true; else if (!dead && s) live.push(s); continue; }
+    if (!dead && s) live.push(s);
+  }
+  return segs.length > 0 && live.every((s) => NOOP_SEGMENT_RE.test(s));
+}
+/**
+ * #4979 SPEC-2: a substitute-validate stands only when the frozen command it replaced cannot run (died before any test,
+ * a runner usage error, a missing host tool, exit 127) or passes anyway. A frozen command that runs and fails is a real
+ * failure the substitute may not hide. `run` is the engine's rerun of the frozen command; null when none was made.
+ */
+export function substituteVerdict(run, { repoHas = () => false, command = "" } = {}) {
+  if (!run) return "unverified";
+  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
+  return run.rc === 124 ? "timeout" : "runs";
+}
+/**
+ * #4990 SEC-13: the paths of `removed` (deleted, or the old side of a rename, in the diff) that a frozen command names:
+ * a whitespace token equal to the path, or a directory token above it. A builder that removes the target of its frozen
+ * validate makes the engine's rerun read "unrunnable", so the substitute is judged on the diff instead.
+ */
+const TEST_FILE_RE = /\.(?:test|spec)\.[a-z0-9]+$|^test_[^/]+\.[a-z0-9]+$|_test\.[a-z0-9]+$|Tests?\.(?:java|kt|kts|cs|php|scala|swift)$|_spec\.rb$|^tests\.rs$|^conftest\.py$|\.bats$/;
+/** #5003: a runnable test FILE (by basename), unlike `isTestPath`, which also matches fixtures under tests/. */
+const isTestFile = (p) => TEST_FILE_RE.test(String(p).split("/").pop());
+/**
+ * #4990 SEC-13: the paths of `removed` (deleted, or the old side of a rename, in the diff) that a frozen command names.
+ * #5003: a token is stripped of quotes, a `--flag=` prefix and a pytest `::node` suffix; a glob is expanded against
+ * `baseFiles`; an exact path matches itself; a directory or bare-word token matches only a removed test file under it.
+ */
+export function removedNamedPaths(command, removed = [], baseFiles = []) {
+  const toks = String(command ?? "").split(/\s+/).map((t) => t.replace(/^['"`(]+|['"`);]+$/g, "").replace(/^-[^=\/]*=/, "").replace(/::.*$/, "").replace(/^['"`]+|['"`]+$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((t) => t && t !== ".");
+  const files = new Set(baseFiles);
+  return removed.filter((p) => toks.some((t) => {
+    if (/[*?]/.test(t)) return globRe(t).test(p) && (files.size === 0 || files.has(p));
+    return p === t || (p.startsWith(`${t}/`) && isTestFile(p));
+  }));
+}
+/** #4990: paths the lane's diff deletes or renames away from (the old side). #5003: `-z` (unquoted), null on a git error (fail closed). */
+export async function removedPathsOf(git, base) {
+  let out;
+  try { out = String(await git(["diff", "--name-status", "-z", "-M", `${base}...HEAD`])); } catch { return null; }
+  const f = out.split("\0"), gone = [];
+  for (let i = 0; i < f.length; i++) {
+    const st = f[i];
+    if (!/^[A-Z]/.test(st)) continue;
+    const two = /^[RC]/.test(st);
+    if (/^[DR]/.test(st) && f[i + 1]) gone.push(f[i + 1]);
+    i += two ? 2 : 1;
+  }
+  return gone;
 }
 const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
@@ -499,6 +594,18 @@ export function normalizeRunnerCommand(command) {
 export function cliUsageError({ rc, output } = {}) {
   return rc !== 0 && CLI_USAGE_RE.test(String(output ?? ""));
 }
+const FORGEDOCK_ENTRY_RE = /^\/.*\/forgedock\/bin\/(?:lean\/checks|forgedock)\.mjs$/;
+const FORGEDOCK_TOKEN_RE = /(?<![\w./-])\/[^\s'"`;&|()]*\/forgedock\/bin\/(lean\/checks|forgedock)\.mjs/g;
+/**
+ * #5005: a frozen validate command names forgedock's own entry point by the absolute path of the install that wrote it; on
+ * the host that runs it that path may not exist. Rewrites each such token whose file is missing to this install's path.
+ */
+export function resolveForgedockPaths(command, { exists = () => true, checksCli, forgedockCli } = {}) {
+  return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => {
+    const here = which === "forgedock" ? forgedockCli : checksCli;
+    return here && !exists(tok) ? here : tok;
+  });
+}
 const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
@@ -512,6 +619,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const py = PY_MISSING_RE.exec(out);
   if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
   const js = NODE_MISSING_RE.exec(out);
+  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "command" }; // #5005: the host's forgedock install is not at the frozen path
   if (js) {
     const spec = js[1], scoped = spec.startsWith("@");
     if (!scoped && spec.includes("/")) return null;
@@ -545,7 +653,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -559,6 +667,17 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
+    // #4979 SPEC-2: a substitute counts only when the frozen command it replaced cannot run (or passes); checked first, never CI-covered
+    if (v.substituted) {
+      if (removedPaths === null) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the engine could not read the diff's removed paths to show the frozen command's target survives` }); continue; }
+      const gone = removedNamedPaths(v.substituted.from, removedPaths, baseFiles);
+      if (gone.length) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_removed_path", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the diff removes ${gone.map((x) => `\`${x}\``).join(", ")} that the frozen command names: a substitute may not replace a check by deleting its target` }); continue; }
+      const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
+      const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
+      if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
+      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check` }); continue; }
+      if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
+    }
     const r = runs.find((x) => x?.id === v.id);
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
@@ -995,8 +1114,9 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
 /** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */
 export function followupMap(out, items) {
   const echoed = new Map();
-  for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(k.trim(), Number(n)); }
-  return Object.fromEntries(items.filter((i) => echoed.has(String(i.key).trim())).map((i) => [i.key, echoed.get(String(i.key).trim())]));
+  const norm = (k) => String(k).replace(/`/g, "").trim(); // #4984: the script strips backticks from the label it echoes
+  for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(norm(k), Number(n)); }
+  return Object.fromEntries(items.filter((i) => echoed.has(norm(i.key))).map((i) => [i.key, echoed.get(norm(i.key))]));
 }
 
 /**

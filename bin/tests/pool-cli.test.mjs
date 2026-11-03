@@ -48,6 +48,24 @@ describe("forgedock pool (#4544)", () => {
     await assert.rejects(run(["remove"], s, {}), /usage: forgedock pool remove/);
     await assert.rejects(run(["remove", "zz"], s, { ok: false, status: 404, data: { error: "no" } }), /HTTP 404/);
   });
+  it("pool upgrade --help prints usage and sends no request", async () => {
+    for (const argv of [["upgrade", "--help"], ["upgrade", "-h"], ["remove", "--help"], ["resize", "-h"], ["enroll", "--help"], ["--help"]]) {
+      const s = setup();
+      const { out } = await run(argv, s, { ok: true, status: 200, data: { agents: [{ name: "a1" }] } });
+      assert.match(out, /^usage: forgedock pool/, argv.join(" "));
+      assert.equal(s.calls.length, 0, argv.join(" "));
+    }
+  });
+  it("unknown flags on pool verbs are rejected before any request", async () => {
+    for (const argv of [["upgrade", "--bogus"], ["remove", "a1", "--force"], ["resize", "a1", "--cpuz", "2"], ["enroll", "--nope"]]) {
+      const s = setup();
+      await assert.rejects(run(argv, s, { ok: true, status: 200, data: { agents: [{ name: "a1" }] } }), /usage: unknown flag/, argv.join(" "));
+      assert.equal(s.calls.length, 0, argv.join(" "));
+    }
+    const s = setup();
+    await run(["resize", "a1", "--cpus", "2", "--mem", "4", "--drain"], s, { ok: true, status: 200, data: {} });
+    assert.equal(s.calls[0].path, "/agents/a1/resize");
+  });
   it("an unknown verb is a usage error", async () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);
   });

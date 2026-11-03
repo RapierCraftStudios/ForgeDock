@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { milestoneSlug, readBranches, resolveLane } from "./lane.mjs";
+import { milestoneSlug, readBranches, resolveLane, makeLaneCache } from "./lane.mjs";
 
 /** Fake gh/git: the issue's milestone, GitHub's default branch, and the branches on origin. */
 function io({ milestone = null, ghDefault = "main", onOrigin = ["staging", "main"], ghFails = null, gitFails = false } = {}) {
@@ -99,5 +99,37 @@ describe("lane resolution (#4125)", () => {
     assert.ok(!missing.transient);
     const slug = await resolve({ milestone: "🚀" });
     assert.deepEqual([slug.code, !!slug.transient], ["lane.unresolved", false]);
+  });
+});
+
+describe("per-batch lane lookups (#4963)", () => {
+  it("one default-branch read and one ls-remote per lane across issues; a supplied milestone skips the issue view", async () => {
+    const fake = io({ onOrigin: ["staging", "main", "milestone/m1"] }), cache = makeLaneCache();
+    const rs = await Promise.all([1, 2, 3, 4].map((issue) => resolveLane({ issue, repo: "o/r", io: fake, cwd: "/r", cache, milestone: issue % 2 ? "M1" : null })));
+    assert.deepEqual(rs.map((r) => r.lane), ["milestone/m1", "staging", "milestone/m1", "staging"]);
+    const n = (k, ...m) => fake.calls.filter((c) => c[0] === k && m.every((x, i) => c[i + 1] === x)).length;
+    assert.equal(n("gh", "repo", "view"), 1);
+    assert.equal(n("gh", "issue", "view"), 0);
+    assert.equal(fake.calls.filter((c) => c[1] === "ls-remote").length, 2);
+  });
+  it("without cache or milestone every call reads (unchanged)", async () => {
+    const fake = io();
+    await resolveLane({ issue: 1, repo: "o/r", io: fake, cwd: "/r" });
+    await resolveLane({ issue: 2, repo: "o/r", io: fake, cwd: "/r" });
+    assert.equal(fake.calls.filter((c) => c[1] === "issue").length, 2);
+    assert.equal(fake.calls.filter((c) => c[1] === "repo").length, 2);
+  });
+  it("a failed lookup is not cached: the retry re-reads", async () => {
+    const cache = makeLaneCache();
+    const bad = await resolveLane({ issue: 1, repo: "o/r", io: io({ ghFails: "repo" }), cwd: "/r", cache, milestone: null });
+    assert.equal(bad.transient, true);
+    const ok = await resolveLane({ issue: 1, repo: "o/r", io: io(), cwd: "/r", cache, milestone: null });
+    assert.equal(ok.ok, true);
+  });
+  it("a missing lane branch is not cached either", async () => {
+    const cache = makeLaneCache();
+    const miss = await resolveLane({ issue: 1, repo: "o/r", io: io({ onOrigin: ["main"] }), cwd: "/r", cache, milestone: null });
+    assert.equal(miss.ok, false);
+    assert.equal((await resolveLane({ issue: 1, repo: "o/r", io: io(), cwd: "/r", cache, milestone: null })).ok, true);
   });
 });

@@ -15,6 +15,8 @@ import { exportNames, isTestPath } from "./enumerating.mjs";
 const SOURCE_RE = /\.(?:[cm]?[jt]sx?|py)$/;
 const SKIP_RE = /(?:^|\/)(?:node_modules|vendor|dist|build|coverage)\//;
 const MANIFESTS = ["package.json", "pyproject.toml", "setup.py", "go.mod", "Cargo.toml"];
+// entry points a standalone script defines by convention: never a shared export
+const ENTRY_NAMES = new Set(["main", "cli"]);
 const MIN_NAME = 3, MAX_NAMES = 50, CONVENTION = 3;
 const lines = (s) => String(s ?? "").split("\n").map((x) => x.trim()).filter(Boolean);
 const out = (git) => async (args) => { try { return String(await git(args)); } catch { return ""; } };
@@ -68,13 +70,14 @@ export async function duplicateExports({ git, cwd, base }) {
     let names = 0;
     for (const f of changed) {
       const was = new Set(added.has(f) ? [] : declaredExports(await g(["show", `${base}:${f}`]), f));
-      const fresh = declaredExports(read(f), f).filter((n) => !was.has(n) && n.length >= MIN_NAME);
+      const fresh = declaredExports(read(f), f).filter((n) => !was.has(n) && n.length >= MIN_NAME && !ENTRY_NAMES.has(n));
       const root = packageRoot(f, manifests);
+      if (root === "." && /^scripts\//.test(f)) continue; // standalone scripts, not a package
       for (const name of fresh) {
         if (++names > MAX_NAMES) return res;
         const hits = lines(await g(["-c", "core.quotepath=off", "grep", "-l", "-w", "-e", name, "HEAD", "--", ...(root === "." ? [] : [`${root}/`])]))
           .map((l) => l.replace(/^HEAD:/, ""))
-          .filter((p) => p !== f && keep(p) && packageRoot(p, manifests) === root);
+          .filter((p) => p !== f && keep(p) && packageRoot(p, manifests) === root && !(root === "." && /^scripts\//.test(p)));
         const others = [];
         for (const p of hits) if (declaredExports(read(p), p).includes(name)) others.push(p);
         if (others.length && others.length < CONVENTION) res.push({ symbol: name, path: f, others: others.sort() });
