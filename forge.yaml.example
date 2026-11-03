@@ -915,6 +915,14 @@ branches:
 #   internal_service_patterns:
 #     - "acme-"
 #
+#   # Managed test runners (optional, default unset): map a path prefix to the
+#   # runner command prefix that validate commands touching it must use. Checked
+#   # at contract freeze (testRunnerProblems), so a command that skips the runner
+#   # is rejected up front instead of failing as env.tool_missing.
+#   # test_runners:
+#   #   services/worker: "poetry -C services/worker run"
+#   #   web: "pnpm --filter web exec"
+#
 #   # Toolchain commands for lint, format, typecheck, test, and build steps.
 #   # Used by: review-pr, review-pr-staging, work-on (Phase 3H, validate), rollback,
 #   #          incident-response, orchestrate (integration build gate).

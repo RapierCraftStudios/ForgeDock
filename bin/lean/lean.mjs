@@ -513,6 +513,10 @@ export async function runCore(o) {
       return true;
     } catch { return false; }
   }
+  const labelFailed = (step, e) => { // #4905: a failed needs-human comment/label call is recorded, not swallowed (the issue showed needs-human with no label)
+    const error = String(e?.message ?? e).slice(0, 200);
+    T.anomalies.push(`needs-human ${step} failed: ${error}`); ev({ event: "NEEDS_HUMAN_LABEL_FAILED", step, error });
+  };
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, { ask: askText, note: askNote = "", ...extra } = {}) {
     // #4725: a recorded premise (`Premise: <kind>:<arg>`) that already holds is no blocker: no label, the lane runs again.
     const predicate = parsePredicate(why);
@@ -528,8 +532,10 @@ export async function runCore(o) {
         link = reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : reg.entry ?? "";
       }
       const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
-      await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
-      await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
+      try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`); }
+      catch (e) { labelFailed("comment", e); }
+      try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); }
+      catch (e) { labelFailed("label", e); }
     } catch { /* best effort */ }
     return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
   }
@@ -642,11 +648,17 @@ export async function runCore(o) {
   const signOffUnpushed = async () => {
     try {
       const r = await ensureSignedOff({ git, lane, branch });
-      if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten }); }
+      if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten, ...(r.dirty ? { dirty: r.dirty } : {}) }); }
     } catch (e) { throw Object.assign(e, e?.noIdentity === true ? { laneCode: OUTCOME_CODES.CI_DCO } : { engineCode: OUTCOME_CODES.ENGINE_DCO_REWRITE }); } // #4997: a failed rewrite is mechanical (engine-error, recoverable), only a missing identity is a human block
   };
   const gitPush = async (args) => {
-    if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() }); await signOffUnpushed(); } // #4590: never push .forge-lean/ or tool caches this branch added
+    if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
+      try { await signOffUnpushed(); }
+      catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push the branch as-is before reporting
+        if (!e?.noIdentity) { try { await git(["push", "-u", "origin", branch]); ev({ event: "DCO_RESCUE_PUSH", branch }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
+        throw e;
+      }
+    } // #4590: never push .forge-lean/ or tool caches this branch added
     try { return await retrying(() => git(args), { transient: PUSH_TRANSIENT_RE, permanent: PUSH_PERMANENT_RE, attempts: 4, sleep: sleepFn, random }); }
     catch (e) {
       if (e?.transientExhausted) { e.deferCode = OUTCOME_CODES.PUSH_TRANSIENT; e.deferDetail = `git push kept failing transiently after 4 attempts: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`; }
@@ -2116,7 +2128,7 @@ export async function runCore(o) {
     async function amend() {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
-      baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
+      baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null;
       const addedPaths = wantsDecision ? String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").filter(Boolean) : [];
       const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
       const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
@@ -2298,7 +2310,8 @@ export async function runCore(o) {
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
       const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf(), substitutedRuns, removedPaths });
+      const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf(), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });

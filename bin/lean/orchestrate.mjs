@@ -115,6 +115,7 @@ import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
 import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
+import { mapLimit } from "./pmap.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
@@ -144,6 +145,8 @@ export const EST_DEFAULT_MIN = Object.freeze({ S: 10, M: 25, L: 50 });
 export const POST_DEPLOY_EST_MIN = 2;
 // A ready issue queued longer than this joins the head band (starvation guard; only with an estimator).
 export const DEFAULT_STARVE_MS = 30 * 60000;
+/** #4963: issues read at once while a batch sets up. */
+export const DEFAULT_SETUP_CONCURRENCY = 6;
 // Merged runs of one repo and size needed before their median replaces the default.
 export const HISTORY_MIN_SAMPLES = 3;
 
@@ -253,7 +256,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
-  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
+  estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
@@ -336,10 +339,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
 
+  let setup = null; // #4963: {read, total} while the initial per-issue reads run; written with phase "setup" so a slow start is visible
   let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
   const save = () => {
     if (!store || halted) return;
-    store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
+    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
@@ -412,7 +416,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // New issues (a fresh batch, or extra issues passed to a resume) join the queue.
   for (const n of issues) if (!set.has(n)) { set.add(n); order.push(n); pending.push(n); }
   for (const n of pending) if (!enqueued.has(n)) enqueued.set(n, now());
-  for (const n of order) if (!deps.has(n)) await readDeps(n);
+  // #4963: bounded-concurrency setup reads; each issue's result lands in Maps keyed by issue, so `order` and the edges are unchanged.
+  const unread = order.filter((n) => !deps.has(n));
+  if (unread.length) {
+    setup = { read: 0, total: unread.length };
+    save();
+    await mapLimit(unread, setupConcurrency, async (n) => { await readDeps(n); setup.read++; save(); });
+    setup = null;
+  }
   if (estimate) for (const n of order) { // a resume that enabled the estimator
     if (estimates.has(n) || results.has(n)) continue;
     let b = ""; try { b = await readBody(n); } catch { b = ""; }
@@ -446,6 +457,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       .sort((a, b) => a.p - b.p || a.b - b.b || a.s - b.s || b.w - a.w || a.i - b.i).map((x) => x.n);
   };
   const entryOf = (n) => ({ key: keyOf(n), batch: sched?.batch ?? batchId ?? null, repo: sched?.repo ?? null, issue: n, priority: prioOf(n), ...(sched?.exclusive ? { exclusive: true } : {}) });
+  // #4964: remote lanes are published to the registry for `sched show` only; they never take a slot
+  const endRemote = (n) => { if (remoteRun.delete(n)) reg?.dropRemote?.(keyOf(n)); };
+  const noteRemote = (n, h) => { reg?.noteRemote?.(keyOf(n), { ...entryOf(n), sandbox: h?.id ?? null, agent: h?.agent ?? null }); };
+  let poolDown = false;
+  const notePool = (down, reason) => { if (down === poolDown) return; poolDown = down; reg?.notePool?.(sched?.batch ?? batchId ?? "?", down ? { reason } : null); };
   const releaseSlot = (n) => { if (reg && slotted.delete(n)) reg.release(keyOf(n)); };
   const offerFresh = (ns) => { const fresh = ns.filter((n) => !offered.has(n)); if (!fresh.length) return; reg.offer(fresh.map(entryOf)); for (const n of fresh) offered.add(n); };
   const withdrawExcept = (keep) => {
@@ -500,6 +516,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
         let cap = null;
         try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
+        if (typeof remote.capacity === "function") notePool(cap === null, "capacity probe failed");
         // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
         if (cap && cap.online === 0) {
           poolOfflineSince ??= now();
@@ -585,7 +602,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { remote?.onUsage?.(n, r.sandbox, rec); } catch { /* the batch total still counts it */ }
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
-    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
+    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); };
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
@@ -633,6 +650,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (row.outcome === "deferred") {
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
       let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
+      if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n);
         try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
@@ -781,6 +799,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try {
           r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
+            if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
@@ -805,18 +824,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const a of adopting) a.live = a.first ? await a.first : false;
   for (const { n, rec, p, live } of adopting) {
     if (live) {
-      if (rec.remote) remoteRun.add(n);
+      if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
       else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
       track(n, p.then((r) => {
         if (r) return settle(n, r, rec, checked.get(n) ?? null);
         if (halted) return; // #4454: kept for the next resume
-        running.delete(n); releaseSlot(n); remoteRun.delete(n); requeueLost(n); save(); // ended without a result after all
+        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n); save(); // ended without a result after all
       }));
       continue;
     }
     const r = await p;
     if (!r) { requeueLost(n); continue; }
-    if (rec.remote) remoteRun.add(n);
+    if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
     else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle
     track(n, Promise.resolve(r).then((x) => settle(n, x, rec, checked.get(n) ?? null)));
     await running.get(n); // settled before scheduling

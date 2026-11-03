@@ -10,7 +10,7 @@
  * analysis attached, never a guess. Shadow mode (the default) posts `FORGE:DECISION (shadow)` and keeps the label; live mode
  * records the decision, clears needs-human and requeues. A veto (`forge:decision-veto` label, or a reply within
  * `veto_hours`) reverts it; a reversal rate above `reversal_max` forces shadow. Never throws: an error is an `error` row.
- * The issue-watch stage (#4765) calls `settle` once per escalation (key: the escalation comment id).
+ * Not yet called in production: the issue-watch stage (#4765) is meant to call `settle` once per escalation (key: the escalation comment id).
  */
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { foldDecisions, recordDecisions as recordToRegister } from "./decisions.mjs";
