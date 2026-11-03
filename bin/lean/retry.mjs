@@ -32,6 +32,17 @@ export async function retrying(fn, { transient, permanent = null, attempts = 4, 
   throw last;
 }
 
+/** Poll `probe` until it returns a truthy value (returned) or `timeoutMs` has passed (null). The probe runs at least once. */
+export async function pollUntil(probe, { timeoutMs, pollMs, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
+  const t0 = now();
+  for (;;) {
+    const v = await probe();
+    if (v) return v;
+    if (now() - t0 > timeoutMs) return null;
+    await sleep(pollMs);
+  }
+}
+
 /**
  * #4507: run `call(env)` with the lane's gh cache env; on a gh parse error (corrupt cache) reset the cache and run it
  * once more. Without a cache it still retries once. Any other error is rethrown unchanged.
