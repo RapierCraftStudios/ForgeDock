@@ -1095,7 +1095,7 @@ export async function runCore(o) {
       const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
-      const salv = (await pickSalvage({ io, cwd, issue, branch, hasBranch: Boolean(remote) }))?.ref; // #4958, #5063: the newest salvage ref that is not behind the lane branch
+      const salv = (await pickSalvage({ io, cwd, issue, branch, hasBranch: Boolean(remote) }).catch((e) => { ev({ event: "SALVAGE_PICK_FAILED", error: String(e?.message ?? e).slice(0, 200) }); return null; }))?.ref; // release #5068 delta SPEC-2: never silent // #4958, #5063: the newest salvage ref that is not behind the lane branch
       if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null }; fromSalvage = true; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).

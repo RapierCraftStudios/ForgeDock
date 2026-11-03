@@ -2464,3 +2464,5 @@ The release review of #5068 (#4793 decision stage, #5063 salvage resume) found:
 - **BUG-2/SPEC-1/REG-1/CONC-3 (#5063).** `pickSalvage` fetches `origin/<branch>` before the ancestry check when the lane branch exists, so a missing local ref no longer hides the salvage and a stale one no longer resumes a ref behind the remote.
 
 Tests: `issuewatch-decisions.test.mjs` "release #5068 ..." (5), `salvage-resume.test.mjs` lane-branch fetch (2). Cost: 0 LLM calls.
+
+Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNER/MEMBER/COLLABORATOR or `ownLogins`), so a forged `FORGE:DECISION` can neither finish nor suppress a decision (SEC-1). `decisionLaunch` checks `inflight` only for per-issue watches: a batch issue stays inflight until its batch reports, so a running batch is requeued and a reported one has its claim released (SPEC-1). A failed salvage pick logs `SALVAGE_PICK_FAILED` instead of dropping the salvage silently (SPEC-2).
