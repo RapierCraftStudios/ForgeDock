@@ -4,6 +4,8 @@
 // Pure and deterministic: the child scan reads one open-issue list per pass; no LLM call.
 import { parentOf } from "./context.mjs";
 import { parseHelpFields } from "./selftest-static.mjs";
+import { listAssociations } from "./gh-assoc.mjs";
+import { isTrustedActor } from "../engine/phases.mjs";
 
 export const AUTO_MODES = ["off", "decomposed", "epic", "all"];
 export const DEFAULT_AUTO_MODE = "decomposed";
@@ -41,9 +43,11 @@ const labelsOf = (it) => nodesOf(it?.labels).map((l) => String(l?.name ?? l));
  * @param {Iterable<number>} roots the batch issues plus the `--epic N` epics
  * @param {Iterable<number>} skip issues the batch already holds
  * @returns {number[]} open children of a root, ascending: `**Parent**: #P` line, `parent` field, or the root's `subIssues`;
- *   an issue labelled `needs-human` is left out.
+ *   an issue labelled `needs-human` is left out. #4982: so is a child whose author is not trusted (the `Blocked by` edge
+ *   rule, `isTrustedActor`; a missing association fails closed), reported through `onSkip({number, reason})`.
+ * @param {(s:{number:number, reason:string})=>void} [onSkip]
  */
-export function selectChildren({ list, roots, skip = [] }) {
+export function selectChildren({ list, roots, skip = [], onSkip }) {
   const rootSet = new Set(roots), skipSet = new Set(skip), open = new Set(), out = new Set();
   for (const it of list ?? []) if (Number.isSafeInteger(it?.number)) open.add(it.number);
   for (const it of list ?? []) {
@@ -54,10 +58,12 @@ export function selectChildren({ list, roots, skip = [] }) {
     if (p != null && rootSet.has(p)) out.add(n);
   }
   const byNum = new Map((list ?? []).map((it) => [it.number, it]));
-  return [...out].filter((n) => !skipSet.has(n) && !labelsOf(byNum.get(n)).includes("needs-human")).sort((a, b) => a - b);
+  const trusted = (it) => isTrustedActor({ association: it?.authorAssociation, type: it?.author?.is_bot ? "Bot" : "User", login: it?.author?.login });
+  return [...out].filter((n) => !skipSet.has(n) && !labelsOf(byNum.get(n)).includes("needs-human")).sort((a, b) => a - b)
+    .filter((n) => trusted(byNum.get(n)) || (onSkip?.({ number: n, reason: "untrusted author" }), false));
 }
 
-const REQUIRED_FIELDS = ["number", "body", "labels"], OPTIONAL_FIELDS = ["parent", "subIssues"];
+const REQUIRED_FIELDS = ["number", "body", "labels", "author"], OPTIONAL_FIELDS = ["parent", "subIssues"];
 
 /** The `--json` list this host's `gh issue list` accepts (read from its `--help`, K4): the required fields plus whichever sub-issue fields it advertises. */
 export async function hostListFields(gh) {
@@ -74,7 +80,9 @@ export async function readChildList({ gh, repo, limit = 1000, fields = null }) {
   const f = fields ?? (await hostListFields(gh));
   const raw = await gh(["issue", "list", "-R", repo, "--state", "open", "--limit", String(limit), "--json", f.join(",")]);
   const v = JSON.parse(raw);
-  return Array.isArray(v) ? v : [];
+  if (!Array.isArray(v)) return [];
+  const assoc = await listAssociations(gh, repo); // #4982: not a `gh issue list` field (#4859); unreadable = every author untrusted
+  return v.map((it) => ({ ...it, authorAssociation: assoc.get(it?.number) }));
 }
 
 /**
