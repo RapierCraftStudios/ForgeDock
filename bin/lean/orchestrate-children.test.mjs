@@ -18,7 +18,7 @@ async function run({ mode, list, pollS = 0.001, elsewhere = [], epics = [], bodi
     runOne: async (n) => { started.push(n); if (n === 1) await g; return merged; }, ...extra });
   return { started, log, decisions, calls: () => calls, open, done };
 }
-const L = (...kids) => [{ number: 1, body: "", labels: [] }, ...kids.map((n) => ({ number: n, body: "**Parent**: #1", labels: [] }))];
+const L = (...kids) => [{ number: 1, body: "", labels: [], authorAssociation: "MEMBER" }, ...kids.map((n) => ({ number: n, body: "**Parent**: #1", labels: [], authorAssociation: "MEMBER" }))];
 
 describe("#4965 auto_add_children", () => {
   it("epic: adds open children of a batch issue, one decision and one added row listing them", async () => {
@@ -40,8 +40,20 @@ describe("#4965 auto_add_children", () => {
       assert.deepEqual(r.started, [1]);
     }
   });
+  it("#4982 an untrusted author's child is not added and logs one skipped row", async () => {
+    const list = [...L(2), { number: 3, body: "**Parent**: #1", labels: [], authorAssociation: "NONE" }];
+    const r = await run({ mode: "epic", list });
+    await until(() => r.started.includes(2) && r.log.some((x) => x.outcome === "skipped"));
+    await new Promise((x) => setTimeout(x, 40));
+    r.open(); await r.done;
+    assert.ok(!r.started.includes(3));
+    const sk = r.log.filter((x) => x.outcome === "skipped");
+    assert.equal(sk.length, 1);
+    assert.equal(sk[0].issue, 3);
+    assert.match(sk[0].detail, /#3 .*untrusted author/);
+  });
   it("needs-human children and children live in another batch are not added", async () => {
-    const list = [...L(2, 3), { number: 4, body: "**Parent**: #1", labels: [{ name: "needs-human" }] }];
+    const list = [...L(2, 3), { number: 4, body: "**Parent**: #1", labels: [{ name: "needs-human" }], authorAssociation: "MEMBER" }];
     const r = await run({ mode: "all", list, elsewhere: [3] });
     await until(() => r.started.includes(2));
     await new Promise((x) => setTimeout(x, 40));
@@ -49,10 +61,10 @@ describe("#4965 auto_add_children", () => {
     assert.deepEqual([...r.started].sort(), [1, 2]);
   });
   it("an --epic root outside the batch adds its children; late children join on a later pass", async () => {
-    let list = [{ number: 50, body: "", labels: [] }, { number: 51, body: "**Parent**: #50", labels: [] }];
+    let list = [{ number: 50, body: "", labels: [], authorAssociation: "MEMBER" }, { number: 51, body: "**Parent**: #50", labels: [], authorAssociation: "MEMBER" }];
     const r = await run({ mode: "epic", epics: [50], list: () => list });
     await until(() => r.started.includes(51));
-    list = [...list, { number: 52, body: "**Parent**: #50", labels: [] }];
+    list = [...list, { number: 52, body: "**Parent**: #50", labels: [], authorAssociation: "MEMBER" }];
     await until(() => r.started.includes(52));
     r.open(); await r.done;
     assert.equal(r.log.filter((x) => x.outcome === "added").length, 2);

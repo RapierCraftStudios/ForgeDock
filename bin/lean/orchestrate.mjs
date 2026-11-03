@@ -875,6 +875,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // #4965: epic and late children (`orchestration.auto_add_children` epic|all): at most one `getChildren()` list call per poll window.
   let nextChildScan = 0, childScanFailed = false;
+  const skippedKids = new Set(); // #4982: one row per untrusted child, not one per scan
+  const skipChild = ({ number, reason }) => {
+    if (skippedKids.has(number)) return;
+    skippedKids.add(number);
+    update({ issue: number, outcome: "skipped", detail: `#${number} not auto-added: ${reason} (orchestration.auto_add_children)` });
+  };
   const drainChildren = async () => {
     if (!getChildren || !addsEpicChildren(autoChildren?.mode)) return 0;
     const t = now();
@@ -886,7 +892,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return 0;
     }
     childScanFailed = false;
-    const fresh = selectChildren({ list, roots: [...set, ...(autoChildren.epics ?? [])], skip: [...set, ...(elsewhere ?? [])] })
+    const fresh = selectChildren({ list, roots: [...set, ...(autoChildren.epics ?? [])], skip: [...set, ...(elsewhere ?? [])], onSkip: skipChild })
       .filter((n) => { try { return !(reg?.holder && reg.holder(entryOf(n)) != null); } catch { return true; } });
     if (!fresh.length) return 0;
     for (const n of pending) {
