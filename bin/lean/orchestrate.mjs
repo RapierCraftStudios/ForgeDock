@@ -516,9 +516,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const adm = admitRemote();
       if (adm.ok) {
         // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
-        let cap = null;
-        try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
-        if (typeof remote.capacity === "function") notePool(cap === null, "capacity probe failed");
+        let cap = null, probeFailed = false;
+        try { cap = remote.capacity?.() ?? null; } catch { probeFailed = true; }
+        // #5048: only a failed probe (a throw) marks the pool down; null is unknown (first pass, no capacity()) and leaves the state; a sample clears it.
+        if (probeFailed) notePool(true, "capacity probe failed"); else if (cap !== null) notePool(false);
         // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
         if (cap && cap.online === 0) {
           poolOfflineSince ??= now();

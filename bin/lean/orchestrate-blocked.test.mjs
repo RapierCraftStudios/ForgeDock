@@ -97,3 +97,26 @@ describe("remote lanes with a registry lacking the #4964 methods", () => {
     assert.deepEqual(calls, [], "a remote lane never takes a host slot");
   });
 });
+
+describe("#5048: the pool is unreachable only after a failed capacity probe", () => {
+  const run = async (capacity) => {
+    const notes = [];
+    const registry = { tryAcquire: () => ({ ok: true }), offer() {}, withdraw() {}, release() {}, setLanePid() {}, adoptSlot() {}, holder: () => null, notePool: (b, st) => notes.push(st === null ? "clear" : "down") };
+    const rows = await orchestrate({ issues: [4, 5, 6], parallel: 1, pollMs: 5, trusted: () => true, readBody: async () => "", sched: { registry, batch: "B", repo: "o/r" },
+      remote: { max: 1, isRemote: () => true, ...(capacity ? { capacity } : {}) },
+      runOne: async (n, lane, ctx) => { ctx.onStart?.({ handle: { id: `s-${n}` }, remote: true }); return merged; } });
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+    return notes;
+  };
+  it("unknown capacity (null) does not mark the pool unreachable", async () => {
+    assert.deepEqual(await run(() => null), []);
+  });
+  it("a provider without capacity() never marks the pool unreachable", async () => {
+    assert.deepEqual(await run(null), []);
+  });
+  it("a throwing probe marks it down and a later successful sample clears it", async () => {
+    let calls = 0;
+    const notes = await run(() => { if (++calls === 1) throw new Error("boom"); return { free: 1, online: 1, at: calls }; });
+    assert.deepEqual(notes, ["down", "clear"]);
+  });
+});

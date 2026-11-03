@@ -246,7 +246,7 @@ export function contextPackNote(pack) {
 /** #4857: validate-command rules for the plan prompt (the implement session resumes it), kept out of the shared templates (their token caps are guarded). */
 export function unrunnableValidateNote(testRunners = null) {
   const map = testRunners && typeof testRunners === "object" ? Object.entries(testRunners).map(([k, v]) => `${k}/ -> ${v}`).join("; ") : "";
-  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments.`;
+  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments. A post-deploy requirement needs a registered check id; one that is a manual or production-credential action with no runnable check is disposition "defer" with bucket "owner:<action>" (the engine also converts a check-less post-deploy to a defer to the orchestrator). forge.yaml validate.recipes rewrite matching commands at freeze.`;
 }
 
 export function reproPlanNote(on) {

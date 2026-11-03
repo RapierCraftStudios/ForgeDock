@@ -189,6 +189,16 @@ describe("remote adapter (#4254)", () => {
     await assert.rejects(() => q.status(h), /ECONNRESET/); // #4672: a transport error propagates; providerLanes retries it for the unreachable window
   });
 
+  it("#5053 httpTransport: a 401 on status is transient and names its hop; a launch 401 is not transient", async () => {
+    const reply = (status, body) => ({ status, ok: status < 300, text: async () => JSON.stringify(body), headers: { get: () => null } });
+    const t = httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => reply(401, { error: "unauthorized", hop: "agent", agent: "a1", reason: "agent auth: router token rejected by agent" }) });
+    await assert.rejects(t.status("x"), (e) => e.transient === true && e.hop === "agent" && e.reason === "router token rejected by agent" && /agent a1 auth: router token rejected/.test(e.message) && !e.message.includes(TOKEN));
+    await assert.rejects(t.result("x"), (e) => e.transient === true && e.status === 401);
+    await assert.rejects(t.launch({ id: "x" }), (e) => e.transient !== true && e.status === 401);
+    const r = httpTransport({ endpoint: "https://pool.example", fetchFn: async () => reply(401, { hop: "router" }) });
+    await assert.rejects(r.status("x"), /router auth/);
+  });
+
   it("httpTransport: bearer token, JSON protocol, 404 = gone/destroyed, 429 retryable; the token never in errors", async () => {
     const calls = [];
     const reply = (status, body, headers = {}) => ({ status, ok: status >= 200 && status < 300, text: async () => (body === undefined ? "" : JSON.stringify(body)), headers: { get: (k) => headers[k] ?? null } });
@@ -320,10 +330,11 @@ describe("pool provider (#4546)", () => {
 
 describe("remote capacity (GET /status, #4540)", () => {
   const mk = (res) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => { if (res instanceof Error) throw res; if (url.endsWith("/agents")) return { status: 404, ok: false, text: async () => "", headers: { get: () => null } }; assert.equal(url, "https://pool.example/v1/status"); return { status: res.status, ok: res.status < 400, text: async () => res.body ?? "", headers: { get: () => null } }; } });
-  it("free integer is reported; 404, malformed, negative and transport errors are unknown (null)", async () => {
+  it("free integer is reported; 404, malformed and negative are unknown (null); an unreachable router throws (#5048)", async () => {
     assert.deepEqual(await mk({ status: 200, body: '{"free":3}' }).capacity(), { free: 3 });
     assert.deepEqual(await mk({ status: 200, body: '{"free":0}' }).capacity(), { free: 0 });
-    for (const r of [{ status: 404 }, { status: 200, body: "nope" }, { status: 200, body: '{"free":"2"}' }, { status: 200, body: '{"free":-1}' }, new Error("down")]) assert.equal(await mk(r).capacity(), null);
+    for (const r of [{ status: 404 }, { status: 200, body: "nope" }, { status: 200, body: '{"free":"2"}' }, { status: 200, body: '{"free":-1}' }]) assert.equal(await mk(r).capacity(), null);
+    await assert.rejects(() => mk(new Error("down")).capacity(), (e) => e.unreachable === true && /pool router unreachable/.test(e.message));
   });
   it("#4788: no online on /status: derived from /agents (ok && !paused); an unreadable /agents stays unknown", async () => {
     const mkA = (status, agents) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => {
@@ -337,12 +348,12 @@ describe("remote capacity (GET /status, #4540)", () => {
     assert.deepEqual(await mkA(200, down).capacity(), { online: 0, total: 1 });
     assert.equal(await mkA(404, "nope").capacity(), null);
   });
-  it("remoteProvider.capacity delegates, and is null without a transport capability or on a throw", async () => {
+  it("remoteProvider.capacity delegates, is null without a transport capability, and passes a transport error on (#5048)", async () => {
     const batch = openBatch(join(tmpDir("cap-"), "batches"), "bt");
     const p = (transport) => remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null });
     assert.deepEqual(await p({ capacity: async () => ({ free: 1 }) }).capacity(), { free: 1 });
     assert.equal(await p({}).capacity(), null);
-    assert.equal(await p({ capacity: async () => { throw new Error("x"); } }).capacity(), null);
+    await assert.rejects(() => p({ capacity: async () => { throw new Error("x"); } }).capacity(), /x/);
   });
 });
 

@@ -116,6 +116,27 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
     assert.deepEqual(ledgerFor(7).entries("sandbox").map((e) => e.value), ["fake-7"]);
   });
 
+  it("#5053 a 401 on status/result of a launched sandbox is retried, then ends sandbox.auth (capped), never engine-error", async () => {
+    const e401 = () => Object.assign(new Error("sandbox status: HTTP 401 (agent a1 auth)"), { status: 401, hop: "agent", transient: true });
+    const mk = (failPolls) => { const prov = flaky(0); let polls = 0; prov.start = async () => ({ provider: "fake", id: "fake-7", issue: 7 });
+      prov.status = async (h) => { if (polls++ < failPolls) throw e401(); return prov.live.has(h.issue) ? "running" : "exited"; }; return prov; };
+    const ok = mk(2); ok.results[7] = { terminalReason: "merged", pr: 1 }; ok.live.delete(7);
+    assert.equal((await lanes(ok).l.runOne(7, "staging")).terminalReason, "merged");
+    const down = mk(1e9);
+    const r = await lanes(down, { unreachableWindowMs: 5000 }).l.runOne(7, "staging");
+    // release review BUG-6: a persistent 401 is sandbox.auth (capped by max_deferrals), not the uncapped sandbox.unreachable
+    assert.deepEqual([r.terminalReason, r.code, r.retryInSeconds], ["deferred", "sandbox.auth", 300]);
+    assert.match(r.detail, /agent a1 auth/);
+    assert.match(r.detail, /pool agent refused the router/);
+  });
+
+  it("#5053 launch 401 from the agent hop says the agent refused, not the forgedock token", async () => {
+    const prov = fakeProvider(); prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 401 (agent a1 auth)"), { status: 401, hop: "agent" }); };
+    const r = await lanes(prov).l.runOne(7, "staging");
+    assert.equal(r.code, "sandbox.auth");
+    assert.match(r.detail, /agent a1 auth.*pool agent refused the router/);
+  });
+
   it("unreachable: adopt applies the same tolerance, and a non-transport error is still engine-error", async () => {
     const down = flaky(1e9);
     const { l } = lanes(down, { unreachableWindowMs: 3000 });

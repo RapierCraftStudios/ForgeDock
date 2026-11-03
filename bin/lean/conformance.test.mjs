@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -910,9 +910,10 @@ describe("post-deploy check ids (#4626)", () => {
     assert.ok(validateContract(pd({ check: "Bad Id" }), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
     assert.ok(!validateContract(pd({ check: "login-smoke" }), ISSUE).problems.some((p) => /check id/.test(p)));
   });
-  it("applyAmendments: a post-deploy amendment needs a check id", () => {
+  it("applyAmendments: a post-deploy amendment without a check id is deferred to the orchestrator (#5020)", () => {
     const bad = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w" }], ISSUE);
-    assert.ok(bad.problems.some((p) => /needs a check id/.test(p)));
+    assert.deepEqual(bad.problems, []);
+    assert.equal(bad.contract.requirements[0].disposition, "defer");
     const ok = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w", check: "login-smoke" }], ISSUE);
     assert.equal(ok.contract.requirements[0].check, "login-smoke");
   });
@@ -1211,5 +1212,58 @@ describe("builder amendment slips (#5036)", () => {
   });
   it("a truly unknown kind is still rejected with the valid kinds", () => {
     assert.match(applyAmendments(C, [{ kind: "flaky-note", why: "w" }]).problems[0], /unknown kind 'flaky-note'; valid kinds are .*substitute-validate/);
+  });
+});
+
+describe("#5020 freeze-time environment defects", () => {
+  const base = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], validate: [{ id: "V1", command: "cd services/api && poetry run pytest tests/x.py" }, { id: "V2", command: "node --test a.test.mjs" }], repro_test: { path: "t.py", id: "t", command: "cd services/api && poetry run pytest t.py" } };
+  const recipes = [{ match: "poetry run pytest", replace: "uv run --with-requirements r.txt pytest" }];
+
+  it("applyValidateRecipes rewrites matching validate and repro commands and leaves the rest", () => {
+    const { contract, applied } = applyValidateRecipes(base, recipes);
+    assert.equal(contract.validate[0].command, "cd services/api && uv run --with-requirements r.txt pytest tests/x.py");
+    assert.equal(contract.validate[1].command, "node --test a.test.mjs");
+    assert.match(contract.repro_test.command, /uv run --with-requirements r\.txt pytest t\.py/);
+    assert.deepEqual(applied.map((a) => a.id), ["V1", "repro_test"]);
+    assert.equal(base.validate[0].command.includes("poetry"), true, "input is not mutated");
+  });
+  it("applyValidateRecipes ignores no recipes and invalid regexes", () => {
+    assert.equal(applyValidateRecipes(base, null).contract, base);
+    assert.equal(applyValidateRecipes(base, [{ match: "(", replace: "x" }]).applied.length, 0);
+  });
+  it("Poetry's missing-env output is env.tool_missing material, and a repro head that dies on it is an env miss", () => {
+    const run = { rc: 1, output: "Creating virtualenv api-py3.12\n\nCommand not found: pytest\n" };
+    assert.deepEqual(missingTool(run), { tool: "pytest", kind: "command" });
+    assert.deepEqual(reproEnvMiss(run), { tool: "pytest", kind: "command" });
+    assert.equal(reproEnvMiss({ rc: 1, output: "1 failed" }), null);
+    // release review BUG-1: a module the repo tracks is a real failure of the change, not an env miss
+    const mod = { rc: 1, output: "ModuleNotFoundError: No module named 'mypkg'" };
+    assert.deepEqual(reproEnvMiss(mod, { command: "pytest t.py" }), { tool: "mypkg", kind: "python-module" });
+    assert.equal(reproEnvMiss(mod, { command: "pytest t.py", repoHas: repoTracks(["src/mypkg/__init__.py"]) }), null);
+    assert.equal(reproEnvMiss({ rc: 0, output: "" }), null);
+  });
+  it("a post-deploy requirement with no check id is deferred to the orchestrator; one with a check is untouched", () => {
+    const c = { requirements: [{ id: "R1", quote: "q", disposition: "post-deploy", why: "needs prod creds" }, { id: "R2", quote: "q", disposition: "post-deploy", check: "login-smoke", why: "w" }] };
+    const { contract, converted } = deferChecklessPostDeploy(c);
+    assert.deepEqual(converted, ["R1"]);
+    assert.equal(contract.requirements[0].disposition, "defer");
+    assert.equal(contract.requirements[0].bucket, ORCHESTRATOR_BUCKET);
+    assert.equal(contract.requirements[1].disposition, "post-deploy");
+    assert.deepEqual(bucketProblems(contract.requirements[0]), []);
+  });
+  it("a post-deploy amendment with no check becomes a tracked defer instead of a problem", () => {
+    const c = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [], validate: [] };
+    const r = applyAmendments(c, [{ kind: "post-deploy", requirement: "R1", why: "manual prod action" }], "q");
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.contract.requirements[0].disposition, "defer");
+    assert.equal(r.contract.requirements[0].bucket, ORCHESTRATOR_BUCKET);
+  });
+  it("a substitute-validate that is not valid shell is rejected", () => {
+    assert.match(substituteShellProblem("pytest tests/ && ("), /./);
+    assert.equal(substituteShellProblem("pytest tests/"), null);
+    const c = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [], validate: [{ id: "V1", command: "poetry run pytest" }] };
+    const r = applyAmendments(c, [{ kind: "substitute-validate", validate: "V1", command: "uv run pytest tests/ && (", why: "poetry env missing" }], "q");
+    assert.ok(r.problems.some((p) => /not valid shell/.test(p)));
+    assert.equal(r.contract.validate[0].command, "poetry run pytest");
   });
 });

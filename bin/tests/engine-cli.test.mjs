@@ -1253,3 +1253,13 @@ describe("readLaneInstructions (#4395)", () => {
     assert.equal(readLaneInstructions(d), undefined, "unset");
   });
 });
+
+describe("#5020 readEnvConfig reads validate.recipes", () => {
+  it("returns the block map as {match, replace} recipes; absent yields none", () => {
+    const d = tmpDir("recipes-");
+    writeFileSync(join(d, "forge.yaml"), 'validate:\n  recipes:\n    "poetry run pytest": "uv run pytest"\n');
+    assert.deepEqual(readEnvConfig(d).validateRecipes, [{ match: "poetry run pytest", replace: "uv run pytest" }]);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal("validateRecipes" in readEnvConfig(d), false);
+  });
+});

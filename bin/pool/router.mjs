@@ -147,13 +147,15 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     catch (e) { log.warn?.(`forge.yaml for ${spec.repo.slug} unreadable: ${e.message}`); return spec; }
   }
 
+  /** #5053: an agent's 401 reaches the dispatcher through this router; tag it so it is not mistaken for a router auth failure. */
+  const agentBody = (r, name) => (r.status === 401 ? { ...(r.data && typeof r.data === "object" ? r.data : {}), error: "unauthorized", hop: "agent", agent: name, reason: typeof r.data?.reason === "string" ? r.data.reason : "agent auth: router token rejected by agent" } : r.data ?? {});
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
     if (known && own(agents(), known.agent)) {
       known.touched = now(); store.save();
       const r = await agentCall(own(agents(), known.agent), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...sizeFor(spec) });
-      return { status: r.status, body: r.data, retryAfter: r.retryAfter };
+      return { status: r.status, body: agentBody(r, known.agent), retryAfter: r.retryAfter };
     }
     const size = sizeFor(spec);
     const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.cpus_free >= size.cpus && c.mem_free_gb >= size.mem_gb)
@@ -162,7 +164,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
       if (r.status === 503) continue; // raced with another launch; try the next host
       if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
-      return { status: r.status, body: { ...(r.data ?? {}), agent: c.name } };
+      return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
     }
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
@@ -190,7 +192,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     try {
       const r = await agentCall(a, method, path);
       if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; relayQ.delete(id); store.save(); }
-      return { status: r.status, body: r.data };
+      return { status: r.status, body: agentBody(r, s.agent) };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
   }
 
@@ -214,7 +216,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   function enroll(body) {
-    if (!enrollOk(body?.token)) return { status: 401, body: { error: "bad enrollment token" } };
+    if (!enrollOk(body?.token)) return { status: 401, body: { error: "bad enrollment token", hop: "router", reason: "router auth: bad enrollment token" } };
     const name = String(body.name ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "");
     let url;
     try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url required" } }; }
@@ -321,14 +323,23 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   async function handle(req, res) {
     const url = new URL(req.url, "http://router");
     if (!url.pathname.startsWith("/health")) log.info?.(`${req.socket.remoteAddress} ${req.method} ${url.pathname}`); // query (tokens) never logged
+    // #5053: every rejected request is logged with its status; the sandbox id comes from the path, the repo slug from a launch body (never tokens or the query).
+    const meta = { id: /^\/sandboxes\/([^/]+)/.exec(url.pathname)?.[1] };
+    const writeHead = res.writeHead.bind(res);
+    res.writeHead = (status, ...a) => {
+      if (status >= 400 && url.pathname !== "/health") log.warn?.(`rejected ${req.method} ${url.pathname} -> ${status}${meta.id && meta.id !== "claim" ? ` sandbox=${meta.id.slice(0, 128)}` : ""}${meta.repo ? ` repo=${meta.repo}` : ""}`);
+      return writeHead(status, ...a);
+    };
     try {
       for (const [match, r] of routes) {
         const p = match(req, url);
         if (!p) continue;
-        if (r.auth === "forgedock" && !bearerOk(req, cfg.forgedock_token)) return send(res, 401, { error: "unauthorized" });
-        if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized" });
+        if (r.auth === "forgedock" && !bearerOk(req, cfg.forgedock_token)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
+        if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
         if (r.auth === "enroll" && !enrollOk(url.searchParams.get("token"))) return send(res, 401, "unauthorized\n");
         const body = req.method === "POST" ? await readJson(req) : null;
+        if (typeof body?.repo?.slug === "string") meta.repo = body.repo.slug.slice(0, 200);
+        if (typeof body?.id === "string") meta.id = body.id;
         const out = await r.fn(p, body, url, req);
         if (out.bundle) return sendBundle(res);
         if (out.image) return sendImage(res, out.image);

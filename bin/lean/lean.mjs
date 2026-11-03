@@ -15,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -64,7 +64,7 @@ import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
-import { ensureSignedOff } from "./signoff.mjs";
+import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -225,7 +225,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, validateRecipes = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -657,8 +657,8 @@ export async function runCore(o) {
   const gitPush = async (args) => {
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       try { await signOffUnpushed(); }
-      catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push the branch as-is before reporting
-        if (!e?.noIdentity) { try { await git(["push", "-u", "origin", branch]); ev({ event: "DCO_RESCUE_PUSH", branch }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
+      catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push them as-is before reporting; #5047: to a salvage ref, never the lane branch (the sign-off range excludes origin/<branch>)
+        if (!e?.noIdentity) { try { const sha = String(await git(["rev-parse", "HEAD"])).trim(), ref = salvageBranch(issue, sha); await git(["push", "origin", `${sha}:refs/heads/${ref}`]); laneHead = { branch, sha, pushedTo: ref }; ev({ event: "DCO_RESCUE_PUSH", branch: ref }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
         throw e;
       }
     } // #4590: never push .forge-lean/ or tool caches this branch added
@@ -679,14 +679,14 @@ export async function runCore(o) {
       if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
       return true;
-    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead ? await rescuePush(reason, e?.pushRejected) : false; }
+    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return laneHead ? await rescuePush(reason, e?.pushRejected || e?.engineCode === OUTCOME_CODES.ENGINE_DCO_REWRITE) : false; }
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
   async function rescuePush(reason, rejected) {
     // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
     try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
     // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
-    for (const ref of [...(rejected ? [] : [branch]), `forge-salvage/${issue}-${laneHead.sha.slice(0, 10)}`]) {
+    for (const ref of [...(rejected ? [] : [branch]), salvageBranch(issue, laneHead.sha)]) {
       try {
         await git(["push", "origin", `${laneHead.sha}:refs/heads/${ref}`]);
         laneHead.pushedTo = ref;
@@ -1089,14 +1089,14 @@ export async function runCore(o) {
 
     // ---- 2. worktree (resume an open PR / remote branch) ----
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
-    let resumed = null;
+    let resumed = null, fromSalvage = false;
     try {
       const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
       if (!prs.length && !remote) { // #4958: commits the exit rescue could only push to a salvage branch resume from there
         const salv = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/forge-salvage/${issue}-*`], { cwd })).split("\n").map((l) => l.trim().split(/\s+/)[1]).filter(Boolean).sort().at(-1);
-        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
+        if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: null, base: null }; fromSalvage = true; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
       }
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
@@ -1183,6 +1183,7 @@ export async function runCore(o) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
     wtCreated = true;
+    if (fromSalvage) await dropSalvageTracking({ git, branch }); // #5047: the salvaged commits are unpublished: the sign-off range must include them
     if (wtInfo?.sparse) {
       sparse = { excluded: wtInfo.excluded, maxKb: sparseMaxKb };
       ev({ event: "WORKTREE_SPARSE", excluded: wtInfo.excluded, excluded_bytes: wtInfo.bytes, max_kb: sparseMaxKb });
@@ -1286,7 +1287,13 @@ export async function runCore(o) {
         return null;
       }
       const rg = await heavyStep("precheck", () => io.redGreen({ cwd: wt, base, command: String(t.command), env: laneEnv() })).catch(() => null);
-      const words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
+      let words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
+      if (words.head === "FAILED" && io.runCommand) { // #5020: a head that failed because a tool or env is missing is env.repro_unrunnable, not a red-green verdict
+        const hr = await io.runCommand({ command: String(t.command), cwd: wt, timeoutMs: 120000, env: laneEnv() }).then((x) => x?.r ?? x).catch(() => null);
+        // release review BUG-1: a module the repo tracks is the change's own failure, never an env miss (same repoHas as the validate rerun)
+        const repoHas = repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
+        if (reproEnvMiss(hr, { command: String(t.command), repoHas })) words = { ...words, head: "UNRUNNABLE" };
+      }
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
       return words;
@@ -1391,6 +1398,14 @@ export async function runCore(o) {
      * #4328: probe the host for the tools and modules a contract's validate commands need; #4393: then flag `$NAME`s the lane
      * env leaves empty and run each remaining command once on the base worktree (io.preflightRun). The misses; [] without either hook.
      */
+    /** #5020: forge.yaml validate.recipes rewrite frozen commands; a check-less post-deploy requirement becomes a defer to the orchestrator. */
+    function freezeRewrites(c) {
+      const r = applyValidateRecipes(c, validateRecipes);
+      for (const x of r.applied) T.decisions.push(`validate recipe rewrote ${x.id}: \`${x.from}\` -> \`${x.to}\``);
+      const d = deferChecklessPostDeploy(r.contract);
+      if (d.converted.length) T.decisions.push(`Post-deploy with no registered check deferred to the orchestrator: ${d.converted.join(", ")}`);
+      return d.contract;
+    }
     async function preflightValidates(contract) {
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
@@ -1667,6 +1682,7 @@ export async function runCore(o) {
           return o.contract;
         };
         let contract = dropScope(await readContract());
+        contract = freezeRewrites(contract);
         await refreshIssue("contract validation");
         let vc = validateContract(contract, issueText, { repro: reproOn() });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
@@ -1675,7 +1691,7 @@ export async function runCore(o) {
           const problems = [...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)];
           T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
           await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
-          contract = dropScope(await readContract());
+          contract = freezeRewrites(dropScope(await readContract()));
           await refreshIssue("contract validation");
           vc = validateContract(contract, issueText, { repro: reproOn() });
           if (missed.length) misses = await preflightValidates(contract);
@@ -2140,7 +2156,8 @@ export async function runCore(o) {
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
-        await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all }));
+        try { await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all })); } // #5020: retried by ghw; a still-failing post is an anomaly, never an engine-error
+        catch (e) { T.anomalies.push(`FORGE:AMENDMENT comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
         T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
       }
       pendingDecisions = a.decisions; // #4737: persisted only once the PR merges
