@@ -381,11 +381,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
     if (drift?.holds) bodies.set(n, body);
-    deps.set(n, await declared(n, body));
+    const d = await declared(n, body);
     await readEstimate(n, body);
     await classifyOne(n);
     await readPriority(n);
     if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; } lanes.set(n, l); }
+    // deps marks the issue read (a resume skips it): set it last, so a concurrent setup save never persists a half-read issue (#4963)
+    deps.set(n, d);
   };
   const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
   // A milestone issue waiting on a staging fix (or the reverse) never sees that fix on its own base: surface the edge.

@@ -160,4 +160,25 @@ describe("orchestrate admit-and-hold (#5031)", async () => {
     assert.deepEqual(seen, [[7, true]]);
     assert.ok(landed.calls > 2, "the commit was re-checked while held");
   });
+
+  it("keeps the base wait across a resume: plan.json records it and a resumed batch holds the issue again", async () => {
+    const { deps, seen, landed } = mk();
+    const { readFileSync, readdirSync, writeFileSync } = await import("node:fs");
+    setTimeout(() => { landed.on = true; }, 60);
+    await quiet(() => orchestrateFromCli(["7", "--repo", "o/r", "--no-prefilter"], deps));
+    const [id] = readdirSync(deps.batchRoot);
+    const planPath = `${deps.batchRoot}/${id}/plan.json`;
+    const plan = JSON.parse(readFileSync(planPath, "utf8"));
+    assert.deepEqual(JSON.parse(JSON.stringify(plan.baseWaits)), { 7: [{ dep: 9, sha: "abc1234567890", base: "milestone/m-two" }] }, JSON.stringify(plan.baseWaits));
+    // simulate a batch stopped before #7 ran (schedd restart): clear its result, then resume with the commit not yet landed
+    const stPath = `${deps.batchRoot}/${id}/state.json`;
+    const st = JSON.parse(readFileSync(stPath, "utf8"));
+    st.results = {}; st.pending = [7]; writeFileSync(stPath, JSON.stringify(st));
+    for (const f of readdirSync(`${deps.batchRoot}/${id}`)) if (/report/.test(f)) (await import("node:fs")).rmSync(`${deps.batchRoot}/${id}/${f}`, { recursive: true, force: true });
+    landed.on = false; landed.calls = 0; seen.length = 0;
+    setTimeout(() => { landed.on = true; }, 80);
+    await quiet(() => orchestrateFromCli(["--resume", id], deps));
+    assert.deepEqual(seen, [[7, true]], "the resumed batch ran #7 only after the commit landed");
+    assert.ok(landed.calls > 1, "the commit was re-checked after the resume");
+  });
 });

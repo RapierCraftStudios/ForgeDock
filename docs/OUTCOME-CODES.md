@@ -108,13 +108,13 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 `forgedock orchestrate` recovers mechanical outcomes inside the batch:
 
 - **recoverable**:
-  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`, `contract.invalid_command` or `budget.exceeded`;
+  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`, `contract.invalid_command`, `budget.exceeded`, `conformance.unimplemented`, `conformance.omission` or `conformance.unjustified_deferral` (#5035: the recovery lane resumes the lane branch, delivers the named gap or records a defer-with-why amendment that files a tracked follow-up);
   - `contract.invalid` when the issue was edited mid-run (`issueEdited`);
   - `ci-pending` on a conflicting PR, recovered as `base.conflict`.
 
   The runner relaunches the issue once per `orchestration.recovery.max_attempts` (default 1) as a recovery lane (`run-issue --recover <code>`), under the normal admission rules. That lane removes the `needs-human` label, posts `FORGE:DECISION`, and resumes the open PR: base-sync, then CI fix rounds from the failed-check logs. Dependents stay queued. A merged recovery is reported as `recovered`. A failed one is final, keeps the recovery evidence on the row, and skips its dependents. A failed recovery stays `needs-human`: the lane re-adds the label (with a `FORGE:NEEDS_HUMAN` comment carrying the evidence) only for a final `needs-human` or `ci-pending`, and only when it is the last attempt (`attempt == max_attempts`); a non-final attempt that ends `needs-human` or `ci-pending` without another attempt following is re-labelled once by the batch runner; the batch runner re-adds it, once, for a final `engine-error` or `deferred` after the recovery pass (those may be requeued, so the lane cannot know). `invalid`, `decomposed`, `dependency-*` and `merged` never re-label. In-batch recovery is off when `engine.path: full`: the runner passes no recovery to the batch, and `run-issue --path full` rejects `--recover`.
 - **human**: `builder.blocked`, which is only reached by a typed human block: credentials, spend, promotion, customer or product-decision. It is never recovered, it skips dependents, and it is the only class in the report's escalation list.
-- **terminal**: every other code. No recovery runs, dependents are skipped, and the row is reported as `unrecovered`.
+- **terminal**: every other code, including `conformance.regression`, `conformance.guard_broken` and `conformance.scope_creep`. No recovery runs, dependents are skipped, and the row is reported as `unrecovered`.
 
 ## Known limits
 
