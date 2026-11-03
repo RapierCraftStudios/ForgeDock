@@ -5,11 +5,11 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { runSelftestLive, stripState, selftestFromCli, STEPS } from "./selftest-live.mjs";
+import { runSelftestLive, stripState, selftestFromCli, STEPS, FIXTURES, uniqueFixture } from "./selftest-live.mjs";
 
 /** A fake sandbox world. `d` toggles a defect: add4859 (--add skips), wipe4860 (body wiped), double (resume relaunches), orderBA, noRemoteAuth. */
 function world(d = {}) {
-  const w = { issues: {}, closed: [], calls: [], killed: 0, pid: 100, results: {}, order: [], deps: {}, running: {}, clock: 0, pool: !!d.pool };
+  const w = { issues: {}, closed: [], calls: [], killed: 0, stops: [], pid: 100, results: {}, order: [], deps: {}, running: {}, clock: 0, pool: !!d.pool };
   const gh = async (a) => {
     w.calls.push(a.join(" "));
     if (a[0] === "api" && a[1] === "-X" && a[2] === "PUT") return "{}";
@@ -36,7 +36,9 @@ function world(d = {}) {
     },
     orchestrate: {
       start: async (repo, issues) => { w.order.push(...issues); w.running[issues[0]] = { pid: ++w.pid }; w.a = issues[0]; return { id: "b1", kill: async () => { w.killed++; } }; },
-      resume: async (id) => { w.resumedAt = w.tick ?? 0; if (d.double) w.running[w.a] = { pid: ++w.pid }; return { id, kill: async () => { w.killed++; } }; },
+      // stop = `orchestrate --cancel`: the lane is torn down (d.nostop: the defect where only the client dies and the lane lives on)
+      stop: async (id) => { w.stops.push(id); if (!d.nostop) delete w.running[w.a]; },
+      resume: async (id) => { w.resumedAt = w.tick ?? 0; w.running[w.a] = { pid: d.nostop ? w.running[w.a]?.pid ?? ++w.pid : ++w.pid }; return { id, kill: async () => { w.killed++; } }; },
       state: async () => ({ order: w.order, deps: w.deps, running: w.running, results: w.results }),
     },
     remote: w.pool ? { run: async ({ issue }) => { w.remoteIssue = issue; return { where: d.local ? "local" : "remote", authenticated: !d.noRemoteAuth, engineVersion: d.oldEngine ? "1.37.0" : "1.39.0" }; } } : null,
@@ -73,9 +75,14 @@ describe("selftest --live steps (#4865)", () => {
     const { r } = await run({ wipe4860: true });
     assert.equal(r.ok, false); assert.equal(r.step, "body"); assert.match(r.message, /lost its body text/);
   });
-  it("a lane launched twice after --resume fails the resume step", async () => {
-    const { r } = await run({ double: true });
-    assert.equal(r.step, "resume"); assert.match(r.message, /launched again/);
+  it("resume really stops the batch (not just the client) and cleanup stops it again (#4952)", async () => {
+    const { r, w } = await run({});
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual(w.stops, ["b1", "b1"], "once in the resume step, once in cleanup");
+  });
+  it("a stop that leaves the lane running fails the resume step instead of passing vacuously (#4952)", async () => {
+    const { r } = await run({ nostop: true }, { timeoutMs: 20000 });
+    assert.equal(r.step, "resume"); assert.match(r.message, /to stop after the cancel/);
   });
   it("B merging before A fails the merge step", async () => {
     const { r } = await run({ orderBA: true });
@@ -88,6 +95,34 @@ describe("selftest --live steps (#4865)", () => {
     assert.match((await run({ pool: true, local: true })).r.message, /not in the pool/);
     const ok = await run({ pool: true });
     assert.equal(ok.w.remoteIssue, 12); assert.deepEqual(ok.w.closed, ["10", "11", "12"]);
+  });
+  it("fixtures are run-unique, so a merged run leaves nothing the next run trips on (#4952)", async () => {
+    const x = uniqueFixture(FIXTURES.node, "node", "r1"), y = uniqueFixture(FIXTURES.python, "python", "r1");
+    assert.match(x.a.body, /`src\/r1\/a\.js`.*`src\/r1\/a\.test\.js`/); assert.match(x.a.title, /\(r1\)/);
+    assert.match(y.b.body, /`r1\/b\.py`.*`r1\/test_b\.py`/);
+    const { w } = await run({});
+    assert.match(w.issues[10].body, /src\/r[0-9a-z]+\/a\.js/);
+  });
+  it("the created issue is tracked at once: A is closed when B's create fails (#4952)", async () => {
+    const { w, io } = world({}), gh = io.gh; let creates = 0;
+    io.gh = async (a) => { if (a[0] === "issue" && a[1] === "create" && ++creates === 2) throw new Error("rate limited"); return gh(a); };
+    const r = await runSelftestLive({ repo: "o/sandbox", io, pollMs: 1, timeoutMs: 60000 });
+    assert.equal(r.step, "create"); assert.deepEqual(w.closed, ["10"]);
+  });
+  it("cleanup matches branches exactly and finds PRs by the head branch it created (#4952)", async () => {
+    const { w, io } = world({ add4859: true }), gh = io.gh, log = [];
+    io.gh = async (a) => {
+      if (a[0] === "api" && a[1].includes("matching-refs/heads/forge/issue-10")) return "refs/heads/forge/issue-10\nrefs/heads/forge/issue-100\nrefs/heads/forge/issue-10-x\n";
+      if (a[0] === "api" && a[2] === "DELETE") { log.push(`del ${a[3].split("git/")[1]}`); return ""; }
+      if (a[0] === "api") return "";
+      if (a[0] === "pr" && a[1] === "list") { log.push(`list ${a[a.indexOf("--head") + 1]}`); return a.includes("forge/issue-10") ? "7\n" : ""; }
+      if (a[0] === "pr" && a[1] === "close") { log.push(`close ${a[2]}`); return ""; }
+      return gh(a);
+    };
+    const r = await runSelftestLive({ repo: "o/sandbox", io, pollMs: 1, timeoutMs: 60000 });
+    assert.deepEqual(r.cleanupErrors, []);
+    assert.deepEqual(log, ["list forge/issue-10", "close 7", "del refs/heads/forge/issue-10", "list forge/issue-10-x", "del refs/heads/forge/issue-10-x"]);
+    assert.ok(!w.calls.some((c) => /search/.test(c)), "no text search for PRs");
   });
   it("unknown fixture language fails at setup", async () => {
     assert.equal((await runSelftestLive({ repo: "o/r", lang: "ruby", io: {} })).step, "setup");

@@ -14,6 +14,8 @@ import { postMarker } from "./selftest-gate.mjs";
 import { reportNightly } from "./selftest-nightly.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 
+const BATCH_WAIT_TRIES = 60, BATCH_WAIT_MS = 1000;
+
 export class StepError extends Error {
   constructor(step, message) { super(message); this.step = step; }
 }
@@ -32,6 +34,17 @@ export const FIXTURES = {
     b: { title: "selftest B: add b()", body: "Create `b.py` with `def b(): return \"b\"` and `test_b.py` (pytest) asserting it. The test must fail on the current code." },
   },
 };
+
+/**
+ * The fixture with every path and title made unique to this run (#4952): a merged run leaves its files on the sandbox
+ * default branch, and the next run's "the test fails on the current code" premise must still hold.
+ */
+export function uniqueFixture(fx, lang, runId) {
+  const re = lang === "python" ? /`((?:test_)?[ab]\.py)`/g : /`src\/([ab](?:\.test)?\.js)`/g;
+  const dir = (m, f) => (lang === "python" ? `\`${runId}/${f}\`` : `\`src/${runId}/${f}\``);
+  const one = (i) => ({ title: `${i.title} (${runId})`, body: i.body.replace(re, dir) });
+  return { files: fx.files, a: one(fx.a), b: one(fx.b) };
+}
 
 /** The issue body with its FORGE:STATE annotation removed. */
 export const stripState = (body) => String(body ?? "").replace(/<!--\s*FORGE:STATE[\s\S]*?-->/g, "").trim();
@@ -59,16 +72,16 @@ async function checkBodies(ctx, step = "body") {
 
 export const STEPS = [
   { name: "create", run: async (ctx) => {
-    const { io, repo, fx } = ctx;
+    const { io, repo } = ctx, fx = ctx.fx = uniqueFixture(ctx.fx, ctx.lang, ctx.runId);
     for (const [path, content] of Object.entries(fx.files)) {
       await io.gh(["api", "-X", "PUT", `repos/${repo}/contents/${path}`, "-f", `message=selftest fixture ${path}`, "-f", `content=${Buffer.from(content).toString("base64")}`]).catch(() => { /* already present */ });
     }
-    const mk = async (t, body) => num(await io.gh(["issue", "create", "-R", repo, "--title", t, "--body", body]));
+    // Tracked the moment it exists: if B's create fails, A is still cleaned up.
+    const mk = async (t, body) => { const n = num(await io.gh(["issue", "create", "-R", repo, "--title", t, "--body", body])); ctx.created.push(n); return n; };
     const a = await mk(fx.a.title, fx.a.body);
     const b = await mk(fx.b.title, `${fx.b.body}\n\n**Depends on**: #${a}`);
     ctx.issues = { A: a, B: b };
     ctx.bodies = { [a]: fx.a.body, [b]: fx.b.body };
-    ctx.created.push(a, b);
   } },
   { name: "add", run: async (ctx) => {
     const { io, repo, issues } = ctx;
@@ -84,12 +97,13 @@ export const STEPS = [
     const { io, issues } = ctx;
     const pid = async () => (await io.orchestrate.state(ctx.run.id))?.running?.[issues.A]?.pid ?? null;
     const before = await waitFor(ctx, "resume", `a live lane for #${issues.A}`, pid);
+    // The batch runs inside schedd: killing the client stops nothing, so the batch itself is cancelled (#4952).
     await ctx.run.kill();
+    await io.orchestrate.stop(ctx.run.id);
+    await waitFor(ctx, "resume", `the lane of #${issues.A} (pid ${before}) to stop after the cancel`, async () => ((await pid()) ? null : { stopped: true }));
     ctx.run = await io.orchestrate.resume(ctx.run.id);
-    await io.sleep(ctx.pollMs);
-    const st = await io.orchestrate.state(ctx.run.id), after = st?.running?.[issues.A]?.pid ?? null;
-    const done = st?.results?.[issues.A];
-    if (!done && after !== before) fail("resume", `#${issues.A} was launched again after --resume (pid ${before} -> ${after}), not re-adopted`);
+    const st = await waitFor(ctx, "resume", `the batch to pick #${issues.A} up again after --resume`, async () => { const s = await io.orchestrate.state(ctx.run.id); return s?.results?.[issues.A] || s?.running?.[issues.A]?.pid ? s : null; });
+    if (!st.results?.[issues.A] && st.running?.[issues.A]?.pid === before) fail("resume", `#${issues.A} still has its pre-cancel lane (pid ${before}) after --resume: the batch was never stopped`);
     await checkBodies(ctx, "body");
   } },
   { name: "merge", run: async (ctx) => {
@@ -130,23 +144,28 @@ export const STEPS = [
 export async function runSelftestLive({ repo, lang = "node", io, timeoutMs = 45 * 60 * 1000, pollMs = 5000 }) {
   const fx = FIXTURES[lang];
   if (!fx) return { ok: false, step: "setup", message: `unknown fixture language ${lang} (node|python)`, notes: [], cleanupErrors: [] };
-  const ctx = { io, repo, fx, timeoutMs, pollMs, issues: {}, bodies: {}, created: [], notes: [], run: null };
+  const ctx = { io, repo, fx, lang, runId: `r${io.now?.().toString(36) ?? "0"}`, timeoutMs, pollMs, issues: {}, bodies: {}, created: [], notes: [], run: null };
   let out = { ok: true, step: null, message: null };
   for (const s of STEPS) {
     try { await s.run(ctx); } catch (e) { out = { ok: false, step: e.step ?? s.name, message: String(e.message ?? e) }; break; }
   }
   const cleanupErrors = [];
   const tryC = async (what, f) => { try { await f(); } catch (e) { cleanupErrors.push(`${what}: ${String(e.message ?? e).slice(0, 120)}`); } };
-  if (ctx.run) await tryC("stop orchestrate", () => ctx.run.kill());
+  if (ctx.run) {
+    await tryC("kill orchestrate client", () => ctx.run.kill());
+    await tryC("stop batch", () => io.orchestrate.stop(ctx.run.id));
+  }
   for (const n of ctx.created) {
     await tryC(`close #${n}`, () => io.gh(["issue", "close", String(n), "-R", repo]));
-    await tryC(`delete branches of #${n}`, async () => {
-      const refs = String(await io.gh(["api", `repos/${repo}/git/matching-refs/heads/forge/issue-${n}`, "--jq", ".[].ref"])).split("\n").filter(Boolean);
-      for (const ref of refs) await io.gh(["api", "-X", "DELETE", `repos/${repo}/git/${ref}`]);
-    });
-    await tryC(`close PRs of #${n}`, async () => {
-      const prs = String(await io.gh(["pr", "list", "-R", repo, "--search", `#${n} in:title,body`, "--state", "open", "--json", "number", "--jq", ".[].number"])).split("\n").filter(Boolean);
-      for (const p of prs) await io.gh(["pr", "close", p, "-R", repo, "--delete-branch"]);
+    // The prefix search over-matches (issue-5 lists issue-50): keep only this issue's own branches, then find PRs by head.
+    const own = new RegExp(`^refs/heads/forge/issue-${n}(?![0-9])`);
+    const lines = async (args) => String(await io.gh(args)).split("\n").filter(Boolean);
+    await tryC(`clean up branches of #${n}`, async () => {
+      const refs = (await lines(["api", `repos/${repo}/git/matching-refs/heads/forge/issue-${n}`, "--jq", ".[].ref"])).filter((r) => own.test(r));
+      for (const ref of refs) {
+        for (const p of await lines(["pr", "list", "-R", repo, "--head", ref.replace(/^refs\/heads\//, ""), "--state", "open", "--json", "number", "--jq", ".[].number"])) await io.gh(["pr", "close", p, "-R", repo]);
+        await io.gh(["api", "-X", "DELETE", `repos/${repo}/git/${ref}`]);
+      }
     });
   }
   return { ...out, notes: ctx.notes, cleanupErrors };
@@ -159,7 +178,11 @@ export function realIo(env = process.env, { pool = false } = {}) {
   let self;
   const root = batchRoot(env);
   const detached = (args) => { const p = spawn(process.execPath, [CLI, ...args], { detached: true, windowsHide: true, stdio: "ignore", env }); p.unref(); return { kill: async () => { try { process.kill(-p.pid, "SIGTERM"); } catch { /* gone */ } } }; };
-  const waitBatch = async (before) => { for (let i = 0; i < 60; i++) { const id = listBatches(root).find((b) => !before.has(b)); if (id) return id; await new Promise((r) => setTimeout(r, 1000)); } throw new Error("orchestrate did not create a batch within 60s"); };
+  // The batch of THIS start: new on disk, for the sandbox repo, and naming the issue we passed. A concurrent real batch is never adopted (#4952).
+  const ownBatch = (id, repo, issues) => {
+    try { const p = openBatch(root, id).readPlan(); return String(p?.repo ?? "").toLowerCase() === repo.toLowerCase() && issues.every((n) => (p?.argv ?? []).map(String).includes(String(n))); } catch { return false; }
+  };
+  const waitBatch = async (before, repo, issues) => { for (let i = 0; i < BATCH_WAIT_TRIES; i++) { const id = listBatches(root).find((b) => !before.has(b) && ownBatch(b, repo, issues)); if (id) return id; await new Promise((r) => setTimeout(r, BATCH_WAIT_MS)); } throw new Error(`orchestrate did not create a batch for ${repo} ${issues.join(",")} within ${BATCH_WAIT_TRIES * BATCH_WAIT_MS / 1000}s`); };
   return (self = {
     now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     gh: async (args) => { const r = spawnSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }); if (r.status !== 0) throw new Error(r.stderr.trim() || `gh exited ${r.status}`); return r.stdout; },
@@ -168,8 +191,10 @@ export function realIo(env = process.env, { pool = false } = {}) {
     orchestrate: {
       start: async (repo, issues, parallel) => {
         const before = new Set(listBatches(root)), h = detached(["orchestrate", ...issues.map(String), "--parallel", String(parallel), "--repo", repo]);
-        return { id: await waitBatch(before), kill: h.kill };
+        return { id: await waitBatch(before, repo, issues), kill: h.kill };
       },
+      // The batch lives in schedd, not in the client: `--cancel` is what stops it (its lanes tear down, the rest is held for --resume).
+      stop: async (id) => { const r = await self.cli(["orchestrate", "--cancel", id]); if (r.code !== 0) throw new Error(`orchestrate --cancel ${id} exited ${r.code}: ${String(r.stderr || r.stdout).slice(0, 160)}`); },
       resume: async (id) => ({ id, ...detached(["orchestrate", "--resume", id]) }),
       state: async (id) => openBatch(root, id).store.load(),
     },
@@ -180,7 +205,7 @@ export function realIo(env = process.env, { pool = false } = {}) {
       let row = null;
       try {
         while (!row && Date.now() - t0 < timeoutMs) { row = (await self.orchestrate.state(run.id))?.results?.[issue] ?? null; if (!row) await self.sleep(pollMs); }
-      } finally { await run.kill(); }
+      } finally { await run.kill(); await self.orchestrate.stop(run.id).catch(() => {}); }
       if (!row) throw new Error(`#${issue} produced no result within ${Math.round(timeoutMs / 1000)}s`);
       const v = JSON.parse(await self.gh(["issue", "view", String(issue), "-R", repo, "--json", "body,comments"]));
       const text = `${v.body}\n${v.comments.map((c) => c.body).join("\n")}`;
