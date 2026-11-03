@@ -2012,6 +2012,7 @@ The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
 `normalizeAmendment` maps the near-synonyms `supersede-guard`, `supersede` and `supersedes-guard` to `supersedes` (#4916), and the `applyAmendments` rows pre-pass expands a `supersedes` amendment carrying `guards: [...]` into one `{guard, why}` row per id (same `why`; a single `guard` is kept too). Each row still hits the `GUARD_ID_RE` check and the reviewer still judges it; other unknown kinds keep the valid-kinds error.
+#4856: `normalizeAmendment` compares kinds case-insensitively with `_` as `-` (`Scope_Deferral`), and `AMEND_SLIPS` also maps `deferred`, `deferral` and `scope-deferral` to `defer`. Only recognised kinds are rewritten, so `scope-note` and any other unlisted kind keep their spelling in the unknown-kind error (it lists `AMEND_KINDS`).
 
 ## Entry 2026-10-27 — AlterLab engine gaps (#4685)
 - A remote lane's `credentials` block naming a missing tool/module (`missingToolBlock`, lean.mjs) ends `env.tool_missing` (recoverable), not `builder.blocked`.
