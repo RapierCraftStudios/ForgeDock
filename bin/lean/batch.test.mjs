@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
@@ -75,12 +76,13 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
       { code: "merge.transient" },
       { code: "push.transient" },
       { code: "cli.idle" },
+      { code: "cli.idle" },
     ];
     const starts = [];
     const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
       runOne: async () => { starts.push(now()); const d = seq.shift(); return { terminalReason: "deferred", detail: d.code, ...d }; } });
     const gaps = starts.slice(1).map((t, i) => (t - starts[i]) / 1000);
-    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
+    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
     assert.equal(rows[0].outcome, "deferred");
     assert.match(rows[0].detail, /gave up after 3 deferrals/);
     // the usage-limit reset time and a lease expiry are honoured
@@ -287,6 +289,8 @@ describe("lane launch env (#4179)", () => {
     assert.equal(pid, 99);
     assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
     assert.equal(spawned[0].opts.env.KEEP, "1");
+    assert.equal(spawned[0].opts.windowsHide, true, "a detached lane must not open a console window on Windows");
+    assert.equal(spawned[0].opts.detached, true);
     assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
   });
 });
@@ -754,8 +758,40 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "invalid"], [2, "merged"]]);
   });
 
+  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease; an expired or unreadable one runs, and the issue's own open lane PR runs (#4931)", async () => {
+    const mk = (issue, opts) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[a.length - 1] === "body") { if (opts.body instanceof Error) throw opts.body; return opts.body ?? "{}"; }
+      if (a[0] === "issue") return issue;
+      if (a.includes("open")) { if (opts.open instanceof Error) throw opts.open; return opts.open ?? "[]"; }
+      return "[]";
+    } });
+    const lease = (until) => JSON.stringify({ body: `x\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 9, lease: { by: "core_1", until, host: "sbx", pid: 1 } })}\n-->` });
+    const OPEN = '{"state":"OPEN"}';
+    const held = await mk(OPEN, { body: lease(Date.now() + 600000) })(9);
+    assert.equal(held.outcome, "deferred"); assert.equal(held.code, "lease.held"); assert.match(held.detail, /leased by core_1 until \d{4}-/);
+    assert.equal(await mk(OPEN, { body: lease(Date.now() - 1000) })(9), null, "expired lease: run");
+    // #4931: an open feat/issue-9-lean PR is this issue's own lane (ci.red / base.conflict recovery, a relaunch after
+    // engine-error or ci-pending resumes it), never another lane's: the lane runs
+    assert.equal(await mk(OPEN, { open: '[{"number":4919}]' })(9), null, "own open lane PR: run (resume it)");
+    assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
+    assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
+  });
+  it("#4920 a deferred dispatch check launches no lane and no sandbox, and a restarted batch (new orchestrate) defers again", async () => {
+    for (const round of [1, 2]) { // round 2: a fresh orchestrate call = a daemon restart; the answer is read from GitHub each time
+      const { now, sleep } = fakeClock();
+      let launched = 0;
+      const rows = await orchestrate({ issues: [5], readBody: async () => "", now, sleep, maxDeferrals: 1,
+        remote: { max: 1, place: () => ({ where: "remote", reason: "heavy" }) },
+        dispatchCheck: async () => ({ outcome: "deferred", code: "lease.held", detail: "issue 5 leased by core_1 until 2999-01-01T00:00:00.000Z" }),
+        runOne: async () => { launched++; return { terminalReason: "merged", cost_usd: 0 }; } });
+      assert.equal(launched, 0, `round ${round}: no lane, no sandbox`);
+      assert.equal(rows[0].outcome, "deferred", `round ${round}`);
+    }
+  });
   it("makeDispatchCheck: merged head-branch PR, closed issue, open issue, unreadable answers fail open", async () => {
-    const mk = (issue, prs, events = "") => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+    const mk = (issue, prs, events = "", { body = "{}", open = "[]" } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[a.length - 1] === "body") return body; // #4920: the lease lookup
+      if (a[0] === "pr" && a.includes("open")) return open; // #4920: the open lane PR lookup
       if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason"]); if (issue instanceof Error) throw issue; return issue; }
       if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
@@ -812,7 +848,7 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.unreachable", retryInSeconds: 60 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 60000, host: true }); // #4788
-    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
+    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "sandbox.start_failed"]) {
       assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
     }
   });
@@ -838,6 +874,46 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [1, 2, 3, 4, 5, 6].map((n) => [n, "merged"]));
     assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
     assert.ok(Math.max(...capacityDefers.values()) > 3, "an issue was deferred for capacity more than maxDeferrals times");
+  });
+});
+
+describe("#4784: usage-limit deferrals", () => {
+  it("rate_limited is never capped and keeps its hold; a deferred row is requeuable", async () => {
+    assert.deepEqual(deferPolicy({ code: "rate_limited", resetAtEpochMs: 5000 }, { now: 1000, deferrals: 99, maxDeferrals: 3 }), { delayMs: 4000, hold: true });
+    const { now, sleep } = fakeClock();
+    let runs = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
+      runOne: async () => (++runs <= 6 ? { terminalReason: "deferred", code: "rate_limited", retryInSeconds: 600 } : { terminalReason: "merged", pr: 9 }) });
+    assert.equal(runs, 7);
+    assert.equal(rows[0].outcome, "merged");
+    const b = openBatch(tmpDir("batch-requeue-deferred-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1], results: { 1: { outcome: "deferred" } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
+  });
+  it("#4957: a blocker deferred on a usage limit past maxDeferrals keeps its dependents pending; the chain runs in order after the hold", async () => {
+    const { c, now, sleep } = fakeClock();
+    const bodies = { 1: "", 2: "Depends on #1", 3: "Depends on #2" };
+    const starts = [];
+    let limited = 0;
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, readBody: async (n) => bodies[n], now, sleep, maxDeferrals: 3,
+      runOne: async (n) => {
+        starts.push(n);
+        if (n === 1 && limited++ < 5) return { terminalReason: "deferred", code: "rate_limited", resetAtEpochMs: c.t + 600_000, detail: "usage limit hit" };
+        return { terminalReason: "merged" };
+      } });
+    assert.deepEqual(starts, [1, 1, 1, 1, 1, 1, 2, 3], "#2 and #3 never start before #1 merges");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+  });
+  it("a requeuable deferred row: an issue that gave up after N deferrals (#4984)", async () => {
+    const { now, sleep } = fakeClock();
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
+      runOne: async () => ({ terminalReason: "deferred", code: "followup.unavailable", detail: "no tracking issue was returned for R2" }) });
+    assert.match(rows[0].detail, /gave up after 3 deferrals/);
+    const b = openBatch(tmpDir("batch-requeue-gaveup-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1], results: { 1: { outcome: rows[0].outcome, detail: rows[0].detail } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
   });
 });
 
@@ -907,6 +983,27 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.deepEqual(ok.requeued, [5]);
     assert.equal(b.readRequeued()[0].reason, "decided");
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
+  });
+
+  it("#5000: --add/--requeue on a finished batch without a daemon clear the report and say it is not hosted", async () => {
+    const root = tmpDir("batch-add-finished-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [5], results: { 5: { outcome: "needs-human" } } });
+    b.writeReport({ rows: [], report: "x" });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN", labels: [], body: "", author: { login: "a" } }) };
+    const lines = [];
+    const run = async (argv) => { const l = console.log; console.log = (x) => lines.push(String(x)); try { return await orchestrateFromCli(argv, { batchRoot: root, io }); } finally { console.log = l; } };
+    const add = await run(["--add", "b1", "7"]);
+    assert.deepEqual(add.added, [7]);
+    assert.equal(b.readReport(), null, "a plain add reopens the finished batch for --resume");
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)), "the CLI says nothing is scheduled yet");
+    b.writeReport({ rows: [], report: "x" });
+    lines.length = 0;
+    const rq = await run(["--requeue", "b1", "5"]);
+    assert.deepEqual(rq.requeued, [5]);
+    assert.equal(b.readReport(), null);
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
   });
 });
 
@@ -1097,5 +1194,40 @@ describe("batch plan secrets (#4787)", () => {
     assert.ok(!readFileSync(join(b.dir, "plan.json"), "utf8").includes("tok-123"));
     assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
     assert.deepEqual(b.scrubPlan(), []);
+  });
+
+  it("setup reads run with bounded concurrency, keep order and deps, and write an early setup state (#4963)", async () => {
+    const saves = []; let live = 0, peak = 0;
+    const bodies = { 1: "Blocked by #2", 2: "", 3: "Depends on #1", 4: "", 5: "" };
+    const store = { load: () => null, save: (s) => saves.push(JSON.parse(JSON.stringify(s))) };
+    await orchestrate({ issues: [1, 2, 3, 4, 5], parallel: 1, store, setupConcurrency: 2, trusted: () => true,
+      readBody: async (n) => { live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 15 - n * 2)); live--; return bodies[n]; },
+      runOne: async () => ({ terminalReason: "merged" }), now: () => Date.now(), sleep: async () => {}, pollMs: 1 });
+    assert.equal(peak, 2);
+    const setupSaves = saves.filter((s) => s.phase === "setup");
+    assert.deepEqual(setupSaves[0].setup, { read: 0, total: 5 });
+    assert.equal(setupSaves.at(-1).setup.read, 5);
+    assert.deepEqual(setupSaves[0].order, [1, 2, 3, 4, 5]);
+    const last = saves.at(-1);
+    assert.equal(last.phase, undefined);
+    assert.deepEqual(last.deps, { 1: [2], 2: [], 3: [1], 4: [], 5: [] });
+  });
+
+  it("5 issues with slow gh/git calls reach their first admitted lane in a fraction of the serial setup time (#4963)", async () => {
+    const LAT = 30; // ms per gh/git call, standing in for a loaded host
+    const wait = () => new Promise((r) => setTimeout(r, LAT));
+    const firstLane = async (setupConcurrency, cache) => {
+      const io = { gh: async (a) => { await wait(); return a[0] === "repo" ? "main\n" : JSON.stringify({ milestone: null }); }, git: async () => { await wait(); return "abc\trefs/heads/staging\n"; } };
+      const t0 = Date.now(); let first = null;
+      await orchestrate({ issues: [1, 2, 3, 4, 5], parallel: 5, setupConcurrency, trusted: () => true, now: () => Date.now(), sleep: async () => {}, pollMs: 1,
+        readBody: async () => { await wait(); return ""; },
+        resolveLane: (n) => resolveLane({ issue: n, repo: "o/r", io, cwd: "/r", ...(cache ? { cache: makeLaneCache(), milestone: null } : {}) }),
+        runOne: async () => { first ??= Date.now() - t0; return { terminalReason: "merged" }; } });
+      return first;
+    };
+    const serial = await firstLane(1, false), fast = await firstLane(6, true);
+    // Serial: 5 issues x 4 calls x LAT = 600 ms; bounded + shared lookups: about 3 rounds = 90 ms. The 2-minute target is a 5x cut or better here.
+    assert.ok(fast < serial / 3, `fast ${fast} ms vs serial ${serial} ms`);
+    assert.ok(fast < 10 * LAT, `first lane after ${fast} ms`);
   });
 });

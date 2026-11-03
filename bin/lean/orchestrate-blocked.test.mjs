@@ -69,3 +69,19 @@ describe("#4773: Blocked by edges and the blocked label", () => {
     assert.deepEqual(started, [1]);
   });
 });
+
+describe("#4917: a deferred issue still waiting when the last running lane ends", () => {
+  it("stays pending in the saved state (future notBefore) while the batch stops on the breaker", async () => {
+    let failLast; const gate = new Promise((r) => { failLast = r; });
+    let saved = null;
+    const store = { load: () => null, save: (st) => { saved = st; } };
+    await orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", breaker: { errors: 1, window_min: 30 }, maxDeferrals: 3, store,
+      runOne: async (n) => {
+        if (n === 1) { setTimeout(failLast, 20); return { terminalReason: "deferred", code: "run.interrupted", retryInSeconds: 3600, cost_usd: 0 }; }
+        await gate; return { terminalReason: "engine-error", detail: "boom" };
+      } });
+    assert.ok(saved.pending.includes(1), JSON.stringify(saved.pending));
+    assert.ok(Number(saved.notBefore?.[1]) > Date.now(), JSON.stringify(saved.notBefore));
+    assert.deepEqual(saved.running, {});
+  });
+});

@@ -179,7 +179,7 @@ export function probeEnv(allow = [], env = process.env) {
 export function spawnProbe({ run, cwd, env, timeoutMs }) {
   return new Promise((resolve) => {
     let stdout = "", stderr = "", timedOut = false;
-    const child = nodeSpawn("sh", ["-c", run], { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = nodeSpawn("sh", ["-c", run], { cwd, env, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const cap = (s, d) => (s + d).slice(-OUTPUT_TAIL * 4);
     child.stdout.on("data", (d) => { stdout = cap(stdout, d); });
     child.stderr.on("data", (d) => { stderr = cap(stderr, d); });

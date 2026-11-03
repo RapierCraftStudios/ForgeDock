@@ -8,6 +8,7 @@
  * never in the range, so they are never rewritten. Deterministic, 0 LLM calls.
  */
 const SEP = "\x1f", END = "\x1e";
+const STASH_REF = "refs/forgedock/dco-stash";
 const PLACEHOLDER_RE = /@localhost$/i;
 
 /** True when the commit must be rewritten: placeholder author or committer, or no sign-off naming its author. */
@@ -59,24 +60,19 @@ export async function ensureSignedOff({ git, lane, branch, env = process.env }) 
     throw Object.assign(new Error(`${bad.length} unpushed commit(s) fail DCO (placeholder author or no sign-off: ${bad.slice(0, 5).map((c) => c.sha.slice(0, 8)).join(", ")}) and the worktree has no usable git identity to rewrite them`), { noIdentity: true });
   }
   const fenv = { FD_BAD: bad.map((c) => c.sha).join(" "), FD_NAME: name, FD_EMAIL: email, FILTER_BRANCH_SQUELCH_WARNING: "1" };
-  // filter-branch refuses on any modified or staged tracked file (#4905): park them in a commit object (not the shared stash stack), rewrite, put them back.
-  let parked = "", dirty = []; // #4905: the dirty paths are reported so the source of the dirt (validate/format output) is visible in events and the error
+  // filter-branch refuses a dirty tree (lockfile churn, build output): park tracked changes on a private ref, never the shared stash stack
   const porcelain = await ok(["status", "--porcelain", "--untracked-files=no"]);
-  if (porcelain) {
-    dirty = porcelain.split("\n").map((l) => l.replace(/^\s*\S+\s+/, "")).slice(0, 20);
-    const ident = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
-    try { parked = String(await git(["stash", "create", "forge: signoff park"], { env: ident })).trim(); } catch { parked = ""; }
-    if (parked) await git(["reset", "--hard", "-q", "HEAD"]);
-  }
+  const dirty = porcelain ? porcelain.split("\n").map((l) => l.replace(/^\s*\S+\s+/, "")).slice(0, 20) : []; // #4905: the dirty paths are reported so the source of the dirt (validate/format output) is visible
+  const saved = porcelain ? await ok(["stash", "create"]) : "";
+  if (saved) { await git(["update-ref", STASH_REF, saved]); await git(["reset", "-q", "--hard", "HEAD"]); }
   let failure = null;
   try { await git(["filter-branch", "-f", "--env-filter", ENV_FILTER, "--msg-filter", MSG_FILTER, "--", "HEAD", ...exclude], { env: fenv }); }
-  catch (e) { failure = Object.assign(new Error(`could not rewrite ${bad.length} unpushed commit(s) for DCO: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}${dirty.length ? ` (dirty tracked files: ${dirty.join(", ")})` : ""}`), { noIdentity: false }); }
-  let stashRef;
-  if (parked) {
-    try { await git(["stash", "apply", "-q", parked]); }
-    catch { stashRef = "refs/forge/signoff-stash"; await ok(["update-ref", stashRef, parked]); } // keep the work reachable, never lose it
+  catch (e) { failure = `could not rewrite ${bad.length} unpushed commit(s) for DCO: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}${dirty.length ? ` (dirty tracked files: ${dirty.join(", ")})` : ""}`; }
+  if (saved) {
+    try { await git(["stash", "apply", saved]); await ok(["update-ref", "-d", STASH_REF]); }
+    catch { failure = `${failure ? `${failure}; ` : ""}could not restore the lane's uncommitted changes after the DCO rewrite; they are kept as ${saved} (${STASH_REF})`; }
   }
-  if (failure) throw failure;
+  if (failure) throw Object.assign(new Error(failure), { noIdentity: false, engineCode: "engine.dco_rewrite" });
   await ok(["for-each-ref", "--format=delete %(refname)", "refs/original/"]).then(async (l) => { for (const r of l.split("\n").map((x) => x.replace(/^delete /, "")).filter(Boolean)) await ok(["update-ref", "-d", r]); });
-  return { rewritten: bad.length, ...(dirty.length ? { dirty } : {}), ...(stashRef ? { stashRef } : {}) };
+  return { rewritten: bad.length, ...(dirty.length ? { dirty } : {}) };
 }

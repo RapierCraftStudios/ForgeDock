@@ -43,7 +43,7 @@ export const syncChecks = (mode = "local") => (mode === "ci" ? `${LIGHT} (the en
 /** CI failed on the pushed branch (#4167): one fix round in the builder's own session. */
 export function ciFailurePrompt(failures, mode = "local") {
   const list = failures.slice(0, 10).map((f) => `#### ${f.job ?? "check"}${f.url ? ` (${f.url})` : ""}\n${f.log ? `\`\`\`\n${f.log}\n\`\`\`` : "(no log available: open the url)"}`).join("\n\n");
-  return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). A failing check whose files this diff does not touch (a flaky or timing-dependent test) is not an amendment: name the check and why it is unrelated in ${IMPLEMENTATION_FILE} and change no code for it; unknown amendment kinds are rejected. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** The repo's declared check commands (forge.yaml learned.test_commands) failed before the PR (#4240): fixed in-session. */
@@ -182,6 +182,15 @@ export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as writt
 3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
 4. Scope: does the diff change only deliverable paths and tests?`;
 
+/** #4959: reviewer-only (kept out of REVIEW_RUBRIC, which the builder prompt shares and its token budget caps). */
+const VERDICT_RULE = "A criterion asking for a validation or finding verdict (VALIDATED, FALSE_POSITIVE, INCONCLUSIVE) is met by the recorded verdict here (read by the engine from the lane's investigation) together with a regression or repro test in the diff; it needs no prose in the diff. A gap you yourself call minor is not a failing row.";
+
+/** #4959: the verdict word of an investigation note's \`**Verdict**:\` line (uppercased), or null. */
+export function investigationVerdict(md) {
+  const m = /^\*\*Verdict\*\*:\s*([A-Za-z_-]+)/m.exec(String(md ?? ""));
+  return m ? m[1].toUpperCase() : null;
+}
+
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
@@ -234,6 +243,12 @@ export function contextPackNote(pack) {
 }
 
 /** #4271: the bug-lane plan addition (lean.repro_test prefer on a bug/type:bug issue); "" when off, so the prompt is unchanged. */
+/** #4857: validate-command rules for the plan prompt (the implement session resumes it), kept out of the shared templates (their token caps are guarded). */
+export function unrunnableValidateNote(testRunners = null) {
+  const map = testRunners && typeof testRunners === "object" ? Object.entries(testRunners).map(([k, v]) => `${k}/ -> ${v}`).join("; ") : "";
+  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments.`;
+}
+
 export function reproPlanNote(on) {
   if (!on) return "";
   return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
@@ -384,7 +399,7 @@ export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of o
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, evidence and validated_by, and each null deferral_ok; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
-- amendment: a requirement with an \`amendment\` is judged against amendment.text and its why, not the quote; its issue_coverage row is covered when the amendment follows from its why. If it does not hold, mark the row partial with note "amendment: <what to change>".
+- amendment: a requirement with an \`amendment\` is judged against amendment.text and its why, not the quote; its issue_coverage row is covered when the amendment follows from its why. A requirement with \`amended_from\` was contracted defer or post-deploy and flipped to deliver: compare amended_from.quote and amended_from.why with amendment.text side by side, and mark the row partial when the rewording drops the original work or only trivially restates it. If it does not hold, mark the row partial with note "amendment: <what to change>".
 - requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change, including an outcome criterion (a metric, rate or log expectation) this change could ship as a test, metric or alert, or a read-only production check possible now (bucket verify-now). For a verify out_of_band row (measured by the named job, not in this lane) set instrumented: true only when its budget test or bench is committed and that job is configured, with that path:line as evidence; false otherwise. Do not judge the measured result.
 - post-deploy requirements: deferral_ok is false when the requirement has no \`check\` id, or its check is neither in .forge/post-deploy-checks.json on the default branch nor added by this change (the commands run from that file only).
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
@@ -441,12 +456,12 @@ export function decisionNote(comments = []) {
   return kept.length ? `\n\nBinding decisions posted after the contract froze (trusted; they override the issue text where they conflict, and the frozen contract still applies):\n${kept.join("\n---\n")}` : "";
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null }) {
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
 }
 
 /**

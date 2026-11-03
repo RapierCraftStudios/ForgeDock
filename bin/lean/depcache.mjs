@@ -146,7 +146,15 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
 
   // ---- trees ----
   const boundary = (p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=$|[/\\\\'\"\\s:;])", "g");
-  /** Hardlink `src` into `dst`; symlinks recreated; files in bin dirs that name `from` are copied with `to` instead. */
+  /** Hardlink a file; across filesystems (EXDEV, #4909) copy it with its mode so the cache is reused instead of reinstalled. */
+  function linkOrCopy(sp, dp) {
+    try { fs.linkSync(sp, dp); } catch (e) {
+      if (e?.code !== "EXDEV") throw e;
+      fs.copyFileSync(sp, dp);
+      fs.chmodSync(dp, fs.statSync(sp).mode & 0o7777);
+    }
+  }
+  /** Hardlink `src` into `dst` (copy on EXDEV); symlinks recreated; files in bin dirs that name `from` are copied with `to` instead. */
   function linkTree(src, dst, { from = null, to = null, binDir = () => false } = {}) {
     const re = from && to && from !== to ? boundary(from) : null;
     const walk = (s, d, rel) => {
@@ -165,7 +173,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
               continue;
             }
           }
-          fs.linkSync(sp, dp);
+          linkOrCopy(sp, dp);
         }
       }
     };

@@ -69,6 +69,7 @@ export function summariseLog(events, fallbackIssue = null) {
     remediated: ev.some((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate"),
     startTs, endTs, wallMs: finished && !Number.isNaN(a) && !Number.isNaN(b) ? Math.max(0, b - a) : null,
     phases,
+    ledger: finished && ev[t].phases && typeof ev[t].phases === "object" ? ev[t].phases : {}, // #4908: lane phase ledger (wall time per phase)
     contextPack,
     // #4362: builder attempts in log order with their trigger (null before the field existed)
     builderAttempts: builderCalls.map((e) => ({ attempt: e.attempt ?? null, trigger: e.trigger ?? null, restart_of: e.restart_of ?? null, cost_usd: Number.isFinite(costOf(e)) ? costOf(e) : null })),

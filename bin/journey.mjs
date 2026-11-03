@@ -642,9 +642,9 @@ export function openUrl(url) {
     if (process.platform === "win32") {
       spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore", windowsHide: true });
     } else if (process.platform === "darwin") {
-      spawnSync("open", [url], { detached: true, stdio: "ignore" });
+      spawnSync("open", [url], { detached: true, windowsHide: true, stdio: "ignore" });
     } else {
-      spawnSync("xdg-open", [url], { detached: true, stdio: "ignore" });
+      spawnSync("xdg-open", [url], { detached: true, windowsHide: true, stdio: "ignore" });
     }
   } catch {
     // Best-effort — if the browser can't be opened, the journey continues.

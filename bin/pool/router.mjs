@@ -167,6 +167,21 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
 
+  /** #4912: hand the lane to an agent's ready warm sandbox; 404 when no agent has one (the caller then launches cold). */
+  async function claim(spec) {
+    if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
+    if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
+    const size = sizeFor(spec);
+    for (const c of (await capacities()).filter((x) => x.ok && !x.paused)) {
+      const r = await agentCall(own(agents(), c.name), "POST", "/warm/claim", { spec: withForgeYaml(spec), ...size }, 30000);
+      if (!r.ok) continue;
+      sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() };
+      store.save();
+      return { status: 200, body: { ...(r.data ?? {}), agent: c.name } };
+    }
+    return { status: 404, body: { error: "no warm sandbox ready" } };
+  }
+
   async function forward(id, method, path) {
     const s = own(sbx(), id);
     const a = s && own(agents(), s.agent);
@@ -253,6 +268,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   const routes = [
     [route("GET", "/health"), { fn: async () => ({ status: 200, body: { ok: true, agents: Object.keys(agents()).length, sandboxes: Object.keys(sbx()).length } }), auth: "none" }],
     [route("POST", "/sandboxes"), fd(async (_p, body) => launch(body))],
+    [route("POST", "/sandboxes/claim"), fd(async (_p, body) => claim(body))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
@@ -325,7 +341,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
   }
 
-  return { handle, launch, tick, enroll, issueCode, capacities, status, store };
+  return { handle, launch, claim, tick, enroll, issueCode, capacities, status, store };
 }
 
 export function startRouter(cfg, deps) {

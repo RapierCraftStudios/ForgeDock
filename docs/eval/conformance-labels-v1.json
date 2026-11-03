@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "description": "Labelled conformance gate verdicts from real lanes. true-block: the gate was right to block; false-block: it blocked a correct change.",
+  "cases": [
+    { "id": "b20261031-085207#4865-a", "batch": "b20261031-085207", "issue": 4865, "kind": "conformance.omission", "label": "true-block", "note": "builder silently deferred an issue requirement" },
+    { "id": "b20261031-085207#4865-b", "batch": "b20261031-085207", "issue": 4865, "kind": "conformance.omission", "label": "true-block", "note": "same omission on the second round" },
+    { "id": "b20261031-085207#4873-omission", "batch": "b20261031-085207", "issue": 4873, "kind": "conformance.omission", "label": "true-block", "note": "builder narrowed a suggested fix" },
+    { "id": "b20261031-085207#4866", "batch": "b20261031-085207", "issue": 4866, "kind": "conformance.guard_broken", "label": "false-block", "note": "additive enum code plus its coverage entry" },
+    { "id": "b20261031-085207#4873-guard", "batch": "b20261031-085207", "issue": 4873, "kind": "conformance.guard_broken", "label": "false-block", "note": "new gh api call the base test's fake gh could not answer" },
+    { "id": "b20261031-085207#4899", "batch": "b20261031-085207", "issue": 4899, "kind": "conformance.guard_broken", "label": "false-block", "note": "intentional change to a guarded behaviour" },
+    { "id": "b20261031-085207#4887", "batch": "b20261031-085207", "issue": 4887, "kind": "conformance.scope_creep", "label": "false-block", "note": "doc edit the repo's freshness rule requires" }
+  ]
+}

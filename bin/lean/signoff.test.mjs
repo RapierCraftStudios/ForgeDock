@@ -120,4 +120,27 @@ describe("ensureSignedOff", () => {
     await assert.rejects(ensureSignedOff({ git, lane: "staging", branch: "feat/x", env: {} }), /could not rewrite 1 unpushed.*dirty tracked files: base\.txt/s);
     assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "modified\n");
   });
+
+  it("rewrites on a dirty tree (#4997): unstaged and staged tracked changes survive, no stash entry is left", async () => {
+    const f = fixture();
+    f.commit("a.txt", "unpushed placeholder", "placeholder");
+    writeFileSync(join(f.wt, "base.txt"), "churn\n");
+    writeFileSync(join(f.wt, "a.txt"), "staged\n"); f.sh("add", "a.txt");
+    const r = await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} });
+    assert.equal(r.rewritten, 1);
+    assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "churn\n");
+    assert.equal(readFileSync(join(f.wt, "a.txt"), "utf8"), "staged\n");
+    assert.equal(f.sh("stash", "list"), "");
+    assert.equal(f.sh("for-each-ref", "refs/forgedock/"), "");
+    assert.match(f.sh("log", "-1", "--format=%B"), /Signed-off-by: Lane Bot/);
+  });
+
+  it("a failed rewrite carries engineCode engine.dco_rewrite, restores the tree, and is not noIdentity (#4997)", async () => {
+    const f = fixture();
+    f.commit("a.txt", "unpushed placeholder", "placeholder");
+    writeFileSync(join(f.wt, "base.txt"), "churn\n");
+    const git = async (a, o) => { if (a[0] === "filter-branch") throw new Error("boom"); return f.git(a, o); };
+    await assert.rejects(ensureSignedOff({ git, lane: "staging", branch: "feat/x", env: {} }), (e) => e.engineCode === "engine.dco_rewrite" && e.noIdentity === false && /boom/.test(e.message));
+    assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "churn\n");
+  });
 });

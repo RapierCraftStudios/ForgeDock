@@ -272,29 +272,34 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
     assert.ok(!existsSync(join(wt, "node_modules")));
     assert.equal(snapDirs(s.root, "pnpm").length, 0);
 
-    const s2 = setup("npm");
-    const exdev = { ...fs, linkSync: () => { throw Object.assign(new Error("EXDEV: cross-device link"), { code: "EXDEV" }); } };
-    const c2 = makeDepCache({ root: s2.root, exec: s2.f.exec, env: {}, fs: exdev });
-    const wt2 = s2.lane("y");
-    const [r2] = await c2.prepare({ wt: wt2, repoKey: "r" });
-    assert.equal(r2.status, "miss-installed");
-    assert.equal(r2.published, false);
-    assert.match(r2.reason, /EXDEV/);
-    assert.ok(existsSync(join(wt2, "node_modules/left-pad/index.js")), "the lane keeps its own install");
-    assert.equal(snapDirs(s2.root, "npm").length, 0);
-    assert.deepEqual(readdirSync(join(s2.root, "r")), [], "no tmp or lock left");
-    // A published snapshot that cannot be linked (EXDEV) is skipped and leaves nothing half-linked.
-    await s2.cache.prepare({ wt: s2.lane("z"), repoKey: "r" });
-    const wt3 = s2.lane("w");
-    const [r3] = await c2.prepare({ wt: wt3, repoKey: "r" });
-    assert.equal(r3.status, "skipped");
-    assert.ok(!existsSync(join(wt3, "node_modules")));
+    const s4x = setup("npm");
+    const noLink = makeDepCache({ root: s4x.root, exec: s4x.f.exec, env: {}, fs: { ...fs, linkSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } });
+    const [rx] = await noLink.prepare({ wt: s4x.lane("y"), repoKey: "r" });
+    assert.equal(rx.status, "miss-installed");
+    assert.equal(rx.published, false);
+    assert.equal(snapDirs(s4x.root, "npm").length, 0);
 
     const s4 = setup("npm");
     const c4 = makeDepCache({ root: s4.root, exec: async (cmd, args) => { if (cmd === "git" || args[0] === "--version") return s4.f.exec(cmd, args, { cwd: s4.base }); throw Object.assign(new Error("spawn npm ENOENT"), { code: "ENOENT" }); }, env: {} });
     const [r4] = await c4.prepare({ wt: s4.lane("v"), repoKey: "r" });
     assert.equal(r4.status, "failed");
     assert.match(r4.reason, /tool not found/);
+  });
+
+  it("with the cache on another filesystem (EXDEV) a second lane with the same lock hash copies the snapshot: deps hit, no install (#4909)", async () => {
+    const s = setup("npm");
+    const exdev = { ...fs, linkSync: () => { throw Object.assign(new Error("EXDEV: cross-device link"), { code: "EXDEV" }); } };
+    const c = makeDepCache({ root: s.root, exec: s.f.exec, env: {}, fs: exdev });
+    const [r1] = await c.prepare({ wt: s.lane("a"), repoKey: "r" });
+    assert.equal(r1.status, "miss-installed");
+    assert.equal(r1.published, true, "published by copy");
+    const installs = () => s.f.calls.filter((x) => x.cmd !== "git" && x.args[0] !== "--version").length;
+    const before = installs();
+    const wt2 = s.lane("b");
+    const [r2] = await c.prepare({ wt: wt2, repoKey: "r" });
+    assert.equal(r2.status, "hit");
+    assert.equal(installs(), before, "no install on the second lane");
+    assert.ok(existsSync(join(wt2, "node_modules/left-pad/index.js")));
   });
 
   it("no lockfile, yarn Plug'n'Play, an existing node_modules and FORGE_DEPCACHE=0 are skipped untouched", async () => {

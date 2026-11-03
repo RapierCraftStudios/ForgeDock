@@ -214,7 +214,8 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
       quality[t] = group(xs);
     }
     acceptance = { pass: 0, fail: 0, pending: 0, unprobed: 0 };
-    for (const m of merged) if (m.info) acceptance[acceptanceOf(m.info.comments, now)]++;
+    acceptance.unprobed_issues = []; // #4908: which merged issues declare no outcome probe
+    for (const m of merged) if (m.info) { const k = acceptanceOf(m.info.comments, now); acceptance[k]++; if (k === "unprobed") acceptance.unprobed_issues.push(m.issue); }
     acceptance.probed = acceptance.pass + acceptance.fail + acceptance.pending;
     acceptance.pass_rate = r(per(acceptance.pass, acceptance.pass + acceptance.fail));
   }
@@ -394,6 +395,7 @@ export function formatEfficiencyLines(m, label = "") {
   const a = m.acceptance;
   lines.push(a ? `acceptance (7d after promotion): pass ${a.pass}/${a.pass + a.fail}${a.pass_rate == null ? "" : ` (${Math.round(a.pass_rate * 100)}%)`}, pending ${a.pending}, unprobed ${a.unprobed}`
     : "acceptance (7d after promotion): n/a");
+  if (a) lines.push(`unprobed merged issues (no acceptance probe declared): ${a.unprobed_issues?.length ? a.unprobed_issues.map((n) => `#${n}`).join(", ") : "none"}`); // #4908
   lines.push(`tools: calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads (>=3x same path)/merge ${f(m.rereads_per_merge)}`); // #4410
   const ln = m.lanes; // #4452
   lines.push(ln ? `lanes: ${LANE_SHAPES.map((k) => `${k} ${ln[k]?.n ?? 0} (${usd(ln[k]?.cost_usd ?? 0)})`).join(", ")}; upgrade rate ${ln.upgrade_rate == null ? "n/a"
