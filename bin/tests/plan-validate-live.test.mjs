@@ -80,6 +80,12 @@ describe("parallel start gate", () => {
     const u = await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: g, isAncestor: async (s) => s === "sha8" });
     assert.deepEqual(u.map((x) => x.dep), [9]);
   });
+  it("tags a merged dependency whose commit is missing as kind commit with its sha, and an open one as other", async () => {
+    const [c] = await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: synced("abc1234567890"), isAncestor: async () => false });
+    assert.deepEqual([c.kind, c.sha], ["commit", "abc1234567890"]);
+    const [o] = await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: gh({ state: "OPEN" }) });
+    assert.deepEqual([o.kind, o.sha], ["other", null]);
+  });
   it("passes when the dependency is merged into the lane", async () => {
     const g = async (a) => (a[0] === "pr" ? JSON.stringify({ baseRefName: "milestone/m2", mergedAt: "x" }) : gh({ state: "CLOSED", closedByPullRequestsReferences: [{ number: 3 }] })(a));
     assert.deepEqual(await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: g }), []);
@@ -122,5 +128,36 @@ describe("orchestrate parallel milestone start", async () => {
     const dirs = readdirSync(deps.batchRoot);
     const plan = readdirSync(`${deps.batchRoot}/${dirs[0]}`).find((f) => /plan/.test(f));
     assert.match(readFileSync(`${deps.batchRoot}/${dirs[0]}/${plan}`, "utf8"), /"forced":\s*"9 lands tomorrow"/);
+  });
+});
+
+describe("orchestrate admit-and-hold (#5031)", async () => {
+  const { orchestrateFromCli } = await import("../engine-cli.mjs");
+  const { tmpDir } = await import("./_tmp.mjs");
+  const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
+  // #9 is closed by a PR merged into staging (sha abc...); #7 (lane main) waits until `landed.on` flips.
+  const mk = () => {
+    const landed = { on: false, calls: 0 };
+    const io = { gh: async (a) => {
+      if (a[0] === "repo" && a[1] === "view") return "main\n";
+      if (a[0] === "issue" && a[2] === "7") return JSON.stringify({ body: "Depends on #9", milestone: { title: "M Two" } });
+      if (a[0] === "issue" && a[2] === "9") return JSON.stringify({ state: "CLOSED", closedByPullRequestsReferences: [{ number: 3 }] });
+      if (a[0] === "pr") return JSON.stringify({ baseRefName: "staging", mergedAt: "x", mergeCommit: { oid: "abc1234567890" } });
+      return "o/r\n";
+    }, git: async (a) => { if (a.includes("--is-ancestor")) { landed.calls++; if (!landed.on) throw new Error("not ancestor"); } return ""; } };
+    const leanIo = { gh: async (a) => (a[0] === "repo" ? "main\n" : JSON.stringify({ milestone: { title: "M Two" }, body: "" })),
+      git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
+    const seen = [];
+    const deps = { dir: tmpDir("pvl-"), batchRoot: tmpDir("pvl-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io, leanIo, pollMs: 10,
+      leanModule: { runCore: async (o) => { seen.push([o.issue, landed.on]); return { terminalReason: "merged", pr: 1, cost_usd: 0, wall_ms: 1 }; } } };
+    return { deps, seen, landed };
+  };
+
+  it("admits an issue whose dependency commit is not on the base and runs it only once the commit lands", async () => {
+    const { deps, seen, landed } = mk();
+    setTimeout(() => { landed.on = true; }, 80);
+    await quiet(() => orchestrateFromCli(["7", "--repo", "o/r", "--no-prefilter"], deps));
+    assert.deepEqual(seen, [[7, true]]);
+    assert.ok(landed.calls > 2, "the commit was re-checked while held");
   });
 });
