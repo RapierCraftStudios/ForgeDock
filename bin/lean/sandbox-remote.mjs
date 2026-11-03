@@ -60,8 +60,14 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     return { status: res.status, ok: res.ok, data, retryAfter: res.headers?.get?.("retry-after") ?? null };
   };
   const fail = (what, r) => {
-    const e = new Error(`sandbox ${what}: HTTP ${r.status}`);
+    // #5053: a 401 names the hop that answered it (router or agent; the pool tags the body), never the token.
+    const hop = r.status === 401 && ["router", "agent"].includes(r.data?.hop) ? r.data.hop : null;
+    const who = hop === "agent" && typeof r.data?.agent === "string" ? `agent ${r.data.agent.slice(0, 64)}` : hop;
+    const reason = hop && typeof r.data?.reason === "string" ? r.data.reason.replace(/^(router|agent) auth: /, "").replace(/[^\x20-\x7e]/g, "").slice(0, 80) : "";
+    const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth${reason ? `: ${reason}` : ""})` : ""}`);
     e.status = r.status;
+    if (hop) e.hop = hop;
+    if (reason) e.reason = reason;
     if ([502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll
     if (r.status === 429 || r.status === 503) { e.retryable = true; const n = Number(r.retryAfter); if (Number.isFinite(n) && n > 0) e.retryInSeconds = n; }
     return e;
@@ -74,12 +80,12 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async status(id) {
       const r = await call("GET", p(id));
       if (r.status === 404) return "gone";
-      if (!r.ok) throw fail("status", r);
+      if (!r.ok) throw Object.assign(fail("status", r), r.status === 401 ? { transient: true } : {}); // #5053: the sandbox launched, so a 401 is retried like an unreachable pool
       const s = String(r.data?.state ?? "");
       return s === "running" || s === "pending" || s === "starting" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
-    async result(id) { const r = await call("GET", `${p(id)}/result`); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
+    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },

@@ -590,7 +590,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   // A start failure repeats on a relaunch: typed, never engine-error (#4254). Retryable (capacity) defers with backoff.
   // #4685: a refused or missing credential defers with its own code (a fixed token is picked up on the retry), never needs-human.
   const startFailed = (id, e) => ([401, 403].includes(e?.status)
-    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)` }
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; ${e?.hop === "agent" ? "the pool agent refused the router (re-enroll or fix the agent token)" : "check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)"}` }
     : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     : isCloneFailure(errText(e)) ? cloneDeferred(id, errText(e))
