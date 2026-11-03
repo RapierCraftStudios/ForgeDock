@@ -22,3 +22,6 @@ No env vars. Hold-instead-of-refuse is deferred.
 
 ### Docs
 - devdocs/modules/lean.md entry + index.yaml glob `scripts/plan-validate-live*` so the freshness check maps the script to the lean dossier.
+
+### Follow-up (scope)
+devdocs/index.yaml and devdocs/modules/lean.md are changed too: check-devdocs-freshness.sh fails without a dossier mapping for scripts/plan-validate-live.mjs. Recorded as add-deliverable amendments in result.json.
