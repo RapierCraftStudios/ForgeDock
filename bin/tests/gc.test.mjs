@@ -409,11 +409,17 @@ describe("forge.yaml hygiene (#4183)", () => {
     assert.match(r.out, /feat\/issue-1-lean  \(delete_merged_branches: false\)/);
   });
 
+  it("hygiene ignores unrelated unlabelled docker containers (#4962)", async () => {
+    const w = world({ containers: [{ Names: "shop-db-1", CreatedAt: dockerTime(NOW - 30 * H), Labels: "com.docker.compose.project=shop", Size: "1kB" }] });
+    const c = hygieneCheck(await planGcFor(w));
+    assert.equal(c.stale, 0); assert.equal(c.status, "pass");
+  });
+
   it("doctor Resource hygiene check: counts/sizes of owned leftovers, warns on reclaimable and unowned stale; --fix applies", async () => {
     const w = world({
       containers: [
         { Names: "lean1-pg", CreatedAt: dockerTime(NOW - 10 * H), Labels: "forgedock.owner=1", Size: "1kB" },
-        { Names: "users-db", CreatedAt: dockerTime(NOW - 30 * H), Labels: "", Size: "1kB" },
+        { Names: "forgedock-users-db", CreatedAt: dockerTime(NOW - 30 * H), Labels: "", Size: "1kB" },
       ],
     });
     const plan = await planGcFor(w);
