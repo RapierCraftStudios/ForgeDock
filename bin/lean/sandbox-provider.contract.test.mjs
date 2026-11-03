@@ -191,8 +191,8 @@ describe("remote adapter (#4254)", () => {
 
   it("#5053 httpTransport: a 401 on status is transient and names its hop; a launch 401 is not transient", async () => {
     const reply = (status, body) => ({ status, ok: status < 300, text: async () => JSON.stringify(body), headers: { get: () => null } });
-    const t = httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => reply(401, { error: "unauthorized", hop: "agent", agent: "a1" }) });
-    await assert.rejects(t.status("x"), (e) => e.transient === true && e.hop === "agent" && /agent a1 auth/.test(e.message) && !e.message.includes(TOKEN));
+    const t = httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => reply(401, { error: "unauthorized", hop: "agent", agent: "a1", reason: "agent auth: router token rejected by agent" }) });
+    await assert.rejects(t.status("x"), (e) => e.transient === true && e.hop === "agent" && e.reason === "router token rejected by agent" && /agent a1 auth: router token rejected/.test(e.message) && !e.message.includes(TOKEN));
     await assert.rejects(t.result("x"), (e) => e.transient === true && e.status === 401);
     await assert.rejects(t.launch({ id: "x" }), (e) => e.transient !== true && e.status === 401);
     const r = httpTransport({ endpoint: "https://pool.example", fetchFn: async () => reply(401, { hop: "router" }) });

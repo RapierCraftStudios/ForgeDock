@@ -442,4 +442,5 @@ test("router logs rejected requests and tags the hop that answered 401 (#5053)",
   const viaAgent = await get("/sandboxes/s1", "fd");
   assert.equal(viaAgent.status, 401);
   assert.deepEqual([viaAgent.body.hop, viaAgent.body.agent], ["agent", "a1"]);
+  assert.match(viaAgent.body.reason, /^agent auth/);
 });

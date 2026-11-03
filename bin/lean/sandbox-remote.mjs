@@ -63,9 +63,11 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     // #5053: a 401 names the hop that answered it (router or agent; the pool tags the body), never the token.
     const hop = r.status === 401 && ["router", "agent"].includes(r.data?.hop) ? r.data.hop : null;
     const who = hop === "agent" && typeof r.data?.agent === "string" ? `agent ${r.data.agent.slice(0, 64)}` : hop;
-    const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth)` : ""}`);
+    const reason = hop && typeof r.data?.reason === "string" ? r.data.reason.replace(/^(router|agent) auth: /, "").replace(/[^\x20-\x7e]/g, "").slice(0, 80) : "";
+    const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth${reason ? `: ${reason}` : ""})` : ""}`);
     e.status = r.status;
     if (hop) e.hop = hop;
+    if (reason) e.reason = reason;
     if ([502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll
     if (r.status === 429 || r.status === 503) { e.retryable = true; const n = Number(r.retryAfter); if (Number.isFinite(n) && n > 0) e.retryInSeconds = n; }
     return e;

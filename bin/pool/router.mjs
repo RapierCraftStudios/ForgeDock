@@ -148,7 +148,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   /** #5053: an agent's 401 reaches the dispatcher through this router; tag it so it is not mistaken for a router auth failure. */
-  const agentBody = (r, name) => (r.status === 401 ? { ...(r.data && typeof r.data === "object" ? r.data : {}), error: "unauthorized", hop: "agent", agent: name } : r.data ?? {});
+  const agentBody = (r, name) => (r.status === 401 ? { ...(r.data && typeof r.data === "object" ? r.data : {}), error: "unauthorized", hop: "agent", agent: name, reason: typeof r.data?.reason === "string" ? r.data.reason : "agent auth: router token rejected by agent" } : r.data ?? {});
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);

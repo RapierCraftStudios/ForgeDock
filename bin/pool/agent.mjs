@@ -240,7 +240,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   async function sandboxCred(id, kind, req) {
     const r = own(id);
     const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
-    if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized", hop: "agent" } };
+    if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized", hop: "agent", reason: "agent auth: bad sandbox credential" } };
     if (!CRED_TTL[kind]) return { status: 404, body: { error: "unknown credential" } };
     const c = credCache[kind];
     if (!c || now() - c.at > CRED_TTL[kind]) {
@@ -256,7 +256,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   async function sandboxRelay(id, rid, req) {
     const r = own(id);
     const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
-    if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized", hop: "agent" } };
+    if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized", hop: "agent", reason: "agent auth: bad sandbox credential" } };
     const lane = r.alias ?? r.id; // #4935: a claimed warm sandbox posts under its warm id, but the router queue and the dispatcher use the lane id
     const path = `/agent/relay/${encodeURIComponent(lane)}${rid ? `/${encodeURIComponent(rid)}` : ""}`;
     const x = rid ? await call(cfg.router_url, "GET", path, { token: cfg.token, timeoutMs: 20000 })
@@ -400,7 +400,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (cred) { const r = await sandboxCred(decodeURIComponent(cred[1]), cred[2], req); return send(res, r.status, r.body); }
       const relay = (req.method === "POST" && /^\/sandboxes\/([^/]+)\/relay$/.exec(url.pathname)) || (req.method === "GET" && /^\/sandboxes\/([^/]+)\/relay\/([^/]+)$/.exec(url.pathname));
       if (relay) { const r = await sandboxRelay(decodeURIComponent(relay[1]), relay[2] ? decodeURIComponent(relay[2]) : null, req); return send(res, r.status, r.body ?? {}); }
-      if (url.pathname !== "/health" && !bearerOk(req, cfg.token)) return send(res, 401, { error: "unauthorized", hop: "agent" });
+      if (url.pathname !== "/health" && !bearerOk(req, cfg.token)) return send(res, 401, { error: "unauthorized", hop: "agent", reason: "agent auth: router token rejected by agent" });
       for (const [match, fn] of routes) {
         const p = match(req, url);
         if (!p) continue;
