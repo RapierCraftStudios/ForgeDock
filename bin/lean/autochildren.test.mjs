@@ -26,12 +26,12 @@ describe("#4965 modes", () => {
 describe("#4965 selectChildren", () => {
   const list = [
     { number: 1, body: "epic", labels: [], subIssues: { nodes: [{ number: 5 }, { number: 9 }] } },
-    { number: 2, body: "x\n\n**Parent**: #1", labels: [] },
-    { number: 3, body: "", labels: [], parent: { number: 1 } },
-    { number: 4, body: "**Parent**: #1", labels: [{ name: "needs-human" }] },
-    { number: 5, body: "", labels: [] },
-    { number: 6, body: "**Parent**: #77", labels: [] },
-    { number: 7, body: "**Parent**: #1", labels: [] },
+    { number: 2, body: "x\n\n**Parent**: #1", labels: [], authorAssociation: "MEMBER" },
+    { number: 3, body: "", labels: [], parent: { number: 1 }, authorAssociation: "MEMBER" },
+    { number: 4, body: "**Parent**: #1", labels: [{ name: "needs-human" }], authorAssociation: "MEMBER" },
+    { number: 5, body: "", labels: [], authorAssociation: "MEMBER" },
+    { number: 6, body: "**Parent**: #77", labels: [], authorAssociation: "MEMBER" },
+    { number: 7, body: "**Parent**: #1", labels: [], authorAssociation: "MEMBER" },
   ];
   it("finds children by Parent line, parent field and sub-issues; skips needs-human, closed sub-issues and unrelated", () => {
     assert.deepEqual(selectChildren({ list, roots: [1], skip: [1] }), [2, 3, 5, 7]);
@@ -42,8 +42,25 @@ describe("#4965 selectChildren", () => {
   it("an --epic root outside the batch yields its children", () => {
     assert.deepEqual(selectChildren({ list, roots: [77] }), [6]);
   });
+  it("#4982 selectChildren drops children of an untrusted author and reports each", () => {
+    const l = [
+      { number: 1, body: "", labels: [], authorAssociation: "OWNER", subIssues: { nodes: [{ number: 5 }] } },
+      { number: 2, body: "**Parent**: #1", labels: [], authorAssociation: "NONE", author: { login: "eve" } },
+      { number: 3, body: "**Parent**: #1", labels: [], authorAssociation: "MEMBER" },
+      { number: 4, body: "**Parent**: #1", labels: [], author: { login: "app", is_bot: true } },
+      { number: 5, body: "", labels: [] },
+      { number: 6, body: "", labels: [], parent: { number: 1 } },
+    ];
+    const skipped = [];
+    assert.deepEqual(selectChildren({ list: l, roots: [1], skip: [1], onSkip: (s) => skipped.push(s) }), [3, 4]);
+    assert.deepEqual(skipped, [2, 5, 6].map((number) => ({ number, reason: "untrusted author" })));
+  });
+  it("#4982 readChildList merges the REST author association per issue", async () => {
+    const gh = async (a) => a[0] === "api" ? "1\tMEMBER\n" : a.includes("--help") ? "JSON FIELDS\n  number, body, labels, author\n\nEXAMPLES\n" : "[{\"number\":1},{\"number\":2}]";
+    assert.deepEqual(await readChildList({ gh, repo: "o/r" }), [{ number: 1, authorAssociation: "MEMBER" }, { number: 2, authorAssociation: undefined }]);
+  });
   it("children filed later appear on a later list", () => {
-    assert.deepEqual(selectChildren({ list: [...list, { number: 8, body: "**Parent**: #1", labels: [] }], roots: [1], skip: [1, 2, 3, 5, 7] }), [8]);
+    assert.deepEqual(selectChildren({ list: [...list, { number: 8, body: "**Parent**: #1", labels: [], authorAssociation: "MEMBER" }], roots: [1], skip: [1, 2, 3, 5, 7] }), [8]);
   });
 });
 
@@ -59,17 +76,17 @@ describe("#4965 readers", () => {
   };
   it("readChildList asks the host gh for its fields, then makes one list call", async () => {
     const calls = [];
-    const r = await readChildList({ gh: fakeGh(["number", "body", "labels", "parent", "subIssues", "title"], calls), repo: "o/r" });
-    assert.equal(calls.filter((a) => !a.includes("--help")).length, 1);
-    assert.equal(calls.at(-1)[calls.at(-1).indexOf("--json") + 1], "number,body,labels,parent,subIssues");
-    assert.deepEqual(r, [{ number: 1 }]);
+    const r = await readChildList({ gh: fakeGh(["number", "body", "labels", "author", "parent", "subIssues", "title"], calls), repo: "o/r" });
+    assert.equal(calls.filter((a) => a.includes("--json")).length, 1);
+    assert.equal(calls.findLast((a) => a.includes("--json"))[calls.findLast((a) => a.includes("--json")).indexOf("--json") + 1], "number,body,labels,author,parent,subIssues");
+    assert.deepEqual(r, [{ number: 1, authorAssociation: undefined }]);
   });
   it("a host gh without parent/subIssues still lists, with the fields it has (children found by Parent line)", async () => {
     const calls = [];
-    const gh = fakeGh(["number", "body", "labels", "title"], calls);
-    assert.deepEqual(await hostListFields(gh), ["number", "body", "labels"]);
-    assert.deepEqual(await readChildList({ gh, repo: "o/r" }), [{ number: 1 }]);
-    assert.equal(calls.at(-1)[calls.at(-1).indexOf("--json") + 1], "number,body,labels");
+    const gh = fakeGh(["number", "body", "labels", "author", "title"], calls);
+    assert.deepEqual(await hostListFields(gh), ["number", "body", "labels", "author"]);
+    assert.deepEqual(await readChildList({ gh, repo: "o/r" }), [{ number: 1, authorAssociation: undefined }]);
+    assert.equal(calls.findLast((a) => a.includes("--json"))[calls.findLast((a) => a.includes("--json")).indexOf("--json") + 1], "number,body,labels,author");
   });
   it("liveElsewhere holds the unsettled issues of other live batches of the repo only", () => {
     const mk = (o) => ({ readReport: () => o.report ?? null, readPlan: () => ({ repo: o.repo ?? "o/r" }), store: { load: () => ({ order: o.order, results: o.results ?? {} }) } });
@@ -109,11 +126,12 @@ appendFileSync(${JSON.stringify(launches)}, a[1] + "\\n"); writeFileSync(rf, JSO
     b.setParallel(2);
     const lists = [];
     const gh = async (a) => {
-      if (a[0] === "issue" && a[1] === "list" && a.includes("--help")) return "JSON FIELDS\n  number, body, labels, parent, subIssues\n\nEXAMPLES\n";
-      if (a[0] === "issue" && a[1] === "list" && a.includes("--state") && a.includes("number,body,labels,parent,subIssues")) { lists.push(a); return JSON.stringify([{ number: 9, body: "", labels: [] }, { number: 51, body: "**Parent**: #9", labels: [] }]); }
+      if (a[0] === "issue" && a[1] === "list" && a.includes("--help")) return "JSON FIELDS\n  number, body, labels, author, parent, subIssues\n\nEXAMPLES\n";
+      if (a[0] === "issue" && a[1] === "list" && a.includes("--state") && a.includes("number,body,labels,author,parent,subIssues")) { lists.push(a); return JSON.stringify([{ number: 9, body: "", labels: [], authorAssociation: "MEMBER" }, { number: 51, body: "**Parent**: #9", labels: [], authorAssociation: "MEMBER" }]); }
+      if (a[0] === "api" && /issues\?state=open/.test(a[1])) return "9\tMEMBER\n51\tMEMBER\n";
       if (a.includes("milestone")) return JSON.stringify({ milestone: null });
       if (a[0] === "repo") return "main\n";
-      return JSON.stringify({ body: "", state: "OPEN", labels: [] });
+      return JSON.stringify({ body: "", state: "OPEN", labels: [], authorAssociation: "MEMBER" });
     };
     const deps = { batchRoot: root, allowTmpfs: true, laneScript: stub, pollMs: 20, orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\n" },
       leanIo: { gh, git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") } };

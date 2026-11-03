@@ -32,7 +32,7 @@ export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE } from "./postdeploy-check.mjs";
-import { normaliseDecision, deadAnchors } from "./decisions.mjs";
+import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -325,10 +325,14 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate", "out-of-band"];
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "verification-substitution": "substitute-validate", "out-of-band-verification": "out-of-band" };
+// #5036: annotation-only kinds change no requirement: recorded for the reviewer, never a problem (like UNRELATED_CI_KIND)
+const INFO_KINDS = ["scope-note", "scope", "scope-clarification", "interpretation", "environment", "validation-unavailable"];
+// #5036: deferral-shaped kinds (scope narrowing/reduction, defer-*, deferred-*) are `defer` once they name a requirement
+const DEFER_FAMILY_RE = /^(?:scope-(?:narrowing|reduction)|defer-.+|deferred-.+)$/;
 // #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
 const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
@@ -341,7 +345,8 @@ function normalizeAmendment(a) {
   // #4856: kinds compare case-insensitively with `_` as `-`; only a recognised kind or alias is rewritten, so unknown kinds keep their spelling in the error
   if (typeof n.kind === "string") {
     const k = n.kind.trim().toLowerCase().replace(/_/g, "-");
-    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k)) n.kind = k;
+    if (AMEND_KINDS.includes(k) || Object.hasOwn(AMEND_SLIPS, k) || INFO_KINDS.includes(k)) n.kind = k;
+    else if (DEFER_FAMILY_RE.test(k) && (!blank(n.requirement) || /^R\d+$/.test(String(n.id ?? "")))) n.kind = "defer";
   }
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
@@ -368,6 +373,7 @@ function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
     : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+      : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
@@ -407,6 +413,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
   for (let { a, raw } of rows) {
     // an unrelated out-of-diff CI failure is not a contract change: informational, never a problem
     if (a?.kind === UNRELATED_CI_KIND) { applied.push({ kind: a.kind, target: String(a.target ?? "unrelated check"), why: String(a.why ?? "").trim() || "unrelated to the diff" }); continue; }
+    if (INFO_KINDS.includes(a?.kind)) { applied.push({ kind: a.kind, target: String(a.target ?? a.requirement ?? a.id ?? "note").slice(0, 60), why: String(a.why ?? a.text ?? a.note ?? "").trim() || "informational" }); continue; }
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (a && blank(a.why) && !blank(defaultWhy)) a = { ...a, why: String(defaultWhy) }; // the engine demanded the change: its reason is the why
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
@@ -429,6 +436,14 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // SEC-11: a second substitute of the same id keeps the frozen command as `from`, so the engine always reruns the original
       v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
       applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
+      continue;
+    } else if (a.kind === "out-of-band" && !blank(a.requirement) && !blank(a.evidence ?? a.job)) {
+      // #5036: the existing out_of_band path for a deliver requirement; evidence names the job that measures it
+      const r = c.requirements.find((x) => x.id === a.requirement);
+      if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
+      if (r.disposition !== "deliver") { problems.push(`out-of-band ${r.id}: applies only to a deliver requirement`); continue; }
+      r.verify = "out_of_band"; r.evidence = String(a.evidence ?? a.job).trim(); r.amended = true;
+      applied.push({ kind: a.kind, target: r.id, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
@@ -472,11 +487,15 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     } else if (a.kind === "decision") {
       const d = normaliseDecision({ ...a.decision, why: a.decision?.why ?? a.why });
       if (!d) { problems.push(amendmentProblem(a, tag)); continue; }
-      // a file the lane adds and the contract lists as a deliverable is a new file the issue declared: a valid anchor
+      // #5036: any file the lane adds is a valid anchor; one the contract does not list becomes a deliverable
       const listed = new Set(c.deliverables.map((x) => x.path));
-      const added = (Array.isArray(addedPaths) ? addedPaths : []).filter((x) => listed.has(x));
+      const added = Array.isArray(addedPaths) ? addedPaths : [];
       const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, [...baseFiles, ...added]) : [];
       if (dead.length) { problems.push(`decision anchor(s) ${dead.join(", ")} match no file on the base; anchor a path that exists there`); continue; }
+      for (const f of added) {
+        if (listed.has(f) || (Array.isArray(baseFiles) && baseFiles.includes(f)) || !d.anchors.some((x) => anchorMatches(x, f))) continue;
+        c.deliverables.push({ id: `A${c.deliverables.length + 1}`, path: f, change: `new file anchoring decision: ${d.choice.slice(0, 80)}`, amended: true }); listed.add(f);
+      }
       if (!blank(a.decision?.supersedes)) c.preserve = (c.preserve ?? []).filter((p) => p.decision !== a.decision.supersedes && p.id !== a.decision.supersedes);
       decisions.push(a.decision?.supersedes ? { ...d, supersedes: String(a.decision.supersedes) } : d);
       applied.push({ kind: a.kind, target: d.choice.slice(0, 60), why: String(a.why).trim() });
@@ -537,14 +556,35 @@ export function substituteVerdict(run, { repoHas = () => false, command = "" } =
  * a whitespace token equal to the path, or a directory token above it. A builder that removes the target of its frozen
  * validate makes the engine's rerun read "unrunnable", so the substitute is judged on the diff instead.
  */
-export function removedNamedPaths(command, removed = []) {
-  const toks = String(command ?? "").split(/\s+/).map((t) => t.replace(/^['"`(]+|['"`);]+$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((t) => t && t !== ".");
-  return removed.filter((p) => toks.some((t) => p === t || p.startsWith(`${t}/`)));
+const TEST_FILE_RE = /\.(?:test|spec)\.[a-z0-9]+$|^test_[^/]+\.[a-z0-9]+$|_test\.[a-z0-9]+$|Tests?\.(?:java|kt|kts|cs|php|scala|swift)$|_spec\.rb$|^tests\.rs$|^conftest\.py$|\.bats$/;
+/** #5003: a runnable test FILE (by basename), unlike `isTestPath`, which also matches fixtures under tests/. */
+const isTestFile = (p) => TEST_FILE_RE.test(String(p).split("/").pop());
+/**
+ * #4990 SEC-13: the paths of `removed` (deleted, or the old side of a rename, in the diff) that a frozen command names.
+ * #5003: a token is stripped of quotes, a `--flag=` prefix and a pytest `::node` suffix; a glob is expanded against
+ * `baseFiles`; an exact path matches itself; a directory or bare-word token matches only a removed test file under it.
+ */
+export function removedNamedPaths(command, removed = [], baseFiles = []) {
+  const toks = String(command ?? "").split(/\s+/).map((t) => t.replace(/^['"`(]+|['"`);]+$/g, "").replace(/^-[^=\/]*=/, "").replace(/::.*$/, "").replace(/^['"`]+|['"`]+$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((t) => t && t !== ".");
+  const files = new Set(baseFiles);
+  return removed.filter((p) => toks.some((t) => {
+    if (/[*?]/.test(t)) return globRe(t).test(p) && (files.size === 0 || files.has(p));
+    return p === t || (p.startsWith(`${t}/`) && isTestFile(p));
+  }));
 }
-/** #4990: paths the lane's diff deletes or renames away from (the old side), per `git diff --name-status -M`. */
+/** #4990: paths the lane's diff deletes or renames away from (the old side). #5003: `-z` (unquoted), null on a git error (fail closed). */
 export async function removedPathsOf(git, base) {
-  const rows = String(await git(["diff", "--name-status", "-M", `${base}...HEAD`]).catch(() => "")).split("\n").map((l) => l.split("\t"));
-  return rows.filter((r) => /^[DR]/.test(r[0] ?? "") && r[1]).map((r) => r[1]);
+  let out;
+  try { out = String(await git(["diff", "--name-status", "-z", "-M", `${base}...HEAD`])); } catch { return null; }
+  const f = out.split("\0"), gone = [];
+  for (let i = 0; i < f.length; i++) {
+    const st = f[i];
+    if (!/^[A-Z]/.test(st)) continue;
+    const two = /^[RC]/.test(st);
+    if (/^[DR]/.test(st) && f[i + 1]) gone.push(f[i + 1]);
+    i += two ? 2 : 1;
+  }
+  return gone;
 }
 const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
@@ -632,7 +672,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -648,7 +688,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const v of contract.validate ?? []) {
     // #4979 SPEC-2: a substitute counts only when the frozen command it replaced cannot run (or passes); checked first, never CI-covered
     if (v.substituted) {
-      const gone = removedNamedPaths(v.substituted.from, removedPaths);
+      if (removedPaths === null) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the engine could not read the diff's removed paths to show the frozen command's target survives` }); continue; }
+      const gone = removedNamedPaths(v.substituted.from, removedPaths, baseFiles);
       if (gone.length) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_removed_path", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the diff removes ${gone.map((x) => `\`${x}\``).join(", ")} that the frozen command names: a substitute may not replace a check by deleting its target` }); continue; }
       const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
       const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;

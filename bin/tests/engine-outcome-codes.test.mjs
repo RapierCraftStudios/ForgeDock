@@ -307,7 +307,7 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
   });
   it("terminal: other codes, unedited contract.invalid, plain ci-pending, unknown and non-needs-human rows", () => {
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "terminal");
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.omission" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "nope" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "ci-pending" }), "terminal");
@@ -318,9 +318,9 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
 
 describe("forge#4656: parked class", () => {
   it("is opt-in, keeps terminal by default, and the legacy classifier defaults to external", () => {
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.omission" }), "terminal");
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.omission" }, { parked: true }), "parked");
-    assert.equal(parkedLabel("conformance.omission"), "parked:conformance.omission");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }, { parked: true }), "parked");
+    assert.equal(parkedLabel("conformance.regression"), "parked:conformance.regression");
     assert.deepEqual(classifyLegacyNeedsHuman("needs the legal sign-off"), { kind: "external" });
   });
 });

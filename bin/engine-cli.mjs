@@ -21,7 +21,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
-import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
+import { readBranches, resolveLane, isDefaultLane, makeLaneCache } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
@@ -1328,6 +1328,26 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
 const onlyReleased = (l, out = (t) => console.log(t)) => { if (!l.endsWith("(none)")) out(l); };
 
 /**
+ * #5031: the `baseWait` seam of `orchestrate` for issues admitted while a dependency's merge commit was not yet on their base:
+ * a detail string until every awaited commit is an ancestor of origin/<base> (fetched at most every 30s per base), else null.
+ */
+function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
+  const fetched = new Map();
+  return async (n) => {
+    const l = waits.get(n);
+    if (!l) return null;
+    const missing = [];
+    for (const w of l) {
+      if (now() - (fetched.get(w.base) ?? -Infinity) > 30000) { fetched.set(w.base, now()); try { await leanIo.git(["fetch", "origin", w.base], { cwd }); } catch { /* offline: the local ref */ } }
+      let on = false;
+      for (const ref of [`origin/${w.base}`, w.base]) if (!on) on = await io.git?.(["-C", cwd, "merge-base", "--is-ancestor", w.sha, ref]).then(() => true, () => false);
+      if (!on) missing.push(w);
+    }
+    return missing.length ? `waiting for ${missing.map((w) => `#${w.dep} (${w.sha.slice(0, 10)})`).join(", ")} on ${missing[0].base}` : null;
+  };
+}
+
+/**
  * `--hold <id> N...` / `--release <id> N...` (#4592): the batch's `hold` file, through the daemon (`viaDaemon(op, issues)`, null
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
@@ -1569,12 +1589,15 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root, print: (l) => onlyReleased(l, (t) => sink.line(t)) }); // #4592
   }
   let batch, plan = null;
+  const baseWaits = new Map(); // #5031: issue -> [{dep, sha, base}] merge commits not yet on its base at start
   if (resumeId) {
     batch = batchMod.openBatch(root, resumeId);
     batch.scrubPlan(); // #4787: a pre-fix plan.json keeps no secret; the lanes re-read it from the environment
     plan = batch.readPlan();
     if (!plan) throw new Error(`no batch ${resumeId} in ${root}`);
     argv = plan.argv;
+    // #5031: a resume (operator or schedd restart) keeps the base waits recorded at start; a landed commit releases on the first check
+    for (const [n, l] of Object.entries(plan.baseWaits ?? {})) if (Array.isArray(l) && l.length) baseWaits.set(Number(n), l.filter((w) => w && typeof w.sha === "string" && typeof w.base === "string"));
   }
   const issues = issuesOf(argv);
   if (!issues.length) throw new Error(ORCH_USAGE);
@@ -1602,16 +1625,26 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const { unmetDependencies } = await import("../scripts/plan-validate-live.mjs");
       const gateBranches = readBranches(cwd);
       const gateIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
-      const unmet = await unmetDependencies({ issues, repo, gh: io.gh, baseOf: async (n) => {
+      const isAncestor = async (sha, b) => {
+        for (const ref of [`origin/${b}`, b]) if (await io.git?.(["-C", cwd, "merge-base", "--is-ancestor", sha, ref]).then(() => true, () => false)) return true;
+        return false;
+      };
+      let unmet = await unmetDependencies({ issues, repo, gh: io.gh, isAncestor, baseOf: async (n) => {
         const r = await resolveLane({ issue: n, repo, io: gateIo, cwd, branches: gateBranches, requested: lane, override: laneOverride });
         return r.ok ? r.lane : null;
       } });
+      // #5031: a dependency merged but not yet on the base is admitted and held until its commit lands; any other unmet edge still refuses
+      for (const u of unmet.filter((x) => x.kind === "commit")) {
+        const list = baseWaits.get(u.issue) ?? []; list.push({ dep: u.dep, sha: u.sha, base: u.base }); baseWaits.set(u.issue, list);
+      }
+      for (const [n, l] of baseWaits) sink.line(`held: #${n} waits for ${l.map((w) => `#${w.dep} (${w.sha.slice(0, 10)}) on ${w.base}`).join(", ")}; admitted once the commit lands`);
+      unmet = unmet.filter((x) => x.kind !== "commit");
       if (unmet.length) throw new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
     }
     const base = deps.batchId ?? batchMod.newBatchId();
     batch = batchMod.openBatch(root, base);
     for (let i = 2; batch.exists(); i++) batch = batchMod.openBatch(root, `${base}.${i}`); // never resume by accident
-    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(force ? { forced: force } : {}), ...(daemon ? { daemon: true, env: kept } : {}) };
+    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(force ? { forced: force } : {}), ...(baseWaits.size ? { baseWaits: Object.fromEntries(baseWaits) } : {}), ...(daemon ? { daemon: true, env: kept } : {}) };
     batch.writePlan(plan);
     batch.setParallel(parallel);
   } else {
@@ -1644,8 +1677,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const prefilter = argv.includes("--no-prefilter") ? null
     : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd), minAge: await readPostDeployMinAge(cwd) });
   const fetched = new Set();
+  const laneCache = makeLaneCache(), milestoneOf = new Map(); // #4963: shared default-branch / ls-remote reads; the milestone readBody already fetched
   const laneOf = async (n) => {
-    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride });
+    const known = milestoneOf.get(n); milestoneOf.delete(n); // used once: a later retry re-reads the live milestone
+    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride, cache: laneCache, milestone: known });
     if (r.ok && prefilter && !fetched.has(r.lane)) { fetched.add(r.lane); try { await leanIo.git(["fetch", "origin", r.lane], { cwd }); } catch { /* offline: use the local ref */ } }
     return r;
   };
@@ -1886,7 +1921,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
@@ -1928,8 +1963,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author"); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
-        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author"); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
+        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
@@ -2301,11 +2336,12 @@ export async function schedFromCli(argv, deps = {}) {
     const st = reg.list();
     const who = (e) => `#${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} P${e.priority}`;
     console.log(deps.tick ?? health.tickText(health.stallCheck({ dir: schedMod.schedDir() })));
-    console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}`);
+    console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}, remote ${(st.remote ?? []).length}`);
     const ws = Object.entries(st.weights ?? {});
     console.log(`repo weights: ${ws.length ? ws.map(([r, n]) => `${r}=${n}`).join(", ") : "equal (none set)"}`);
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
+    for (const l of schedMod.remoteLines(st)) console.log(l); // #4964
     return st;
   }
   if (sub === "cap") {

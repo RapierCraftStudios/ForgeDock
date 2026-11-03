@@ -144,12 +144,14 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
     }
     const obj = (x) => (x && typeof x === "object" && !Array.isArray(x) ? x : {});
     const weights = Object.fromEntries(Object.entries(obj(o?.weights)).filter(([, n]) => posInt(n)));
-    return { v: 1, cap: posInt(o?.cap), weights, seq: Number.isInteger(o?.seq) ? o.seq : 0, slots: obj(o?.slots), queue: obj(o?.queue) };
+    return { v: 1, cap: posInt(o?.cap), weights, seq: Number.isInteger(o?.seq) ? o.seq : 0, slots: obj(o?.slots), queue: obj(o?.queue), remote: obj(o?.remote), pool: obj(o?.pool) };
   };
   // Drop queued entries of dead dispatchers, and slots whose dispatcher and lane are both gone.
   const reclaim = (s) => {
     for (const [k, e] of Object.entries(s.queue)) if (!alive(e.pid)) delete s.queue[k];
     for (const [k, e] of Object.entries(s.slots)) if (!alive(e.pid) && !(e.lanePid && alive(e.lanePid))) delete s.slots[k];
+    for (const [k, e] of Object.entries(s.remote)) if (!alive(e?.pid)) delete s.remote[k]; // #4964
+    for (const [k, e] of Object.entries(s.pool)) if (!alive(e?.pid)) delete s.pool[k];
   };
   const mutate = (fn) => {
     lock();
@@ -200,7 +202,18 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
     /** Queue entries `[{key, batch, repo, issue, priority}]` (their FIFO position is kept on a re-offer). */
     offer: (entries) => { try { mutate((s) => { for (const e of entries) enqueue(s, e.key, e); }); } catch { /* fail-open */ } },
     withdraw: (keys) => { if (!keys.length) return; try { mutate((s) => { for (const k of keys) delete s.queue[k]; }); } catch { /* fail-open */ } },
-    release: (key) => { try { mutate((s) => { delete s.slots[key]; delete s.queue[key]; }); } catch { /* fail-open */ } },
+    release: (key) => { try { mutate((s) => { delete s.slots[key]; delete s.queue[key]; delete s.remote[key]; }); } catch { /* fail-open */ } },
+    /** #4964: publish a running remote (pool) lane for `sched show`; it never takes a host slot. */
+    noteRemote: (key, entry = {}) => {
+      try {
+        mutate((s) => { s.remote[key] = { pid, batch: entry.batch ?? null, repo: entry.repo ?? null, issue: entry.issue ?? null, sandbox: entry.sandbox ?? null, agent: entry.agent ?? null, at: now() }; });
+      } catch { /* fail-open */ }
+    },
+    dropRemote: (key) => { try { mutate((s) => { delete s.remote[key]; }); } catch { /* fail-open */ } },
+    /** #4964: this batch's pool is unreachable (`{reason}`), or null to clear it. */
+    notePool: (batch, state) => {
+      try { mutate((s) => { if (state) s.pool[batch] = { pid, state: "unreachable", reason: state.reason ?? null, at: now() }; else delete s.pool[batch]; }); } catch { /* fail-open */ }
+    },
     setLanePid: (key, lanePid) => { try { mutate((s) => { if (s.slots[key] && posInt(lanePid)) s.slots[key].lanePid = lanePid; }); } catch { /* fail-open */ } },
     /** Record a lane this dispatcher re-attached to: it runs already, so the cap does not gate it. */
     adoptSlot: (key, entry = {}) => {
@@ -231,6 +244,16 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
       weights: { ...s.weights },
       slots: Object.entries(s.slots).map(([key, e]) => ({ key, ...e })),
       queue: grantOrder(s).map(([key, e]) => ({ key, ...e })),
+      remote: Object.entries(s.remote).map(([key, e]) => ({ key, ...e })),
+      pool: Object.entries(s.pool).map(([batch, e]) => ({ batch, ...e })),
     })),
   };
+}
+
+/** #4964: `sched show` lines for remote (pool) lanes and an unreachable pool; empty when there are none. */
+export function remoteLines(st) {
+  const out = (st?.remote ?? []).map((e) => `  remote #${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} sandbox ${e.sandbox ?? "-"} agent ${e.agent ?? "-"}  dispatcher ${e.pid}`);
+  const down = st?.pool ?? [];
+  if (down.length) out.push(`pool: unreachable (${down.map((e) => `batch ${e.batch}${e.reason ? `: ${e.reason}` : ""}`).join("; ")})`);
+  return out;
 }

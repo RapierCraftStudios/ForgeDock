@@ -8,7 +8,7 @@ import { nightlyConfig, nightlyDue, launchNightly, NIGHTLY_MARKER } from "./self
 
 const setup = (yaml) => { const cwd = tmpDir("nt-"), stateDir = tmpDir("ns-"); if (yaml) writeFileSync(join(cwd, "forge.yaml"), yaml); return { cwd, stateDir }; };
 const YAML = "selftest:\n  sandbox_repo: a/b\n  nightly_interval_hours: 24\n";
-const fakeIo = (open = []) => { const calls = []; return { calls, gh: async (a) => { calls.push(a); if (a[1] === "list") return JSON.stringify(open); if (a[1] === "create") return "https://github.com/o/r/issues/77\n"; return ""; } }; };
+const fakeIo = (open = []) => { const calls = []; return { calls, gh: async (a) => { calls.push(a); if (a[0] === "api") return "bot\n"; if (a[1] === "list") return JSON.stringify(open); if (a[1] === "create") return "https://github.com/o/r/issues/77\n"; return ""; } }; };
 
 test("nightlyConfig: unset, zero and other sections are off", () => {
   assert.equal(nightlyConfig(""), null);
@@ -42,7 +42,7 @@ test("failure files one issue naming the step; the second failure edits it", asy
   assert.match(create.join(" "), /step body/); assert.ok(create.join(" ").includes(NIGHTLY_MARKER));
   assert.ok(!create[create.indexOf("--body") + 1].includes("<!-- x"));
   t += 25 * 3600_000;
-  const io2 = fakeIo([{ number: 77, body: `x\n${NIGHTLY_MARKER}` }]);
+  const io2 = fakeIo([{ number: 77, body: `x\n${NIGHTLY_MARKER}`, author: { login: "Bot" } }]);
   const r2 = await nightlyDue({ ...s, repo: "o/r", io: io2, now: () => t, runLive: async () => ({ ok: false, step: "add", message: "m" }) });
   assert.deepEqual([r2.action, r2.issue], ["edit", 77]);
   assert.ok(!io2.calls.some((a) => a[1] === "create"));
@@ -81,4 +81,26 @@ test("launchNightly: detached, unref'd, and an async spawn error never escapes (
   assert.equal(args[2].detached, true); assert.equal(args[2].stdio, "ignore");
   assert.doesNotThrow(() => child.emit("error", Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" })));
   assert.equal(launchNightly({ cli: "c", repo: "o/r", spawnFn: () => { throw new Error("EMFILE"); } }), null);
+});
+
+test("the dedupe never edits a marker-bearing issue authored by someone else (#4952)", async () => {
+  const s = setup(YAML), io = fakeIo([{ number: 5, body: `evil\n${NIGHTLY_MARKER}`, author: { login: "mallory" } }, { number: 6, body: `no marker`, author: { login: "bot" } }]);
+  const r = await nightlyDue({ ...s, repo: "o/r", io, runLive: async () => ({ ok: false, step: "add", message: "m" }) });
+  assert.deepEqual([r.action, r.issue], ["create", 77]);
+  assert.ok(!io.calls.some((a) => a[1] === "edit"));
+  assert.ok(io.calls.find((a) => a[1] === "list").join(" ").includes("number,body,author"));
+});
+
+test("an unreadable login trusts nobody: a new issue is filed", async () => {
+  const s = setup(YAML), io = fakeIo([{ number: 5, body: NIGHTLY_MARKER, author: { login: "bot" } }]), gh = io.gh;
+  io.gh = async (a) => { if (a[0] === "api") throw new Error("no token user"); return gh(a); };
+  const r = await nightlyDue({ ...s, repo: "o/r", io, runLive: async () => ({ ok: false, step: "add", message: "m" }) });
+  assert.equal(r.action, "create");
+});
+
+test("a marker quoted mid-body by the trusted author is not a dedupe hit (shared trailer rule)", async () => {
+  const s = setup(YAML), io = fakeIo([{ number: 5, body: `quote: ${NIGHTLY_MARKER}\nmore text`, author: { login: "bot" } }]);
+  const r = await nightlyDue({ ...s, repo: "o/r", io, runLive: async () => ({ ok: false, step: "add", message: "m" }) });
+  assert.equal(r.action, "create");
+  assert.ok(!io.calls.some((a) => a[1] === "edit"));
 });

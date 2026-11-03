@@ -743,6 +743,33 @@ describe("pre-tool-use hook — subprocess", () => {
   // in every repo on the machine.
   // -------------------------------------------------------------------------
 
+  it("exits 0 for gh pr create -R other/repo --base main (third-party repo, #5040)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -R other/repo --base main --title foo" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for --repo=other/repo --base main (#5040)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create --repo=other/repo --base main --title foo" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("still exits 2 for -R <configured repo> --base main (#5040)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create -R Test/Test --base main --title foo" },
+    });
+    assert.equal(exitCode, 2);
+  });
+
   it("exits 0 (no-op) for a forbidden PR base when cwd is NOT a ForgeDock-managed directory (#1591)", () => {
     const unmanagedDir = makeTmpDir("fd-ptu-unmanaged-");
     try {

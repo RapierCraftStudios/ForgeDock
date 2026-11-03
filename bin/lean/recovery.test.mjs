@@ -9,7 +9,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, formatOutcomeLists, OUTCOME_LINE_MAX } from "./orchestrate.mjs";
 import { RECOVER_HOW } from "./lean.mjs";
 import { recoveryEvidence } from "./render.mjs";
-import { RECOVERABLE_CODES } from "../engine/outcome-codes.mjs";
+import { RECOVERABLE_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import { runFromCli, orchestrateFromCli } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("recovery-sched-");
@@ -96,12 +96,29 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.ok(formatOutcomeLists(rows).some((l) => /^unrecovered: #1 \(budget\.exceeded: Implement turn budget spent/.test(l)));
   });
 
+  it("conformance gaps are recoverable: one recovery lane each, regression/guard_broken/scope_creep/e2e_unverified stay terminal, notes name the defer route", async () => {
+    const codes = ["conformance.unimplemented", "conformance.omission", "conformance.unjustified_deferral"];
+    for (const c of codes) {
+      assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: c }), "recoverable", c);
+      assert.ok(RECOVERABLE_CODES.includes(c) && RECOVER_HOW[c], c);
+    }
+    for (const c of ["conformance.regression", "conformance.guard_broken", "conformance.scope_creep", "conformance.e2e_unverified"]) {
+      assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: c }), "terminal", c);
+    }
+    for (const c of codes.slice(1)) assert.match(RECOVER_HOW[c], /`defer`[\s\S]*why|why[\s\S]*follow-up/i);
+    assert.match(RECOVER_HOW["conformance.omission"], /add-requirement/);
+    const { rows, calls } = await batch({ 1: [NH("conformance.omission", "R2 not covered", { branch: "feat/issue-1-lean" }), NH("conformance.omission", "again")] });
+    assert.deepEqual(calls.filter((c) => c.n === 1).map((c) => c.recover?.code ?? null), [null, "conformance.omission"]);
+    assert.equal(calls.filter((c) => c.n === 1).length, 2, "no second recovery beyond max_attempts");
+    assert.equal(byIssue(rows)[1].outcome, "needs-human");
+  });
+
   it("human codes (product-decision, spend) are never recovered, still skip dependents and are the only escalations, asked once while other lanes keep running", async () => {
     const { rows, calls, decisions } = await batch({
       1: [NH("builder.blocked", "Builder is blocked (product-decision): pick a pricing model")],
       2: [],
       3: [NH("builder.blocked", "Builder is blocked (spend): needs a paid plan")],
-      4: [NH("conformance.omission", "R2 not covered")],
+      4: [NH("conformance.regression", "R2 broke")],
       5: [{ terminalReason: "merged" }] }, { 2: "**Depends on**: #1" });
     const r = byIssue(rows);
     assert.equal(calls.filter((c) => c.n === 1).length, 1); assert.equal(calls.filter((c) => c.n === 3).length, 1);
@@ -114,7 +131,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.match(esc, /#1 \(builder\.blocked\): Builder is blocked \(product-decision\)/);
     assert.match(esc, /#3 \(builder\.blocked\): Builder is blocked \(spend\)/);
     assert.doesNotMatch(esc, /#4/, "the needs-human list holds only human codes");
-    assert.ok(lines.some((l) => /^unrecovered: #4 \(conformance\.omission: R2 not covered\)$/.test(l)));
+    assert.ok(lines.some((l) => /^unrecovered: #4 \(conformance\.regression: R2 broke\)$/.test(l)));
   });
 
   it("base.conflict: a recovery base-sync with a clean result re-queues the issue; the report lists recovered issues separately", async () => {
@@ -224,7 +241,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
   it("/orchestrate spec step 3 lists the recoverable codes, asks no confirmation on them, and escalates once at the end", async () => {
     const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
     const step3 = spec.slice(spec.indexOf("## 3. Launch lanes"), spec.indexOf("## 4. Report"));
-    for (const c of ["`ci.red`", "`base.conflict`", "`ci-pending` on a conflicting", "`contract.invalid` caused by an issue edited mid-run"]) assert.ok(step3.includes(c), c);
+    for (const c of ["`ci.red`", "`base.conflict`", "`ci-pending` on a conflicting", "`contract.invalid` caused by an issue edited mid-run", "`conformance.unimplemented`", "`conformance.omission`", "`conformance.unjustified_deferral`"]) assert.ok(step3.includes(c), c);
     assert.match(step3, /\*\*Do not ask for confirmation on them\.\*\*/);
     assert.match(step3, /FORGE:DECISION/);
     assert.match(step3, /one question list[\s\S]*once, at the end of the batch/);

@@ -78,8 +78,8 @@ describe("amendment kind aliases (#4856)", () => {
       assert.deepEqual(a.toTrack.map((r) => r.id), ["R1"], kind);
     }
   });
-  it("scope-note and other unlisted kinds stay unknown and list the valid kinds", () => {
-    for (const kind of ["scope-note", "Scope_Note", "flaky-note"]) {
+  it("unlisted kinds stay unknown and list the valid kinds (scope-note is informational since #5036)", () => {
+    for (const kind of ["scope-creep", "Scope_Creep", "flaky-note"]) {
       assert.match(applyAmendments(C, [{ kind, requirement: "R1", why: "w" }]).problems[0], new RegExp(`unknown kind '${kind}'; valid kinds are add-deliverable`));
     }
   });
@@ -94,9 +94,9 @@ describe("#4655 multi-requirement amendment references", () => {
       assert.deepEqual(a.applied.map((x) => x.target), ["R1", "R2"], requirement);
     }
   });
-  it("an unknown id inside a list is still a problem; scope-note stays an unknown kind", () => {
+  it("an unknown id inside a list is still a problem; an unknown kind with a requirement is still unknown", () => {
     assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
-    assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
+    assert.match(applyAmendments(C, [{ kind: "scope-creep", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-creep'; valid kinds are/);
   });
   it("an unrelated-ci-failure amendment (kind or type) is an informational no-op; other unknown kinds still fail", () => {
     for (const a of [{ kind: "unrelated-ci-failure", target: "core rate-limit test", why: "diff touches no core file" }, { type: "unrelated-ci-failure", target: "t", why: "w" }]) {
@@ -232,9 +232,25 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.match(gone.failures[0].detail, /test\/leak\.test\.js/);
     const env = precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { rc: 1, output: "Unknown option `-q`" } }, removedPaths: ["docs/other.md"] });
     assert.deepEqual(env.failures, [], "intact named files: env-unrunnable substitute stands");
-    assert.deepEqual(removedNamedPaths("node --test ./test/a.js 'b/c.js' tests/", ["test/a.js", "b/c.js", "tests/x.js", "z.js"]), ["test/a.js", "b/c.js", "tests/x.js"]);
+    assert.deepEqual(removedNamedPaths("node --test ./test/a.js 'b/c.js' z.js", ["test/a.js", "b/c.js", "tests/x.js", "z.js"]), ["test/a.js", "b/c.js", "z.js"]);
     assert.deepEqual(removedNamedPaths("pytest -k leak", ["leak.py"]), []);
-    assert.deepEqual(await removedPathsOf(async () => "D\ta.js\nR100\told.js\tnew.js\nM\tm.js\nA\tn.js", "b"), ["a.js", "old.js"]);
+    assert.deepEqual(await removedPathsOf(async () => "D\0a.js\0R100\0old.js\0new.js\0M\0m.js\0A\0n.js\0", "b"), ["a.js", "old.js"]);
+  });
+  it("#5003 removed-path matching: node ids, globs, flag paths, directory tokens, -z, fail closed", async () => {
+    assert.deepEqual(removedNamedPaths("pytest tests/a.py::test_x", ["tests/a.py"]), ["tests/a.py"]);
+    assert.deepEqual(removedNamedPaths("pytest --junit=tests/a.py", ["tests/a.py"]), ["tests/a.py"]);
+    assert.deepEqual(removedNamedPaths('pytest "tests/a.py::T::t"', ["tests/a.py"]), ["tests/a.py"]);
+    const base = ["tests/test_a.py", "tests/test_b.py", "tests/fixtures/d.json", "src/x.py"];
+    assert.deepEqual(removedNamedPaths("pytest tests/test_*.py", ["tests/test_a.py", "tests/fixtures/d.json", "src/x.py"], base), ["tests/test_a.py"]);
+    assert.deepEqual(removedNamedPaths("pytest tests/", ["tests/fixtures/d.json"]), []);
+    assert.deepEqual(removedNamedPaths("pytest tests/", ["tests/test_a.py"]), ["tests/test_a.py"]);
+    assert.deepEqual(removedNamedPaths("npm test", ["test/fixtures/d.json"]), []);
+    assert.deepEqual(removedNamedPaths("npm test", ["test/a.test.js"]), ["test/a.test.js"]);
+    assert.deepEqual(await removedPathsOf(async (a) => (a.includes("-z") ? "D\0tests/é.py\0" : '"tests/\\303\\251.py"'), "b"), ["tests/é.py"]);
+    assert.equal(await removedPathsOf(async () => { throw new Error("git"); }, "b"), null);
+    const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "node --test test/leak.test.js" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/weak.test.js", why: "w" }]).contract;
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    assert.deepEqual(precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { rc: 1, output: "no tests found" } }, removedPaths: null }).failures.map((f) => f.kind), ["substitute_unverified"]);
   });
   it("#4857 describesUnrunnableCommand reads a blocked summary", () => {
     assert.ok(describesUnrunnableCommand("V2 is unrunnable: poetry found no pyproject at the repo root"));
@@ -1005,10 +1021,12 @@ describe("decision amendments (#4695)", () => {
     assert.match(a.problems[0], /match no file on the base/);
     assert.equal(a.decisions.length, 0);
   });
-  it("an anchor on a lane-added file the contract lists as a deliverable conforms; an unlisted added file does not", () => {
-    const withNew = { ...withRow, deliverables: [...withRow.deliverables, { id: "D3", path: "scripts/seed.py" }] };
-    const go = (added) => applyAmendments(withNew, [{ kind: "decision", why: "w", decision: { choice: "use B", anchors: ["scripts/seed.py"] } }], null, { baseFiles: ["src/scrape.js"], addedPaths: added });
-    assert.deepEqual(go(["scripts/seed.py"]).problems, []);
+  it("an anchor on a lane-added file conforms and the unlisted file becomes a deliverable; an anchor matching neither base nor an added file is rejected", () => {
+    const go = (added, anchor = "scripts/seed.py") => applyAmendments(withRow, [{ kind: "decision", why: "w", decision: { choice: "use B", anchors: [anchor] } }], null, { baseFiles: ["src/scrape.js"], addedPaths: added });
+    const ok = go(["scripts/seed.py"]);
+    assert.deepEqual(ok.problems, []);
+    assert.ok(ok.contract.deliverables.some((d) => d.path === "scripts/seed.py" && d.amended));
+    assert.equal(ok.contract.deliverables.filter((d) => d.path === "scripts/seed.py").length, 1);
     assert.match(go(["scripts/other.py"]).problems[0], /match no file on the base/);
   });
   it("a blank-why amendment takes the engine's defaultWhy; without one it is still rejected", () => {
@@ -1152,5 +1170,46 @@ describe("mutation check (#4913)", () => {
     assert.equal(r.skipped, "", r.skipped); assert.equal(r.results[0].status, "killed");
     assert.equal(readFileSync(join(d, "a.js"), "utf8"), "a2\n"); assert.equal(existsSync(join(d, "b.js")), false);
     assert.equal(g("status", "--porcelain").trim(), "");
+  });
+});
+
+describe("builder amendment slips (#5036)", () => {
+  it("deferral-shaped kinds naming a requirement apply as a tracked defer", () => {
+    for (const kind of ["scope_narrowing", "scope_reduction", "defer-verification", "deferred_measurement", "Scope-Narrowing"]) {
+      const a = applyAmendments(C, [{ kind, requirement: "R1", why: "w" }]);
+      assert.deepEqual(a.problems, [], kind);
+      assert.equal(a.contract.requirements.find((r) => r.id === "R1").disposition, "defer", kind);
+      assert.deepEqual(a.toTrack.map((r) => r.id), ["R1"], kind);
+    }
+    assert.match(applyAmendments(C, [{ kind: "scope_narrowing", why: "w" }]).problems[0], /unknown kind 'scope_narrowing'; valid kinds are/);
+  });
+  it("verification_substitution applies as substitute-validate with the same checks", () => {
+    const base = { requirements: [], validate: [{ id: "V2", command: "poetry run pytest" }] };
+    const ok = applyAmendments(base, [{ kind: "verification_substitution", validate: "V2", command: "node --test t.mjs", why: "no poetry" }]);
+    assert.deepEqual(ok.problems, []);
+    assert.equal(ok.contract.validate[0].command, "node --test t.mjs");
+    assert.equal(ok.contract.validate[0].substituted.from, "poetry run pytest");
+    for (const command of ["echo (oops", "true", "git diff origin/main"]) {
+      assert.equal(applyAmendments(base, [{ kind: "verification_substitution", validate: "V2", command, why: "w" }]).problems.length, 1, command);
+    }
+    assert.match(applyAmendments(base, [{ kind: "verification_substitution", why: "w" }]).problems[0], /needs validate/);
+  });
+  it("out_of_band_verification marks a deliver requirement out_of_band with its evidence", () => {
+    const ok = applyAmendments(C, [{ kind: "out_of_band_verification", requirement: "R1", evidence: ".github/workflows/perf.yml", why: "field metric" }]);
+    assert.deepEqual(ok.problems, []);
+    const r = ok.contract.requirements.find((x) => x.id === "R1");
+    assert.equal(r.verify, "out_of_band"); assert.equal(r.evidence, ".github/workflows/perf.yml");
+    assert.equal(applyAmendments(C, [{ kind: "out_of_band_verification", requirement: "R1", why: "w" }]).problems.length, 1);
+  });
+  it("annotation-only kinds are informational: recorded, no problem, no contract change", () => {
+    for (const kind of ["scope-note", "scope_clarification", "interpretation", "environment", "scope", "validation_unavailable"]) {
+      const a = applyAmendments(C, [{ kind, note: "n" }, { kind, why: "w" }]);
+      assert.deepEqual(a.problems, [], kind);
+      assert.deepEqual(a.contract, C, kind);
+      assert.equal(a.applied.length, 2, kind);
+    }
+  });
+  it("a truly unknown kind is still rejected with the valid kinds", () => {
+    assert.match(applyAmendments(C, [{ kind: "flaky-note", why: "w" }]).problems[0], /unknown kind 'flaky-note'; valid kinds are .*substitute-validate/);
   });
 });

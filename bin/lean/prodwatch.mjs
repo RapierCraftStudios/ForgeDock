@@ -15,7 +15,7 @@ import { writeAtomic } from "./batch.mjs";
 import { acquireLock, watchDir, loadWatches } from "./issuewatch.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { parseSources, runAdapter } from "./prodwatch-sources.mjs";
-import { cluster, fingerprint, classifyCluster, validateCluster, tallyClusters, parseAlertRules, signalRef, trailerOf } from "./prodwatch-triage.mjs";
+import { cluster, fingerprint, classifyCluster, validateCluster, tallyClusters, parseAlertRules, signalRef, trailerOf, neutralize } from "./prodwatch-triage.mjs";
 import { admit } from "./prodwatch-governor.mjs";
 import { computeMetrics, sourceMode, emitMetrics } from "./prodwatch-metrics.mjs";
 
@@ -80,8 +80,6 @@ export function targetLabel(cfg, raw = "") {
 // ── pure helpers ───────────────────────────────────────────────────────────────────────────
 const SOURCE_TAG = /<!--\s*FORGE:PRODWATCH\s+source=(\S+?)\s*-->/;
 const FP_TAG = /FORGE:SIGNAL_REF\s+fp=([0-9a-f]+)/;
-/** Signal text is untrusted: a literal comment opener could forge a FORGE marker, so it is escaped before it reaches a body or prompt. */
-const neutralize = (s) => String(s ?? "").replace(/<!--/g, "&lt;!--");
 const oneLine = (s, n) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
 /** Rows for computeMetrics from the prod-watch issues (open and closed) that carry our markers: GitHub is the register. */

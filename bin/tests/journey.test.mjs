@@ -531,6 +531,8 @@ describe("preflight", () => {
     assert.match(w.text, /nodejs\.org/);
   });
 
+  // detectWSL() falls back to the real /proc/version, so expectations follow the host.
+  const hostIsWSL = detectEnvironment({ platform: "linux", env: {} }).isWSL;
   it("adds Platform/WSL/Shell rows after GitHub CLI without disturbing ghReady's index", async () => {
     const home = tmpDir("fd-home6-");
     mkdirSync(join(home, ".claude"), { recursive: true });
@@ -556,7 +558,7 @@ describe("preflight", () => {
     assert.match(platformRow.detail, /Linux/);
     assert.match(platformRow.detail, /bash/);
     assert.equal(wslRow.ok, true);
-    assert.equal(wslRow.detail, "not detected");
+    assert.equal(wslRow.detail, hostIsWSL ? "detected" : "not detected");
     assert.equal(shellRow.ok, true);
     assert.equal(shellRow.detail, "bash");
 
@@ -1464,7 +1466,8 @@ describe("forge (Act II)", () => {
     assert.equal(res.updated, 0, "no update should be counted when the write failed");
   });
 
-  it("stale regular-file copy with no manifest entry: orphaned .tmp file is cleaned up on a copyFile failure (forge#2540)", async () => {
+  // root bypasses the read-only .tmp file this test relies on to force EPERM.
+  it("stale regular-file copy with no manifest entry: orphaned .tmp file is cleaned up on a copyFile failure (forge#2540)", { skip: process.getuid?.() === 0 }, async () => {
     const home = tmpDir("fd-forge-home4d-");
     const forgeHome = tmpDir("fd-forge-src4d-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
@@ -3334,7 +3337,7 @@ describe("writeInstallReceipt", () => {
     const receipt = JSON.parse(readFileSync(join(home, ".forge", "install-receipt.json"), "utf-8"));
     assert.equal(receipt.platform.platform, "linux");
     assert.equal(receipt.platform.shell, "bash");
-    assert.equal(receipt.platform.isWSL, false);
+    assert.equal(receipt.platform.isWSL, detectEnvironment({ platform: "linux", env: {} }).isWSL);
   });
 
   it("reflects forge.yaml presence/shape via validateForgeYamlShape, without copying file contents", async () => {
