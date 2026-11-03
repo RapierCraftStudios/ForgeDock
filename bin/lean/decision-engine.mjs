@@ -160,7 +160,18 @@ export function classify(item, policy, opts = {}) {
 export async function settle(item, policy, deps = {}, opts = {}) {
   const row = { issue: item?.issue ?? null, escalationId: item?.escalationId ?? null, kind: null, action: "skipped" };
   try {
-    if (item.escalationId && (item.comments ?? []).some((c) => /FORGE:DECISION/.test(String(c?.body ?? "")) && String(c.body).includes(`Escalation: ${item.escalationId}`))) return { ...row, reason: "already handled" };
+    const prior = item.escalationId ? (item.comments ?? []).filter((c) => /FORGE:DECISION/.test(String(c?.body ?? "")) && String(c.body).includes(`Escalation: ${item.escalationId}`)) : [];
+    if (prior.length) {
+      // release #5068 BUG-1: a full live decision whose label clear or requeue failed is finished, not skipped (the caller
+      // only lists issues still labelled needs-human); a vetoed, shadow, escalated or mixed one stays handled
+      const body = (c) => String(c?.body ?? "");
+      const torn = prior.some((c) => /^<!-- FORGE:DECISION -->\s*\n## Decision\n/.test(body(c)) && !/External part stays needs-human/.test(body(c)))
+        && !prior.some((c) => /## Decision vetoed/.test(body(c)));
+      if (!torn) return { ...row, reason: "already handled" };
+      await deps.setLabels({ issue: item.issue, remove: [NEEDS_HUMAN_LABEL] });
+      await deps.requeue(item.issue);
+      return { ...row, action: "decided", resumed: true, reason: "finished an interrupted live decision" };
+    }
     const s = splitEscalation(item, policy.matrix, opts);
     row.kind = s.kind;
     if (s.kind === "recovery") return { ...row, reason: "recovery owns this code" };

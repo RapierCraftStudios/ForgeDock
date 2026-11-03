@@ -10,7 +10,7 @@
  * No LLM calls.
  */
 import { existsSync, mkdirSync, readFileSync, rmdirSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -344,7 +344,35 @@ export function formatStatus(s, watch, now = Date.now()) {
   return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
+    ...(s.decisionError ? [`  needs-human decisions: last round failed: ${s.decisionError}`] : []), // release #5068 CQ-1
     ...(watch.mode === "release" ? [`  pool: ${(s.pool ?? []).length}  releases: ${(s.releases ?? []).length + (s.release ? 1 : 0)}${s.release ? `  active: ${s.release.theme} (${s.release.issues.length} issues, batch ${s.release.batch})` : ""}  llm-classified: ${s.llm ?? 0}`] : [])].join("\n");
+}
+
+const unsettle = (state, n) => { for (const k of ["failed", "unverified", "closed", "pendingVerify"]) if (state[k]) state[k] = state[k].filter((x) => x !== n); delete state.retries[n]; };
+/**
+ * #4793: a decided or evidence-gathered issue (needs-human already cleared) goes back to a lane. Per-issue watches launch it
+ * here. Release #5068 MAT-1: batch and release watches never re-select an issue they hold in `claimed`, so a batch watch
+ * requeues it into its batch (`orchestrate --requeue`), and an issue the watch has not taken yet, or a release watch's,
+ * has its claim released so the next pass selects it. @returns {boolean} true when a lane runs or the next pass takes it.
+ */
+export function decisionLaunch({ i, watch, repo, io, state, handles, branches, defaults }) {
+  const n = i.number;
+  if (state.inflight.includes(n)) return false;
+  if (watch.mode === "batch" && state.batch && state.claimed.includes(n)) {
+    if (!io.batch?.requeue?.(state.batch, n, "issue-watch decision: needs-human settled")) return false;
+    unsettle(state, n);
+    return true;
+  }
+  if (watch.mode !== "per-issue") { // the next tick / release pass re-selects it (own registry claims stay eligible)
+    state.claimed = state.claimed.filter((x) => x !== n); delete state.lanes[n];
+    unsettle(state, n);
+    return true;
+  }
+  if (!claimIssue(repoDir(repo, io.env), n, watch.name)) return false;
+  const lane = laneFor(i, watch, { branches, defaults });
+  if (!state.claimed.includes(n)) state.claimed.push(n);
+  unsettle(state, n); state.inflight.push(n); state.lanes[n] = lane; handles.set(n, io.launch(n, lane));
+  return true;
 }
 
 /** Run until done (capped) or `once`; writes status.json each pass. */
@@ -353,15 +381,7 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
   const handles = new Map();
   const ctx = decisionContext({ loadPolicy, readFile, cwd: cwd ?? process.cwd() });
   const shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
-  const launch = (i) => { // a decided or evidence-gathered issue goes back to a lane; batch and release watches re-select it once needs-human is cleared
-    const n = i.number;
-    if (watch.mode !== "per-issue" || state.inflight.includes(n) || !claimIssue(repoDir(repo, io.env), n, watch.name)) return false;
-    const lane = laneFor(i, watch, { branches, defaults });
-    if (!state.claimed.includes(n)) state.claimed.push(n);
-    for (const k of ["failed", "unverified", "closed", "pendingVerify"]) if (state[k]) state[k] = state[k].filter((x) => x !== n);
-    delete state.retries[n]; state.inflight.push(n); state.lanes[n] = lane; handles.set(n, io.launch(n, lane));
-    return true;
-  };
+  const launch = (i) => decisionLaunch({ i, watch, repo, io, state, handles, branches, defaults });
   try {
     do {
       if (state.phase === "running" && decisionsActive(watch, ctx.policy)) { // #4793: a failed round must not stop the watch
@@ -399,6 +419,8 @@ function realIo(repo, env = process.env) {
     },
     batch: {
       add: (id, issues) => openBatch(root, id).addIssues(issues),
+      // release #5068 MAT-1: the CLI path checks the label, reopens a finished batch and hosts it on the schedd
+      requeue: (id, n, reason) => (spawnSync(process.execPath, [CLI, "orchestrate", "--requeue", id, String(n), "--reason", reason], { cwd: process.cwd(), env, encoding: "utf8", timeout: 120000, windowsHide: true }).stdout ?? "").match(new RegExp(`requeued #${n}\\b`)) !== null,
       reported: (id) => existsSync(join(root, id, "report.json")),
       start: async (issues, parallel, lane) => {
         const before = new Set(listBatches(root));
