@@ -150,7 +150,10 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
 - `needs-human` with a **recoverable code**: `ci.red`, `base.conflict` (merge conflict), `ci-pending` on a conflicting
   PR, `contract.invalid` caused by an issue edited mid-run, `builder.block_untyped` (an in-scope technical choice),
   and the environment codes `env.tool_missing` (a validate command the host cannot run) and `env.repro_unrunnable`
-  (the repro harness could not run the repro test).
+  (the repro harness could not run the repro test), and the conformance gaps `conformance.unimplemented`,
+  `conformance.omission` and `conformance.unjustified_deferral` (the recovery lane delivers the gap, or defers an optional
+  clause with a why so a tracked follow-up is filed; `conformance.regression`, `guard_broken`, `scope_creep` and
+  `e2e_unverified` stay terminal).
   These are mechanical. **Do not ask for confirmation on them.** The batch runner recovers each one itself
   (`orchestration.recovery.max_attempts`, default 1 per issue). It launches one recovery lane under the same lease, lane
   and admission rules as any lane, with `run-issue --recover <code> [--recover-attempt n]` (core path only:
@@ -166,7 +169,7 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   the issue's last comment for the reason, mark its dependents skipped, and add it to the escalation list (step 4). Only
   explicit or logical edges skip a dependent (after you decide the block in scope, clear the label and run
   `forgedock orchestrate --requeue <id> N... --reason "..."`, never a second batch); an issue that merely overlaps the same file keeps running.
-- `needs-human` with a **terminal code** that is neither recoverable nor human (for example a `conformance.*` code, or
+- `needs-human` with a **terminal code** that is neither recoverable nor human (for example `conformance.regression`, or
   `contract.invalid` without a mid-run issue edit): the runner does not recover it and it is not an escalation. The
   batch report lists it as `unrecovered: #N (<code>: <detail>)`, like a recovery that did not merge. Mark its dependents
   skipped and leave the issue for a later run once its cause is fixed.
