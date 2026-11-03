@@ -288,6 +288,15 @@ describe("core work-on", () => {
     assert.equal((await run(w)).terminalReason, "invalid");
   });
 
+  it("a failed needs-human comment is recorded as an anomaly and the lane still ends needs-human (#4905)", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "trust me", evidence: [], tests: [] } });
+    const gh = w.io.gh;
+    w.io.gh = async (a, opts) => { if (a[0] === "issue" && a[1] === "edit" && a.includes("--add-label")) throw new Error("label boom"); return gh(a, opts); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.match(traj(w)[0], /needs-human label failed: label boom/);
+  });
+
   it("invalid without evidence goes to needs-human and does not close", async () => {
     const w = world({ changed: [], result: { status: "invalid", summary: "trust me", evidence: [], tests: [] } });
     const r = await run(w);
