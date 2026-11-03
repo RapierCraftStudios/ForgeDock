@@ -602,7 +602,7 @@ async function main() {
   if (!(await isForgeDockManagedCwd())) { process.exit(0); return; }
 
   // --- Rule 1: PR branch target validation ---
-  const prViolation = checkPrTarget(command);
+  const prViolation = await checkPrTarget(command);
   if (prViolation) {
     process.stderr.write(prViolation);
     process.exit(2);
@@ -750,6 +750,51 @@ async function isForgeDockManagedCwd() {
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve the `owner/repo` a `gh pr create` command targets: `-R`/`--repo`,
+ * else the cwd's `origin` remote. Lower-cased; null when unresolvable.
+ *
+ * @param {string} command
+ * @returns {string|null}
+ */
+function resolvePrTargetRepo(command) {
+  const slug = (v) => {
+    const m = String(v || "").trim().match(/([^/:\s]+)\/([^/\s]+?)(?:\.git)?\/?$/);
+    return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+  };
+  const flagged = extractFlag(command, "--repo") || extractFlag(command, "-R");
+  if (flagged) return slug(flagged);
+  try {
+    const { execFileSync: exec } = _require("child_process");
+    return slug(exec("git", ["remote", "get-url", "origin"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `owner/repo` of the forge.yaml in cwd (project.owner / project.repo),
+ * lower-cased; null when absent or unreadable.
+ *
+ * @returns {Promise<string|null>}
+ */
+async function configuredRepoSlug() {
+  try {
+    const raw = _require("fs").readFileSync(join(process.cwd(), "forge.yaml"), "utf-8");
+    const { parseForgeYaml } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "forge-utils.mjs")).href
+    );
+    const { owner, repo } = parseForgeYaml(raw)?.project ?? {};
+    return owner && repo ? `${owner}/${repo}`.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check whether a gh pr create command targets a forbidden base branch.
  *
  * Allows staging → main PRs (the deploy path) by detecting --head staging
@@ -757,9 +802,9 @@ async function isForgeDockManagedCwd() {
  * main are still hard-blocked.
  *
  * @param {string} command
- * @returns {string|null} Error message to show, or null if allowed.
+ * @returns {Promise<string|null>} Error message to show, or null if allowed.
  */
-function checkPrTarget(command) {
+async function checkPrTarget(command) {
   // Only check gh pr create commands.
   if (!/gh\s+pr\s+create/.test(command)) return null;
 
@@ -767,6 +812,12 @@ function checkPrTarget(command) {
   if (!base) return null; // no --base flag — gh will use the default
 
   if (FORBIDDEN_PR_BASES.includes(base.toLowerCase())) {
+    // The staging/milestone rule only governs the configured forge repo; a PR
+    // to a positively-identified other repo may legitimately target main.
+    const target = resolvePrTargetRepo(command);
+    const configured = await configuredRepoSlug();
+    if (target && configured && target !== configured) return null;
+
     // Allow staging → main (the deploy path, not a pipeline violation).
     const head = extractFlag(command, "--head") || extractFlag(command, "-H") || currentGitBranch();
     if (head && /^staging$/.test(head)) {
