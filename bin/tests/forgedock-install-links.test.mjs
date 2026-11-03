@@ -1,8 +1,8 @@
 // doctor/uninstall against an npm-style install whose links target ~/.forge (#4962).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, lstatSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, symlinkSync, rmSync, lstatSync, readFileSync } from "node:fs";
+import { tmpDir } from "./_tmp.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -11,7 +11,7 @@ const BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs")
 const PKG = join(dirname(BIN), "..");
 
 function setup({ stale = false, mcp = null } = {}) {
-  const home = mkdtempSync(join(tmpdir(), "fd-links-"));
+  const home = tmpDir("fd-links-");
   const claude = join(home, ".claude");
   mkdirSync(join(claude, "commands"), { recursive: true });
   mkdirSync(join(claude, "scripts"), { recursive: true });
