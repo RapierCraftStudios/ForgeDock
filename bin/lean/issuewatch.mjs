@@ -344,6 +344,7 @@ export function formatStatus(s, watch, now = Date.now()) {
   return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
+    ...(s.decisionError ? [`  needs-human decisions: last round failed: ${s.decisionError}`] : []), // release #5068 CQ-1
     ...(watch.mode === "release" ? [`  pool: ${(s.pool ?? []).length}  releases: ${(s.releases ?? []).length + (s.release ? 1 : 0)}${s.release ? `  active: ${s.release.theme} (${s.release.issues.length} issues, batch ${s.release.batch})` : ""}  llm-classified: ${s.llm ?? 0}`] : [])].join("\n");
 }
 

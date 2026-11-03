@@ -319,3 +319,9 @@ test("release #5068 BUG-1: a live decision whose label clear failed is finished 
   await run(io2, w, s2, ctxOf(), { launch: () => true });
   assert.ok(!io2.writes.some((a) => a.includes("--remove-label")));
 });
+
+test("release #5068 CQ-1: a failed decision round is shown in the watch status", () => {
+  const w = W();
+  assert.match(formatStatus({ ...st(w), decisionError: "gh: HTTP 502" }, w, NOW), /needs-human decisions: last round failed: gh: HTTP 502/);
+  assert.ok(!/last round failed/.test(formatStatus(st(w), w, NOW)));
+});
