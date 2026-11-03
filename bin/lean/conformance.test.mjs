@@ -1236,6 +1236,10 @@ describe("#5020 freeze-time environment defects", () => {
     assert.deepEqual(missingTool(run), { tool: "pytest", kind: "command" });
     assert.deepEqual(reproEnvMiss(run), { tool: "pytest", kind: "command" });
     assert.equal(reproEnvMiss({ rc: 1, output: "1 failed" }), null);
+    // release review BUG-1: a module the repo tracks is a real failure of the change, not an env miss
+    const mod = { rc: 1, output: "ModuleNotFoundError: No module named 'mypkg'" };
+    assert.deepEqual(reproEnvMiss(mod, { command: "pytest t.py" }), { tool: "mypkg", kind: "python-module" });
+    assert.equal(reproEnvMiss(mod, { command: "pytest t.py", repoHas: repoTracks(["src/mypkg/__init__.py"]) }), null);
     assert.equal(reproEnvMiss({ rc: 0, output: "" }), null);
   });
   it("a post-deploy requirement with no check id is deferred to the orchestrator; one with a check is untouched", () => {

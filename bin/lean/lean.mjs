@@ -1290,7 +1290,9 @@ export async function runCore(o) {
       let words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
       if (words.head === "FAILED" && io.runCommand) { // #5020: a head that failed because a tool or env is missing is env.repro_unrunnable, not a red-green verdict
         const hr = await io.runCommand({ command: String(t.command), cwd: wt, timeoutMs: 120000, env: laneEnv() }).then((x) => x?.r ?? x).catch(() => null);
-        if (reproEnvMiss(hr, { command: String(t.command) })) words = { ...words, head: "UNRUNNABLE" };
+        // release review BUG-1: a module the repo tracks is the change's own failure, never an env miss (same repoHas as the validate rerun)
+        const repoHas = repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
+        if (reproEnvMiss(hr, { command: String(t.command), repoHas })) words = { ...words, head: "UNRUNNABLE" };
       }
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);

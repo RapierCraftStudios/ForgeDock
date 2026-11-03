@@ -472,7 +472,7 @@ orchestration:
 
 ## `decisions` (OPTIONAL)
 
-Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). The issue-watch stage (#4793) calls `settle` for the open `needs-human` issues a watch selects: it runs when `mode: live`, or when the watch sets `sweep_needs_human: true`; `policy` and `human_only` are also read by prodwatch (`loadPolicy`). The parser has one nesting level and no arrays, so lists are comma-separated.
+Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). **Not yet wired:** nothing calls `settle` in production, so `mode` (including `live`), `veto_hours` and `reversal_max` have no effect today; `policy` and `human_only` are read by prodwatch and issue-watch (`loadPolicy`) only. The parser has one nesting level and no arrays, so lists are comma-separated.
 
 | Key | Type | Description |
 |---|---|---|
@@ -718,8 +718,6 @@ issue_watch:
 | `parallel` | integer | No | K of the batch in `batch` mode. Default 4. |
 | `include_followups` | string | No | `none` (default) or `defer-only`. |
 | `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
-| `sweep_needs_human` | boolean | No | Also settle `needs-human` escalations that predate the watch (the backlog). Default false; `forgedock issue-watch run --dry-run` classifies them first and writes nothing. |
-| `max_launches` | integer | No | Total lane launches (claims plus requeues by the decision engine); at N the watch drains. Default: none. Decision-stage issues also count against `max_issues`. |
 | `threshold` | map | release | `{ min_issues, min_score, max_age_days }`; any one fires a release. |
 | `immediate` | list | release | `label:<name>` or `priority:P0..P3` entries that cut a release now with only their theme. |
 | `max_release_issues` | integer | release | Cap on a release set, closure included. Default 40. |
