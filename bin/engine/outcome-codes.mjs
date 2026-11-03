@@ -45,6 +45,7 @@ export const OUTCOME_CODES = Object.freeze({
   RUN_INTERRUPTED: "run.interrupted", // forge#4179: SIGTERM/SIGINT on a core run; teardown ran from the ledger, lane requeued
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
+  ENGINE_DCO_REWRITE: "engine.dco_rewrite", // forge#4997: the DCO sign-off rewrite of unpushed commits failed (git filter-branch); mechanical engine-error (not needs-human), relaunched by the batch runner
   ENGINE_VALIDATE_RESULT_LOST: "engine.validate_result_lost", // forge#4708: a validate result recorded before a CI fix round is missing after it and could not be carried forward
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
