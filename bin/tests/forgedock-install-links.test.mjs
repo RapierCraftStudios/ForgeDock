@@ -36,7 +36,12 @@ const run = (home, args, cwd = home) =>
 describe("persisted ~/.forge links (#4962)", () => {
   it("doctor does not flag a link into an up-to-date ~/.forge copy", () => {
     const { home } = setup();
-    assert.match(run(home, ["doctor"]).stdout, /Command files[^\n]*\n[^\n]*41\/42 broken/);
+    const out = run(home, ["doctor"]).stdout;
+    // Only the other (unlinked) commands are missing; bootstrap.md is not among the broken.
+    const m = out.match(/\((\d+)\/(\d+) broken: ([^)]*)/);
+    assert.ok(m, out);
+    assert.equal(Number(m[1]), Number(m[2]) - 1);
+    assert.doesNotMatch(m[3], /bootstrap\.md/);
   });
 
   it("doctor reports a stale ~/.forge copy", () => {
