@@ -2386,3 +2386,8 @@ Cite: #4764.
 ## Entry 2026-11-03 — lane rescue push uses the post-rewrite head (#5014)
 
 `checkpoint()` (`lean.mjs`, #4958) captured `laneHead.sha` before `gitPush`, which untracks tool state and rewrites unpushed commits for DCO (`ensureSignedOff`) before it pushes. When that push then failed, `rescuePush` pushed the pre-rewrite commit and `lane_sha` / the `FORGE:LANE_BRANCH` line named a sha the branch no longer held. `rescuePush` now re-reads HEAD first (keeping the captured sha if `rev-parse` fails). Test: `lean.test.mjs` "#5014 the rescue pushes and reports the head after the pre-push sign-off rewrite...". Found by the release review of #5013.
+
+## Entry 2026-11-03 — milestone-start gate accepts dependencies already on the lane (#4978)
+
+`unmetDependencies` (`scripts/plan-validate-live.mjs`) treated a closed dependency as merged only when its closing PR's base equalled the dependent's lane, so a dependency merged into staging and reached by a milestone sync was always flagged. It now also fetches the PR's `mergeCommit` and passes when `isAncestor(sha, lane)` holds; `runBatch` (`engine-cli.mjs`) injects that as `git merge-base --is-ancestor <sha> origin/<lane>` (local `<lane>` as fallback). The base-equality fast path stays. A refusal names the commit (`merge commit <sha10> is not on <lane>`) and lists only the true positives; with no known commit the old text is kept. Holding such issues instead of refusing is deferred. Cost: 0 LLM calls.
+Cite: #4978.
