@@ -75,12 +75,13 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
       { code: "merge.transient" },
       { code: "push.transient" },
       { code: "cli.idle" },
+      { code: "cli.idle" },
     ];
     const starts = [];
     const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
       runOne: async () => { starts.push(now()); const d = seq.shift(); return { terminalReason: "deferred", detail: d.code, ...d }; } });
     const gaps = starts.slice(1).map((t, i) => (t - starts[i]) / 1000);
-    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
+    assert.deepEqual(gaps, [60, 600, DEFER_BACKOFF_S, DEFER_BACKOFF_S * 2, DEFER_BACKOFF_S * 4]);
     assert.equal(rows[0].outcome, "deferred");
     assert.match(rows[0].detail, /gave up after 3 deferrals/);
     // the usage-limit reset time and a lease expiry are honoured
@@ -754,7 +755,7 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "invalid"], [2, "merged"]]);
   });
 
-  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease or an open lane PR; an expired or unreadable one runs", async () => {
+  it("#4920 makeDispatchCheck defers an issue another lane owns: a live foreign lease; an expired or unreadable one runs, and the issue's own open lane PR runs (#4931)", async () => {
     const mk = (issue, opts) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
       if (a[0] === "issue" && a[a.length - 1] === "body") { if (opts.body instanceof Error) throw opts.body; return opts.body ?? "{}"; }
       if (a[0] === "issue") return issue;
@@ -766,8 +767,9 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     const held = await mk(OPEN, { body: lease(Date.now() + 600000) })(9);
     assert.equal(held.outcome, "deferred"); assert.equal(held.code, "lease.held"); assert.match(held.detail, /leased by core_1 until \d{4}-/);
     assert.equal(await mk(OPEN, { body: lease(Date.now() - 1000) })(9), null, "expired lease: run");
-    const pr = await mk(OPEN, { open: '[{"number":4919}]' })(9);
-    assert.equal(pr.outcome, "deferred"); assert.match(pr.detail, /PR #4919 is open on feat\/issue-9-lean/);
+    // #4931: an open feat/issue-9-lean PR is this issue's own lane (ci.red / base.conflict recovery, a relaunch after
+    // engine-error or ci-pending resumes it), never another lane's: the lane runs
+    assert.equal(await mk(OPEN, { open: '[{"number":4919}]' })(9), null, "own open lane PR: run (resume it)");
     assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
     assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
   });
@@ -843,7 +845,7 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.unreachable", retryInSeconds: 60 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 60000, host: true }); // #4788
-    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
+    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "sandbox.start_failed"]) {
       assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
     }
   });
@@ -869,6 +871,32 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [1, 2, 3, 4, 5, 6].map((n) => [n, "merged"]));
     assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
     assert.ok(Math.max(...capacityDefers.values()) > 3, "an issue was deferred for capacity more than maxDeferrals times");
+  });
+});
+
+describe("#4784: usage-limit deferrals", () => {
+  it("rate_limited is never capped and keeps its hold; a deferred row is requeuable", async () => {
+    assert.deepEqual(deferPolicy({ code: "rate_limited", resetAtEpochMs: 5000 }, { now: 1000, deferrals: 99, maxDeferrals: 3 }), { delayMs: 4000, hold: true });
+    const { now, sleep } = fakeClock();
+    let runs = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
+      runOne: async () => (++runs <= 6 ? { terminalReason: "deferred", code: "rate_limited", retryInSeconds: 600 } : { terminalReason: "merged", pr: 9 }) });
+    assert.equal(runs, 7);
+    assert.equal(rows[0].outcome, "merged");
+    const b = openBatch(tmpDir("batch-requeue-deferred-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1], results: { 1: { outcome: "deferred" } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
+  });
+  it("a requeuable deferred row: an issue that gave up after N deferrals (#4984)", async () => {
+    const { now, sleep } = fakeClock();
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3,
+      runOne: async () => ({ terminalReason: "deferred", code: "followup.unavailable", detail: "no tracking issue was returned for R2" }) });
+    assert.match(rows[0].detail, /gave up after 3 deferrals/);
+    const b = openBatch(tmpDir("batch-requeue-gaveup-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1], results: { 1: { outcome: rows[0].outcome, detail: rows[0].detail } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
   });
 });
 
@@ -938,6 +966,27 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.deepEqual(ok.requeued, [5]);
     assert.equal(b.readRequeued()[0].reason, "decided");
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
+  });
+
+  it("#5000: --add/--requeue on a finished batch without a daemon clear the report and say it is not hosted", async () => {
+    const root = tmpDir("batch-add-finished-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [5], results: { 5: { outcome: "needs-human" } } });
+    b.writeReport({ rows: [], report: "x" });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN", labels: [], body: "", author: { login: "a" } }) };
+    const lines = [];
+    const run = async (argv) => { const l = console.log; console.log = (x) => lines.push(String(x)); try { return await orchestrateFromCli(argv, { batchRoot: root, io }); } finally { console.log = l; } };
+    const add = await run(["--add", "b1", "7"]);
+    assert.deepEqual(add.added, [7]);
+    assert.equal(b.readReport(), null, "a plain add reopens the finished batch for --resume");
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)), "the CLI says nothing is scheduled yet");
+    b.writeReport({ rows: [], report: "x" });
+    lines.length = 0;
+    const rq = await run(["--requeue", "b1", "5"]);
+    assert.deepEqual(rq.requeued, [5]);
+    assert.equal(b.readReport(), null);
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
   });
 });
 

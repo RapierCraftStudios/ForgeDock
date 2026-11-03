@@ -2,6 +2,19 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Unreleased: `forgedock selftest`, opt-in release gate and nightly run; gate-marker check ignored
+
+- **New command** `forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--pr N]`. It runs a live contract harness against a disposable sandbox repo, plus a static check of every `gh --json` field list. See [SELFTEST.md](SELFTEST.md).
+- **Opt-in nightly run:** `selftest.nightly_interval_hours` makes the schedd daemon start a detached live selftest on that schedule and file one issue on failure. Restart schedd after upgrading to pick it up.
+- **Gate-marker check ignored:** the `Check for FORGE gate markers` check is no longer read as a CI failure by `review-staging`, `/review-pr-staging` or `/deploy-pr`. It only echoes the latest gate marker, so after a GATE_FAILURE it blocked its own GATE_PASS (#4941).
+- **`blocked` label now holds issues (#4773):** `orchestration.blocked_label` defaults to `blocked`. After upgrading, an open issue in a batch that carries a label named `blocked` is admitted but not dispatched until the label is removed. If you use `blocked` for another meaning, set `blocked_label: ""` (turns it off) or another label name. See [CONFIG.md](CONFIG.md#orchestration-optional) and `forge.yaml.example`.
+- **Host lane cap is on by default (#4777):** local lanes are bounded by cores and free memory (`engine.lane_cpu_reservation`, `engine.lane_mem_mb`), so `--parallel 12` on a small host runs fewer concurrent local lanes. Remote sandbox lanes are exempt; `admission: enabled: false` removes the cap.
+- **Mechanical recovery budget is 2 (#4725):** `orchestration.recovery.mechanical_max_attempts` defaults to 2 while `recovery.max_attempts` stays 1, so `env.*`, `base.conflict` and conflicting-PR rows get 2 recovery lanes.
+
+### Live selftest gates the staging->main release review (when a sandbox repo is set)
+
+When forge.yaml sets `selftest.sandbox_repo`, `forgedock review-staging` stops with `REVIEW_RESULT: status: BLOCKED` unless the staging->main PR carries a `FORGE:SELFTEST result=pass` comment for its current head commit (a missing, failing, malformed or stale marker refuses). Run `forgedock selftest --live --repo <owner/sandbox> --pr <N>` (sandbox repo or `selftest.sandbox_repo` in forge.yaml, see [CONFIG.md](CONFIG.md#selftest-optional)) after the last push to the release PR; it posts the marker. Without `selftest.sandbox_repo` the gate is skipped (the CLI prints `SELFTEST: skipped` on stderr), so repos without a sandbox are not blocked. Details: [SELFTEST.md](SELFTEST.md).
+
 ## v1.30.0: environment failures are recoverable, scoped pre-PR checks, decomposed parents can close
 
 - **New recoverable codes.** A validate command the host cannot run (missing interpreter, module or executable) ends `env.tool_missing`, and a repro test the harness could not run on head ends `env.repro_unrunnable`. Both were terminal `conformance.unimplemented` before. The batch runner recovers them like `ci.red` (see docs/OUTCOME-CODES.md).

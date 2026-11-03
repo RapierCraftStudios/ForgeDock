@@ -5,10 +5,11 @@
  * Conformance calibration: scores labelled gate verdicts (and an optional replay corpus) per check kind and prints
  * precision, recall and false-block rate, with the mode each kind has earned: enforce only at ~0 false blocks.
  *
- *   node scripts/conformance-calibrate.mjs --labels <labels.json> [--replay <corpus.json>] [--min-blocks N] [--max-false-rate R] [--json]
+ *   node scripts/conformance-calibrate.mjs --labels <labels.json> [--replay <corpus.json>] [--events <run-log>] [--min-blocks N] [--max-false-rate R] [--json]
  *
  * A case is {id, kind, label} with label true-block | false-block | missed | true-pass, or {id, kind, expected_block, blocked}
  * (the replay-bench shape). A file is `{cases: [...]}` or a bare array. `kind` is any failure code; none is built in.
+ * `--events` reads run-log events (JSONL, a JSON array or `{events}`) and adds the mutation-check metrics (#4929).
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -47,6 +48,43 @@ export function scoreKinds(cases, { minBlocks = DEFAULT_MIN_BLOCKS, maxFalseRate
   });
 }
 
+export const MUTATION_EVENT = "REQUIREMENT_MUTATION_SURVIVED";
+export const MUTATION_KIND = "conformance.mutation_survived";
+
+/** Events from a run-log file: JSONL text, a JSON array or `{events}`; unparseable lines are dropped. */
+export function eventsOf(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return [];
+  try {
+    const doc = JSON.parse(t);
+    return (Array.isArray(doc) ? doc : doc?.events ?? (doc?.event ? [doc] : [])).filter((e) => e && typeof e === "object");
+  } catch { /* JSONL */ }
+  return t.split("\n").flatMap((l) => { try { const e = JSON.parse(l); return e && typeof e === "object" ? [e] : []; } catch { return []; } });
+}
+
+/**
+ * Mutation-check metrics for engine.conformance_mutation promotion. survivedShare = survived ids / checked requirements over the
+ * REQUIREMENT_MUTATION_SURVIVED events (an event with no ids is a clean check); falseSurvivedRate = false-block / (true-block + false-block)
+ * over labelled cases of kind conformance.mutation_survived (a survived verdict on a test that was real). A rate is null with no denominator.
+ */
+export function mutationStats(events, cases) {
+  const evs = (events ?? []).filter((e) => e?.event === MUTATION_EVENT);
+  let checked = 0, survived = 0, skippedRuns = 0;
+  for (const e of evs) {
+    checked += Number(e.checked) || 0;
+    survived += Array.isArray(e.ids) ? e.ids.length : 0;
+    if (e.skipped) skippedRuns++;
+  }
+  let falseSurvived = 0, labelledSurvived = 0;
+  for (const c of cases ?? []) {
+    if (c.kind !== MUTATION_KIND) continue;
+    const l = labelOf(c);
+    if (l === "false-block") { falseSurvived++; labelledSurvived++; } else if (l === "true-block") labelledSurvived++;
+  }
+  const ratio = (n, d) => (d ? n / d : null);
+  return { events: evs.length, checked, survived, survivedShare: ratio(survived, checked), skippedRuns, falseSurvived, labelledSurvived, falseSurvivedRate: ratio(falseSurvived, labelledSurvived) };
+}
+
 const pct = (x) => (x === null ? "n/a" : `${Math.round(x * 1000) / 10}%`);
 
 export function formatKindReport(rows) {
@@ -58,26 +96,35 @@ export function formatKindReport(rows) {
   return [line(head), ...body.map(line), "", enforce.length ? `engine.conformance_kinds: "${enforce.join(", ")}"` : "engine.conformance_kinds: (none earned enforcement)"].join("\n");
 }
 
+export function formatMutationReport(m) {
+  return ["mutation check (engine.conformance_mutation)",
+    `survived-mutation share: ${m.survived}/${m.checked} (${pct(m.survivedShare)}) over ${m.events} event(s), ${m.skippedRuns} skipped`,
+    `false survived: ${m.falseSurvived}/${m.labelledSurvived} (${pct(m.falseSurvivedRate)}) labelled ${MUTATION_KIND} case(s)`].join("\n");
+}
+
 export function parseCalibrateArgs(argv) {
-  const o = { labels: null, replay: null, minBlocks: DEFAULT_MIN_BLOCKS, maxFalseRate: DEFAULT_MAX_FALSE_RATE, json: false };
+  const o = { labels: null, replay: null, events: null, minBlocks: DEFAULT_MIN_BLOCKS, maxFalseRate: DEFAULT_MAX_FALSE_RATE, json: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--labels") o.labels = argv[++i];
     else if (a === "--replay") o.replay = argv[++i];
+    else if (a === "--events") o.events = argv[++i];
     else if (a === "--min-blocks") o.minBlocks = Number(argv[++i]);
     else if (a === "--max-false-rate") o.maxFalseRate = Number(argv[++i]);
     else if (a === "--json") o.json = true;
     else throw new Error(`unknown argument ${a}`);
   }
-  if (!o.labels && !o.replay) throw new Error("usage: conformance-calibrate.mjs --labels <labels.json> [--replay <corpus.json>] [--min-blocks N] [--max-false-rate R] [--json]");
+  if (!o.labels && !o.replay) throw new Error("usage: conformance-calibrate.mjs --labels <labels.json> [--replay <corpus.json>] [--events <run-log>] [--min-blocks N] [--max-false-rate R] [--json]");
   return o;
 }
 
-export function run(argv, read = (p) => JSON.parse(readFileSync(p, "utf8"))) {
+export function run(argv, read = (p) => JSON.parse(readFileSync(p, "utf8")), readText = (p) => readFileSync(p, "utf8")) {
   const o = parseCalibrateArgs(argv);
   const cases = [o.labels, o.replay].filter(Boolean).flatMap((p) => casesOf(read(p)));
   const rows = scoreKinds(cases, o);
-  return o.json ? JSON.stringify({ cases: cases.length, kinds: rows }, null, 2) : `${cases.length} labelled case(s)\n${formatKindReport(rows)}`;
+  const mutation = o.events ? mutationStats(eventsOf(readText(o.events)), cases) : null;
+  if (o.json) return JSON.stringify({ cases: cases.length, kinds: rows, ...(mutation ? { mutation } : {}) }, null, 2);
+  return `${cases.length} labelled case(s)\n${formatKindReport(rows)}${mutation ? `\n\n${formatMutationReport(mutation)}` : ""}`;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

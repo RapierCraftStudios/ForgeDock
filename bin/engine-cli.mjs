@@ -32,6 +32,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -122,6 +123,10 @@ export function readConformanceKinds(cwd = process.cwd()) {
     const k = normalizeKindModes(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.conformance_kinds);
     return Object.keys(k).length ? k : undefined;
   } catch { return undefined; }
+}
+/** forge.yaml `engine.conformance_mutation` (off|report, #4913): rerun each evidence test with the change reverted; undefined (off) when absent or invalid. */
+export function readConformanceMutation(cwd = process.cwd()) {
+  try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.conformance_mutation ?? "").trim() === "report" ? "report" : undefined; } catch { return undefined; }
 }
 /** forge.yaml `engine.review_incomplete` (needs-human|degraded, #4160); undefined when absent or invalid (the core defaults to needs-human). */
 export function readReviewIncomplete(cwd = process.cwd()) {
@@ -404,8 +409,8 @@ export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
-    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky");
-    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}) });
+    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
+    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) });
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -442,6 +447,30 @@ export function readPrecheckCommands(cwd = process.cwd()) {
 /** #4585: forge.yaml `verify.invariants`, a block list of repo-wide check commands; undefined when absent or empty. */
 export function readInvariants(cwd = process.cwd()) {
   return readYamlList(cwd, "verify", "invariants");
+}
+/** #4792: a block map under `section.key` (`    ".py": "cmd"` or `    py: cmd`); the one-level parser drops these lines. undefined when absent or empty. */
+export function readYamlMap(cwd, section, key) {
+  let raw;
+  try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
+  const out = {};
+  const head = new RegExp(`^${section}:\\s*(#.*)?$`), keyRe = new RegExp(`^\\s+${key}:\\s*(#.*)?$`);
+  let inSection = false, mapIndent = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) { inSection = head.test(line); mapIndent = null; continue; }
+    if (!inSection) continue;
+    const indent = line.length - line.trimStart().length;
+    if (mapIndent === null) { if (keyRe.test(line)) mapIndent = indent; continue; }
+    if (indent <= mapIndent) { mapIndent = keyRe.test(line) ? indent : null; continue; }
+    const m = /^\s+(?:"([^"]+)"|'([^']+)'|([^\s:#"']+))\s*:\s+(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[4].trim();
+    const q = /^"((?:[^"\\]|\\.)*)"\s*(#.*)?$/.exec(v) ?? /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(v);
+    if (q) v = v.startsWith('"') ? q[1].replace(/\\(["\\])/g, "$1") : q[1].replace(/''/g, "'");
+    else v = v.replace(/\s+#.*$/, "").trim();
+    if (v) out[m[1] ?? m[2] ?? m[3]] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 function readYamlList(cwd, section, key) {
   let raw;
@@ -492,11 +521,14 @@ function readPrecheckOptions(cwd = process.cwd()) {
  */
 export function readEnvConfig(cwd = process.cwd()) {
   try {
-    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.env ?? {};
+    const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"));
+    const e = y?.env ?? {};
+    const tr = y?.verification?.test_runners; // #4857: {path prefix: runner command prefix} for validate commands
+    const runners = tr && typeof tr === "object" && !Array.isArray(tr) ? Object.fromEntries(Object.entries(tr).filter(([k, v]) => k && typeof v === "string" && v.trim())) : {};
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -949,7 +981,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1200,8 +1232,8 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1246,18 +1278,16 @@ async function addedEdges({ added, records, io, repo }) {
   return edges;
 }
 
-/** #4917: whether the schedd re-hosted a finished batch after --add/--requeue, already hosts it, or no daemon answered. */
-function rehostLine(id, res) {
-  if (res.reopened === true) return `batch ${id}: re-hosted by the schedd`;
-  if (res.hosted === true) return `batch ${id}: already hosted by the schedd`;
-  return `batch ${id}: not re-hosted (no schedd answered): forgedock orchestrate --resume ${id}`;
-}
-
 /**
  * #4408: add `tokens` to batch `id`. Not a plain integer: skipped; not OPEN on the batch's repo (`gh issue view --json
  * state`): skipped `closed` (`unreadable` when the read fails); the rest go to the batch's `add` file, through the daemon
  * when `viaDaemon(issues)` answers (non-null), else written here (batch.mjs `addIssues` skips issues already in the batch).
  */
+/** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
+const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
+
 async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1281,15 +1311,15 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
     else if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: st ? "closed" : "unreadable" });
   }
   let res = { added: [], skipped: [], requeued: [] };
-  const hadReport = !!b.readReport();
   if (open.length) {
     res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
-    if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // #4687: no daemon: the next --resume reruns it
+    if (res.reopened === undefined && (res.added?.length || res.requeued?.length) && b.readReport()) b.clearReport(); // #4687/#5000: no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, added: res.added ?? [], requeued: res.requeued ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
+  if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   out.edges = await addedEdges({ added: out.added, records, io, repo }); // #4773
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
-  if (hadReport && open.length) print(rehostLine(id, res)); // #4917
+  if (out.added.length || out.requeued.length) print(hostedLine(id, res));
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
   return out;
 }
@@ -1343,14 +1373,14 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
   }
   const why = reason || "operator decision", by = "operator";
   let res = { requeued: [], refused: [] };
-  const hadReport = !!b.readReport();
   if (open.length) {
     res = (viaDaemon ? await viaDaemon(open, why, by) : null) ?? b.requeue(open, { reason: why, by });
     if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
+  if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
-  if (hadReport && open.length) print(rehostLine(id, res)); // #4917
+  if (out.requeued.length) print(hostedLine(id, res));
   return out;
 }
 
@@ -1386,7 +1416,7 @@ async function orchestrateClient(argv, deps = {}) {
     if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    if (sock) await schedd.request(sock, { op: "set-parallel", id, k });
+    if (sock) await schedd.request(sock, { op: "set-parallel", id, k }, undefined, { timeoutMs: schedd.REQUEST_MS });
     else {
       // No daemon: the batch is not running anywhere; the parallel file is all there is to change.
       const batchMod = await import("./lean/batch.mjs");
@@ -1401,17 +1431,17 @@ async function orchestrateClient(argv, deps = {}) {
   const addVia = (id) => async (issues) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
+    return sock ? schedd.request(sock, { op: "add", id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const requeueVia = (id) => async (issues, reason, by) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }) : null;
+    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const holdVia = (id) => async (op, issues) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op, id, issues }) : null;
+    return sock ? schedd.request(sock, { op, id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
@@ -1421,7 +1451,7 @@ async function orchestrateClient(argv, deps = {}) {
     return cancelBatch({ id, root: await batchRootOf(), stopRemote: argv.includes("--stop-remote"), viaDaemon: async () => {
       let sock = null;
       try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }) : null;
+      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
     } });
   }
   if (argv.includes("--requeue")) {
@@ -1632,7 +1662,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -1725,6 +1755,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
+  const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
+  const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
+    epics: argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : [])) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
@@ -1842,7 +1876,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
-  let rows;
+  let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -1850,9 +1884,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(preflight ? { preflight } : {}),
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
+      autoChildren,
+      ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
@@ -1971,8 +2007,10 @@ export function makeDispatchCheck({ gh, repo }) {
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
-    // #4920: a live lease or an open lane PR from another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox
-    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n }).catch(() => null) : null;
+    // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
+    // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
+    // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
@@ -2040,6 +2078,12 @@ async function scheddDue() {
   await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
   try { const prem = await import("./lean/needs-human-premise.mjs"); await prem.sweepPremises({ repo, io: { gh: (a) => leanIo.gh(a), pkgVersion: prem.registryPkgVersion } }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
+  try { // #4894: opt-in nightly live selftest (forge.yaml selftest.nightly_interval_hours); best effort
+    const { nightlyDue, launchNightly } = await import("./lean/selftest-nightly.mjs");
+    // Detached child: the harness calls back into this daemon (orchestrate --add), so it must never run on its event loop.
+    const launch = () => launchNightly({ cli: fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), repo });
+    await nightlyDue({ repo, cwd: process.cwd(), io: leanIo, launch });
+  } catch { /* never stops the other sweeps */ }
 }
 
 /** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */
@@ -2060,8 +2104,20 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv[0] === "status") {
     let sock;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { console.log("schedd: not running"); return { running: false }; }
-    const st = await schedd.request(sock, { op: "status" });
-    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}${Number.isFinite(st.lastTick) ? `, last tick ${Math.round((Date.now() - st.lastTick) / 1000)} s ago` : ""}`);
+    let st;
+    try { st = await schedd.request(sock, { op: "status" }, undefined, { timeoutMs: deps.statusMs ?? schedd.REQUEST_MS }); }
+    catch (e) {
+      if (e?.code !== "schedd.timeout") throw e;
+      console.log(`schedd: not responding (${e.message}); see ${schedd.scheddPaths(dir).log}`);
+      process.exitCode = 1;
+      return { running: true, responding: false };
+    }
+    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${Number.isFinite(st.lastTick) ? `, last tick ${Math.round((Date.now() - st.lastTick) / 1000)} s ago` : ""}`);
+    for (const b of st.batches) {
+      const age = b.lastProgressAgeSec == null ? "no progress yet" : `last progress ${b.lastProgressAgeSec}s ago`;
+      const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
+      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
+    }
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }
@@ -2076,7 +2132,13 @@ export async function scheddFromCli(argv, deps = {}) {
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
-  if (!d.running) return d;
+  if (!d.running) {
+    // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies
+    if (!(deps.standby ?? Boolean(process.env.INVOCATION_ID))) return d;
+    const wait = deps.standbyMs ?? 5000, alive = deps.alive ?? ((await import("./lean/sched.mjs")).pidAlive);
+    do await (deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(wait); while (alive(d.owner));
+    return scheddFromCli(argv, deps);
+  }
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
@@ -2132,7 +2194,7 @@ export async function decisionsFromCli(argv, deps = {}) {
   const [sub, ...rest] = argv;
   if (sub !== "list") throw new Error(usage);
   const flag = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : null; };
-  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024 })).stdout));
+  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024, timeout: 60000 })).stdout));
   const repo = flag("--repo") ?? String(await run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
   if (rest.includes("--refresh")) {
     const jq = '.[] | select(.body | startswith("<!-- FORGE:DECISION {")) | {body, user, author_association, issue_url} | tojson';
@@ -2268,6 +2330,13 @@ export async function schedFromCli(argv, deps = {}) {
 
 /** #4773: is the author of a `viewIssue` record (author plus the REST association, #4859) trusted (the engine admission's `isTrustedActor`)? */
 const bodyTrusted = (v) => isTrustedActor({ association: v?.authorAssociation, type: v?.author?.is_bot ? "Bot" : "User", login: v?.author?.login });
+
+/** forge.yaml `orchestration.auto_add_children` (#4965; default `decomposed`) and `auto_add_children_poll_s` (default 120). */
+export function readAutoChildren(cwd = process.cwd()) {
+  let o = {};
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestration ?? {}; } catch { o = {}; }
+  return { mode: _autoChildren.parseAutoMode(o.auto_add_children), pollS: _autoChildren.parsePollS(o.auto_add_children_poll_s) };
+}
 
 /**
  * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),

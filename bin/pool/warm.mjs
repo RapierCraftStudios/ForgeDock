@@ -46,8 +46,9 @@ export function makeWarm({ store, sb, own, now, launch, destroy, view, log = con
     }
   }
   /** Claim a ready warm sandbox of the same repo and size for the lane `spec`; 404 when none is ready. */
-  async function claim({ spec, cpus, mem_gb }) {
-    if (Number.isInteger(spec?.warm)) configure({ spec, cpus, mem_gb, n: spec.warm });
+  async function claim({ spec, cpus, mem_gb, limit = null }) {
+    // #4936: keep the burst limit the router sends with the claim, or replenished sandboxes lose lane_cpus/lane_mem caps
+    if (Number.isInteger(spec?.warm)) configure({ spec, cpus, mem_gb, limit, n: spec.warm });
     const known = own(spec?.id);
     if (known) { known.lease = now(); store.save(); return { status: 200, body: view(known) }; }
     const rec = recs(keyOf(spec)).find((r) => isReady(r) && r.cpus === cpus && r.mem_gb === mem_gb);

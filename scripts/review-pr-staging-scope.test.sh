@@ -235,7 +235,7 @@ OUT9=$(credit9 "$H"); N9=$(printf '%s' "${OUT9#*|}" | wc -w)
 # spec text guards: the resolver is reused, never copied; carried record accepted; the unchanged cross-PR and merge-resolution paths are still present
 grep -q 'review-delta.sh' "$PRE" && grep -q 'REVIEW-CARRIED' "$PRE" && ok || bad "review-staging-pre.sh must call review-delta.sh and accept the REVIEW-CARRIED record"
 if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC" "$PRE"; then bad "spec must not carry a second copy of the resolver logic"; else ok; fi
-grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$PRE" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$PRE" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
+grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" > "$_D/pf"' "$PRE" && grep -qF 'cat "$_W/$pr/pf" >> "$_PF"' "$PRE" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$PRE" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
 [ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC" | head -1)" -ge 3 ] && ok || bad "FENCE_BOOTSTRAP stubs must remain"
 # an unresolvable helper fails the fence closed (exit 1), never an unsourced bootstrap
 OUT8=$( ( unset FORGEDOCK_HOME FORGE_HOME FORGE_ROOT CLAUDE_PLUGIN_ROOT CLAUDE_CONFIG_DIR CODEX_HOME FORGE_SOURCED_ROOT FORGEDOCK_MARKETPLACE; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
@@ -305,8 +305,8 @@ OUT11=$(scope11 "28668 5 6")
 [ "$(printf '%s\n' "$OUT11" | head -1)" = "scoped 1" ] && ok || bad "an issue number in the bundle list must be skipped, not fall open (got '$OUT11')"
 case "$OUT11" in *"#28668 is an issue"*) ok ;; *) bad "0B.1 must announce the skipped issue (got '$OUT11')" ;; esac
 OUT11=$(scope11 "5 77")
-[ "$(printf '%s\n' "$OUT11" | head -1 | cut -d' ' -f1)" = "full" ] && ok || bad "a genuine read failure must still fall open (got '$OUT11')"
-case "$OUT11" in *"fell open at bundle PR #77"*"not a confirmed issue"*) ok ;; *) bad "a fall-open must print the PR and reason (got '$OUT11')" ;; esac
+[ "$(printf '%s\n' "$OUT11" | head -1)" = "scoped 1" ] && ok || bad "a genuine read failure on one PR must degrade that PR only and keep scope (got '$OUT11')"
+case "$OUT11" in *"scope degraded for PR #77"*"not a confirmed issue"*) ok ;; *) bad "a degraded PR must print the PR and reason (got '$OUT11')" ;; esac
 else echo "review-pr-staging-scope.test.sh: git missing, delta section skipped"; fi
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
