@@ -216,7 +216,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   function enroll(body) {
-    if (!enrollOk(body?.token)) return { status: 401, body: { error: "bad enrollment token" } };
+    if (!enrollOk(body?.token)) return { status: 401, body: { error: "bad enrollment token", hop: "router", reason: "router auth: bad enrollment token" } };
     const name = String(body.name ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "");
     let url;
     try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url required" } }; }
@@ -334,8 +334,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       for (const [match, r] of routes) {
         const p = match(req, url);
         if (!p) continue;
-        if (r.auth === "forgedock" && !bearerOk(req, cfg.forgedock_token)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "bad token" });
-        if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "bad token" });
+        if (r.auth === "forgedock" && !bearerOk(req, cfg.forgedock_token)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
+        if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
         if (r.auth === "enroll" && !enrollOk(url.searchParams.get("token"))) return send(res, 401, "unauthorized\n");
         const body = req.method === "POST" ? await readJson(req) : null;
         if (typeof body?.repo?.slug === "string") meta.repo = body.repo.slug.slice(0, 200);

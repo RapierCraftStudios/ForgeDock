@@ -437,6 +437,7 @@ test("router logs rejected requests and tags the hop that answered 401 (#5053)",
   const bad = await get("/sandboxes/s1?token=secret", "wrong");
   assert.equal(bad.status, 401);
   assert.equal(bad.body.hop, "router");
+  assert.match(bad.body.reason, /^router auth/);
   assert.ok(warns.some((m) => m.includes("GET /sandboxes/s1 -> 401 sandbox=s1")) && !warns.join().includes("secret"));
   const viaAgent = await get("/sandboxes/s1", "fd");
   assert.equal(viaAgent.status, 401);
