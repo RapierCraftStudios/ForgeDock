@@ -1971,7 +1971,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   } catch { /* alerts never fail a batch */ }
   for (const l of report) sink.line(l);
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
-  try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
+  let unfinished = false;
+  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
 
@@ -2115,6 +2118,7 @@ export async function scheddFromCli(argv, deps = {}) {
       const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
       console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
     }
+    for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }
   if (argv[0] === "watchdog") { // #4780: run by the schedd watchdog timer; signals a live daemon whose heartbeat went stale

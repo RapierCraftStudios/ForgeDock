@@ -172,6 +172,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const run = Promise.resolve().then(() => runBatch({ argv, cwd, env, sink, keepBreaker, signal: ac.signal })).then((result) => {
       const report = ent.dir ? openBatch(root, ent.id).readReport()?.report ?? null : null;
       emit({ type: "done", result, report });
+      if (ent.id) rehostLater(ent.id); // #4917
     }, (e) => {
       const message = e?.message ?? String(e);
       if (e?.code === "batch.stopped") { log(`schedd: batch ${ent.id ?? argv.join(" ")} stopped (lanes keep running; resumed by the next daemon)`); if (!started) reject(new Error(message)); return; }
@@ -179,6 +180,26 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }).finally(() => { if (ent.id) hosted.delete(ent.id); ent.subs.clear(); runs.delete(run); touch(); });
     runs.set(run, ac);
   });
+
+  // #4917: a batch that ended with a deferred issue still waiting (no report) is re-hosted once its retry-at is near, without a restart
+  const rehostTimers = new Set();
+  const rehostLater = (id) => {
+    if (closing) return;
+    let b, st;
+    try { b = openBatch(root, id); if (b.readReport() || b.readCancel() || !b.pendingIssues().length) return; st = b.store.load(); } catch { return; }
+    const at = Math.min(...b.pendingIssues().map((n) => Number(st?.notBefore?.[n]) || Infinity));
+    if (!Number.isFinite(at)) return; // nothing waits on the clock: a deliberate hold stays for --resume
+    const t = setTimeout(() => {
+      rehostTimers.delete(t);
+      if (closing || hosted.has(id) || starting.has(id)) return;
+      log(`schedd: re-hosting batch ${id} (pending issues waiting on a retry)`);
+      const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+      starting.set(id, started);
+      started.catch((e) => log(`schedd: re-host ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
+    }, Math.min(60_000, Math.max(1000, at - Date.now())));
+    t.unref?.();
+    rehostTimers.add(t);
+  };
 
   /** #4775: wait for a batch start at most `admitMs`; the start itself goes on (a second host() would duplicate the batch). */
   const bound = (p, what) => {
@@ -204,7 +225,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   };
 
   const handle = async (req, send) => {
-    if (req.op === "status") return send({ type: "status", pid, lastTick, batches: statusBatches() }, true);
+    if (req.op === "status") {
+      // #4917: a batch dir that still holds pending issues but is not hosted (finalised early, or never resumed)
+      const unhosted = [];
+      for (const id of listBatches(root)) {
+        if (hosted.has(id) || starting.has(id)) continue;
+        try { const pending = openBatch(root, id).pendingIssues(); if (pending.length) unhosted.push({ id, pending }); } catch { /* advisory */ }
+      }
+      return send({ type: "status", pid, lastTick, batches: statusBatches(), unhosted }, true);
+    }
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -215,8 +244,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { added, skipped, requeued = [] } = b.addIssues(req.issues ?? []);
-      // #4687/#5000: a re-queued skipped issue or a newly added one reopens a finished, unhosted batch like --requeue does
-      const reopen = (added.length > 0 || requeued.length > 0) && !hosted.has(req.id) && !starting.has(req.id);
+      // #4687/#5000/#4917: a re-queued skipped issue or a newly added one reopens a finished, unhosted batch like --requeue does
+      const reopen = (added.length > 0 || requeued.length > 0 || b.unrunAdds().length > 0 || b.unrunRequeues().length > 0) && !hosted.has(req.id) && !starting.has(req.id);
       if (reopen) await hostBounded({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, null, `batch ${req.id}`);
       return send({ type: "ok", added, skipped, requeued, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
@@ -225,7 +254,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { requeued, refused } = b.requeue(req.issues ?? [], { reason: req.reason, by: req.by });
-      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      // #4917: a refused repeat requeue still reopens when an earlier entry was never applied
+      const reopen = (requeued.length > 0 || b.unrunRequeues().length > 0) && !hosted.has(req.id) && !starting.has(req.id);
       if (reopen) await hostBounded({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, null, `batch ${req.id}`);
       return send({ type: "ok", requeued, refused, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
@@ -306,6 +336,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     clearInterval(lockTimer);
     clearInterval(lagTimer);
     clearInterval(beatTimer);
+    for (const t of rehostTimers) clearTimeout(t);
     if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
