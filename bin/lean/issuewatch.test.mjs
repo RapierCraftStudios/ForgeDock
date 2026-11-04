@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
-import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
+import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
 
 const tmp = () => tmpDir("iw-");
@@ -418,4 +418,122 @@ test("#4793 formatStatus lists decided / evidence-gathered / folded / external-k
   const s = { name: "w", repo: "o/r", phase: "running", claimed: [], inflight: [], merged: [], verified: [], failed: [],
     decisions: { rows: [{ action: "decided" }, { action: "evidence-needed" }, { action: "post-deploy-only" }, { action: "external", kept: true }, { action: "external", kept: true }] } };
   assert.match(formatStatus(s, w, 0), /needs-human decisions: decided 1  evidence-gathered 1  folded 1  external-kept 2/);
+});
+
+// ── #5088: opt-in trust for the repo's own ForgeDock App, claim dry-run, named 401/403 ──────────────────────────────
+const appIss = (n, login = "rapiercraft-forgedock[bot]", o = {}) => iss(n, { title: `fix: app ${n}`, authorAssociation: "NONE", author: { login }, ...o });
+
+test("#5088 trust_app / trust_app_labels are validated watch keys, default off", () => {
+  assert.equal(W().trust_app, false);
+  assert.deepEqual(W().trust_app_labels, []);
+  assert.equal(W({ trust_app: "true" }).trust_app, true);
+  assert.equal(W({ trust_app: "false" }).trust_app, false);
+  assert.deepEqual(W({ trust_app: true, trust_app_labels: ["operator"] }).trust_app_labels, ["operator"]);
+  assert.throws(() => W({ trust_app: "yes" }), /trust_app must be true or false/);
+  assert.throws(() => W({ trust_app_labels: ["operator"] }), /trust_app_labels needs trust_app: true/);
+  assert.deepEqual(parseWatches("issue_watch:\n  watches:\n    a:\n      trust_app: true\n      trust_app_labels: [operator, intake]\n").a, { trust_app: "true", trust_app_labels: ["operator", "intake"] });
+});
+
+test("#5088 trust_app claims the repo's own App issues only; other bots and NONE humans stay out", () => {
+  const on = W({ trust_app: true });
+  for (const l of ["rapiercraft-forgedock[bot]", "app/rapiercraft-forgedock", "rapiercraft-forgedock"]) {
+    assert.ok(isOwnApp(appIss(1, l)), l);
+    assert.equal(classifyIssue(appIss(1, l), on), "claim", l);
+  }
+  for (const l of ["forge[bot]", "dependabot[bot]", "rapiercraft-forgedock-evil"]) assert.equal(classifyIssue(appIss(2, l), on), null, l);
+  assert.ok(!isOwnApp(appIss(2, "rapiercraft-forgedock-evil")));
+  assert.equal(classifyIssue(iss(3, { authorAssociation: "NONE", author: { login: "mallory" } }), on), null);
+  assert.equal(classifyIssue(iss(4), on), "claim"); // trusted humans unchanged
+  const narrow = W({ trust_app: true, trust_app_labels: ["operator"] });
+  assert.equal(classifyIssue(appIss(5), narrow), null);
+  assert.equal(classifyIssue(appIss(5, undefined, { labels: lbl("operator") }), narrow), "claim");
+  // App follow-ups stay governed by include_followups (post-deploy-only folds, never claims)
+  const defer = "- [ ] `R1: x` — defer: separate work\n", pd = "- [ ] `R2: y` — post-deploy: check later\n";
+  const fu = (body) => appIss(6, undefined, { title: "follow-up: 1 deferred item(s)", body });
+  const onFu = W({ trust_app: true, include_followups: "defer-only", postdeploy_rollup: "50" });
+  assert.equal(classifyIssue(fu(defer), onFu), "claim");
+  assert.equal(classifyIssue(fu(pd), onFu), "fold");
+  assert.equal(classifyIssue(fu("no items"), onFu), null);
+  assert.equal(classifyIssue(fu(pd), W({ trust_app: true })), null);
+});
+
+test("#5088 regression: without trust_app an App-authored issue is not claimed", async () => {
+  for (const l of ["rapiercraft-forgedock[bot]", "app/rapiercraft-forgedock", "rapiercraft-forgedock"]) assert.equal(classifyIssue(appIss(1, l), W()), null, l);
+  const io = fakeIo(tmp(), [appIss(1), iss(2)]);
+  const s = await tick({ watch: W(), repo: "o/r", io, state: { phase: "running", claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, batch: null } });
+  assert.deepEqual(s.claimed, [2]);
+});
+
+test("#5088 tick with trust_app claims and launches the App issue, not a NONE human or another bot", async () => {
+  const io = fakeIo(tmp(), [appIss(1), appIss(2, "forge[bot]"), iss(3, { authorAssociation: "NONE", author: { login: "mallory" } }), iss(4)]);
+  const s = await tick({ watch: W({ trust_app: true }), repo: "o/r", io, state: { phase: "running", claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, batch: null } });
+  assert.deepEqual(s.claimed, [1, 4]);
+  assert.deepEqual(io.launched.map(([n]) => n), [1, 4]);
+});
+
+test("#5088 selectorMiss names the failing selector", () => {
+  assert.equal(selectorMiss(iss(1, { labels: lbl("epic") }), W({ exclude_labels: ["epic"] })), "excluded label epic");
+  assert.equal(selectorMiss(iss(1), W({ labels: ["ready"] })), "missing label ready");
+  assert.equal(selectorMiss(iss(1), W()), null);
+});
+
+for (const mode of ["per-issue", "batch"]) {
+  test(`#5088 --dry-run (${mode}) lists would-claim and skipped issues with reasons and writes nothing`, async () => {
+    const dir = tmp(), cwd = tmp();
+    writeFileSync(join(cwd, "forge.yaml"), `branches:\n  default: main\nissue_watch:\n  watches:\n    intake:\n      mode: ${mode}\n      trust_app: true\n      exclude_labels: [epic]\n`);
+    const io = fakeIo(dir, [appIss(1), iss(2, { labels: lbl("epic") }), iss(3, { authorAssociation: "NONE", author: { login: "mallory" } }), iss(4), appIss(5, "dependabot[bot]")]);
+    io.gh = ((orig) => async (a) => (a[0] === "repo" ? (a.includes("nameWithOwner") ? JSON.stringify({ nameWithOwner: "o/r" }) : "main") : orig(a)))(io.gh);
+    const rdir = repoDir("o/r", io.env);
+    mkdirSync(rdir, { recursive: true });
+    writeFileSync(join(rdir, "claims.json"), JSON.stringify({ 4: "other" }) + "\n");
+    const out = [];
+    const r = await issueWatchFromCli(["run", "--name", "intake", "--dry-run"], { cwd, env: io.env, io, print: (l) => out.push(l) });
+    const t = out.join("\n");
+    assert.match(t, /would claim #1 -> staging: ForgeDock App author \(trust_app\)/);
+    assert.match(t, /skip #2: excluded label epic/);
+    assert.match(t, /skip #3: untrusted author mallory \(NONE\)/);
+    assert.match(t, /skip #4: already claimed by watch other/);
+    assert.match(t, /skip #5: bot author dependabot\[bot\]/);
+    assert.deepEqual(r.dryRun.claim, [{ number: 1, lane: "staging", reason: "ForgeDock App author (trust_app)" }]);
+    assert.ok(Array.isArray(r.dryRun.rows));
+    assert.deepEqual(JSON.parse(readFileSync(join(rdir, "claims.json"), "utf8")), { 4: "other" });
+    assert.ok(!existsSync(join(watchDir("o/r", "intake", io.env), "status.json")));
+    assert.deepEqual(io.launched, []);
+    assert.deepEqual(io.batchOps, []);
+  });
+}
+
+test("#5088 planClaims: own registry claim stays claimable, room caps the rest as over capacity", async () => {
+  const io = fakeIo(tmp(), [iss(1), iss(2), iss(3)]);
+  const rdir = repoDir("o/r", io.env);
+  mkdirSync(rdir, { recursive: true });
+  writeFileSync(join(rdir, "claims.json"), JSON.stringify({ 1: "w" }) + "\n");
+  const p = await planClaims({ watch: W(), repo: "o/r", io, state: { claimed: [3], inflight: [] }, room: 1 });
+  assert.deepEqual(p.claim.map((c) => c.number), [1]);
+  assert.deepEqual(p.skip, [{ number: 3, reason: "already claimed by this watch" }, { number: 2, reason: "over capacity (room 1)" }]);
+});
+
+test("#5088 ghRunner names the failing call; 401/403 also warn with the effect on the pass", () => {
+  const assocArgs = ["api", "repos/o/r/issues?state=open&per_page=100", "--paginate", "--jq", ".[]"];
+  assert.match(ghFailureEffect(assocArgs), /every author untrusted/);
+  assert.match(ghFailureEffect(["api", "user", "--jq", ".login"]), /^no effect/);
+  assert.match(ghFailureEffect(["api", "app", "--jq", ".slug"]), /^no effect/);
+  assert.match(ghFailureEffect(["api", "repos/o/r/branches/staging/protection/required_status_checks"]), /required checks unknown/);
+  assert.match(ghFailureEffect(["issue", "list", "-R", "o/r"]), /raised to its caller/);
+  const warned = [];
+  const fail = (stderr) => () => { throw Object.assign(new Error("Command failed"), { status: 1, stderr }); };
+  const gh403 = ghRunner(fail("gh: Resource not accessible by integration (HTTP 403)\n"), (l) => warned.push(l));
+  assert.throws(() => gh403(assocArgs), (e) => /gh api repos\/o\/r\/issues\?state=open&per_page=100 --paginate failed: gh: Resource not accessible by integration \(HTTP 403\)/.test(e.message) && e.status === 1);
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /gh api repos\/o\/r\/issues\?state=open.* -> HTTP 403: .*effect: pass degraded: .*every author untrusted/);
+  const gh401 = ghRunner(fail("gh: A JSON web token could not be decoded (HTTP 401)"), (l) => warned.push(l));
+  assert.throws(() => gh401(["api", "app", "--jq", ".slug"]), /gh api app --jq failed/);
+  assert.match(warned[1], /gh api app --jq -> HTTP 401: .*effect: no effect/);
+  const gh500 = ghRunner(fail("gh: Server Error (HTTP 500)"), (l) => warned.push(l));
+  assert.throws(() => gh500(["issue", "list"]), /gh issue list failed: gh: Server Error/);
+  assert.equal(warned.length, 2);
+  let seen;
+  assert.equal(ghRunner((cmd, args, opts) => { seen = { cmd, args, opts }; return "out"; })(["repo", "view"]), "out");
+  assert.equal(seen.cmd, "gh");
+  assert.deepEqual(seen.opts.stdio, ["ignore", "pipe", "pipe"]);
 });
