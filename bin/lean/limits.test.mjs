@@ -183,3 +183,37 @@ describe("account-scoped usage-limit holds (#4190)", () => {
     assert.deepEqual(limits.list(), []);
   });
 });
+
+describe("account rotator and usage-limit holds (#5094)", () => {
+  it("#5094 rotator headroom: a rate_limited lane records no host hold and admissions continue", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t;
+    const limits = openLimits(storeFile(), { now });
+    let acct = "acct-1";
+    const rotator = { kind: "tokenbaton", accounts: [{ n: 1 }, { n: 2 }], headroom: () => true, resumeAt: () => now(),
+      isAccount: (id) => id === "acct-1" || id === "acct-2", currentIdentity: () => acct };
+    const starts = {};
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", limits, rotator, identity: () => laneBackendId({}, rotator), batchId: "b1",
+      runOne: async (n) => {
+        (starts[n] ??= []).push(now());
+        if (n === 1 && starts[1].length === 1) { acct = "acct-2"; return limited("acct-1", t0 + 600_000); } // tokenbaton rotates
+        return { terminalReason: "merged" };
+      } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.deepEqual(limits.list(), [], "no host-wide hold while an account has headroom");
+    assert.equal(starts[2][0], t0, "admissions continue");
+    assert.equal(starts[1][1], t0, "the limited issue reruns at once on the next account");
+  });
+
+  it("#5094 a hold set for identity A does not block admissions once the rotator's active identity is B", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t;
+    const limits = openLimits(storeFile(), { now });
+    limits.set("acct-1", t0 + 3_600_000, "batch b0 #1");
+    const rotator = { currentIdentity: () => "acct-2" };
+    const starts = [];
+    await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => laneBackendId({}, rotator),
+      runOne: async () => { starts.push(now()); return { terminalReason: "merged" }; } });
+    assert.deepEqual(starts, [t0]);
+  });
+});
