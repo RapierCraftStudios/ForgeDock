@@ -175,7 +175,7 @@ Print these blocks to stdout before Phase 1A begins. During Phase 1B (step 3 —
 
 **Goal**: Query the Forge Ledger knowledge index for prior cards matching this issue's title terms, affected files, and symbols — **before reading any code**. Inject above-threshold results with explicit delta-verification framing so the investigator builds on prior knowledge rather than re-deriving it.
 
-**This phase is non-blocking** — if the index is absent, empty, or returns no match above threshold, log a single line and proceed to Phase 1A. Never stall the pipeline for recall.
+**This phase is non-blocking** — if the index is absent or empty, print a WARNING and use the live subject search (Step 1); if it returns no match above threshold, log a single line and proceed to Phase 1A. Never stall the pipeline for recall.
 
 **Relationship to Phase 0.5**: Phase 0.5 retrieves structured priors from the Gist-based FORGE:MEMORY_INDEX (coarse keyword scoring over MEMORY_ENTRY lines). Phase 0.6 queries the Forge Ledger index (BM25 over structured knowledge cards, indexed by `build-knowledge-index.mjs`). Both are complementary and both run — neither replaces the other.
 
@@ -183,6 +183,8 @@ Print these blocks to stdout before Phase 1A begins. During Phase 1B (step 3 —
 
 ```bash
 RECALL_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/bin/recall.mjs"
+# #5085: recall.mjs ships with ForgeDock, not the target repo: also probe the install root
+[ -f "$RECALL_PATH" ] || RECALL_PATH="${FORGE_ROOT:-$(forge_root 2>/dev/null)}/bin/recall.mjs"
 LEDGER_AVAILABLE=0
 
 if [ -f "$RECALL_PATH" ]; then
@@ -192,8 +194,14 @@ if [ -f "$RECALL_PATH" ]; then
 fi
 
 if [ "$LEDGER_AVAILABLE" -eq 0 ]; then
-  echo "[recall] Forge Ledger index absent or empty — skipping Phase 0.6, proceeding to Phase 1A"
-  # → Continue to Phase 1A
+  WHICH=$([ -f "$RECALL_PATH" ] && echo "index ~/.forge/index empty or missing" || echo "bin/recall.mjs missing")
+  echo "WARNING: [recall] Forge Ledger index absent or empty (${WHICH}) — falling back to live subject search"
+  # #5085: prior attempts by subject terms (codes, symbols, title words) + repo-wide git log --grep, not only by file
+  PA_BODY="${TMPDIR:-/tmp}/pa-{NUMBER}.md"; gh issue view {NUMBER} {GH_FLAG} --json body --jq .body > "$PA_BODY" 2>/dev/null
+  PA=$(node "$(forge_resolve prior-attempts.mjs)" --repo {GH_REPO} --issue {NUMBER} --body-file "$PA_BODY" \
+    --title "$(gh issue view {NUMBER} {GH_FLAG} --json title --jq .title)" || true)
+  case "$PA" in *"| #"*) RECALL_RESULTS="$PA" ;; esac
+  # → Skip Steps 2-3; inject RECALL_RESULTS (the ## Prior Attempts table) via Step 4, then Phase 1A
 fi
 ```
 

@@ -158,6 +158,19 @@ log_lacks "no milestone after failed read-back" "--milestone"
 MOCK_READBACK=missing-sections run "post-create repair is not fatal" 0 --repo o/r --title "fix: a" --body-file "$GOOD"
 log_has "missing section appended after create" "|issue|edit|901|-R|o/r|--body|"
 
+# --- #5085: bug/fix issues without ## Prior Attempts warn, never block ---------------
+WARN="no ## Prior Attempts section"
+run "fix title without prior attempts still creates" 0 --repo o/r --title "fix(api): a" --body-file "$GOOD"
+grep -qF "$WARN" "$TMP/err" && ok || bad "fix title warns about missing ## Prior Attempts"
+out_has "warning keeps the CREATED line" "ISSUE_CREATE_RESULT:CREATED"
+run "bug label warns" 0 --repo o/r --title "chore: a" --body-file "$GOOD" --label bug
+grep -qF "$WARN" "$TMP/err" && ok || bad "bug label warns about missing ## Prior Attempts"
+PA="$TMP/pa.md"; { printf '## Prior Attempts\n\nNone found (terms: a).\n\n'; cat "$GOOD"; } > "$PA"
+run "fix with prior attempts" 0 --repo o/r --title "fix: a" --body-file "$PA"
+grep -qF "$WARN" "$TMP/err" && bad "warned although ## Prior Attempts is present" || ok
+run "feat never warns" 0 --repo o/r --title "feat: a" --body-file "$GOOD"
+grep -qF "$WARN" "$TMP/err" && bad "feat issue warned about ## Prior Attempts" || ok
+
 # --- dedup helper comes from the script's own directory, never the cwd ---------------
 printf '#!/usr/bin/env bash\necho "DUPLICATE: #666 planted"; exit 1\n' > "$TMP/work/scripts/issue-dedup.sh"
 run "planted cwd dedup helper ignored" 0 --repo o/r --title "fix: a" --body-file "$GOOD"
