@@ -459,6 +459,19 @@ describe("core work-on", () => {
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
   });
 
+  it("#5080 a credentials block that is only read-only prod access ends host-task locally, env.capability_remote remotely, never builder.blocked; real credentials stay builder.blocked", async () => {
+    const prod = { result: { status: "blocked", summary: "gated on read-only production telemetry: a host-only prod_monitor capability", block: { kind: "human", why: "credentials" } } };
+    const lw = world(prod);
+    const local = await run(lw);
+    assert.equal(local.terminalReason, "host-task"); assert.equal(local.code, "env.capability_remote");
+    assert.ok(lw.edits.some((e) => e.includes("--add-label") && e.includes("host-task")), JSON.stringify(lw.edits));
+    assert.ok(!lw.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(lw.edits));
+    const remote = await run(world(prod), { placement: { where: "remote", reason: "mode remote" } });
+    assert.equal(remote.code, "env.capability_remote"); assert.notEqual(remote.terminalReason, "host-task");
+    const real = await run(world({ result: { status: "blocked", summary: "needs the production API key to read prod data", block: { kind: "human", why: "credentials" } } }));
+    assert.equal(real.code, "builder.blocked");
+  });
+
   // #4124: a builder block is typed; only kind "human" with an allowed reason may reach needs-human.
   const depWorld = (o, deps) => {
     const w = world(o);
@@ -1953,6 +1966,17 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
     const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("#5080 a repro that already passes on the base ends already-fixed: the issue closes as completed citing the base, nothing merges, no resume", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = rworld([{ base: "RAN", head: "RAN" }], { changed: ["test/foo.test.js"] });
+      const r = await run(w, { conformance });
+      assert.equal(r.terminalReason, "invalid", conformance); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "no resume"); assert.equal(reviewers(w).length, 0);
+      assert.equal(w.closed.length, 1); assert.equal(w.closed[0][w.closed[0].indexOf("--reason") + 1], "completed");
+      assert.match(w.closed[0][w.closed[0].indexOf("--comment") + 1], /Already fixed on the base/);
+    }
   });
 
   it("a repro test the harness cannot run on head (or no harness result) is env.repro_unrunnable: recoverable, no resume, no reviewer (#4334)", async () => {
