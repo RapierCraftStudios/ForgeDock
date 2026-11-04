@@ -28,7 +28,7 @@
 # exact value EXTENDED is STANDARD. An extended roster prints an extra DEPTH=extended line.
 # Path triggers escalate in EVERY tier except full (which already runs the union): CONTRACT HIGH_RISK, cross-critical
 # pairs, churn hot-spot, danger zone, bin/engine* (Concurrency + spec-cli), bin/ (spec-cli), auth/session/trust-filter
-# files (Auth: auth*, not author*; oauth, jwt, login, password, permission, rbac, acl, token(s), api_key(s), credential, deps.py), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API).
+# files (Auth: auth*, not author*; oauth, jwt, login, password, permission, rbac, acl, token(s), api_key(s), credential, deps.py), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API). web/app dirs, .tsx/.jsx, next.config.*, middleware.ts (Frontend; forge#5077).
 # Auth and Infra are path-gated: a diff-text score alone never selects them. Security is a hard floor in every tier.
 # spec-cli is added only with --spec-cli true (the persona file exists in the repo under review); in the standard tier it
 # also covers commands/**. Bash 3.2 portable (no mapfile, associative arrays, grep -P).
@@ -200,6 +200,7 @@ fi
 hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(docker-)?compose[^/]*\.ya?ml$|(^|/)deploy[^/]*\.sh$|(^|/)docker-entrypoint[^/]*$|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }
+hit '(^|/)(web|app)/|\.(tsx|jsx)$|(^|/)next\.config\.[a-z]+$|(^|/)middleware\.(ts|js)$' && { add_agent Frontend; trig frontend-path; }
 hit '^bin/engine' && { add_agent Concurrency; trig bin-engine; }
 if [ "$SPEC_CLI" = "true" ]; then
     hit '^bin/' && { add_agent spec-cli; trig bin; }
