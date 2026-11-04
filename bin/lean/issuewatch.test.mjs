@@ -436,7 +436,11 @@ test("#5088 trust_app / trust_app_labels are validated watch keys, default off",
 
 test("#5088 trust_app claims the repo's own App issues only; other bots and NONE humans stay out", () => {
   const on = W({ trust_app: true });
-  for (const l of ["rapiercraft-forgedock[bot]", "app/rapiercraft-forgedock", "rapiercraft-forgedock"]) {
+  // Release review #5123 (AUTH-1): the bare slug counts only with a bot signal; a human who registers the slug is never the App.
+  assert.ok(isOwnApp(appIss(1, "rapiercraft-forgedock", { author: { login: "rapiercraft-forgedock", is_bot: true } })));
+  assert.ok(!isOwnApp(appIss(1, "rapiercraft-forgedock", { author: { login: "rapiercraft-forgedock", is_bot: false } })), "human with the slug as login");
+  assert.equal(classifyIssue(appIss(1, "rapiercraft-forgedock", { author: { login: "rapiercraft-forgedock", is_bot: false } }), on), null, "human slug never claimed");
+  for (const l of ["rapiercraft-forgedock[bot]", "app/rapiercraft-forgedock"]) {
     assert.ok(isOwnApp(appIss(1, l)), l);
     assert.equal(classifyIssue(appIss(1, l), on), "claim", l);
   }
