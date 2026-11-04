@@ -68,7 +68,8 @@ export function parseVerify(sec = {}) {
       if (ext.length > 1 && cmd) guardCommand[ext] = cmd;
     }
   }
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
+  const precheckBlock = str(s.precheck_block).toLowerCase() === "true"; // #5079: a still-failing declared check stops the lane (ci.red)
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
