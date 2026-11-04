@@ -7,9 +7,14 @@
  * symbol from the issue, and repo-fact file pointers. Only GitHub and git are read; nothing here is ForgeDock-specific
  * beyond the FORGE:* records lanes already write. `gatherContextFacts` does the I/O; `compileContextPack` is pure, so the
  * same facts always give a byte-identical pack. The pack is a hint: it never enters the issue text contracts quote from.
+ * #5085: `attempts` also carries subject history: closed issues and merged PRs found by the issue's subject terms (codes,
+ * symbols, title words; `subjectTerms`) through GitHub search and a repo-wide `git log --grep`, whatever files they touched.
+ * The pack also reports whether the Forge Ledger recall index exists, so a missing index is never skipped silently.
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { parseDependsOn } from "../engine/phases.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { runLogKey } from "../engine/runlog.mjs";
@@ -33,6 +38,12 @@ export const MAX_LINKS = 20;
 export const MAX_LEDGER_PRS = 8;
 /** #4401: FORGE:FACTS records (earlier lanes) read into one pack: this issue's own attempts first, then the file-path ledger. */
 export const MAX_FACT_LANES = 6;
+/** #5085: subject-history bounds per pack: GitHub searches run, rows kept. */
+export const MAX_SUBJECT_QUERIES = 3;
+export const MAX_SUBJECT_ITEMS = 8;
+/** #5085: where the Forge Ledger recall CLI ships (the ForgeDock install) and its default index file (bin/recall.mjs). */
+const RECALL_INSTALL = fileURLToPath(new URL("../recall.mjs", import.meta.url));
+const RECALL_INDEX = join(homedir(), ".forge", "index", "knowledge.jsonl");
 export const REPO_FACT_FILES = Object.freeze([REPO_FACTS_FILE, TEST_MAP_FILE]);
 const ATTEMPT_MARKERS = ["NEEDS_HUMAN", "BASE_SYNC", "FIX_CI"];
 const LINE_MAX = 200;
@@ -105,6 +116,29 @@ export function issueSymbols(body) {
 
 const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const namesSymbol = (text, symbols) => symbols.some((s) => new RegExp(`(?:^|[^\\w$])${reEscape(s)}(?:$|[^\\w$])`).test(String(text)));
+
+const STOPWORDS = new Set(("about after again also always another because before being between both cannot could does doing during each every from have having into issue issues just make makes more most must never only other over same should some such than that their them then there these they this those through under until very what when where which while will with within without would your " +
+  "fix fixes fixed bug bugs feat chore docs test tests file files when wrong error errors fail fails failed failing add adds remove update use uses").split(" "));
+const FILE_EXT = /\.(?:m?[jt]sx?|cjs|md|sh|json|ya?ml|py|go|rs|rb|css|html|txt|toml|lock|sql)$/i;
+/** #5085: subject terms split by kind: codes and symbols (exact, quoted searches) and distinctive title words. */
+function subjectParts({ title = "", body = "" } = {}) {
+  const text = `${stripComments(title)}\n${stripComments(body)}`;
+  const codes = [];
+  const add = (t) => { if (t && !codes.some((c) => c.toLowerCase() === t.toLowerCase())) codes.push(t); };
+  for (const m of text.matchAll(/`([a-z][a-z0-9_.-]{2,63})`/g)) if (/[._-]/.test(m[1]) && !FILE_EXT.test(m[1]) && /[a-z0-9]$/.test(m[1])) add(m[1]);
+  for (const m of text.matchAll(/(?<![\w/#:])([A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9])(?![\w:])/g)) if (!/^FORGE_/.test(m[1])) add(m[1]);
+  for (const m of text.matchAll(/\bHTTP\s*([1-5]\d\d)\b|(?<![\w#])([1-5]xx)\b/gi)) add(m[1] ?? m[2].toLowerCase());
+  for (const s of issueSymbols(body)) if (!codes.some((c) => c.toLowerCase().endsWith(`.${s.toLowerCase()}`))) add(s);
+  const head = stripComments(title).replace(/^\s*\w+(?:\([^)]*\))?!?:\s*/, "");
+  const words = [];
+  for (const w of head.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []) if (!STOPWORDS.has(w) && !words.includes(w) && !codes.some((c) => c.toLowerCase() === w)) words.push(w);
+  return { codes: codes.slice(0, 3), words: words.slice(0, 3) };
+}
+/** #5085: the issue's subject terms, codes and symbols first, then title words; deterministic, deduped, at most 6. */
+export function subjectTerms({ title = "", body = "" } = {}) {
+  const { codes, words } = subjectParts({ title, body });
+  return [...codes, ...words];
+}
 
 /** Rerun (an earlier run left a record or salvage), decomposed child (`**Parent**`), or first attempt. */
 export function laneType({ resumed = false, attempts = 0, body = "" } = {}) {
@@ -187,12 +221,73 @@ async function readComments(gh, repo, n) {
 }
 
 /**
+ * #5085: closed issues and merged PRs on the same subject, found by term rather than by issue number or file: up to
+ * MAX_SUBJECT_QUERIES GitHub searches (each code/symbol quoted, then the title words together) and one `git log --grep`
+ * over the whole history of `base`. `exclude` (self, linked issues) is dropped; rows are ranked by the number of
+ * matched terms, then newest first, and capped. A failed query lands in `errors`; the rest still count.
+ * @returns {Promise<{terms:string[], rows:{number:number, kind:string, status:string, title:string, matched:string[]}[], errors:string[]}>}
+ */
+export async function subjectHistory({ io, repo, issue = null, title = "", body = "", base = null, exclude = [], max = MAX_SUBJECT_ITEMS }) {
+  const { codes, words } = subjectParts({ title, body });
+  const terms = [...codes, ...words], errors = [], hits = new Map();
+  const skip = new Set([Number(issue), ...exclude.map(Number)]);
+  const hit = (n, info, matched) => {
+    if (!Number.isSafeInteger(n) || n <= 0 || skip.has(n)) return;
+    const row = hits.get(n) ?? { number: n, kind: info.kind, status: info.status, title: info.title, matched: [] };
+    if (info.src === "gh") Object.assign(row, { kind: info.kind, status: info.status, title: info.title || row.title });
+    for (const t of matched) if (!row.matched.includes(t)) row.matched.push(t);
+    hits.set(n, row);
+  };
+  if (!terms.length) return { terms, rows: [], errors };
+  const queries = [...codes.slice(0, words.length ? MAX_SUBJECT_QUERIES - 1 : MAX_SUBJECT_QUERIES).map((c) => [c]), ...(words.length ? [words] : [])].slice(0, MAX_SUBJECT_QUERIES);
+  for (const q of queries) {
+    const text = q.length === 1 && codes.includes(q[0]) ? `"${q[0]}"` : q.join(" ");
+    try {
+      const out = await io.gh(["api", "-X", "GET", "search/issues", "-f", `q=repo:${repo} is:closed ${text}`, "-f", "per_page=10", "--jq",
+        ".items[] | {number, title, state_reason, pr: (.pull_request != null), merged: (.pull_request.merged_at != null)} | @json"]);
+      for (const it of parseLines(out)) {
+        const status = it.pr ? (it.merged ? "merged" : "closed unmerged") : (it.state_reason ? String(it.state_reason) : "closed");
+        hit(Number(it.number), { src: "gh", kind: it.pr ? "PR" : "issue", status: codeOf(status.replace(" ", "-")) ? status : "closed", title: oneLine(it.title, 120) }, q);
+      }
+    } catch (e) { errors.push(`attempts: subject search ${oneLine(e?.message ?? e, 80)}`); }
+  }
+  if (base && io.git) {
+    try {
+      const greps = codes.length ? ["-E", `--grep=${codes.map(reEscape).join("|")}`] : ["--all-match", ...words.map((w) => `--grep=${reEscape(w)}`)];
+      const out = String(await io.git(["log", "-i", ...greps, "-n", "20", "--format=%x1e%H%x1f%s%x1f%b", base]));
+      for (const rec of out.split("\x1e").filter((x) => x.trim())) {
+        const [, subject = "", msg = ""] = rec.split("\x1f");
+        const pr = Number(/Merge pull request #(\d+)/.exec(subject)?.[1] ?? /\(#(\d+)\)\s*$/.exec(subject.trim())?.[1]) || null;
+        const hay = `${subject}\n${msg}`.toLowerCase();
+        const matched = (codes.length ? codes : words).filter((t) => hay.includes(t.toLowerCase()));
+        if (!pr || !matched.length || (!codes.length && matched.length < words.length)) continue;
+        const named = /^Merge pull request/.test(subject) ? msg.split("\n").map((l) => l.trim()).find(Boolean) ?? subject : subject;
+        hit(pr, { src: "git", kind: "PR", status: "merged", title: oneLine(named, 120) }, matched);
+      }
+    } catch (e) { errors.push(`attempts: subject git log ${oneLine(e?.message ?? e, 80)}`); }
+  }
+  const rows = [...hits.values()].sort((a, b) => b.matched.length - a.matched.length || b.number - a.number)
+    .slice(0, max);
+  return { terms, rows, errors };
+}
+
+/** #5085: is the Forge Ledger recall CLI (repo or ForgeDock install) and its index there? null when it cannot be probed. */
+async function recallStatus(io, dirs, index) {
+  if (typeof io?.exists !== "function") return null;
+  let cli = false;
+  for (const p of [...dirs.filter(Boolean).map((d) => `${d}/bin/recall.mjs`), RECALL_INSTALL]) if (await io.exists(p)) { cli = true; break; }
+  if (!cli) return { present: false, reason: "bin/recall.mjs missing" };
+  if (!(await io.exists(index))) return { present: false, reason: "index ~/.forge/index missing" };
+  return { present: true, reason: "" };
+}
+
+/**
  * Collect the facts for one issue's pack. `io`: {gh, git, exists}; git runs in `cwd` (the lane worktree), base is the
  * base ref; `checkout` (the main checkout, optional) is where repo-fact files absent from the worktree are looked up.
  * Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
  */
-export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [] }) {
-  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], errors: [] };
+export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [], recallIndex = RECALL_INDEX }) {
+  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], errors: [], recall: null };
   const body = String(iss?.body ?? "");
   const on = new Set(sources);
   const step = async (name, fn) => { if (!on.has(name)) return; try { await fn(); } catch (e) { facts.errors.push(`${name}: ${oneLine(e?.message ?? e, 120)}`); } };
@@ -243,7 +338,13 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
     }
     const refs = String(await git(["for-each-ref", "--format=%(refname) %(objectname:short)", `refs/forge/salvage/${issue}/`])).split("\n").map((l) => l.trim()).filter(Boolean).sort();
     for (const l of refs) { const [ref, sha] = l.split(" "); facts.attempts.push({ kind: "salvage", ref, line: `salvaged uncommitted work at ${sha ?? "?"} (git diff HEAD ${ref} --stat)` }); }
+    // #5085: earlier issues and PRs on the same subject, deduped against the graph (or, with graph off, the body's own links)
+    const exclude = [...facts.links.map((l) => l.number), ...bodyLinks(body, repo, issue), ...parseDependsOn(stripComments(body), issue), ...(parentOf(body) ? [parentOf(body)] : [])];
+    const sh = await subjectHistory({ io: { gh: io.gh, git }, repo, issue, title: String(iss?.title ?? ""), body, base, exclude });
+    facts.errors.push(...sh.errors);
+    for (const r of sh.rows) facts.attempts.push({ kind: "subject", ref: `#${r.number}`, line: `[${r.kind}] ${r.status} "${r.title}"; matched ${r.matched.join(", ")}` });
   });
+  try { facts.recall = await recallStatus(io, [...new Set([cwd, checkout])], recallIndex); } catch { facts.recall = null; }
 
   // #4375: already read and selected by the engine from the local ledger (pitfalls.mjs selectPitfalls); no I/O here
   await step("pitfalls", async () => {
@@ -367,9 +468,10 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
     for (const f of facts?.facts ?? []) cand.push({ src: "facts", line: `- ${f} (repo facts file; read it if relevant)` });
   }
   const found = Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, cand.filter((c) => c.src === s).length]));
-  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [] };
+  const recall = facts?.recall && typeof facts.recall === "object" ? { present: Boolean(facts.recall.present), reason: oneLine(facts.recall.reason ?? "", 80) } : null;
+  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [], recall };
   if (!cand.length) return empty;
-  const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts at this issue", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Facts from earlier lanes and repo facts" };
+  const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts (this issue and the same subject)", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Facts from earlier lanes and repo facts" };
   const head = `Context pack for #${facts.issue}`;
   const size = (s) => Buffer.byteLength(s, "utf8");
   const kept = [];
@@ -388,7 +490,7 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
     if (rows.length) parts.push(`\n${titles[s]}:`, ...rows.map((r) => r.text));
   }
   const text = parts.join("\n");
-  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit) };
+  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit), recall };
 }
 
 /** The pack text without its pitfalls section (#4375: pitfalls are local only and never posted). */
@@ -406,7 +508,7 @@ export function publicPackText(text) {
 /** The collapsed FORGE:CONTEXT issue record body (without the marker); pitfalls show as a count only (#4375). */
 export function renderContextRecord(pack, { mode, laneType: lt }) {
   const src = CONTEXT_SOURCES.map((s) => `${s} ${pack.sources?.[s] ?? 0}/${pack.found?.[s] ?? 0}`).join(", ");
-  return `<details><summary>Context pack: ${pack.items} item(s), ${pack.bytes} bytes, ${pack.truncated} dropped (mode ${mode}, lane ${lt}, hash ${pack.hash})</summary>\n\nSources (included/found): ${src}${pack.sources?.pitfalls ? " (pitfalls are local only, not shown)" : ""}\n\n~~~~text\n${noComments(publicPackText(pack.text)).replace(/~~~~/g, "~~~")}\n~~~~\n</details>`;
+  return `<details><summary>Context pack: ${pack.items} item(s), ${pack.bytes} bytes, ${pack.truncated} dropped (mode ${mode}, lane ${lt}, hash ${pack.hash})</summary>\n\nSources (included/found): ${src}${pack.sources?.pitfalls ? " (pitfalls are local only, not shown)" : ""}${pack.recall && !pack.recall.present ? `\n\nRecall index: absent (${pack.recall.reason || "unknown"}); subject history comes from live search.` : ""}\n\n~~~~text\n${noComments(publicPackText(pack.text)).replace(/~~~~/g, "~~~")}\n~~~~\n</details>`;
 }
 
 /**

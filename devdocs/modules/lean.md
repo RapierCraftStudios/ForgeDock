@@ -988,6 +988,21 @@ the old path with no extra calls. The pack never enters `issueText`, and neither
 the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
 builder turns, cache tokens and cost per lane type and mode; the default moves to
 `on` only once that A/B shows a win.
+
+Subject history (#5085): **attempts** also carries `subject` rows after the
+issue's own runs. `subjectTerms` takes codes (dotted/underscored, UPPER_SNAKE,
+HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words.
+`subjectHistory` (shared with `scripts/prior-attempts.mjs`, the `/issue`
+`## Prior Attempts` table) runs at most `MAX_SUBJECT_QUERIES`=3 closed
+`search/issues` queries plus one repo-wide `git log --grep` (no pathspec), drops
+self and graph/body links, ranks by matched terms then number, and keeps
+`MAX_SUBJECT_ITEMS`=8. A failed query is a `facts.errors` entry (`attempts:
+subject ...`). Subject rows never count as runs (`priorAttempts`/`laneType`).
+`facts.recall` / pack `recall` says whether `bin/recall.mjs` (repo or ForgeDock
+install) and `~/.forge/index/knowledge.jsonl` exist; when absent, `FORGE:CONTEXT`
+adds `Recall index: absent (<reason>); subject history comes from live search.`
+and `CONTEXT_PACK` records `recall: absent|present`. The status stays out of the
+pack text and hash.
 `ab` (#4444) runs the experiment: `contextArm` (context.mjs) hashes `repo#issue`
 (sha256, first byte parity) to a stable `on` or `shadow` arm, so reruns stay in
 their arm. The lane uses the arm as its effective mode, logs it as `context_pack` /
