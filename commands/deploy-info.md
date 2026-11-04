@@ -57,13 +57,13 @@ else
   OPEN_FINDINGS_SUMMARY=""
   for pr_num in $ALL_PR_NUMBERS; do
     # Anchored post-filter (same as review-pr-staging.md): the search is a coarse candidate fetch only
-    FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
+    FINDING_PR_FILTER='[.[] | select(([.labels[]?.name] | (index("blocking") != null) or (index("priority:P0") != null) or (index("priority:P1") != null) or (map(select(startswith("priority:"))) | length == 0))) | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
     OPEN_FINDINGS=$(gh issue list -R {GH_REPO} \
       --label "review-finding" \
       --state open \
       --search "PR #${pr_num}" \
       --limit 20 \
-      --json number,title,body 2>/dev/null \
+      --json number,title,body,labels 2>/dev/null \
       | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null)  # uses FINDING_PR_FILTER
 
     if [ -n "$OPEN_FINDINGS" ]; then
@@ -307,13 +307,13 @@ if [ -z "$TRAIN_PR_NUMBER" ]; then
 else
   # Step 2: Check whether the train is held (has blocking findings)
   # Anchored post-filter (same as review-pr-staging.md): the search is a coarse candidate fetch only
-  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
+  FINDING_PR_FILTER='[.[] | select(([.labels[]?.name] | (index("blocking") != null) or (index("priority:P0") != null) or (index("priority:P1") != null) or (map(select(startswith("priority:"))) | length == 0))) | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
   HELD_BY=$(gh issue list {GH_FLAG} \
     --label "review-finding" \
     --state open \
     --search "PR #${TRAIN_PR_NUMBER}" \
     --limit 20 \
-    --json number,title,body 2>/dev/null \
+    --json number,title,body,labels 2>/dev/null \
     | jq -r --arg n "${TRAIN_PR_NUMBER}" "$FINDING_PR_FILTER" 2>/dev/null | sed 's/^  - //' || true)  # uses FINDING_PR_FILTER
 
   if [ -n "$HELD_BY" ]; then
