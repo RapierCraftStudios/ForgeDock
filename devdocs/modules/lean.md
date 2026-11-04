@@ -2548,3 +2548,7 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-04 — prior-attempts table cells escape backslashes (release review of #5103, CodeQL)
 
 - `scripts/prior-attempts.mjs` `cell()` escapes `\` before `|`, so a title with a trailing backslash can no longer turn `\|` back into a column break in the `## Prior Attempts` table (CodeQL `js/incomplete-sanitization`).
+
+## Entry 2026-11-05 — issue-watch App trust needs a bot signal (release review of #5123)
+
+- `isOwnApp` (`bin/lean/issuewatch.mjs`) requires a bot signal as well as the App slug: the `<slug>[bot]` or `app/<slug>` login form, or `is_bot: true` for the bare GraphQL login. A human account registered under the slug's name (user logins and App slugs are separate namespaces) is never the App, so `trust_app: true` never claims its issues.

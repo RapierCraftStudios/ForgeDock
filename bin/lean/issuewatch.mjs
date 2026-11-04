@@ -152,7 +152,13 @@ export const hasUnresolvedDefer = (body) => noComments(body).split("\n").some((l
 const bareLogin = (i) => String(i.author?.login ?? "").trim().toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");
 export const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || bareLogin(i) === APP_SLUG; };
 /** #5088: the issue's author is this repo's ForgeDock App (`app/<slug>`, `<slug>[bot]` or the bare slug); never another bot. */
-export const isOwnApp = (i) => bareLogin(i) === APP_SLUG;
+// Release review of #5123 (AUTH-1): the slug alone is a username anyone could register. Require a bot signal too: the
+// REST/gh forms `<slug>[bot]` / `app/<slug>`, or `is_bot: true` (gh --json author) for the bare GraphQL login.
+export const isOwnApp = (i) => {
+  if (bareLogin(i) !== APP_SLUG) return false;
+  const l = String(i.author?.login ?? "").trim();
+  return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true;
+};
 const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
 
 /** {kind, reason}: `kind` as classifyIssue returns it; `reason` says why (shown by the per-issue/batch `--dry-run`). */
