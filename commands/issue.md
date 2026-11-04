@@ -83,7 +83,7 @@ Read the actual code before drafting: the investigator inherits your file refere
 
 Duplicates: the script's token-overlap dedup is authoritative; also run a semantic search (`gh issue list --state open --search "{key_terms}"`, and `--state closed` for regressions). An open duplicate: tell the user and do not create. A closed one: create, and write "Regression of #N." in the body. If the user explicitly overrides a dedup STOP, re-run with `--exclude <that number>`; agents never do this without the user's authorization.
 
-**Prior attempts (MANDATORY for bug/fix)**: `node "$(forge_resolve prior-attempts.mjs)" --repo {GH_REPO} --title "{TITLE}" --body-file "{DRAFT_BODY_FILE}"` searches by subject terms, not files. Paste its table as `## Prior Attempts`; fill the `?` cells.
+**Prior attempts (MANDATORY for bug/fix)**: `node "$(forge_resolve prior-attempts.mjs)" --repo {GH_REPO} --title "{TITLE}" --body-file "{DRAFT_BODY_FILE}"` searches by subject terms, not files. Paste its table as `## Prior Attempts`; fill the `?`s.
 
 ### 3. Draft
 
