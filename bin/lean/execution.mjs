@@ -128,8 +128,9 @@ export function parseExecution(sec = {}) {
   const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
   const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
+  const accountRotator = str(s.account_rotator) === "tokenbaton" ? "tokenbaton" : null; // #5094: rotator.mjs reads its per-account quota state
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
