@@ -2475,3 +2475,10 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 `fileFollowups` passes `batchId`/`rollupLabel` as `FORGE_BATCH_ID`/`FORGE_ROLLUP_LABEL`. `track()` records `followups: [{issue, class, count}]` on the lane result, and `formatOutcomeLists` prints one `follow-ups appended: #N (<class>: k item(s) from #a,#b)` line grouped by issue, naming the rollup. Decision: `devdocs/decisions/5078-followup-routing.md`.
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Already-fixed close, source-deliverable rule, host block routing (#5080)
+
+- `reproFailures`: `BASE=RAN HEAD=RAN` is `repro_base_green`. With no source change in the diff, `alreadyFixedOnBase` closes the issue as completed, citing the base commit (lean.mjs, finish `already-fixed`).
+- `precheck` adds `source_deliverable_untouched`: a diff of only test files cannot close an issue whose contract names a source deliverable (`conformance.unimplemented`).
+- A credentials block naming only read-only production access (`READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match) is host work: `env.capability_remote` (recovered on the host), `splitEscalation` kind `host`; `prod_monitor` matches `prod_monitor` and read-only production telemetry, and `hostCapabilityBlock` accepts it when no capabilities are declared.
+- `formatProbeSummary` prints the cause of an `error` row; `scripts/issue-dedup.sh` needs at least 2 shared tokens.

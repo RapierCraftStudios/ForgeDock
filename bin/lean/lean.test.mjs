@@ -443,6 +443,13 @@ describe("core work-on", () => {
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
   });
 
+  it("#5080 a credentials block that is only read-only prod access is env.capability_remote, never builder.blocked; real credentials stay builder.blocked", async () => {
+    const host = await run(world({ result: { status: "blocked", summary: "gated on read-only production telemetry: a host-only prod_monitor capability", block: { kind: "human", why: "credentials" } } }));
+    assert.equal(host.code, "env.capability_remote");
+    const real = await run(world({ result: { status: "blocked", summary: "needs the production API key to read prod data", block: { kind: "human", why: "credentials" } } }));
+    assert.equal(real.code, "builder.blocked");
+  });
+
   // #4124: a builder block is typed; only kind "human" with an allowed reason may reach needs-human.
   const depWorld = (o, deps) => {
     const w = world(o);
