@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
-import { gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
+import { gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments, subjectTerms, subjectHistory, MAX_SUBJECT_ITEMS, MAX_SUBJECT_QUERIES } from "./context.mjs";
 
 const REPO = "o/r";
 const BOT = { author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
@@ -47,6 +47,7 @@ function fakes(o = {}) {
     calls.push(["gh", ...a]);
     const path = a.find((x) => String(x).startsWith("repos/"));
     if (o.ghFail) throw new Error("gh down");
+    if (a.includes("search/issues")) { const q = String(a.find((x) => String(x).startsWith("q=")) ?? ""); if (o.searchFail) throw new Error("HTTP 403 rate limit"); return o.search ? o.search(q) : ""; }
     let m;
     if ((m = /issues\/(\d+)\/timeline$/.exec(path))) return o.timeline ?? "https://api.github.com/repos/o/r 70\nhttps://api.github.com/repos/o/r 61\n";
     if ((m = /issues\/(\d+)\/comments$/.exec(path))) return (comments[m[1]] ?? []).map((c) => JSON.stringify(c)).join("\n");
@@ -56,6 +57,7 @@ function fakes(o = {}) {
   };
   const git = async (a) => {
     calls.push(["git", ...a]);
+    if (a[0] === "log" && a.some((x) => String(x).startsWith("--grep="))) return o.grepLog ?? "";
     if (a[0] === "for-each-ref") return "refs/forge/salvage/50/1700 abc1234\n";
     if (a[0] === "log") return log.map(([h, s, b, f]) => `\x1e${h}\x1f${s}\x1f${b}\x1f\n${f}\n`).join("");
     return "";
@@ -405,7 +407,7 @@ describe("#4375 recurring pitfalls in the context pack", () => {
     const r = renderContextRecord(p, { mode: "on", laneType: "first" });
     for (const x of ["no-unused-vars", "Recurring pitfalls", "src/*.ts", "devdocs/modules/lean.md is stale"]) assert.ok(!r.includes(x), x);
     assert.match(r, /pitfalls 2\/2/);
-    assert.ok(r.includes("Prior attempts at this issue:") && r.includes("Merged PRs on the same symbols"), "the other sections stay");
+    assert.ok(r.includes("Prior attempts (this issue and the same subject):") && r.includes("Merged PRs on the same symbols"), "the other sections stay");
   });
 
   it("the cache key changes when the selected pitfall signatures change", () => {
@@ -486,5 +488,79 @@ describe("#4467: priorAttempts reads App comments in gh issue view shape", () =>
   it("counts the App's NEEDS_HUMAN, not a stranger's", () => {
     assert.equal(priorAttempts("", [ghShape("rapiercraft-forgedock")]), 1);
     assert.equal(priorAttempts("", [ghShape("someone")]), 0);
+  });
+});
+
+describe("#5085: subject history and recall status", () => {
+  const item = (n, title, extra = {}) => JSON.stringify({ number: n, title, state_reason: "completed", pr: false, merged: false, ...extra });
+  const SUBJ = { number: 50, title: "fix(fetch): TLS bypass misclassified as blocked", body: "Requests end as `tls.bypass_misclassified` in src/fetch/tls.ts.\n\n**Depends on**: #45" };
+
+  it("#5085: subject history surfaces a closed issue matched by an error code with no shared file", async () => {
+    const f = fakes({ search: (q) => (q.includes('"tls.bypass_misclassified"') ? [item(900, "Billing: classify TLS bypass"), item(45, "dep, already in graph"), item(50, "self")].join("\n") : "") });
+    const facts = await gatherContextFacts({ io: f.io, repo: REPO, issue: 50, iss: SUBJ, comments: [], cwd: "/wt", base: "origin/staging", sources: ["graph", "attempts"] });
+    const p = compileContextPack(facts);
+    assert.match(p.text, /- #900: \[issue\] completed "Billing: classify TLS bypass"; matched tls\.bypass_misclassified/);
+    assert.ok(!/- #45: \[issue\]/.test(p.text) && !/- #50: \[issue\]/.test(p.text), "self and graph links are deduped");
+    assert.ok(p.sources.attempts >= 1 && p.found.attempts >= 1, JSON.stringify(p.found));
+    assert.ok(f.calls.some((c) => c.includes("search/issues") && c.some((x) => String(x) === 'q=repo:o/r is:closed "tls.bypass_misclassified"')));
+  });
+
+  it("subjectTerms: codes, symbols, then distinctive title words; deterministic and capped", () => {
+    const t = subjectTerms({ title: "fix(context): recall prior attempts by subject, not only by issue number", body: "`ci.red` and `bin/lean/context.mjs` and `compileContextPack()` HTTP 403 <!-- `hidden.code` -->" });
+    assert.deepEqual(t, ["ci.red", "403", "compileContextPack", "recall", "prior", "attempts"]);
+    assert.ok(t.length <= 6);
+    assert.deepEqual(subjectTerms({ title: "", body: "" }), []);
+  });
+
+  it("matches title words and repo-wide git history; ranks by hits, caps the rows, keeps own attempts first", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => item(800 + i, `thin content ${i}`)).join("\n");
+    const grepLog = `\x1e${"e".repeat(40)}\x1fMerge pull request #777 from o/fix-thin\x1fGuard thin content pages in billing\n\x1e${"f".repeat(40)}\x1fMerge pull request #778 from o/x\x1funrelated\n`;
+    const f = fakes({ search: () => many, grepLog });
+    const r = await subjectHistory({ io: f.io, repo: REPO, issue: 50, title: "Thin content billing guard", body: "", base: "origin/staging" });
+    assert.deepEqual(r.terms, ["thin", "content", "billing", "guard"].slice(0, 3));
+    assert.equal(r.rows.length, MAX_SUBJECT_ITEMS);
+    assert.ok(!r.rows.some((x) => x.number === 778), "a git hit must name the terms");
+    const g = f.calls.find((c) => c[0] === "git" && c[1] === "log");
+    assert.ok(g.includes("--all-match") && !g.includes("--"), "repo-wide, no pathspec");
+    assert.ok(f.calls.filter((c) => c.includes("search/issues")).length <= MAX_SUBJECT_QUERIES);
+    const both = await subjectHistory({ io: fakes({ search: () => item(777, "thin content PR", { pr: true, merged: true }), grepLog }).io, repo: REPO, issue: 50, title: "Thin content billing", body: "", base: "origin/staging" });
+    assert.deepEqual(both.rows[0], { number: 777, kind: "PR", status: "merged", title: "thin content PR", matched: ["thin", "content", "billing"] });
+    const facts = await gather(fakes({ search: () => many }), { iss: { ...ISS, title: "Thin content guard" }, sources: ["attempts"] });
+    const kinds = facts.attempts.map((a) => a.kind);
+    assert.ok(kinds.indexOf("subject") > kinds.lastIndexOf("salvage"), kinds.join(","));
+  });
+
+  it("subject history is ranked and truncated within the byte budget like the other sources", async () => {
+    const many = Array.from({ length: 8 }, (_, i) => item(800 + i, `A long title about thin content billing regressions number ${i}`)).join("\n");
+    const facts = await gather(fakes({ search: () => many }), { iss: { ...ISS, title: "Thin content billing" }, sources: ["attempts"] });
+    const full = compileContextPack(facts);
+    assert.ok(full.found.attempts >= 8 + 3);
+    const small = compileContextPack(facts, { budgetBytes: 400 });
+    assert.ok(small.bytes <= 400 && small.truncated > 0, `${small.bytes} ${small.truncated}`);
+    assert.ok(small.text.includes("- #50 FORGE:STATE") && small.text.indexOf("- #50 FORGE:STATE") < (small.text.indexOf("- #80") >>> 0), "own attempts outrank subject rows");
+  });
+
+  it("a failed subject search is an error, never a throw, and an attempts-off pack makes no search", async () => {
+    const facts = await gather(fakes({ searchFail: true }), { iss: { ...ISS, title: "Thin content billing" }, sources: ["attempts"] });
+    assert.ok(facts.errors.some((e) => e.startsWith("attempts: subject search")), facts.errors.join("|"));
+    assert.ok(facts.attempts.some((a) => a.kind === "state"));
+    const g = fakes();
+    await gather(g, { sources: ["graph", "facts"] });
+    assert.ok(!g.calls.some((c) => c.includes("search/issues")));
+  });
+
+  it("a missing bin/recall.mjs or index is reported in the FORGE:CONTEXT record", async () => {
+    const absent = await gather(fakes(), { sources: ["graph"], recallIndex: "/idx/knowledge.jsonl" });
+    assert.deepEqual(absent.recall, { present: false, reason: "bin/recall.mjs missing" });
+    const p = compileContextPack(absent);
+    const r = renderContextRecord(p, { mode: "on", laneType: "first" });
+    assert.match(r, /Recall index: absent \(bin\/recall\.mjs missing\); subject history comes from live search\./);
+    assert.ok(!p.text.includes("Recall index"), "the status stays out of the pack text and its hash");
+    const noIndex = await gather({ io: { ...fakes().io, exists: async (x) => x === "/wt/bin/recall.mjs" } }, { sources: ["graph"], recallIndex: "/idx/knowledge.jsonl" });
+    assert.match(renderContextRecord(compileContextPack(noIndex), { mode: "on", laneType: "first" }), /Recall index: absent \(index ~\/\.forge\/index missing\)/);
+    const ok = await gather({ io: { ...fakes().io, exists: async (x) => x === "/wt/bin/recall.mjs" || x === "/idx/knowledge.jsonl" } }, { sources: ["graph"], recallIndex: "/idx/knowledge.jsonl" });
+    assert.deepEqual(ok.recall, { present: true, reason: "" });
+    assert.ok(!renderContextRecord(compileContextPack(ok), { mode: "on", laneType: "first" }).includes("Recall index"));
+    assert.equal(compileContextPack({ issue: 1, links: [], attempts: [], ledger: [], facts: [], recall: absent.recall }).recall.present, false, "the empty pack carries it too");
   });
 });
