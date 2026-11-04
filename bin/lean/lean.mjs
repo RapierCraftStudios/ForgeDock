@@ -472,7 +472,7 @@ export async function runCore(o) {
         await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
       } catch { /* best effort */ }
     }
-    if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
+    if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed", "host-task"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
     }
@@ -935,6 +935,12 @@ export async function runCore(o) {
     if (b.kind === "human" && b.why === "credentials" && READONLY_PROD_RE.test(s) && !EXTERNAL_NEED_RE.test(s)) {
       // #5080: read-only production access with no credential/spend/account need is host work: recovered on the host, never a human ask
       T.decisions.push("Builder block: read-only production access is host work (host-task), not an owner ask");
+      if (o.placement?.where !== "remote") { // on the host already: a host task (label host-task), never needs-human
+        const why = `Host-task: the lane needs read-only production access (Builder is blocked (credentials)): ${s}\n\nNot a credential or an owner ask: run it on the host with its read-only prod tools.`;
+        try { await post("FORGE:HOST_TASK", `## Host task\n${why}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+        try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "host-task"]); } catch { /* best effort */ }
+        return await finish("host-task", why, { code: OUTCOME_CODES.ENV_CAPABILITY_REMOTE }, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
+      }
       return await needsHuman(`Host-task: the lane needs read-only production access, which the dispatching host has (Builder is blocked (credentials)): ${s}\n\nNot a credential: the lane is recovered on the host.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
     }
     if (b.kind === "human" && b.why === "credentials" && o.placement?.where === "remote" && missingToolBlock(s)) {
