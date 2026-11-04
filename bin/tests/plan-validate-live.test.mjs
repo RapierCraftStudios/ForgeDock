@@ -90,6 +90,31 @@ describe("parallel start gate", () => {
     const g = async (a) => (a[0] === "pr" ? JSON.stringify({ baseRefName: "milestone/m2", mergedAt: "x" }) : gh({ state: "CLOSED", closedByPullRequestsReferences: [{ number: 3 }] })(a));
     assert.deepEqual(await unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: g }), []);
   });
+  describe("closed with empty closedByPullRequestsReferences (#5086)", () => {
+    const lane = (list) => async (a) => {
+      if (a[0] === "pr" && a[1] === "list") { if (list instanceof Error) throw list; assert.ok(a.includes("feat/issue-9-lean")); return JSON.stringify(list); }
+      return gh({ state: "CLOSED", closedByPullRequestsReferences: [] })(a);
+    };
+    const run = (list, isAncestor) => unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: lane(list), isAncestor });
+    const pr = (base) => [{ number: 5, baseRefName: base, mergedAt: "x", mergeCommit: { oid: "def" } }];
+    it("passes a dependency closed with empty closedByPullRequestsReferences whose lane PR merged into the milestone branch", async () => {
+      assert.deepEqual(await run(pr("milestone/m2")), []);
+    });
+    it("passes when the lane PR merged elsewhere but its commit is on the base, holds when it is not", async () => {
+      assert.deepEqual(await run(pr("staging"), async () => true), []);
+      const [u] = await run(pr("staging"), async () => false);
+      assert.deepEqual([u.kind, u.sha], ["commit", "def"]);
+    });
+    it("still refuses when no merged PR exists", async () => {
+      const [u] = await run([]);
+      assert.match(u.why, /closed but not merged into milestone\/m2/);
+      assert.equal(u.kind, "other");
+    });
+    it("still refuses when the lane PR lookup fails", async () => {
+      const [u] = await run(new Error("boom"));
+      assert.equal(u.kind, "other");
+    });
+  });
   it("ignores dependencies inside the batch", async () => {
     assert.deepEqual(await unmetDependencies({ issues: [7, 9], baseOf: async () => "x", gh: gh({ state: "OPEN" }) }), []);
   });
