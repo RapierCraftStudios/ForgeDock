@@ -730,11 +730,21 @@ issue_watch:
 
 ## `followups` (OPTIONAL)
 
-Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issue per class per parent: `engineering`, `post-deploy`, `external` and `ops`. Each carries the label `followup:<class>` (`external` also `external-prerequisite`, and states the parent it is a prerequisite of) and inherits the parent's milestone. A requirement may set an optional `class` in the contract; otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`.
+Deferred follow-ups (`scripts/file-deferred-followups.sh`) are routed by kind (#5078):
+
+| Kind | Where it goes |
+|---|---|
+| Post-promotion, production-verify, rollout-promote (`post-deploy`, `owner:orchestrator`, `owner:promote:<flag>`, or an owner why such as "after release", "rollout", "purge") | A checklist line in the repo's ONE open post-deploy rollup (`FORGE:POSTDEPLOY_ROLLUP`, else the lowest open issue labelled `followups.rollup_issue_label`). Never a new issue when one is open. |
+| Read-only production data or capture (bucket `host`, or an owner why naming obs-psql, a `*-monitor` or a read-only prod query) | Class `host`: added to the parent's engineering follow-up of the same run, else one per-parent follow-up. Labels `followup:host` and `host-task`, never `needs-human`. |
+| Truly external (credentials, spend, an account, a third party, a customer) | ONE issue per batch (`FORGE:EXTERNAL_BATCH: <batch id>`) holding every item under a `### #<parent>` heading, labelled `followup:external`, `external-prerequisite` and `needs-human`. |
+| Engineering | The parent's open follow-up when one exists, else one issue per parent with all its items together. `ops` and `verify-now` also keep one issue per parent. |
+
+Each issue carries the label `followup:<class>` and inherits the parent's milestone. A requirement may set an optional `class` in the contract. Otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`. The batch report lists `follow-ups appended: #N (<class>: k item(s) from #a,#b)` per issue, not "issues filed".
 
 ```yaml
 followups:
-  default_milestone: "Backlog"   # optional: milestone title used when the parent's milestone has shipped and no later one is open
+  default_milestone: "Backlog"     # optional: milestone title used when the parent's milestone has shipped and no later one is open
+  rollup_issue_label: post-deploy  # optional: a repo's own open issue with this label is the post-deploy rollup when no marked one is open
 ```
 
 ## `rollouts` (OPTIONAL)

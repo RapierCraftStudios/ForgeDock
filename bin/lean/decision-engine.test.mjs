@@ -158,6 +158,19 @@ test("#4766 tally, telemetry mapping and the batch report 'decided' section", ()
   assert.deepEqual(formatOutcomeLists([{ issue: 7, outcome: "merged" }]), []);
 });
 
+test("#5078 the batch report lists follow-ups appended, grouped by issue across rows, the rollup named", () => {
+  const lines = formatOutcomeLists([
+    { issue: 7, outcome: "merged", followups: [{ issue: 900, class: "post-deploy", count: 2 }, { issue: 901, class: "engineering", count: 1 }] },
+    { issue: 8, outcome: "merged", followups: [{ issue: 900, class: "post-deploy", count: 1 }] },
+    { issue: 9, outcome: "merged", followups: [{ issue: 950, class: "external", count: 3 }] },
+  ]);
+  const fu = lines.filter((l) => l.startsWith("follow-ups appended:"));
+  assert.equal(fu.length, 1);
+  assert.equal(fu[0], "follow-ups appended: #900 (post-deploy rollup: 3 item(s) from #7,#8) #901 (engineering: 1 item(s) from #7) #950 (external aggregate: 3 item(s) from #9)");
+  assert.ok(!lines.some((l) => /issues filed/.test(l)));
+  assert.deepEqual(formatOutcomeLists([{ issue: 7, outcome: "merged", followups: [] }]), []);
+});
+
 test("#4826 docs say 'not yet wired' exactly while no production module calls settle", async () => {
   const { readFileSync, readdirSync } = await import("node:fs");
   const dir = new URL(".", import.meta.url);
