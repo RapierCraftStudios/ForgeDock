@@ -512,7 +512,7 @@ describe("#5085: subject history and recall status", () => {
     assert.deepEqual(subjectTerms({ title: "", body: "" }), []);
   });
 
-  it("matches title words and repo-wide git history; ranks by hits, caps the rows, keeps own attempts first", async () => {
+  it("matches title words and repo-wide git history; ranks by matched terms, caps the rows, keeps own attempts first", async () => {
     const many = Array.from({ length: 12 }, (_, i) => item(800 + i, `thin content ${i}`)).join("\n");
     const grepLog = `\x1e${"e".repeat(40)}\x1fMerge pull request #777 from o/fix-thin\x1fGuard thin content pages in billing\n\x1e${"f".repeat(40)}\x1fMerge pull request #778 from o/x\x1funrelated\n`;
     const f = fakes({ search: () => many, grepLog });
@@ -524,10 +524,16 @@ describe("#5085: subject history and recall status", () => {
     assert.ok(g.includes("--all-match") && !g.includes("--"), "repo-wide, no pathspec");
     assert.ok(f.calls.filter((c) => c.includes("search/issues")).length <= MAX_SUBJECT_QUERIES);
     const both = await subjectHistory({ io: fakes({ search: () => item(777, "thin content PR", { pr: true, merged: true }), grepLog }).io, repo: REPO, issue: 50, title: "Thin content billing", body: "", base: "origin/staging" });
-    assert.deepEqual(both.rows[0], { number: 777, kind: "PR", status: "merged", title: "thin content PR", matched: ["thin", "content", "billing"] });
+    assert.deepEqual(both.rows.find((x) => x.number === 777), { number: 777, kind: "PR", status: "merged", title: "thin content PR", matched: ["thin", "content", "billing"] });
     const facts = await gather(fakes({ search: () => many }), { iss: { ...ISS, title: "Thin content guard" }, sources: ["attempts"] });
     const kinds = facts.attempts.map((a) => a.kind);
     assert.ok(kinds.indexOf("subject") > kinds.lastIndexOf("salvage"), kinds.join(","));
+  });
+
+  it("ranks rows by matched-term count, then newest number", async () => {
+    const search = (q) => (q.includes('"a.code"') ? [item(901, "x"), item(950, "y")] : q.includes('"b.code"') ? [item(901, "x")] : []).join("\n");
+    const r = await subjectHistory({ io: fakes({ search }).io, repo: REPO, issue: 50, title: "", body: "`a.code` and `b.code`" });
+    assert.deepEqual(r.rows.map((x) => [x.number, x.matched]), [[901, ["a.code", "b.code"]], [950, ["a.code"]]]);
   });
 
   it("subject history is ranked and truncated within the byte budget like the other sources", async () => {

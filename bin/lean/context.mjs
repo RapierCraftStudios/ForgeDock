@@ -224,7 +224,7 @@ async function readComments(gh, repo, n) {
  * #5085: closed issues and merged PRs on the same subject, found by term rather than by issue number or file: up to
  * MAX_SUBJECT_QUERIES GitHub searches (each code/symbol quoted, then the title words together) and one `git log --grep`
  * over the whole history of `base`. `exclude` (self, linked issues) is dropped; rows are ranked by the number of
- * queries that hit them, then newest first, and capped. A failed query lands in `errors`; the rest still count.
+ * matched terms, then newest first, and capped. A failed query lands in `errors`; the rest still count.
  * @returns {Promise<{terms:string[], rows:{number:number, kind:string, status:string, title:string, matched:string[]}[], errors:string[]}>}
  */
 export async function subjectHistory({ io, repo, issue = null, title = "", body = "", base = null, exclude = [], max = MAX_SUBJECT_ITEMS }) {
@@ -233,9 +233,8 @@ export async function subjectHistory({ io, repo, issue = null, title = "", body 
   const skip = new Set([Number(issue), ...exclude.map(Number)]);
   const hit = (n, info, matched) => {
     if (!Number.isSafeInteger(n) || n <= 0 || skip.has(n)) return;
-    const row = hits.get(n) ?? { number: n, kind: info.kind, status: info.status, title: info.title, matched: [], queries: 0 };
+    const row = hits.get(n) ?? { number: n, kind: info.kind, status: info.status, title: info.title, matched: [] };
     if (info.src === "gh") Object.assign(row, { kind: info.kind, status: info.status, title: info.title || row.title });
-    row.queries++;
     for (const t of matched) if (!row.matched.includes(t)) row.matched.push(t);
     hits.set(n, row);
   };
@@ -267,8 +266,8 @@ export async function subjectHistory({ io, repo, issue = null, title = "", body 
       }
     } catch (e) { errors.push(`attempts: subject git log ${oneLine(e?.message ?? e, 80)}`); }
   }
-  const rows = [...hits.values()].sort((a, b) => b.queries - a.queries || b.matched.length - a.matched.length || b.number - a.number)
-    .slice(0, max).map(({ queries, ...r }) => r);
+  const rows = [...hits.values()].sort((a, b) => b.matched.length - a.matched.length || b.number - a.number)
+    .slice(0, max);
   return { terms, rows, errors };
 }
 

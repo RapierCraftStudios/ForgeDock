@@ -995,7 +995,7 @@ HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words.
 `subjectHistory` (shared with `scripts/prior-attempts.mjs`, the `/issue`
 `## Prior Attempts` table) runs at most `MAX_SUBJECT_QUERIES`=3 closed
 `search/issues` queries plus one repo-wide `git log --grep` (no pathspec), drops
-self and graph/body links, ranks by queries hit then number, and keeps
+self and graph/body links, ranks by matched terms then number, and keeps
 `MAX_SUBJECT_ITEMS`=8. A failed query is a `facts.errors` entry (`attempts:
 subject ...`). Subject rows never count as runs (`priorAttempts`/`laneType`).
 `facts.recall` / pack `recall` says whether `bin/recall.mjs` (repo or ForgeDock
