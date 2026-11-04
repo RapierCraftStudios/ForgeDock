@@ -7,7 +7,7 @@
 # that stay deferred: trusted lookup (claim marker <!-- FORGE:DEFERRED_ISSUE: #M --> on the parent, then a state-all search) of a follow-up carrying
 # <!-- FORGE:DEFERRED_FROM: #N -->, append the missing items (exact path match; a closed one is reopened only if completed, not resolved by a person, and given new items), or create ONE issue
 # with a checklist, claim it on the parent and re-check once for a concurrent lower-numbered duplicate.
-# Items are grouped by class (engineering | post-deploy | external | ops, #4664): one follow-up per class per parent, each
+# Items are grouped by class (engineering | post-deploy | external | ops | host, #4664/#5078): one follow-up per class per parent, each
 # labelled `followup:<class>`, carrying `<!-- FORGE:DEFERRED_CLASS: <class> -->` (absent = engineering, for older issues) and the
 # parent's milestone (a shipped/closed one: the next open milestone by due date, else FORGE_FOLLOWUPS_DEFAULT_MILESTONE).
 #
@@ -17,7 +17,12 @@
 #   error (exit 2, DEFERRED_TSV=INVALID, nothing filed). The label (default: the path) is the item's identity in the checklist
 #   and in the stdout rows; repeated `R<n>: R<m>:` prefixes in it collapse to the first. Class: column 4, else the why's
 #   `post-deploy:|external:|ops:` prefix, else engineering.
-#   #4724 buckets: a why carrying `[bucket:<kind>]` is routed by it: `owner` is always class external (never the rollup),
+#   #4724 buckets: a why carrying `[bucket:<kind>]` is routed by it (#5078): `owner` is class external only for credentials, spend,
+#   an account, a third party or a customer; `owner: orchestrator`, `owner: promote...` and post-promotion text join the rollup and
+#   read-only production data or capture is class host. `host` (labels `followup:host` + `host-task`, never `needs-human`) joins
+#   the parent's engineering follow-up when the run has one. External items go to ONE aggregate per batch, found by
+#   `<!-- FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID or adhoc> -->` (an older per-parent external follow-up is still appended to).
+#   The rollup may also be the lowest open trusted issue labelled FORGE_ROLLUP_LABEL (forge.yaml followups.rollup_issue_label).
 #   `new-issue` engineering, `verify-now` (the parent is already on the default branch) its own per-parent follow-up class
 #   `verify-now` that the gate releases at once, and `post-deploy`/`date` go to the ONE open rollup of the release lane.
 #   The rollup (class post-deploy) is found by `<!-- FORGE:POSTDEPLOY_ROLLUP: <lane> -->`, not by parent: every lane appends
@@ -57,7 +62,19 @@ if [ "$ITEMS" = "-" ]; then cat > "$TMP/items.raw"; else cat "$ITEMS" > "$TMP/it
 # Internal file uses a non-whitespace separator (US, \x1f): a tab IFS collapses an empty `why` and drops the known-flaw flag.
 # Fields: identity, why, flag, path (`-` when none), class.
 SEP=$(printf '\037')
-CLASSES="engineering post-deploy external ops verify-now"
+CLASSES="engineering post-deploy external ops verify-now host"
+# #5078: an owner item is external only when it needs credentials, spend, an account, a third party or a customer. A
+# post-promotion action (owner:orchestrator, owner:promote:*, after promotion/release, rollout, purge) joins the rollup and
+# read-only production data or capture (obs-psql, *-monitor, a read-only prod query) is a host task. Mirrors
+# bin/lean/conformance.mjs ownerRoute; ERE without \b for BSD grep (bash 3.2 hosts).
+POSTPROM_ERE='(after|post)[- ]?(promotion|release|deploy)|in production after|production[- ]verif|promot(e|ion)|rollout|purge|deploy[- ]time'
+ROPROD_ERE='obs-psql|[a-z0-9.-]+-monitor|prod(uction)? monitor|read[- ]only[^.]{0,40}prod|prod(uction)?[^.]{0,30}(query|queries|capture|data|logs?)'
+owner_route() { # why -> post-deploy | host | external
+  case "$1" in "owner: orchestrator"*|"owner: promote"*) echo "post-deploy"; return 0 ;; esac
+  if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE"; then echo "post-deploy"
+  elif printf '%s' "$1" | grep -qiE "$ROPROD_ERE"; then echo "host"
+  else echo "external"; fi
+}
 : > "$TMP/items"
 BAD=0; ROW=0
 bad_row() { BAD=$((BAD+1)); echo "file-deferred-followups: row $ROW: $1" >&2; }
@@ -86,12 +103,13 @@ while IFS= read -r line || [ -n "$line" ]; do
   if [ "$id" = "-" ]; then bad_row "no path and no label"; continue; fi
   w=$(printf '%s' "$w" | tr '\r\n' '  ')
   if [ -z "$c" ]; then
-    case "$w" in post-deploy:*) c="post-deploy" ;; external:*) c="external" ;; ops:*) c="ops" ;; *) c="engineering" ;; esac
+    case "$w" in post-deploy:*) c="post-deploy" ;; external:*) c="external" ;; ops:*) c="ops" ;; host:*) c="host" ;; *) c="engineering" ;; esac
   fi
-  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops)"; continue ;; esac
+  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops|host)"; continue ;; esac
   # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup, verify-now needs no release.
   case "$w" in
-    *"[bucket:owner]"*) [ "$c" = "ops" ] || c="external" ;;
+    *"[bucket:owner]"*) [ "$c" = "ops" ] || c=$(owner_route "$w") ;;
+    *"[bucket:host]"*) c="host" ;;
     *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering" ;;
     *"[bucket:verify-now]"*) [ "$c" = "post-deploy" ] && c="verify-now" ;;
   esac
@@ -100,6 +118,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   printf '%s%s%s%s%s%s%s%s%s\n' "$id" "$SEP" "$w" "$SEP" "$k" "$SEP" "${p:--}" "$SEP" "$c" >> "$TMP/items"
 done < "$TMP/items.raw"
 if [ "$BAD" -gt 0 ]; then echo "DEFERRED_TSV=INVALID"; exit 2; fi
+# #5078: host items join the parent's engineering follow-up of this run (dependent items together; it gets `host-task`).
+HOST_JOIN=""
+if awk -F"$SEP" '$5 == "engineering" { e = 1 } $5 == "host" { h = 1 } END { exit !(e && h) }' "$TMP/items"; then
+  HOST_JOIN=1
+  awk -F"$SEP" -v OFS="$SEP" '$5 == "host" { $5 = "engineering" } { print }' "$TMP/items" > "$TMP/items.j" && mv "$TMP/items.j" "$TMP/items"
+fi
 TOTAL=$(wc -l < "$TMP/items" | tr -d ' ')
 
 MARKER="<!-- FORGE:DEFERRED_FROM: #${PARENT} -->"
@@ -427,6 +451,10 @@ file_class() {
   CANON=$(cut -f1 "$TMP/canon.$CLS"); CSTATE=$(cut -f2 "$TMP/canon.$CLS")
   if [ -n "$CANON" ]; then
     append_items "$CANON" "$CSTATE" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+    if [ "$CLS" = "engineering" ] && [ -n "$HOST_JOIN" ]; then
+      if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue edit $CANON (add label host-task)" >&2
+      else gh issue edit "$CANON" -R "$REPO" --add-label host-task >/dev/null 2>&1 || echo "file-deferred-followups: warning: could not label #${CANON} host-task" >&2; fi
+    fi
     FILED_N="$CANON"; return 0
   fi
   local claim="<!-- FORGE:DEFERRED_ISSUE: #%s -->" title="follow-up: ${n_items} deferred item(s) (deferred from #${PARENT})"
@@ -460,6 +488,10 @@ file_class() {
     if [ "$CLS" = "external" ]; then
       gh label create external-prerequisite -R "$REPO" --force --color E99695 --description "External prerequisite. Managed by ForgeDock." >/dev/null 2>&1 || true
       args+=(--label external-prerequisite)
+    fi
+    if [ "$CLS" = "host" ] || { [ "$CLS" = "engineering" ] && [ -n "$HOST_JOIN" ]; }; then # #5078: never needs-human
+      gh label create host-task -R "$REPO" --color 0E8A16 --description "Work the host can run (read-only production access)." >/dev/null 2>&1 || true
+      args+=(--label host-task)
     fi
     [ -n "$MS_TITLE" ] && args+=(--milestone "$MS_TITLE")
     URL=$(gh issue create -R "$REPO" --title "$title" --body-file "$TMP/newissue" "${args[@]}" 2>/dev/null) || URL=""

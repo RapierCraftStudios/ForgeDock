@@ -338,5 +338,54 @@ printf -- '-\tdefer: later\t\t\tR2: wire `pd.py` in\n' > "$T/fu.tsv"
 OUT=$(bash "$S" --parent 20 --repo o/r --items "$T/fu.tsv"); RC=$?
 check "follow-up parent: new follow-up issue, parent body unchanged" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && ! grep -q '^issue edit 20' '$GH_LOG' && [ ! -e '$ISSUE_BODY.edited' ] && grep -q '^\*\*Parent\*\*: #20\$' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_FROM: #20' '$T/created.901.body' && printf '%s\n' \"\$OUT\" | grep -q '^R2: wire pd.py in.901\$'"
 
+# 24. #5078: routing by kind
+# post-promotion owner deferral appends to the open rollup, creates no issue
+reset
+printf '{"number":902,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->"}\n' > "$T/issue.902.json"
+echo '{"items":[{"number":902}]}' > "$SEARCH_JSON"; printf '<!-- FORGE:POSTDEPLOY_ROLLUP: default -->\n' > "$ISSUE_BODY"
+printf -- '-\towner: orchestrator. [bucket:owner] post-deploy action with no registered check\t\t\tR1: verify the banner in prod\n-\towner: promote:new-nav. [bucket:owner] flip the flag\t\t\tR2: promote the new nav\n-\towner: ops. [bucket:owner] purge the CDN after release\t\t\tR3: purge the cdn\n' > "$T/pp.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/pp.tsv"); RC=$?
+check "routing: post-promotion owner items append to the rollup, no issue create" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 902' '$GH_LOG' && [ \$(grep -c '^- \[ \] ' '$ISSUE_BODY.edited') -eq 3 ] && printf '%s' \"\$OUT\" | grep -q 'classes=post-deploy '"
+# a configured-label rollup (forge.yaml followups.rollup_issue_label) is used when no marked rollup is open
+reset
+printf '{"number":950,"state":"open","author_association":"OWNER","user":{"type":"User"},"labels":[{"name":"post-deploy"}],"body":"release checklist"}\n' > "$T/issue.950.json"
+echo '{"items":[{"number":950}]}' > "$SEARCH_JSON"; printf 'release checklist\n' > "$ISSUE_BODY"
+printf -- '-\tpost-deploy: [bucket:post-deploy] [check:smoke] check it\t\t\tR4: smoke the login\n' > "$T/lab.tsv"
+OUT=$(FORGE_ROLLUP_LABEL=post-deploy bash "$S" --parent 10 --repo o/r --items "$T/lab.tsv"); RC=$?
+check "routing: labelled rollup #950 appended, no issue create" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 950' '$GH_LOG' && grep -q 'smoke the login' '$ISSUE_BODY.edited' && printf '%s\n' \"\$OUT\" | grep -q '^R4: smoke the login.950\$'"
+reset
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/lab.tsv"); RC=$?
+check "routing: without the label setting an unmarked labelled issue is not the rollup" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ]"
+# read-only production data -> host follow-up, host-task, never needs-human / external-prerequisite
+reset
+printf -- '-\towner: obs-psql. [bucket:owner] capture the read-only production query counts\t\t\tR5: capture prod counts\n' > "$T/host.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/host.tsv"); RC=$?
+check "routing: read-only prod owner item -> one host follow-up labelled host-task" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && grep -q 'FORGE:DEFERRED_CLASS: host' '$T/created.901.body'"
+check "routing: host follow-up carries no needs-human or external-prerequisite" "! grep '^issue create' '$GH_LOG' | grep -qE 'needs-human|external-prerequisite'"
+reset
+printf -- '-\t[bucket:host] host: run the obs-psql report\t\t\tR6: report rows\n-\tdefer: [bucket:new-issue] wire it\t\t\tR7: wire the report\n' > "$T/join.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/join.tsv"); RC=$?
+check "routing: host items join the engineering follow-up of the same run" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'report rows' '$T/created.901.body' && grep -q 'wire the report' '$T/created.901.body' && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:engineering' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && ! grep '^issue create' '$GH_LOG' | grep -q needs-human"
+# N external deferrals in one batch -> ONE aggregated issue carrying needs-human
+reset
+export FORGE_BATCH_ID=b42
+printf -- '-\towner: stripe. [bucket:owner] needs live Stripe credentials\t\t\tR8: charge a real card\n' > "$T/e1.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/e1.tsv"); RC=$?
+check "external batch: first parent creates the aggregate with needs-human" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'FORGE:EXTERNAL_BATCH: b42' '$T/created.901.body' && grep -q '^### #10\$' '$T/created.901.body' && grep '^issue create' '$GH_LOG' | grep -q -- '--label needs-human' && grep '^issue create' '$GH_LOG' | grep -q -- '--label external-prerequisite'"
+printf '{"number":901,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:EXTERNAL_BATCH: b42 -->"}\n' > "$T/issue.901.json"
+echo '{"items":[{"number":901}]}' > "$SEARCH_JSON"; cp "$T/created.901.body" "$ISSUE_BODY"
+printf -- '-\texternal: [bucket:owner] buy the domain (spend)\t\t\tR1: register the domain\n' > "$T/e2.tsv"
+OUT2=$(bash "$S" --parent 11 --repo o/r --items "$T/e2.tsv"); cp "$ISSUE_BODY.edited" "$ISSUE_BODY"
+printf -- '-\texternal: customer sign-off\t\t\tR2: customer signs the DPA\n-\texternal: dup\t\t\tR9: Charge a real card!\n' > "$T/e3.tsv"
+OUT3=$(bash "$S" --parent 12 --repo o/r --items "$T/e3.tsv"); RC=$?
+check "external batch: three parents, exactly one issue create, later lanes append to it" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && [ \$(grep -c '^issue edit 901' '$GH_LOG') -eq 2 ] && printf '%s\n' \"\$OUT3\" | grep -q '^R2: customer signs the DPA.901\$'"
+check "external batch: per-parent headings, duplicate text stored once" "grep -q '^### #11\$' '$ISSUE_BODY.edited' && grep -q '^### #12\$' '$ISSUE_BODY.edited' && [ \$(grep -ci 'charge a real card' '$ISSUE_BODY.edited') -eq 1 ]"
+unset FORGE_BATCH_ID
+# engineering deferrals from one parent land in one issue
+reset
+printf -- '-\tdefer: parser first\t\t\tR1: add the parser\n-\tdefer: needs the parser\t\t\tR2: use the parser\n' > "$T/eng.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv"); RC=$?
+check "engineering: dependent items of one parent in one issue" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'add the parser' '$T/created.901.body' && grep -q 'use the parser' '$T/created.901.body'"
+
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
