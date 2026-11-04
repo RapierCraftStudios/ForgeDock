@@ -899,8 +899,10 @@ lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
-`start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
-for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528) instead of engine-error, and tears down after the result is
+`start` to `needs-human` `sandbox.start_failed` for a 4xx config error (not 401/403/429) or a non-HTTP throw (or `deferred` `sandbox.capacity`
+for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528; `deferred` `sandbox.transient` for any other 5xx,
+retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) instead of engine-error. A sandbox that exits without a result while its
+log tail shows a usage limit ends `deferred` `rate_limited` with the reset time, not engine-error (#5095). It tears down after the result is
 in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
@@ -2477,12 +2479,33 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
 
+## Review roster: Frontend path trigger (forge#5077)
+`scripts/review-roster.sh` has a Frontend path trigger (`web/` or `app/` segment, `.tsx`/`.jsx`, `next.config.*`, `middleware.ts|js`) that calls `add_agent Frontend` in every tier except full, like Infra/Auth. Path triggers are additive to the top-2 score baseline, so a staging→main bundle selects the union of every path-triggered domain with no bundle flag. Output contract and the Security floor are unchanged. `commands/review-pr-agents/frontend.md` gains check 11 (dynamic APIs in static/ISR trees).
+
+Tests: `review-roster.test.sh` "forge#5077" block (not-found.tsx in small/medium/standard, bundle union, negative case). Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Already-fixed close, source-deliverable rule, host block routing (#5080)
+
+- `reproFailures`: `BASE=RAN HEAD=RAN` is `repro_base_green`. With no source change in the diff, `alreadyFixedOnBase` closes the issue as completed, citing the base commit (lean.mjs, finish `already-fixed`).
+- `precheck` adds `source_deliverable_untouched`: a diff of only test files cannot close an issue whose contract names a source deliverable (`conformance.unimplemented`).
+- A credentials block naming only read-only production access (`READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match) is host work: on a remote lane `env.capability_remote` (recovered on the host); on a local lane it ends `host-task` (label `host-task`, comment `FORGE:HOST_TASK`, never `needs-human`); `splitEscalation` kind `host`; `prod_monitor` matches `prod_monitor` and read-only production telemetry, and `hostCapabilityBlock` accepts it when no capabilities are declared.
+- `formatProbeSummary` prints the cause of an `error` row; `scripts/issue-dedup.sh` needs at least 2 shared tokens.
+
 ## Entry 2026-11-04 — One in-lane correction for invalid builder amendment kinds (#5089)
 A builder that invented an amendment kind (`deliverable_change` for an impossible deliverable) used to park a finished lane as `conformance.unimplemented`, because the single conformance resume is shared across all failures. `amendmentKindProblems` (`conformance.mjs`) is a shape-only check (unknown kind, missing `path`/`requirement`; normalised slips and informational kinds pass) that returns the same rejection strings as `applyAmendments`, which is unchanged. At the top of `gate()` in `lean.mjs`, before `amend()`/`precheck`, a non-empty result runs ONE builder resume (`amendmentCorrectionPrompt`, `prompts.mjs`, naming the valid kinds and that an impossible deliverable is `defer`), re-reads `result.json`, and continues; it runs at most once per lane (`amendFixed`) and does not use the conformance `resumes` budget. If the builder still emits a bad kind, the existing conformance resume and `conformance.unimplemented` park apply. The builder prompt now says an impossible deliverable is a `defer`, not a new kind. Unknown kinds are deliberately not auto-mapped to `defer` (deferral changes scope; the reviewer judges it).
 
 Tests: `conformance.test.mjs` "amendmentKindProblems (#5089)", `lean.test.mjs` "an unknown amendment kind ... (#5089)". Cost: 0 LLM calls when valid, one builder resume otherwise.
 
+## Entry 2026-11-04 — Pool 5xx and pool usage limits are deferrals, not needs-human or engine-error (#5095)
+- `httpTransport` marks 500 `transient` too and honours Retry-After on any 5xx; `retryable` stays 429/503 (capacity). `providerLanes` `startFailed` types any other launch 5xx (or `transient`) as `deferred` `sandbox.transient` (`retryInSeconds` from Retry-After, else 60), capped by `max_deferrals`; `sandbox.capacity` stays uncapped, so a pool answering 500 with free slots cannot hot-loop.
+- The no-result path of `wait()` (and `adoptSaved`) checks the lane log tail with `usageLimitInTail` (the lean `usage limit hit; resets at` line, else `runner.mjs` `detectUsageLimit`) and returns `deferred` `rate_limited` with `resetAt`/`resetAtEpochMs`; `deferPolicy` holds it and the breaker never counts it.
+- `remoteHoldId(provider)` = `remote:<provider.name>` is the pool account's hold key. `engine-cli.mjs` passes it as `providerLanes({holdId})` (every remote `rate_limited` result gets `backendId: holdId`, the sandbox's own id kept as `laneBackendId`) and as `remote.identity()`. In `grant()`, a remote-placed lane while that identity is held runs local in hybrid (`fallbackLocal`, local account not held; reason `fallback to local: pool usage limit until <ISO>`) or waits for the reset (remote-only). Without `remote.identity` orchestrate is unchanged.
+
+Tests: `execution.test.mjs` "#5095 ...", `limits.test.mjs` "#5095: a held pool account places hybrid lanes local", `sandbox-provider.contract.test.mjs` "#5095 httpTransport". Cost: 0 LLM calls.
+
 ## Entry 2026-11-04 — Account rotators (tokenbaton): identity-aware holds, in-lane rotation, paused (quota) rows (#5094)
 With `execution.account_rotator: tokenbaton` (`parseExecution` keeps only that value as `accountRotator`), an exhausted account no longer stalls the host. `rotator.mjs` is the adapter: `openRotator` reads `~/.tokenbaton/current` and `live.<n>` on every call (no cache, no writes, fail-open to null), `headroom()` is any account under 95% 5-hour and 100% weekly use (a passed reset counts as 0), `resumeAt()` is the earliest epoch at which one regains headroom, and `accountIdentity(n)` is `backendIdentity` over `CLAUDE_CONFIG_DIR=~/.claude-<n>`, the id a lane on that account records. `laneBackendId(env, rotator)` (`limits.mjs`) returns the rotator's current account, so a hold set for account A no longer blocks admissions once tokenbaton switched to B. In `orchestrate.mjs`, the `rotator` option makes `heldUntil()` return null while any account has headroom and `resumeAt()` when none does (admissions restart on their own). A `rate_limited` lane with headroom sets no host hold (`quotaRequeue`): one on a rotator account (or naming none) reruns at once, at most once per account; a remote sandbox credential that is not a rotator account waits its own reset. The requeue row is outcome `paused` with `quota.resumeAt` and detail `paused (quota) until <ISO>`. The paused attempt's cost and minutes are carried in a per-issue `quota` map (persisted in the batch state) and added once to the issue's next settled row. A still-pending issue at batch end stays `held` (the `--resume`/schedd marker), with `quota` and the carried cost; `formatTable` prints `paused (quota) until <ISO>`. In `lean.mjs`, `callRunner` re-sends the same args (including `resume`, as every `~/.claude-<n>/projects` is the shared session store) when `rotatorRetry` holds (headroom, fewer tries than accounts), logging `PHASE_ACCOUNT_ROTATED`; the deferred result's `backendId` is the rotator's current account. `engine-cli.mjs` wires the rotator into `orchestrate`, both `runCore` call sites and `limits show` (one line per account). Without the key, every path is unchanged.
+
+With #5095, a remote lane limited on the pool account (`backendId` = `remote.identity()`, `remoteHoldId`) still records that pool hold while the rotator has headroom, so hybrid lanes fall back local; no host-account hold is recorded (`limits.test.mjs` "#5094 #5095 a limited pool account").
 
 Tests: `rotator.test.mjs`, `limits.test.mjs` "#5094 rotator headroom" and "#5094 a hold set for identity A", `lean.test.mjs` "#5094 a rotator switches accounts mid-lane" and the rotation-cap/no-headroom cases. Cost: 0 LLM calls.

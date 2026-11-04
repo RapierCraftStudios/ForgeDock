@@ -189,6 +189,15 @@ describe("remote adapter (#4254)", () => {
     await assert.rejects(() => q.status(h), /ECONNRESET/); // #4672: a transport error propagates; providerLanes retries it for the unreachable window
   });
 
+  it("#5095 httpTransport: a 500 is transient (polled with backoff) and a 5xx carries Retry-After; only 429/503 are retryable", async () => {
+    const reply5xx = (status, ra) => async () => ({ status, ok: false, text: async () => "", headers: { get: (h) => (h === "retry-after" ? ra : null) } });
+    const t = httpTransport({ endpoint: "https://pool.example", fetchFn: reply5xx(500, "7") });
+    await assert.rejects(t.launch({ id: "x" }), (e) => e.status === 500 && e.transient === true && e.retryable !== true && e.retryInSeconds === 7);
+    await assert.rejects(t.status("x"), (e) => e.transient === true);
+    const t504 = httpTransport({ endpoint: "https://pool.example", fetchFn: reply5xx(504, null) });
+    await assert.rejects(t504.launch({ id: "x" }), (e) => e.status === 504 && e.transient === true && e.retryable !== true && e.retryInSeconds === undefined);
+  });
+
   it("#5053 httpTransport: a 401 on status is transient and names its hop; a launch 401 is not transient", async () => {
     const reply = (status, body) => ({ status, ok: status < 300, text: async () => JSON.stringify(body), headers: { get: () => null } });
     const t = httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => reply(401, { error: "unauthorized", hop: "agent", agent: "a1", reason: "agent auth: router token rejected by agent" }) });

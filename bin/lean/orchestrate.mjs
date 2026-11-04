@@ -23,7 +23,9 @@
  * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
- * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
+ * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset.
+ * #5095: `remote.identity()` names the pool's account (execution.mjs `remoteHoldId`); while it is held, a remote-placed lane
+ * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  * `getChildren()` + `autoChildren {mode, pollS, epics}` (#4965, `orchestration.auto_add_children`): with mode `epic`|`all`, at most once per `pollS`
@@ -519,6 +521,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
     let p = placeOf(n);
+    if (p?.where === "remote" && typeof remote?.identity === "function") {
+      // #5095: the pool account is held for a usage limit: hybrid runs the lane on the host, remote-only waits for the reset
+      let poolHeld = null;
+      try { const u = holds.holdUntil(remote.identity()); poolHeld = Number.isFinite(u) && u > now() ? u : null; } catch { poolHeld = null; }
+      if (poolHeld !== null) {
+        if (!remote.fallbackLocal || heldUntil() !== null) { notBefore.set(n, poolHeld); return false; }
+        p = { where: "local", reason: `fallback to local: pool usage limit until ${new Date(poolHeld).toISOString()}` };
+      }
+    }
     if (p?.where === "remote" && reg?.holder) {
       let other = null;
       try { other = reg.holder(entryOf(n)) ?? null; } catch { other = null; }
@@ -685,8 +696,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pol.hold) {
           // #5094: an account rotator with headroom means another account runs the next call, so no host hold is recorded.
           const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs });
-          if (rq) delayMs = rq.delayMs;
-          else try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          if (rq) {
+            delayMs = rq.delayMs;
+            // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
+            try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
+          } else try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
           let rotAt = null;
           if (!rq && rotator) { try { rotAt = rotator.resumeAt(); } catch { rotAt = null; } }

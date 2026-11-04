@@ -184,6 +184,37 @@ describe("account-scoped usage-limit holds (#4190)", () => {
   });
 });
 
+describe("#5095: a held pool account places hybrid lanes local", () => {
+  const remoteFor = (extra = {}) => ({ max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool", ...extra });
+  const runWith = async ({ hold, remote }) => {
+    const { c, now, sleep } = fakeClock();
+    const limits = openLimits(storeFile(), { now });
+    for (const [id, ms] of Object.entries(hold)) limits.set(id, c.t + ms, "test");
+    const ctxs = [];
+    const rows = await orchestrate({ issues: [1], parallel: 1, now, sleep, readBody: async () => "", limits, identity: () => "local", remote,
+      runOne: async (n, _l, ctx) => { ctxs.push({ at: now() - 1_000_000, remote: ctx.remote, placement: ctx.placement }); return { terminalReason: "merged" }; } });
+    return { rows, ctxs };
+  };
+
+  it("hybrid: a hold on the remote identity and none on the local one places the next admission local", async () => {
+    const { rows, ctxs } = await runWith({ hold: { "remote:pool": 600_000 }, remote: remoteFor({ fallbackLocal: true }) });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(ctxs.length, 1);
+    assert.equal(ctxs[0].at, 0, "admitted at once, not held");
+    assert.equal(ctxs[0].remote, false);
+    assert.equal(ctxs[0].placement.where, "local");
+    assert.match(ctxs[0].placement.reason, /fallback to local: pool usage limit until/);
+  });
+
+  it("remote-only: a held pool account waits for the reset; no hold places the lane remote", async () => {
+    const held = await runWith({ hold: { "remote:pool": 600_000 }, remote: remoteFor() });
+    assert.equal(held.ctxs[0].remote, true);
+    assert.ok(held.ctxs[0].at >= 600_000, "the remote lane starts after the pool reset");
+    const free = await runWith({ hold: {}, remote: remoteFor({ fallbackLocal: true }) });
+    assert.deepEqual([free.ctxs[0].at, free.ctxs[0].remote, free.ctxs[0].placement.where], [0, true, "remote"]);
+  });
+});
+
 describe("account rotator and usage-limit holds (#5094)", () => {
   it("#5094 rotator headroom: a rate_limited lane records no host hold and admissions continue", async () => {
     const { c, now, sleep } = fakeClock();
@@ -215,5 +246,26 @@ describe("account rotator and usage-limit holds (#5094)", () => {
     await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => laneBackendId({}, rotator),
       runOne: async () => { starts.push(now()); return { terminalReason: "merged" }; } });
     assert.deepEqual(starts, [t0]);
+  });
+
+  it("#5094 #5095 a limited pool account keeps its own hold under a rotator with headroom; the host account is never held", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t;
+    const limits = openLimits(storeFile(), { now });
+    const rotator = { accounts: [{ n: 1 }], headroom: () => true, resumeAt: () => now(), isAccount: (id) => id === "acct-1", currentIdentity: () => "acct-1" };
+    const remote = { max: 2, fallbackLocal: true, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool" };
+    const runs = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", limits, rotator, remote, identity: () => laneBackendId({}, rotator),
+      runOne: async (n, _l, ctx) => {
+        runs.push({ n, at: now(), where: ctx.placement?.where, poolHeld: limits.holdUntil("remote:pool"), hostHeld: limits.holdUntil("acct-1") });
+        return n === 1 && runs.length === 1 ? limited("remote:pool", t0 + 600_000) : { terminalReason: "merged" };
+      } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    const second = runs.find((x) => x.n === 2);
+    assert.equal(runs[0].where, "remote");
+    assert.equal(second.at, t0, "the host account is not held: admissions continue");
+    assert.equal(second.poolHeld, t0 + 600_000, "the pool's own hold is recorded (#5095)");
+    assert.ok(!(second.hostHeld > now()), "no host-wide hold while the rotator has headroom");
+    assert.equal(second.where, "local", "hybrid falls back local while the pool is held");
   });
 });

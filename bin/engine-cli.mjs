@@ -1744,7 +1744,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const { makeLedger } = await import("./lean/ledger.mjs");
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};
-      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0,
+      const holdId = execMod.remoteHoldId(provider); // #5095: the pool account's usage-limit hold key
+      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
         ...(Number.isFinite(exec.unreachableWindowMin) ? { unreachableWindowMs: exec.unreachableWindowMin * 60000 } : {}),
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
         logTail: (h) => { try { return readFileSync(batch.logFile(h.issue), "utf8").slice(-4000); } catch { return ""; } } }); // #4866: a clone failure in the lane log types sandbox.clone
@@ -1783,7 +1784,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
       };
       remote = {
-        capacity, max: exec.maxRemote, isRemote: () => true, place, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        capacity, max: exec.maxRemote, isRemote: () => true, place, identity: () => holdId, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
