@@ -923,11 +923,24 @@ branches:
 #   #   services/worker: "poetry -C services/worker run"
 #   #   web: "pnpm --filter web exec"
 #
+<<<<<<< HEAD
 #   # Route reachability (optional, default unset = no check). A command that gets the
 #   # route paths a diff adds as arguments and exits non-zero when the production
 #   # ingress does not send them to the service that implements them. Blocking when set.
 #   # topology:
 #   #   route_reachability: "bash scripts/check-ingress.sh"
+=======
+#   # #5079: "if file A changes, file B must change" (digest pins, manifests, runtime
+#   # closures, CI wiring). Block map {when glob: required glob[, glob]}; a key
+#   # prefixed `added:` fires only for files the lane adds. A miss is
+#   # conformance.unimplemented (builder resumed once).
+#   # coupled_files:
+#   #   "infra/ssh-guard/bootstrap-body.sh": "infra/ssh-guard/launcher.sh, infra/ssh-guard/MANIFEST.sha256"
+#   #   "added:scripts/tests/test_*.py": ".github/workflows/ci.yml"
+#   # Path-scoped suites (ssh-guard manifest, black/isort per service) are
+#   # .forge/test-map.json entries; set `verify.precheck_block: true` so a still-failing
+#   # declared check stops the lane with ci.red instead of an anomaly.
+>>>>>>> origin/staging
 #
 #   # Toolchain commands for lint, format, typecheck, test, and build steps.
 #   # Used by: review-pr, review-pr-staging, work-on (Phase 3H, validate), rollback,
