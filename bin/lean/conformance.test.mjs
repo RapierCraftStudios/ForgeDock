@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -1309,6 +1309,38 @@ describe("#5020 freeze-time environment defects", () => {
     const r = applyAmendments(c, [{ kind: "substitute-validate", validate: "V1", command: "uv run pytest tests/ && (", why: "poetry env missing" }], "q");
     assert.ok(r.problems.some((p) => /not valid shell/.test(p)));
     assert.equal(r.contract.validate[0].command, "poetry run pytest");
+  });
+});
+
+describe("#5087 a plan decision may not weaken an e2e/integration criterion to mocked tests", () => {
+  const K2 = { id: "K2", choice: "No Playwright e2e; integration coverage via route and component tests with mocked getServerSession and fetch", justification: "web/e2e needs a live stack", source: "precedent" };
+  it("rejects the K2 wording of AlterLab#38180 at contract validation", () => {
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [K2] }), ["K2"]);
+    const v = validateContract({ ...C, decisions: [K2] }, ISSUE);
+    assert.equal(v.ok, false);
+    assert.ok(v.problems.some((p) => p.startsWith("K2:") && p.includes("forge-probe")), v.problems.join("|"));
+  });
+  it("accepts it when an acceptance probe is declared, in the decision or elsewhere in the contract", () => {
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ ...K2, justification: "a forge-probe acceptance probe runs the flow after promotion" }] }), []);
+    assert.deepEqual(weakenedE2eDecisions({ ...C, deliverables: [...C.deliverables, { id: "D9", path: "x.md", change: "declare a forge-probe block" }], decisions: [K2] }), []);
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ ...K2, justification: "no acceptance probe" }] }), ["K2"]);
+  });
+  it("leaves unrelated decisions and contracts without decisions alone", () => {
+    assert.deepEqual(weakenedE2eDecisions(C), []);
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);
+    assert.deepEqual(validateContract({ ...C, decisions: [{ id: "K1", choice: "copy the recipes pattern", source: "precedent" }] }, ISSUE), { ok: true, problems: [] });
+  });
+  it("precheck appends routeFailures as blocking failures; absent keeps today's behaviour", () => {
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    assert.equal(precheck({ contract: C, result: res, changedFiles: files }).ok, true);
+    assert.equal(precheck({ contract: C, result: res, changedFiles: files, routeFailures: [] }).ok, true);
+    const pc = precheck({ contract: C, result: res, changedFiles: files, routeFailures: [{ code: "conformance.unimplemented", kind: "route_unreachable", detail: "x" }] });
+    assert.equal(pc.ok, false);
+    assert.deepEqual(pc.failures.map((f) => f.kind), ["route_unreachable"]);
+  });
+  it("#4726 [type:e2e] behaviour is unchanged", () => {
+    assert.equal(isE2eCommand("node --test test/leak.test.js"), false);
+    assert.equal(isE2eCommand("npx playwright test"), true);
   });
 });
 

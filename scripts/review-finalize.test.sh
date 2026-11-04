@@ -772,6 +772,16 @@ mkfind K-4 CONFIRMED HIGH c.py 5 "Renamed defect"; putfind 1
 jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
 run "$GOOD" file-prepare
 want "delta mode: Source line marks own closed issue" '.items[0] | [.action, (.dedup_of | tostring)] | join(",")' worklist.json "skip-resolved,63"
+# forge#5081: a finding raised only at the earlier head whose cited lines the delta rewrote is fixed in the delta, never re-filed
+echo "changed" > "$REPO_DIR/c.py"; git -C "$REPO_DIR" commit -qam delta; SHA2=$(git -C "$REPO_DIR" rev-parse HEAD); git -C "$REPO_DIR" reset -q --hard "$SHA"
+fp_setup; SHA_OVERRIDE="$SHA2" mkctx 1 DELTA "$SHA" 12
+echo '[]' > "$FIX/issues-open.json"; echo '[]' > "$FIX/issues-closed.json"
+mkfind K-5 CONFIRMED HIGH c.py 5 "Earlier-only defect"; mkfind K-6 CONFIRMED HIGH c.py 5 "Re-raised defect"; putfind 2
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"} + (if .id == "K-5" then {earlier_only: true} else {} end))' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "delta mode: earlier-only finding on rewritten lines is fixed in delta" '.items[] | select(.id == "K-5") | .action' worklist.json "skip-fixed-in-delta"
+want "delta mode: a finding the delta reviewers re-raised is still filed" '.items[] | select(.id == "K-6") | .action' worklist.json "file"
+SHA_OVERRIDE=""
 # the dedup helper receives the title without the shared suffix
 DEDUP_LOG="$WORK/dedup-args"; : > "$DEDUP_LOG"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> "%s"\nexit 0\n' "$DEDUP_LOG" > "$GOOD/scripts/issue-dedup.sh"

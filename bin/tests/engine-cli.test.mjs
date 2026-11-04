@@ -1263,3 +1263,13 @@ describe("#5020 readEnvConfig reads validate.recipes", () => {
     assert.equal("validateRecipes" in readEnvConfig(d), false);
   });
 });
+
+describe("#5087 readEnvConfig reads topology.route_reachability", () => {
+  it("returns the declared command; a repo without topology yields no key (behaviour unchanged)", () => {
+    const d = tmpDir("topology-");
+    writeFileSync(join(d, "forge.yaml"), 'topology:\n  route_reachability: "bash scripts/check-ingress.sh"\n');
+    assert.equal(readEnvConfig(d).routeReachability, "bash scripts/check-ingress.sh");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal("routeReachability" in readEnvConfig(d), false);
+  });
+});

@@ -211,6 +211,19 @@ async function headSha(io, c, pr) {
   return head;
 }
 
+/** A gh write retried on a transient failure (FORGE_GH_RETRY_ATTEMPTS, default 6; FORGE_GH_RETRY_SLEEP seconds, default 2, doubling to 16), as gh_retry in the scripts. */
+async function retryGh(io, args) {
+  const max = Number(io.env.FORGE_GH_RETRY_ATTEMPTS) > 0 ? Math.floor(Number(io.env.FORGE_GH_RETRY_ATTEMPTS)) : 6;
+  const base = /^\d+$/.test(io.env.FORGE_GH_RETRY_SLEEP ?? "") ? Number(io.env.FORGE_GH_RETRY_SLEEP) : 2;
+  for (let n = 1; ; n++) {
+    try { return await io.gh(args); } catch (e) {
+      if (n >= max) throw e;
+      const w = Math.min(base * 2 ** (n - 1), 16);
+      if (w > 0) await new Promise((r) => setTimeout(r, w * 1000));
+    }
+  }
+}
+
 async function main(argv, io) {
   const a = parseArgs(argv);
   if (a.mode === "finalize") return finalize(a, io);
@@ -241,7 +254,7 @@ async function main(argv, io) {
   } catch { /* unreadable: treated as a first pass */ }
   const priorOpen = priorRoutes > 0 ? await priorFindings(io, c, pr, "open") : [];
   const priorResolved = priorRoutes > 0 ? await priorFindings(io, c, pr, "closed") : [];
-  await io.gh(["pr", "comment", String(pr), "-R", c.ghRepo, "--body", `<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${sha7} -->`]);
+  await retryGh(io, ["pr", "comment", String(pr), "-R", c.ghRepo, "--body", `<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${sha7} -->`]);
   io.writeFile(join(sd, `staging_pr_number.${runKey(io.env)}`), `${pr}\n`);
 
   // 0A: bundle PR set, then the open review-finding gate
@@ -365,6 +378,10 @@ async function finalize(a, io) {
   const { c, sd, env, pr, head } = await postContext(a, io);
   const common = ["--repo", c.ghRepo, "--pr", String(pr), "--sd", sd, "--head", head];
 
+  // The panel reviewed the head recorded at dispatch: a moved head is a refusal to --delta, never a degraded panel (no label, no gate failure).
+  const reviewed = readJson(io, join(sd, `review-ctx-${pr}.json`))?.pr?.review_sha;
+  if (SHA_RE.test(reviewed ?? "") && reviewed !== head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: head moved since the review (${reviewed.slice(0, 7)} -> ${head.slice(0, 7)}): run forgedock review-staging ${pr} --delta ${reviewed}`, BLOCK_DEPLOY]);
+
   // Incomplete-panel guard + 6.75 delivery
   const d = await bash(io, "review-staging-post.sh", ["delivery", ...common], env);
   relay(io, d);
@@ -424,7 +441,7 @@ async function finalize(a, io) {
 
   const findings = readJson(io, join(outDir, "findings.json"))?.findings ?? [];
   // A finding whose own filed issue is already closed (file-prepare: skip-resolved, delta pass) is resolved: it never blocks (#4569).
-  const resolvedBy = new Map(worklist.items.filter((i) => i.action === "skip-resolved").map((i) => [i.id, i.dedup_of]));
+  const resolvedBy = new Map(worklist.items.filter((i) => i.action === "skip-resolved" || i.action === "skip-fixed-in-delta").map((i) => [i.id, i.dedup_of]));
   const resolved = findings.filter((f) => resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED" && ["CRITICAL", "HIGH"].includes(upper(f.severity)))
     .map((f) => ({ id: f.id, severity: upper(f.severity), title: f.title ?? "", issue: resolvedBy.get(f.id) }));
   const confirmed = (sev) => findings.filter((f) => !resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED" && upper(f.severity) === sev).length;
@@ -534,7 +551,7 @@ async function summary(a, io) {
     `- findings_kept: ${n.findings_kept ?? 0}; dropped_stale: ${n.findings_dropped_stale ?? 0}; pre-existing: ${n.findings_preexisting ?? 0}; notes_demoted_no_scenario: ${n.notes_demoted_no_scenario ?? 0}`,
     `- findings_filed: ${n.findings_filed ?? 0}${filed.length ? ` (${filed.join(", ")})` : ""}; out_of_scope: ${n.out_of_scope ?? 0}`,
     `- notes_fixed: 0; notes_listed: ${n.notes_listed ?? 0}; notes_dropped: ${n.notes_dropped ?? 0}; notes_capped: ${n.notes_capped ?? 0}; notes_reflag: ${n.notes_reflag ?? 0}`,
-    `- resolved (excluded from the verdict): ${(st.resolved ?? []).length ? st.resolved.map((r) => `${r.severity} ${r.id} ${r.title} (closed #${r.issue})`.replace(/\s+/g, " ")).join("; ") : "(none)"}`,
+    `- resolved (excluded from the verdict): ${(st.resolved ?? []).length ? st.resolved.map((r) => `${r.severity} ${r.id} ${r.title} (${r.issue ? `closed #${r.issue}` : "fixed in delta"})`.replace(/\s+/g, " ")).join("; ") : "(none)"}`,
     `- deduped: ${deduped.length ? deduped.join("; ") : "(none)"}`,
     ...(st.delta?.from ? [`- delta pass: ${String(st.delta.from).slice(0, 7)}..${head.slice(0, 7)} (${(st.delta.files ?? []).length} file(s)); earlier pass at ${st.delta.from} credited (its findings re-read by extract)`] : []),
     "",

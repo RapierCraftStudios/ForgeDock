@@ -696,6 +696,8 @@ the index is absent or returns no results for a given file.
 ```bash
 # Resolve recall CLI path relative to repository root
 RECALL_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/bin/recall.mjs"
+# #5085: recall.mjs ships with ForgeDock, not the target repo: also probe the install root
+[ -f "$RECALL_PATH" ] || RECALL_PATH="$(forge_root 2>/dev/null)/bin/recall.mjs"
 LEDGER_AVAILABLE=0
 
 if [ -f "$RECALL_PATH" ]; then
@@ -735,7 +737,11 @@ Query closed issues with `review-finding` label, searching by filename:
 
 ```bash
 if [ "$LEDGER_AVAILABLE" -eq 0 ] || [ -z "$LEDGER_FINDINGS" ]; then
-  echo "[context:C1] Forge Ledger unavailable or empty — falling back to live gh search"
+  echo "WARNING: [context:C1] Forge Ledger index absent or empty — falling back to live gh + subject search"
+  # #5085: prior attempts by subject terms (codes, symbols, title words), not only by file
+  PA_BODY="${TMPDIR:-/tmp}/pa-{NUMBER}.md"; gh issue view {NUMBER} -R {GH_REPO} --json body --jq .body > "$PA_BODY" 2>/dev/null
+  node "$(forge_resolve prior-attempts.mjs)" --repo {GH_REPO} --issue {NUMBER} --body-file "$PA_BODY" \
+    --title "$(gh issue view {NUMBER} -R {GH_REPO} --json title --jq .title)" || true   # → **Prior Attempts** in output
   IFS=' ' read -ra AFFECTED_FILES_ARR <<< "{AFFECTED_FILES}"
   for file in "${AFFECTED_FILES_ARR[@]}"; do
     basename=$(basename "$file" .py)

@@ -498,15 +498,15 @@ if [ -n "$DELTA_FROM_OPT" ]; then
             [ -n "$_dl" ] || _dl="[]"
         fi
         if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
-            _db=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|^<!-- FORGE:GATE_(PASS|FAILURE) -->|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED' 2>/dev/null) \
+            _db=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^(?:[^\n]*\r?\n){0,4}<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|^<!-- FORGE:GATE_(PASS|FAILURE) -->|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED' 2>/dev/null) \
                 && _dv=$(printf '%s\n' "$_db" | jq -s -r --arg f "$DELTA_FROM_OPT" --argjson L "$_dl" '
                     def shas($t; $re): [ $t | scan($re) | .[0] ];
                     def one($a): if ($a | length) == 1 then $a[0] else null end;
                     def rsha: "(?:^|\\n)Reviewed-SHA: ([0-9a-f]{40}|[0-9a-f]{64})\\r?(?:\\n|$)";
                     to_entries as $E
-                    | [ $E[] | select((.value | test("\\A<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->")) and (.value | test("<!-- REVIEW-FINDINGS-START -->")))
+                    | [ $E[] | select((.value | test("\\A(?:[^\\n]*\\r?\\n){0,4}<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->")) and (.value | test("<!-- REVIEW-FINDINGS-START -->")))
                         | select(one(shas(.value; rsha)) == $f)
-                        | {i: .key, d: (.value | capture("\\A<!-- FORGE:REVIEW-AGENT:(?<d>[a-z0-9-]+) -->").d)} ] as $AG
+                        | {i: .key, d: (.value | capture("\\A(?:[^\\n]*\\r?\\n){0,4}<!-- FORGE:REVIEW-AGENT:(?<d>[a-z0-9-]+) -->").d)} ] as $AG
                     | if ($AG | length) == 0 then "no-agent" else
                         ($AG | map(.i) | min) as $first | ($AG | map(.d) | unique | length) as $nd
                         | ([ $E[] | .value as $t | select(
@@ -526,7 +526,19 @@ if [ -n "$DELTA_FROM_OPT" ]; then
         case "$_dv" in
             ok) REVIEW_MODE="DELTA"; DELTA_FROM="$DELTA_FROM_OPT" ;;
             no-agent) block "--delta-from ${DELTA_FROM_OPT}: no trusted FORGE:REVIEW-AGENT comment with a findings block for that head, no earlier pass to credit: run a full review" ;;
-            no-proof) block "--delta-from ${DELTA_FROM_OPT}: no trusted proof that the earlier panel completed (staging summary, synthesized block or PR Review Summary for that head, nor every launched domain delivered at it): run a full review" ;;
+            no-proof)
+                # forge#5081: name what lacked a valid delivery (launched domains with none, comments whose marker or findings block is malformed)
+                _hint=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->' 2>/dev/null \
+                    | jq -s -r --arg f "$DELTA_FROM_OPT" --argjson L "$_dl" '
+                        def vstart: test("\\A(?:[^\\n]*\\r?\\n){0,4}<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->");
+                        [ .[] | {d: capture("<!-- FORGE:REVIEW-AGENT:(?<d>[a-z0-9-]+) -->").d, start: vstart, blk: test("<!-- REVIEW-FINDINGS-START -->"), at: test("Reviewed-SHA: " + $f)}
+                            | .ok = (.start and .blk and .at) ] as $A
+                        | ([ $A[] | select(.ok) | .d ] | unique) as $ok
+                        | [ $L[] | select(. as $d | $ok | index($d) | not) ] as $miss
+                        | [ $A[] | select(.at and (.ok | not)) | "\(.d) (" + (if .start | not then "REVIEW-AGENT marker not within the first 5 lines" elif .blk | not then "no findings block" else "no usable Reviewed-SHA" end) + ")" ] as $mal
+                        | (if ($miss | length) > 0 then "; launched domains without a valid delivery at that head: " + ($miss | join(", ")) else "" end)
+                          + (if ($mal | length) > 0 then "; malformed reviewer comment(s): " + ($mal | join(", ")) else "" end)' 2>/dev/null) || _hint=""
+                block "--delta-from ${DELTA_FROM_OPT}: no trusted proof that the earlier panel completed (staging summary, synthesized block or PR Review Summary for that head, nor every launched domain delivered at it)${_hint}: run a full review" ;;
             degraded) block "--delta-from ${DELTA_FROM_OPT}: the earlier pass is degraded (review-panel-integrity / REVIEW_DEGRADED / REVIEW_BLOCKED after its agents): run a full review" ;;
             *) block "--delta-from ${DELTA_FROM_OPT}: could not read the trusted review comments, no earlier pass to credit: run a full review" ;;
         esac

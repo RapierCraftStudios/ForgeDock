@@ -266,6 +266,28 @@ export function tmpdirInputs(command) {
 
 const tmpInputProblem = (id, p) => `${id}: reads ${p}, which the command does not create; the run TMPDIR is per run, so the engine's rerun and red-green check will not find it. Create the file inside the command (\`… > ${p} && …\`) or use a path the repo tracks`;
 
+const E2E_WORD_RE = /\b(?:e2e|end-to-end|integration|playwright|cypress|live[- ]stack)\b/i;
+const WEAKEN_RE = /\b(?:no|not|without|drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|instead of|rather than|in lieu of|swap\w*)\b/i;
+const MOCKED_RE = /\b(?:mock\w*|stub\w*|fake\w*|unit|vitest|jest|component tests?|route tests?)\b/i;
+const PROBE_RE = /forge-probe|acceptance[- ]probe/i;
+const NEG_PROBE_RE = /\b(?:no|not|without|never)\b[^.;]{0,30}(?:forge-probe|acceptance[- ]probe)/i;
+/**
+ * #5087: a plan decision whose effect is to drop an e2e/integration check for mocked tests ("no Playwright e2e; integration
+ * coverage via route and component tests"). The #4726 rule keys on the `[type:e2e]` tag, which a reworded criterion
+ * escapes. Exempt when an acceptance probe (#4399) is declared: in the decision itself, or by another row of the contract.
+ * Returns the decision ids; pure.
+ */
+export function weakenedE2eDecisions(c) {
+  const decisions = Array.isArray(c?.decisions) ? c.decisions : [];
+  const elsewhere = (id) => JSON.stringify({ r: c?.requirements ?? [], d: c?.deliverables ?? [], k: decisions.filter((k) => k?.id !== id) });
+  return decisions.filter((k) => {
+    const choice = String(k?.choice ?? "");
+    if (!E2E_WORD_RE.test(choice) || !WEAKEN_RE.test(choice) || !MOCKED_RE.test(choice)) return false;
+    const own = `${choice} ${k?.justification ?? ""}`;
+    return !((PROBE_RE.test(own) && !NEG_PROBE_RE.test(own)) || /forge-probe/i.test(elsewhere(k?.id)));
+  }).map((k) => k.id).filter(Boolean);
+}
+
 export function validateContract(c, issueText, { repro = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
@@ -297,6 +319,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (!k?.id || blank(k?.choice)) problems.push(`decision without id or choice: ${JSON.stringify(k ?? null).slice(0, 80)}`);
     else if (!DECISION_SOURCES.includes(k?.source)) problems.push(`${k.id}: decision source must be one of ${DECISION_SOURCES.join("|")}`);
   }
+  for (const id of weakenedE2eDecisions(c)) problems.push(`${id}: a plan decision may not replace an e2e/integration check with mocked tests; run a real e2e check, or declare a \`forge-probe\` acceptance probe (#4399) that runs after promotion and reopens on failure`);
   if (!Array.isArray(c.validate) || !c.validate.length) problems.push("the contract names no validate[] commands");
   else for (const v of c.validate) {
     if (!v?.id || blank(v?.command)) { problems.push("validate entry without id or command"); continue; }
@@ -735,7 +758,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, routeFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -805,6 +828,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
   for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
+  failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 

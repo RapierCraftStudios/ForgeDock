@@ -39,7 +39,7 @@ case "$a" in "pr view"*"--json labels"*) [ -f "$F/fail-labels" ] && exit 1 ;; "i
 flaky() { [ -f "$F/flaky-$1" ] || return 0; local c; c=$(cat "$F/count-$1" 2>/dev/null || echo 0); echo $((c+1)) > "$F/count-$1"; [ "$c" -lt "$(cat "$F/flaky-$1")" ] && exit 1; return 0; }
 case "$a" in "pr view"*"--json labels"*) flaky labels ;; "issue list"*) flaky issues ;; "api repos/o/r/issues/"*) case "$a" in *"/comments"*) ;; *) flaky kind ;; esac ;; esac
 case "$1 $2" in
-  "pr comment") while [ $# -gt 0 ]; do [ "$1" = --body ] && { printf '%s\n@@\n' "$2" >> "$F/posted"; }; shift; done; exit 0 ;;
+  "pr comment") flaky comment; while [ $# -gt 0 ]; do [ "$1" = --body ] && { printf '%s\n@@\n' "$2" >> "$F/posted"; }; shift; done; exit 0 ;;
   "pr diff") [ -f "$F/files-$3" ] && { cat "$F/files-$3"; exit 0; }; exit 1 ;;
   "pr view")
     case "$a" in *"--json labels"*) [ -f "$F/degraded-$3" ] && echo true || echo false; exit 0 ;; esac
@@ -99,6 +99,16 @@ case "$OUT" in *"RESULT: BLOCK DEPLOY"*) ok ;; *) bad "blocked gate must print R
 grep -q 'FORGE:GATE_FAILURE:TYPE=open-review-finding|FINDINGS=1' "$FIX/posted" && ok || bad "blocked gate must post the GATE_FAILURE marker with FINDINGS=1"
 newfix unanchored; jq -n '[{number:41,title:"bug (PR #55)",body:"x"}]' > "$FIX/findings-5.json"
 run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; [ $? -eq 0 ] && ok || bad "a finding for another PR (#55) must not block #5"
+# #5081: only blocking findings gate; a priority:P2/P3 follow-up does not, a priority:P1 or `blocking` one does
+newfix nonblocking; jq -n '[{number:41,title:"nit (PR #5)",body:"x",labels:[{name:"review-finding"},{name:"priority:P3"}]}]' > "$FIX/findings-5.json"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; [ $? -eq 0 ] && ok || bad "a priority:P3 review-finding must not block"
+newfix blockp1; jq -n '[{number:41,title:"bug (PR #5)",body:"x",labels:[{name:"review-finding"},{name:"priority:P1"}]}]' > "$FIX/findings-5.json"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; [ $? -eq 1 ] && ok || bad "a priority:P1 review-finding must block"
+newfix blocklabel; jq -n '[{number:41,title:"bug (PR #5)",body:"x",labels:[{name:"review-finding"},{name:"priority:P3"},{name:"blocking"}]}]' > "$FIX/findings-5.json"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; [ $? -eq 1 ] && ok || bad "a finding labelled blocking must block"
+# #5081: a transient gh pr comment failure is retried, not dropped
+newfix commentflaky; echo 2 > "$FIX/flaky-comment"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; grep -qx '<!-- FORGE:GATE_PASS:TYPE=open-review-finding -->' "$FIX/posted" && ok || bad "a transient gh pr comment failure must be retried until the GATE_PASS lands"
 newfix override; jq -n '[{number:41,title:"bug (PR #5)",body:"x"}]' > "$FIX/findings-5.json"
 jq -n '[{body:"OVERRIDE: shipping with open findings — known",author_association:"OWNER",user:{type:"User",login:"o"}}]' > "$FIX/comments-9.json"
 OUT=$(run gate --repo o/r --pr 9 --prs-file "$TMP/prs" 2>&1); RC=$?

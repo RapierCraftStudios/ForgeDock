@@ -250,6 +250,14 @@ prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "untrusted ear
 eq "untrusted earlier pass blocker" '.blockers | join(" ") | test("no earlier pass to credit")' true
 earlier_pass "$SHA_B"
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "no earlier pass at the from sha" 3
+# forge#5081: a reviewer body that opens with a heading before the marker still counts as delivered
+{ cmt "$(printf '## Security review\n\n%s' "$(agent_body "$SHA_A")")"; cmt "$(staging_summary "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "marker not on line 1 is accepted" 0; eq "marker-not-on-line-1 mode" .delta.mode DELTA
+# ...and a malformed comment (marker buried past the first lines) is named in the blocker
+late_body() { printf 'a\nb\nc\nd\ne\nf\n<!-- FORGE:REVIEW-AGENT:frontend -->\nReviewed-SHA: %s\n<!-- REVIEW-FINDINGS-START -->\n<!-- REVIEW-FINDINGS-END -->' "$1"; }
+{ cmt "$(agent_body "$SHA_A")"; cmt "$(late_body "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "no proof with a malformed reviewer comment" 3
+eq "blocker names the malformed comment" '.blockers | join(" ") | test("frontend \\(REVIEW-AGENT marker not within the first 5 lines\\)")' true
 earlier_pass "$SHA_D"
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_D"; rc_is "non-ancestor from sha" 3
 eq "non-ancestor blocker" '.blockers | join(" ") | test("not an ancestor")' true
