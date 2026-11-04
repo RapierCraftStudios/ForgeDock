@@ -17,6 +17,7 @@ param(
   [int] $AllowCpus = 0,      # 0 = logical CPUs minus 4 (min 2)
   [int] $AllowMemGb = 0,     # 0 = half of physical RAM (min 4)
   [string] $Distro = 'computeshare',
+  [ValidateSet('auto', 'mirrored', 'nat')] [string] $Networking = 'auto',  # nat: for PCs where mirrored mode fails (e.g. WSL error 0x8007054f)
   [switch] $Force            # kept for compatibility; the install never prompts
 )
 $ErrorActionPreference = 'Stop'
@@ -106,7 +107,7 @@ if ($needReboot) {
 }
 
 $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
-$mirrored = $build -ge 22621
+$mirrored = switch ($Networking) { 'nat' { $false } 'mirrored' { $true } default { $build -ge 22621 } }
 Say ("Networking: " + ($(if ($mirrored) { 'mirrored (agent listens on the Tailscale IP directly)' } else { 'NAT + portproxy (Windows 10 / older 11)' })))
 
 # .wslconfig is per Windows user and applies to every distro: merge our keys, keep everything else.
@@ -116,6 +117,7 @@ $want = [ordered]@{ processors = "$AllowCpus"; memory = "${vmMemGb}GB"; vmIdleTi
 if ($mirrored) { $want['networkingMode'] = 'mirrored' }
 $out = New-Object System.Collections.Generic.List[string]; $inWsl2 = $false; $seen = @{}
 foreach ($l in $lines) {
+  if (-not $mirrored -and $l -match '^\s*networkingMode\s*=\s*mirrored\s*$') { $out.Add("# $l  # disabled by computeshare: -Networking nat"); continue }
   if ($l -match '^\s*\[(.+)\]\s*$') {
     if ($inWsl2) { foreach ($k in $want.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($want[$k])"); $seen[$k] = $true } } }
     $inWsl2 = ($Matches[1].Trim().ToLower() -eq 'wsl2')
