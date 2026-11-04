@@ -1938,7 +1938,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
 
   it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {
     for (const conformance of ["enforce", "shadow"]) {
-      for (const rg of [{ base: "SKIPPED", head: "FAILED" }]) {
+      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }]) {
         const w = rworld([rg]);
         const r = await run(w, { conformance });
         assert.equal(r.code, "conformance.unimplemented", `${conformance} ${JSON.stringify(rg)}`); assert.equal(w.merges.length, 0);
@@ -1948,11 +1948,13 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
         assert.match(nh(w), /repro test test\/foo\.test\.js foo handles null/);
       }
     }
+    const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
+    assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
   });
 
   it("#5080 a repro that already passes on the base ends already-fixed: the issue closes as completed citing the base, nothing merges, no resume", async () => {
     for (const conformance of ["enforce", "shadow"]) {
-      const w = rworld([{ base: "RAN", head: "RAN" }]);
+      const w = rworld([{ base: "RAN", head: "RAN" }], { changed: ["test/foo.test.js"] });
       const r = await run(w, { conformance });
       assert.equal(r.terminalReason, "invalid", conformance); assert.equal(w.merges.length, 0);
       assert.equal(builders(w).length, 2, "no resume"); assert.equal(reviewers(w).length, 0);

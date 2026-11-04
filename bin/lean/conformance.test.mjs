@@ -661,12 +661,14 @@ describe("repro_test on bug lanes (#4271)", () => {
     const k = { ...C, repro_test: RT };
     const green = precheck({ contract: k, result: res, changedFiles: files, repro: { base: "RAN", head: "RAN" } });
     assert.deepEqual(green.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_base_green"]]);
-    assert.match(green.failures[0].detail, /BASE=RAN HEAD=RAN/);
+    assert.match(green.failures[0].detail, /must fail on the base and pass on head; got BASE=RAN HEAD=RAN/);
     const testOnly = ["test/leak.test.js"];
     const pc = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "RAN", head: "RAN" } });
     assert.deepEqual(pc.failures.map((f) => f.kind), ["repro_base_green", "source_deliverable_untouched"]);
-    assert.equal(alreadyFixedOnBase(pc.failures), true);
-    assert.equal(alreadyFixedOnBase(green.failures), true);
+    assert.equal(alreadyFixedOnBase(pc.failures, testOnly), true);
+    assert.equal(alreadyFixedOnBase(green.failures, testOnly), true);
+    assert.equal(alreadyFixedOnBase(green.failures, ["src/leak.js", "test/leak.test.js"]), false, "a source change keeps conformance.unimplemented (K3)");
+    assert.equal(alreadyFixedOnBase(green.failures, ["docs/a.md", ".forge-lean/x.json"], [".forge-lean/"]), true);
     assert.equal(alreadyFixedOnBase([{ kind: "repro_base_green" }, { kind: "validate_failed" }]), false);
     assert.equal(alreadyFixedOnBase([{ kind: "source_deliverable_untouched" }]), false);
     const only = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "FAILED", head: "RAN" } });

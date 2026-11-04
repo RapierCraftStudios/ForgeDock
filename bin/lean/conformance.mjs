@@ -822,7 +822,7 @@ export function reproFailures(contract, { base, head } = {}) {
   const skipped = base === "SKIPPED" ? " (base not run: head did not pass)" : "";
   // #5080: the test already passes on the base: the fix is there (a hotfix or another PR), not missing from this change
   if (base === "RAN") return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_base_green",
-    detail: `repro test ${name} (\`${t.command ?? ""}\`) passes on the base already (BASE=RAN HEAD=RAN): the fix may already be on the base` }];
+    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)` }];
   return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
 }
@@ -842,10 +842,13 @@ export function sourceDeliverableFailures(contract, changedFiles = [], ignore = 
 }
 
 /**
- * #5080: the repro already passes on the base (repro_base_green) and the diff has no source change (the only other failure
- * is source_deliverable_untouched): the issue is already fixed on the base, so it closes as delivered instead of needs-human.
+ * #5080: the repro already passes on the base (repro_base_green), the diff has no non-test source change, and the only other
+ * failure is source_deliverable_untouched: the issue is already fixed on the base, so it closes as delivered instead of
+ * needs-human. A diff that changes source keeps the conformance.unimplemented path (K3).
  */
-export function alreadyFixedOnBase(failures = []) {
+export function alreadyFixedOnBase(failures = [], changedFiles = [], ignore = []) {
+  const files = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)));
+  if (files.some((f) => !isTestPath(f) && SOURCE_EXT_RE.test(f))) return false;
   return failures.some((f) => f.kind === "repro_base_green") && failures.every((f) => f.kind === "repro_base_green" || f.kind === "source_deliverable_untouched");
 }
 
