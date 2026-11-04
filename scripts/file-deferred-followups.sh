@@ -66,13 +66,13 @@ CLASSES="engineering post-deploy external ops verify-now host"
 # #5078: an owner item is external only when it needs credentials, spend, an account, a third party or a customer. A
 # post-promotion action (owner:orchestrator, owner:promote:*, after promotion/release, rollout, purge) joins the rollup and
 # read-only production data or capture (obs-psql, *-monitor, a read-only prod query) is a host task. Mirrors
-# bin/lean/conformance.mjs ownerRoute; ERE without \b for BSD grep (bash 3.2 hosts).
+# bin/lean/conformance.mjs ownerRoute; word boundaries spelled (^|[^[:alnum:]_]) / ([^[:alnum:]_]|$), no \b, for BSD grep (bash 3.2 hosts).
 POSTPROM_ERE='(after|post)[- ]?(promotion|release|deploy)|in production after|production[- ]verif|promot(e|ion)|rollout|purge|deploy[- ]time'
-ROPROD_ERE='obs-psql|[a-z0-9.-]+-monitor|prod(uction)? monitor|read[- ]only[^.]{0,40}prod|prod(uction)?[^.]{0,30}(query|queries|capture|data|logs?)'
-EXTNEED_ERE='credential|secret|api[- ]?key|token|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal'
+ROPROD_ERE='ssh[[:space:]]+[[:alnum:]_.-]*-monitor([^[:alnum:]_]|$)|(^|[^[:alnum:]_])obs-psql([^[:alnum:]_]|$)|(^|[^[:alnum:]_])prod(uction)?[ _-]monitor([^[:alnum:]_]|$)|(^|[^[:alnum:]_])read[- ]only[^[:alnum:]_.]([^.]{0,38}[^[:alnum:]_.])?prod(uction)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])prod(uction)?[^[:alnum:]_.]([^.]{0,28}[^[:alnum:]_.])?(query|queries|capture|telemetry|logs?)([^[:alnum:]_]|$)'
+EXTNEED_ERE='credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?([^[:alnum:]_]|$)|private[- ]key|(^|[^[:alnum:]_])login([^[:alnum:]_]|$)|(^|[^[:alnum:]_])sudo([^[:alnum:]_]|$)|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|(^|[^[:alnum:]_])(delete|drop|truncate|wipe|destroy|modify|migrate|write)([^[:alnum:]_]|$)'
 owner_route() { # why -> post-deploy | host | external
   case "$1" in "owner: orchestrator"*|"owner: promote"*) echo "post-deploy"; return 0 ;; esac
-  if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE"; then echo "post-deploy"
+  if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "post-deploy"
   elif printf '%s' "$1" | grep -qiE "$ROPROD_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "host"
   else echo "external"; fi
 }

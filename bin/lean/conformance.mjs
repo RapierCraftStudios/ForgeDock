@@ -867,6 +867,7 @@ export function reproFailures(contract, { base, head } = {}) {
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
 }
 
+const DOC_ONLY_RE = /\.(?:md|mdx|txt|rst|adoc)$/i;
 const SOURCE_EXT_RE = /\.(?:m?[jt]sx?|cjs|py|go|rs|rb|java|kt|swift|php|cs|c|cc|cpp|h|hpp|sh)$/i;
 /**
  * #5080: a diff of test files only, for a contract that names a code deliverable (a non-test source file): the tests pin
@@ -888,7 +889,8 @@ export function sourceDeliverableFailures(contract, changedFiles = [], ignore = 
  */
 export function alreadyFixedOnBase(failures = [], changedFiles = [], ignore = []) {
   const files = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)));
-  if (files.some((f) => !isTestPath(f) && SOURCE_EXT_RE.test(f))) return false;
+  // Release review of #5103 (MAT-1): any non-test, non-doc change (css, json, yaml, sql, tf, ...) is work the lane did, never "already fixed".
+  if (files.some((f) => !isTestPath(f) && !DOC_ONLY_RE.test(f))) return false;
   return failures.some((f) => f.kind === "repro_base_green") && failures.every((f) => f.kind === "repro_base_green" || f.kind === "source_deliverable_untouched");
 }
 
@@ -1224,9 +1226,9 @@ export function bucketProblems(r) {
 }
 /** #5078: post-promotion / production-verify / rollout text (the rollup) and read-only production data or capture (the host: the prod_monitor signals of execution.mjs plus a read-only prod query). Mirrored in scripts/file-deferred-followups.sh. */
 const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
-export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|obs-psql|[a-z0-9.-]+-monitor\b|prod(?:uction)? monitor|read[- ]only[^.]{0,40}prod|prod(?:uction)?[^.]{0,30}(?:query|queries|capture|data|logs?)\b/i;
-/** An item that truly needs the outside world stays external even when it also reads production. */
-export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal/i;
+export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor\b|\bread[- ]only\b[^.]{0,40}\bprod(?:uction)?\b|\bprod(?:uction)?\b[^.]{0,30}\b(?:query|queries|capture|telemetry|logs?)\b/i;
+/** An item that truly needs the outside world (or a write to production) stays external even when it also reads production. */
+export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write)\b/i;
 /**
  * #5078: where an owner deferral goes. `owner:orchestrator`, `owner:promote:*` or post-promotion text -> post-deploy (the
  * rollup); read-only production data or capture (with no credential/spend/account/third-party/customer need) -> host; else external (credentials, spend, an account, a third party or a customer).
@@ -1235,7 +1237,8 @@ export function ownerRoute(r) {
   const action = String(r?.bucket ?? "").replace(/^owner:/, "");
   if (/^(?:orchestrator$|promote(?::|$))/i.test(action)) return "post-deploy";
   const text = `${action} ${r?.why ?? ""}`;
-  if (POST_PROMOTION_RE.test(text)) return "post-deploy";
+  // Release review #5103 (BUG-3): a credential/spend/write need is external even when it also names a rollout or release.
+  if (POST_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text)) return "post-deploy";
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
 }
 /** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */

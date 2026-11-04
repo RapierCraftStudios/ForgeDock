@@ -1358,3 +1358,29 @@ describe("amendmentKindProblems (#5089)", () => {
     assert.equal(amendmentKindProblems([{ kind: "add-deliverable", why: "w" }, { kind: "defer", why: "w" }]).length, 2);
   });
 });
+
+// Release review of #5103: MAT-1/REG-1 (non-code fixes are never "already fixed") and the read-only-prod routing theme
+// (SPEC-1, SEC-4, AUTH-1, BUG-2/3, QA-3, MAT-7, REG-4).
+import { READONLY_PROD_RE as RO5103, EXTERNAL_NEED_RE as EX5103, ownerRoute as route5103, alreadyFixedOnBase as afb5103 } from "./conformance.mjs";
+describe("release review #5103", () => {
+  const green = [{ kind: "repro_base_green" }, { kind: "source_deliverable_untouched" }];
+  it("a lane that changed css/json/yaml/sql/vue/tf is never closed as already fixed on base", () => {
+    for (const f of ["web/app.css", "config/limits.json", "deploy/values.yaml", "db/0042.sql", "web/App.vue", "infra/main.tf", "web/index.html"]) {
+      assert.equal(afb5103(green, [f, "test/x.test.js"]), false, f);
+    }
+  });
+  it("tests and docs only still close as already fixed", () => {
+    assert.equal(afb5103(green, ["test/x.test.js", "docs/a.md", "devdocs/x.mdx"]), true);
+  });
+  const host = (why) => RO5103.test(why) && !EX5103.test(why);
+  it("read-only production telemetry, captures and queries route to host", () => {
+    for (const why of ["read-only production telemetry from ovh", "ssh ovh-monitor to capture the queue", "obs-psql query of prod", "run a production query against the replica", "capture production logs for the run"]) assert.equal(host(why), true, why);
+  });
+  it("owner asks, writes, credentials and product wording stay external", () => {
+    for (const why of ["Should we delete production data older than 90 days?", "add uptime-monitor dashboard", "needs the production database password to query prod data",
+      "needs the prod ssh key to read production logs", "product manager decides the pricing", "production dataset retention policy", "drop the production table after the capture"]) {
+      assert.equal(host(why), false, why);
+    }
+    assert.equal(route5103({ bucket: "owner:decide", why: "Should we delete production data older than 90 days?" }), "external");
+  });
+});
