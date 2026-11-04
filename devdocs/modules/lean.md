@@ -2475,3 +2475,8 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 `fileFollowups` passes `batchId`/`rollupLabel` as `FORGE_BATCH_ID`/`FORGE_ROLLUP_LABEL`. `track()` records `followups: [{issue, class, count}]` on the lane result, and `formatOutcomeLists` prints one `follow-ups appended: #N (<class>: k item(s) from #a,#b)` line grouped by issue, naming the rollup. Decision: `devdocs/decisions/5078-followup-routing.md`.
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
+
+## Review roster: Frontend path trigger (forge#5077)
+`scripts/review-roster.sh` has a Frontend path trigger (`web/` or `app/` segment, `.tsx`/`.jsx`, `next.config.*`, `middleware.ts|js`) that calls `add_agent Frontend` in every tier except full, like Infra/Auth. Path triggers are additive to the top-2 score baseline, so a staging→main bundle selects the union of every path-triggered domain with no bundle flag. Output contract and the Security floor are unchanged. `commands/review-pr-agents/frontend.md` gains check 11 (dynamic APIs in static/ISR trees).
+
+Tests: `review-roster.test.sh` "forge#5077" block (not-found.tsx in small/medium/standard, bundle union, negative case). Cost: 0 LLM calls.
