@@ -59,7 +59,8 @@ export async function readLive({ gh, repo }) {
 /**
  * Parallel-start gate: dependencies of `issues` (not themselves in the batch) that are not merged into `baseOf(issue)`.
  * A dep is merged when it is CLOSED by a PR that is merged with that base, or whose merge commit is an ancestor of
- * that base (`isAncestor(sha, base)`, e.g. it arrived through a milestone sync). Unreadable issues are skipped (fail open:
+ * that base (`isAncestor(sha, base)`, e.g. it arrived through a milestone sync). With no linked PR (GitHub links only
+ * default-branch merges, #5086) the merged `feat/issue-<dep>-lean` PR is looked up instead. Unreadable issues are skipped (fail open:
  * the engine's own openDependency still guards each lane); an unreadable dep counts as unmet.
  * `sha`/`kind` (#5031): `kind` is "commit" when the dependency merged but its commit is not on the base yet (`sha`), else "other".
  * @returns {Promise<Array<{ issue: number, dep: number, base: string, why: string, sha: string|null, kind: "commit"|"other" }>>}
@@ -83,12 +84,23 @@ export async function unmetDependencies({ issues, baseOf, gh, repo, isAncestor }
         else {
           let merged = false;
           let missing = null;
+          // One PR is "on the base" when it merged there or its merge commit is an ancestor of it.
+          const check = async (p) => {
+            if (!p?.mergedAt) return;
+            const oid = p.mergeCommit?.oid;
+            if (p.baseRefName === base || (oid && isAncestor && await isAncestor(oid, base))) merged = true;
+            else if (oid) missing ??= oid;
+          };
           for (const pr of d.closedByPullRequestsReferences ?? []) {
-            const p = parse(await gh(["pr", "view", String(pr.number), ...r, "--json", "baseRefName,mergedAt,mergeCommit"]));
-            if (!p?.mergedAt) continue;
-            const sha = p.mergeCommit?.oid;
-            if (p.baseRefName === base || (sha && isAncestor && await isAncestor(sha, base))) { merged = true; break; }
-            if (sha) missing ??= sha;
+            await check(parse(await gh(["pr", "view", String(pr.number), ...r, "--json", "baseRefName,mergedAt,mergeCommit"])));
+            if (merged) break;
+          }
+          // #5086: GitHub links closing PRs only for default-branch merges, so a milestone-lane dependency has no references.
+          // Fall back to the lane PR by head-branch convention; a failed or non-array lookup finds nothing (still refused).
+          if (!merged && !missing) {
+            let prs = [];
+            try { prs = parse(await gh(["pr", "list", ...r, "--head", `feat/issue-${dep}-lean`, "--state", "merged", "--json", "number,baseRefName,mergedAt,mergeCommit", "--limit", "5"])); } catch { prs = []; }
+            for (const p of Array.isArray(prs) ? prs : []) { await check(p); if (merged) break; }
           }
           if (!merged) sha = missing;
           if (!merged) why = missing ? `merge commit ${missing.slice(0, 10)} is not on ${base}` : `closed but not merged into ${base}`;
