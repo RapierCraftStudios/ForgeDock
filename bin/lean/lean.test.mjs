@@ -928,6 +928,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.equal(w.followups.length, 1);
     assert.deepEqual(w.followups[0].items.map((i) => i.key), ["R2: Existing callers of foo keep working."]);
     assert.match(w.followups[0].items[0].why, /^post-deploy: \[bucket:post-deploy\] callers live in another module/);
+    assert.deepEqual(r.followups, [{ issue: 900, class: "post-deploy", count: 1 }]); // #5078: the batch report's follow-ups line
     const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
     assert.match(body, /## Remaining work tracked\n- #900\n\nCloses #7$/);
     assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && c.includes("#900")));

@@ -587,6 +587,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
+      ...(Array.isArray(r?.followups) && r.followups.length ? { followups: r.followups } : {}), // #5078
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
@@ -1314,6 +1315,22 @@ export const OUTCOME_LINE_MAX = 200;
  * mechanical needs-human row (failed recovery or a terminal code), then one escalation list holding only human codes,
  * asked once at the end of the batch. Empty when there is nothing to list.
  */
+/**
+ * #5078: one `follow-ups appended:` line grouped by issue across rows: `#N (<class>: k item(s) from #a,#b)`, the post-deploy
+ * rollup named as such. Null when no row filed follow-ups.
+ */
+function formatFollowupsLine(rows) {
+  const by = new Map();
+  for (const r of rows ?? []) for (const f of Array.isArray(r?.followups) ? r.followups : []) {
+    if (!Number.isInteger(f?.issue) || f.issue <= 0) continue;
+    const g = by.get(f.issue) ?? { classes: new Set(), count: 0, from: new Set() };
+    if (f.class) g.classes.add(String(f.class));
+    g.count += Number(f.count) || 0; g.from.add(r.issue); by.set(f.issue, g);
+  }
+  if (!by.size) return null;
+  const name = (c) => (c === "post-deploy" ? "post-deploy rollup" : c === "external" ? "external aggregate" : c);
+  return `follow-ups appended: ${[...by].sort((a, b) => a[0] - b[0]).map(([n, g]) => `#${n} (${[...g.classes].sort().map(name).join("+") || "follow-up"}: ${g.count} item(s) from ${[...g.from].map((i) => `#${i}`).join(",")})`).join(" ")}`;
+}
 export function formatOutcomeLists(rows) {
   const out = [];
   const one = (x) => String(x ?? "").split("\n")[0].slice(0, OUTCOME_LINE_MAX);
@@ -1332,6 +1349,8 @@ export function formatOutcomeLists(rows) {
   if (rq.length) out.push(`remediation queue (/work-on:remediate): ${rq.map((r) => `#${r.issue} (parked:${r.code}${r.pr ? ` PR #${r.pr}` : ""})`).join(" ")}`);
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
   if (parked) out.push(parked);
+  const fu = formatFollowupsLine(rows); // #5078: follow-ups appended, not "issues filed"
+  if (fu) out.push(fu);
   const decided = (rows ?? []).filter((r) => r?.decided); // #4766: settled by the decision engine, listed not hidden
   if (decided.length) out.push(["decided (north-star engine, veto with the forge:decision-veto label):", ...decided.map((r) => `- #${r.issue}: ${one(r.decided.choice)}${r.decided.shadow ? " (shadow)" : ""}`)].join("\n"));
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));

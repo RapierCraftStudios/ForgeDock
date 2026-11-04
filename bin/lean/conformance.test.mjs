@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -930,7 +930,7 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
     assert.equal(cls({ disposition: "defer", class: "external" }), "external");
     assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
-    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops"]);
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host"]);
     assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
     const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
     assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
@@ -942,7 +942,7 @@ describe("post-deploy check ids (#4626)", () => {
   it("#4724 a deferred row needs exactly one valid bucket; owner actions are never post-deploy; dates are absolute", () => {
     const contract = (r) => ({ requirements: [{ id: "R1", quote: Q1, why: "w", ...r }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] });
     const probs = (r) => validateContract(contract(r), Q1).problems.filter((x) => /^R1: .*(bucket|never post-deploy|owner)/.test(x));
-    assert.deepEqual(BUCKETS, ["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+    assert.deepEqual(BUCKETS, ["post-deploy", "verify-now", "date", "owner", "new-issue", "host"]);
     assert.equal(probs({ disposition: "defer" }).length, 1); // missing bucket
     for (const bucket of ["post-deploy", "verify-now", "new-issue", "date:2026-12-01", "owner:rotate the key"]) assert.deepEqual(probs({ disposition: "defer", bucket }), [], bucket);
     for (const bucket of ["date:5 weeks after deploy", "date:2026-02-30", "date", "owner:", "owner", "later", "post-deploy:x"]) assert.equal(probs({ disposition: "defer", bucket }).length, 1, bucket);
@@ -964,6 +964,29 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(one({ bucket: "date:2026-12-01" }).why, "post-deploy: [bucket:date] due:2026-12-01 from:2026-10-27 w");
     assert.equal(one({ bucket: "new-issue" }).why, "defer: [bucket:new-issue] w");
     assert.equal(one({}).why, "defer: w"); // an unbucketed (older) row is unchanged
+  });
+  it("#5078 owner is narrowed: post-promotion -> rollup, read-only prod -> host, credentials/spend -> external", () => {
+    const d = (bucket, why = "w") => ({ disposition: "defer", bucket, why });
+    assert.equal(ownerRoute(d(ORCHESTRATOR_BUCKET)), "post-deploy");
+    assert.equal(followupClass(d("owner:orchestrator", "post-deploy action with no registered check")), "post-deploy");
+    assert.equal(followupClass(d("owner:promote:new-nav", "activate the flag")), "post-deploy");
+    assert.equal(followupClass(d("owner:ops", "purge the CDN after release")), "post-deploy");
+    assert.equal(followupClass(d("owner:qa", "verify in production after promotion")), "post-deploy");
+    assert.equal(followupClass(d("owner:obs-psql", "capture the read-only production query counts")), "host");
+    assert.equal(followupClass(d("owner:ssh ovh-monitor", "tail the logs")), "host");
+    assert.equal(followupClass(d("owner:stripe", "needs live Stripe credentials")), "external");
+    assert.equal(followupClass(d("owner:finance", "approve the spend")), "external");
+    assert.equal(followupClass(d("owner:ops", "needs a customer account to read production data")), "external");
+    assert.equal(followupClass({ ...d("owner:obs-psql", "read prod data"), class: "ops" }), "ops");
+    assert.equal(followupClass(d("host")), "host");
+    assert.deepEqual(bucketProblems(d("host")), []);
+    assert.match(bucketProblems({ disposition: "post-deploy", check: "a", bucket: "host" }).join(";"), /never post-deploy/);
+    assert.match(bucketProblems(d("owner:obs-psql", "capture production query counts")).join(";"), /use bucket host/);
+    assert.deepEqual(bucketProblems(d("owner:stripe", "needs live credentials")), []);
+    assert.deepEqual(bucketProblems(d(ORCHESTRATOR_BUCKET, "manual prod action")), []);
+    const [h, o] = followupItems([{ id: "R1", quote: Q1, ...d("host", "count rows") }, { id: "R2", quote: Q1, why: "w", ...d("owner:orchestrator") }]);
+    assert.equal(h.why, "host: [bucket:host] count rows"); assert.equal(h.class, "host");
+    assert.equal(o.class, "post-deploy"); assert.match(o.why, /^owner: orchestrator\. \[bucket:owner\]/);
   });
   it("#4724 bucketTally counts deferred items per bucket kind; an amendment may carry the bucket", () => {
     assert.deepEqual(bucketTally([{ bucket: "date:2026-12-01" }, { bucket: "date:2026-12-02" }, { bucket: "owner:x" }, {}]), { date: 2, owner: 1, none: 1 });
