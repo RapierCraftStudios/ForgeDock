@@ -247,6 +247,26 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     assert.equal(engine.self_check, "red");
     assert.deepEqual(o.log.filter((e) => e.event === "SELF_CHECK_MISSING").map((e) => e.state), ["red"]);
   });
+  // #5087 (R2/R6): the lane adds a Next.js route handler; only a declared forge.yaml topology.route_reachability may block it
+  const SIGNUP = "web/src/app/(site)/api/v1/agent/signup/pending/route.js";
+  const ROUTED = () => { const k = FULL(); k.deliverables.push({ id: "D5", path: SIGNUP, change: "signup handler", requirements: ["R1"] }); return k; };
+  const addRoute = (t) => { fix(t, ["scrape", "search", "export"]); t.write({ [SIGNUP]: "export async function GET() { return new Response(\"ok\"); }\n" }); };
+  it("#5087 without topology a route-adding lane merges as today: no route check runs, no new blocking failure", async () => {
+    const ran = [];
+    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: async (a) => { ran.push(a.command); return runCheckCommand(a); } });
+    merged(o);
+    assert.ok(!ran.some((c) => c.includes("/api/v1/agent/signup/pending")), "no route reachability command ran");
+    assert.ok(!o.log.some((e) => e.event === "PRECHECK" && (e.failures ?? []).some((f) => f.kind === "route_unreachable")));
+  });
+  it("#5087 a declared topology.route_reachability that rejects the new route blocks before merge (#38241 fixture)", async () => {
+    const ingress = path.join(tmpDir("ingress-"), "check-ingress.sh");
+    fs.writeFileSync(ingress, "for p in \"$@\"; do case \"$p\" in /api/v1/batch*) ;; /api/v1/*) echo \"unreachable: $p -> api\" >&2; exit 1 ;; esac; done\n");
+    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress}`, verify: { maxRounds: 0 } } });
+    assert.equal(o.staging.search, false, "staging untouched");
+    assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
+    assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
+    assert.match(o.ret.detail, /topology\.route_reachability[\s\S]*\/api\/v1\/agent\/signup\/pending[\s\S]*unreachable: \/api\/v1\/agent\/signup\/pending -> api/);
+  });
   it("6 a generic PASS over an incomplete implementation never merges (review.incomplete)", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "export"]), generic: true });
     blocked(o, "review.incomplete"); assert.deepEqual([o.counts.builder, o.counts.reviewer], [2, 2]);

@@ -923,6 +923,11 @@ branches:
 #   #   services/worker: "poetry -C services/worker run"
 #   #   web: "pnpm --filter web exec"
 #
+#   # Route reachability (optional, default unset = no check). A command that gets the
+#   # route paths a diff adds as arguments and exits non-zero when the production
+#   # ingress does not send them to the service that implements them. Blocking when set.
+#   # topology:
+#   #   route_reachability: "bash scripts/check-ingress.sh"
 #   # #5079: "if file A changes, file B must change" (digest pins, manifests, runtime
 #   # closures, CI wiring). Block map {when glob: required glob[, glob]}; a key
 #   # prefixed `added:` fires only for files the lane adds. A miss is

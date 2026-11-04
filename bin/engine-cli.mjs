@@ -533,9 +533,10 @@ export function readEnvConfig(cwd = process.cwd()) {
     const recipes = Object.entries(rm ?? {}).map(([match, replace]) => ({ match, replace }));
     const cf = readYamlMap(cwd, "verification", "coupled_files"); // #5079: {when glob: required glob[, glob]}
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+    const rr = s(y?.topology?.route_reachability); // #5087: repo-supplied command: exits non-zero when the ingress does not deliver the added route paths (args) to their service
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
