@@ -23,7 +23,9 @@
  * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
- * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
+ * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset.
+ * #5095: `remote.identity()` names the pool's account (execution.mjs `remoteHoldId`); while it is held, a remote-placed lane
+ * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  * `getChildren()` + `autoChildren {mode, pollS, epics}` (#4965, `orchestration.auto_add_children`): with mode `epic`|`all`, at most once per `pollS`
@@ -507,6 +509,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
     let p = placeOf(n);
+    if (p?.where === "remote" && typeof remote?.identity === "function") {
+      // #5095: the pool account is held for a usage limit: hybrid runs the lane on the host, remote-only waits for the reset
+      let poolHeld = null;
+      try { const u = holds.holdUntil(remote.identity()); poolHeld = Number.isFinite(u) && u > now() ? u : null; } catch { poolHeld = null; }
+      if (poolHeld !== null) {
+        if (!remote.fallbackLocal || heldUntil() !== null) { notBefore.set(n, poolHeld); return false; }
+        p = { where: "local", reason: `fallback to local: pool usage limit until ${new Date(poolHeld).toISOString()}` };
+      }
+    }
     if (p?.where === "remote" && reg?.holder) {
       let other = null;
       try { other = reg.holder(entryOf(n)) ?? null; } catch { other = null; }

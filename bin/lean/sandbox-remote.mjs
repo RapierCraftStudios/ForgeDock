@@ -68,8 +68,10 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     e.status = r.status;
     if (hop) e.hop = hop;
     if (reason) e.reason = reason;
-    if ([502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll
-    if (r.status === 429 || r.status === 503) { e.retryable = true; const n = Number(r.retryAfter); if (Number.isFinite(n) && n > 0) e.retryInSeconds = n; }
+    if ([500, 502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll; #5095: 500 too
+    if (r.status === 429 || r.status === 503) e.retryable = true;
+    // #5095: Retry-After is honoured on any 429/5xx, so a launch 5xx (sandbox.transient) backs off as the pool asks
+    if (r.status === 429 || r.status >= 500) { const n = Number(r.retryAfter); if (Number.isFinite(n) && n > 0) e.retryInSeconds = n; }
     return e;
   };
   const p = (id) => `/sandboxes/${encodeURIComponent(id)}`;

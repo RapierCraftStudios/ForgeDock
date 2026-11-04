@@ -20,8 +20,10 @@
  *
  * `remote` (#4254, sandbox-remote.mjs) reaches a runner pool or remote session through a transport (`execution.endpoint`,
  * credential `execution.token_env` from the env or the keychain). It is never a default, and a GitHub Actions endpoint
- * needs `allow_actions: true`. A sandbox that fails to start is a typed outcome, not an engine-error: `needs-human`
- * `sandbox.start_failed`, or `deferred` `sandbox.capacity` when the provider marks the error retryable. A provider that
+ * needs `allow_actions: true`. A sandbox that fails to start is a typed outcome, not an engine-error: `deferred` `sandbox.capacity`
+ * when the provider marks the error retryable (429/503), `deferred` `sandbox.transient` for any other 5xx (#5095), `deferred`
+ * `sandbox.auth` for 401/403, else `needs-human` `sandbox.start_failed` (a 4xx config error). #5095: a sandbox that exits without
+ * a result while its log tail shows a usage limit ends `deferred` `rate_limited` held under `remoteHoldId` (never the breaker). A provider that
  * sets `handle.minutes` (billable sandbox minutes) has them used as the lane's sandbox minutes (#4255 below).
  *
  * Sandbox cost and budget (#4255): a provider may implement `usage(handle, {startedAt, endedAt}) -> {minutes, cost_usd}`;
@@ -60,6 +62,7 @@ import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { parseRelayCommands } from "./relay.mjs";
+import { detectUsageLimit, parseSessionLimitResetEpochMs } from "../runner.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
 export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
@@ -532,17 +535,33 @@ export function providerByName(name, opts) {
   throw e;
 }
 
+/** #5095: the usage-limit hold key of a remote provider's account (the pool's), known to the dispatcher before any lane runs. */
+export const remoteHoldId = (provider) => `remote:${String(provider?.name ?? "remote")}`;
+const TRANSIENT_RETRY_S = 60;
+const LIMIT_RE = /usage limit hit; resets at ([^\n;]+)/i;
+const RESETS_RE = /\bresets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*[ap]m\s*\([^)]+\)|\d{1,2}:\d{2}\s*\([^)]+\))/i;
+/** #5095: the usage-limit reset text in a lane log tail (the lean finish line, else the CLI's own limit message), or null. */
+export function usageLimitInTail(tail) {
+  const t = String(tail ?? "");
+  const lean = LIMIT_RE.exec(t);
+  if (lean) return { resetAt: lean[1].trim() };
+  if (!detectUsageLimit("", t)) return null;
+  return { resetAt: RESETS_RE.exec(t)?.[1]?.trim() ?? null };
+}
+
 /**
  * Lane seams for `orchestrate()` over a provider, the same contract as batch.mjs `detachedLanes`. `ledgerFor(issue)`
- * returns that sandbox's ledger (ledger.mjs `makeLedger`).
+ * returns that sandbox's ledger (ledger.mjs `makeLedger`). #5095: with `holdId` every `rate_limited` result is held under it
+ * (`backendId`; the sandbox's own id kept as `laneBackendId`), so orchestrate can place lanes away from a limited pool.
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null }) {
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
   const withUsage = async (r, h) => {
     if (!r || typeof r !== "object") return r;
+    if (holdId && r.code === OUTCOME_CODES.RATE_LIMITED) r = { ...r, backendId: holdId, ...(r.backendId && r.backendId !== holdId ? { laneBackendId: r.backendId } : {}) };
     const endedAt = now(), startedAt = Number.isFinite(h?.startedAt) ? h.startedAt : endedAt;
     let u = null;
     try { u = typeof provider.usage === "function" ? await provider.usage(h, { startedAt, endedAt }) : null; } catch { u = null; }
@@ -586,7 +605,15 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         const last = await g(() => provider.fetchResult(h)); // it may have written the result just before exiting
         if (last) return last;
         const why = `sandbox ${h.id} ${st} without a result`;
-        return isCloneFailure(await tailOf(h)) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why };
+        const tail = await tailOf(h);
+        // #5095: the pool account hit its usage limit: a known-time wait (held, never the breaker), not an engine-error
+        const lim = usageLimitInTail(tail);
+        if (lim) {
+          const at = lim.resetAt ? parseSessionLimitResetEpochMs(lim.resetAt, now()) : undefined;
+          return { terminalReason: "deferred", code: OUTCOME_CODES.RATE_LIMITED, resetAt: lim.resetAt ?? "unknown", resetAtEpochMs: Number.isFinite(at) ? at : null,
+            detail: `${why}: usage limit hit; resets at ${lim.resetAt ?? "unknown"}` };
+        }
+        return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why };
       }
       await sleep(pollMs);
     }
@@ -597,6 +624,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; ${e?.hop === "agent" ? "the pool agent refused the router (re-enroll or fix the agent token)" : "check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)"}` }
     : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    // #5095: a 5xx from the pool router or agent is infrastructure: deferred with backoff (capped), never needs-human
+    : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_TRANSIENT, retryInSeconds: Number(e.retryInSeconds) > 0 ? Number(e.retryInSeconds) : TRANSIENT_RETRY_S,
+      detail: `sandbox ${id} could not start (transient${Number.isInteger(e?.status) ? ` HTTP ${e.status}` : ""}): ${errText(e)}` }
     : isCloneFailure(errText(e)) ? cloneDeferred(id, errText(e))
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
