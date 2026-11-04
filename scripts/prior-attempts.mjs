@@ -35,7 +35,8 @@ export function parseArgs(argv) {
   return o;
 }
 
-const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
+// Backslashes first, then pipes: a title ending in "\" must not turn the cell's "\|" back into a column break (CodeQL js/incomplete-sanitization).
+const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 const shipped = (r) => (r.status === "merged" ? "yes" : r.status === "not_planned" || r.status === "closed unmerged" ? "no" : "closed");
 
 /** The `## Prior Attempts` markdown for a subjectHistory result; columns 2 and 4 are left for the drafter. */
