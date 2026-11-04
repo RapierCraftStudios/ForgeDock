@@ -69,10 +69,11 @@ CLASSES="engineering post-deploy external ops verify-now host"
 # bin/lean/conformance.mjs ownerRoute; ERE without \b for BSD grep (bash 3.2 hosts).
 POSTPROM_ERE='(after|post)[- ]?(promotion|release|deploy)|in production after|production[- ]verif|promot(e|ion)|rollout|purge|deploy[- ]time'
 ROPROD_ERE='obs-psql|[a-z0-9.-]+-monitor|prod(uction)? monitor|read[- ]only[^.]{0,40}prod|prod(uction)?[^.]{0,30}(query|queries|capture|data|logs?)'
+EXTNEED_ERE='credential|secret|api[- ]?key|token|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal'
 owner_route() { # why -> post-deploy | host | external
   case "$1" in "owner: orchestrator"*|"owner: promote"*) echo "post-deploy"; return 0 ;; esac
   if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE"; then echo "post-deploy"
-  elif printf '%s' "$1" | grep -qiE "$ROPROD_ERE"; then echo "host"
+  elif printf '%s' "$1" | grep -qiE "$ROPROD_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "host"
   else echo "external"; fi
 }
 : > "$TMP/items"

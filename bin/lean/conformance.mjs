@@ -1130,10 +1130,10 @@ export function formatShadowSummary(rows) {
   return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}${kinds.length ? `; per kind: ${kinds.join(", ")}` : ""}`;
 }
 
-/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724). */
-export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops"];
+/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724), external one aggregate per batch and host a `host-task` (#5078). */
+export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host"];
 /** #4724: the bucket every deferred row gets at contract time. `date:<YYYY-MM-DD>` and `owner:<action>` carry a value. */
-export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue", "host"]);
 const DATE_BUCKET_RE = /^date:(\d{4})-(\d{2})-(\d{2})$/;
 /** The kind of a bucket (`date:2026-12-01` -> `date`), or null when absent or unknown. */
 export const bucketKind = (b) => { const k = String(b ?? "").split(":")[0]; return BUCKETS.includes(k) ? k : null; };
@@ -1143,19 +1143,37 @@ export function bucketProblems(r) {
   if (!TRACKED.includes(r?.disposition)) return b == null ? [] : ["bucket applies only to a defer or post-deploy requirement"];
   if (b == null || b === "") return [`${r.disposition} needs a bucket (${BUCKETS.join("|")}; \`date:<YYYY-MM-DD>\`, \`owner:<action>\`)`];
   const k = bucketKind(b), out = [];
-  if (!k || (k !== "date" && k !== "owner" && b !== k)) out.push(`bucket '${b}' must be post-deploy, verify-now, date:<YYYY-MM-DD>, owner:<action> or new-issue`);
+  if (!k || (k !== "date" && k !== "owner" && b !== k)) out.push(`bucket '${b}' must be post-deploy, verify-now, date:<YYYY-MM-DD>, owner:<action>, new-issue or host`);
   else if (k === "date") {
     const m = DATE_BUCKET_RE.exec(String(b)), d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
     if (!m || d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) out.push(`bucket '${b}' must be an absolute date:<YYYY-MM-DD>, not a relative wait`);
   } else if (k === "owner" && blank(String(b).slice(6))) out.push("bucket owner needs the action: owner:<action>");
-  if (r.disposition === "post-deploy" && (k === "owner" || k === "new-issue")) out.push(`a ${k} item is never post-deploy: use disposition defer`);
+  if (r.disposition === "post-deploy" && (k === "owner" || k === "new-issue" || k === "host")) out.push(`a ${k} item is never post-deploy: use disposition defer`);
+  if (k === "owner" && ownerRoute(r) === "host") out.push("read-only production data or capture is not an owner action: use bucket host");
   if (k === "owner" && r.class != null && r.class !== "external" && r.class !== "ops") out.push("an owner bucket belongs in class external or ops, never post-deploy");
   return out;
 }
-/** The follow-up class of a requirement: owner -> external, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
+/** #5078: post-promotion / production-verify / rollout text (the rollup) and read-only production data or capture (the host: the prod_monitor signals of execution.mjs plus a read-only prod query). Mirrored in scripts/file-deferred-followups.sh. */
+const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
+const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|obs-psql|[a-z0-9.-]+-monitor\b|prod(?:uction)? monitor|read[- ]only[^.]{0,40}prod|prod(?:uction)?[^.]{0,30}(?:query|queries|capture|data|logs?)\b/i;
+/** An item that truly needs the outside world stays external even when it also reads production. */
+const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal/i;
+/**
+ * #5078: where an owner deferral goes. `owner:orchestrator`, `owner:promote:*` or post-promotion text -> post-deploy (the
+ * rollup); read-only production data or capture (with no credential/spend/account/third-party/customer need) -> host; else external (credentials, spend, an account, a third party or a customer).
+ */
+export function ownerRoute(r) {
+  const action = String(r?.bucket ?? "").replace(/^owner:/, "");
+  if (/^(?:orchestrator$|promote(?::|$))/i.test(action)) return "post-deploy";
+  const text = `${action} ${r?.why ?? ""}`;
+  if (POST_PROMOTION_RE.test(text)) return "post-deploy";
+  return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
+}
+/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
 export function followupClass(r) {
   const k = bucketKind(r?.bucket);
-  if (k === "owner") return r?.class === "ops" ? "ops" : "external";
+  if (k === "owner") return r?.class === "ops" ? "ops" : ownerRoute(r);
+  if (k === "host") return "host";
   if (k === "new-issue") return r?.class && r.class !== "post-deploy" && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "engineering";
   if (k) return "post-deploy";
   return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
@@ -1175,7 +1193,7 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
     const k = bucketKind(r.bucket);
     const tag = k ? `[bucket:${k}] ` : "";
     const due = k === "date" ? `due:${String(r.bucket).slice(5)} from:${new Date(now).toISOString().slice(0, 10)} ` : "";
-    const head = k === "owner" ? `owner: ${flat(String(r.bucket).slice(6))}. ` : k && k !== "new-issue" ? "post-deploy: " : `${r.disposition}: `;
+    const head = k === "owner" ? `owner: ${flat(String(r.bucket).slice(6))}. ` : k === "host" ? "host: " : k && k !== "new-issue" ? "post-deploy: " : `${r.disposition}: `;
     return { id: r.id, class: followupClass(r), key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${head}${tag}${check(r)}${due}${r.why ?? ""}`).slice(0, 400).trim() };
   });
 }
