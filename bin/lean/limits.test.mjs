@@ -183,3 +183,35 @@ describe("account-scoped usage-limit holds (#4190)", () => {
     assert.deepEqual(limits.list(), []);
   });
 });
+
+describe("#5095: a held pool account places hybrid lanes local", () => {
+  const remoteFor = (extra = {}) => ({ max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool", ...extra });
+  const runWith = async ({ hold, remote }) => {
+    const { c, now, sleep } = fakeClock();
+    const limits = openLimits(storeFile(), { now });
+    for (const [id, ms] of Object.entries(hold)) limits.set(id, c.t + ms, "test");
+    const ctxs = [];
+    const rows = await orchestrate({ issues: [1], parallel: 1, now, sleep, readBody: async () => "", limits, identity: () => "local", remote,
+      runOne: async (n, _l, ctx) => { ctxs.push({ at: now() - 1_000_000, remote: ctx.remote, placement: ctx.placement }); return { terminalReason: "merged" }; } });
+    return { rows, ctxs };
+  };
+
+  it("hybrid: a hold on the remote identity and none on the local one places the next admission local", async () => {
+    const { rows, ctxs } = await runWith({ hold: { "remote:pool": 600_000 }, remote: remoteFor({ fallbackLocal: true }) });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(ctxs.length, 1);
+    assert.equal(ctxs[0].at, 0, "admitted at once, not held");
+    assert.equal(ctxs[0].remote, false);
+    assert.equal(ctxs[0].placement.where, "local");
+    assert.match(ctxs[0].placement.reason, /fallback to local: pool usage limit until/);
+  });
+
+  it("remote-only: a held pool account waits for the reset; no hold places the lane remote", async () => {
+    const held = await runWith({ hold: { "remote:pool": 600_000 }, remote: remoteFor() });
+    assert.equal(held.ctxs[0].remote, true);
+    assert.ok(held.ctxs[0].at >= 600_000, "the remote lane starts after the pool reset");
+    const free = await runWith({ hold: {}, remote: remoteFor({ fallbackLocal: true }) });
+    assert.deepEqual([free.ctxs[0].at, free.ctxs[0].remote, free.ctxs[0].placement.where], [0, true, "remote"]);
+  });
+});
+

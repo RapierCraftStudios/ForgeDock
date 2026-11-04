@@ -57,8 +57,9 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_REPRO_UNRUNNABLE: "env.repro_unrunnable", // forge#4334: the repro harness could not run the repro test on head; an environment error, not a conformance failure
   ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
-  SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start; needs-human, not relaunched
+  SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start (a non-auth 4xx/config error or a non-HTTP start failure); needs-human, not relaunched
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
+  SANDBOX_TRANSIENT: "sandbox.transient", // forge#5095: the sandbox provider answered a 5xx on launch (router/agent infrastructure); deferred with backoff, capped by max_deferrals, never needs-human
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",

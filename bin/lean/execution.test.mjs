@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -25,7 +25,7 @@ function fakeProvider(opts = {}) {
     async start({ issue, env, secrets }) {
       p.calls.push(["start", issue]);
       p.ledgerAtStart = opts.ledger?.entries("sandbox").map((e) => e.value) ?? null;
-      if (opts.startThrows) throw Object.assign(new Error("boom: no capacity"), opts.startThrows === 401 ? { status: 401 } : {});
+      if (opts.startThrows) throw Object.assign(new Error("boom: no capacity"), typeof opts.startThrows === "number" ? { status: opts.startThrows } : {});
       p.live.add(issue);
       p.env = env; p.secrets = secrets;
       if (opts.finish) { const r = opts.finish(issue); if (r !== undefined) { p.results[issue] = r; p.live.delete(issue); } }
@@ -837,5 +837,67 @@ describe("host capabilities in placement (#4542)", () => {
       } });
     assert.deepEqual(calls, [{ remote: true, placement: "remote", recover: null }, { remote: false, placement: "local", recover: "env.capability_remote" }]);
     assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
+  });
+});
+
+describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-human or engine-error", () => {
+  const lanesFor = (prov, extra = {}) => providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-5095-")), pollMs: 1, now: () => 1000, sleep: async () => {}, ...extra });
+
+  it("#5095 start HTTP 5xx (500/502/504): deferred with a retry delay, never needs-human", async () => {
+    for (const status of [500, 502, 504]) {
+      const r = await lanesFor(fakeProvider({ startThrows: status })).runOne(7, null);
+      assert.equal(r.terminalReason, "deferred", `HTTP ${status}`);
+      assert.equal(r.code, "sandbox.transient");
+      assert.equal(r.retryInSeconds, 60);
+      assert.match(r.detail, new RegExp(`HTTP ${status}`));
+    }
+    // a Retry-After the pool sent wins over the default delay
+    const prov = fakeProvider();
+    prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 500"), { status: 500, transient: true, retryInSeconds: 12 }); };
+    assert.equal((await lanesFor(prov).runOne(7, null)).retryInSeconds, 12);
+  });
+
+  it("a non-auth 4xx config error stays needs-human sandbox.start_failed; 429/503 stay sandbox.capacity", async () => {
+    const r = await lanesFor(fakeProvider({ startThrows: 422 })).runOne(7, null);
+    assert.deepEqual([r.terminalReason, r.code], ["needs-human", "sandbox.start_failed"]);
+    const prov = fakeProvider();
+    prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 503"), { status: 503, transient: true, retryable: true }); };
+    assert.equal((await lanesFor(prov).runOne(7, null)).code, "sandbox.capacity");
+  });
+
+  it("usageLimitInTail reads the lean finish line and the CLI's own limit message", () => {
+    assert.deepEqual(usageLimitInTail("x\n[lane] deferred: usage limit hit; resets at 3:20pm (UTC)\n"), { resetAt: "3:20pm (UTC)" });
+    assert.equal(usageLimitInTail("sandbox exited 1\nclone ok"), null);
+    assert.equal(usageLimitInTail(""), null);
+  });
+
+  it("a remote lane with no result and a usage limit in its log tail ends deferred rate_limited, held under the pool id, and never trips the breaker", async () => {
+    const prov = fakeProvider({ finish: () => null });
+    const holdId = remoteHoldId(prov);
+    assert.equal(holdId, "remote:fake");
+    const lanes = lanesFor(prov, { holdId, logTail: async () => "building...\nusage limit hit; resets at 3:20pm (UTC)\n" });
+    const r = await lanes.runOne(7, null);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "rate_limited");
+    assert.equal(r.resetAt, "3:20pm (UTC)");
+    assert.ok(Number.isFinite(r.resetAtEpochMs));
+    assert.equal(r.backendId, "remote:fake");
+    assert.ok(prov.calls.some((c) => c[0] === "teardown"));
+    // the same lane ends through orchestrate: a breaker of one engine-error never trips, the issue is requeued behind the hold
+    let t = 0, calls = 0;
+    const rows = await orchestrate({ issues: [7], parallel: 1, readBody: async () => "", now: () => t, sleep: async (ms) => { t += ms ?? 1; }, pollMs: 1,
+      breaker: { errors: 1, window_min: 30 }, identity: () => "local",
+      runOne: async () => (++calls === 1 ? { ...r, resetAtEpochMs: t + 60_000 } : { terminalReason: "merged", pr: 1 }) });
+    assert.ok(!rows.some((x) => x.outcome === "breaker"), "a usage limit is not an engine-error");
+    assert.equal(rows.find((x) => x.issue === 7).outcome, "merged");
+  });
+
+  it("a sandbox's own rate_limited result is held under the pool id, its own id kept as laneBackendId", async () => {
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "deferred", code: "rate_limited", backendId: "cli:abc", resetAtEpochMs: 5000 }) });
+    const r = await lanesFor(prov, { holdId: remoteHoldId(prov) }).runOne(7, null);
+    assert.deepEqual([r.backendId, r.laneBackendId], ["remote:fake", "cli:abc"]);
+    // without a usage-limit signature the no-result path stays engine-error
+    const plain = await lanesFor(fakeProvider({ finish: () => null }), { logTail: async () => "exit 1" }).runOne(7, null);
+    assert.equal(plain.terminalReason, "engine-error");
   });
 });
