@@ -310,6 +310,22 @@ describe("core work-on", () => {
     assert.match(t, /\| Plan \| not reached \|/);
   });
 
+  it("an unknown amendment kind gets one in-lane correction before the gate and does not use the conformance resume (#5089)", async () => {
+    const w = world({ amendments: [{ kind: "deliverable_change", requirement: "R1", why: "no Linux build" }], resumeAmendments: [], reviews: [ok()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).some((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")), "the correction prompt ran");
+    assert.match(traj(w)[0], /Amendment kinds invalid \(1\); builder asked to correct/);
+  });
+
+  it("an unknown amendment kind the builder does not fix parks only after the one correction (#5089)", async () => {
+    const bad = [{ kind: "deliverable_change", requirement: "R1", why: "w" }];
+    const w = world({ amendments: bad, resumeAmendments: bad, reviews: [ok()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(builders(w).filter((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")).length, 1);
+  });
+
   it("nonconforming review -> builder resumed in its session with the failed rows -> re-review conforms -> merge; the note is re-posted", async () => {
     const w = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] });
     const r = await run(w);
