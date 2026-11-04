@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { milestoneSlug, readBranches, resolveLane, makeLaneCache } from "./lane.mjs";
+import { milestoneSlug, readBranches, resolveLane, makeLaneCache, listMilestones } from "./lane.mjs";
 
 /** Fake gh/git: the issue's milestone, GitHub's default branch, and the branches on origin. */
 function io({ milestone = null, ghDefault = "main", onOrigin = ["staging", "main"], ghFails = null, gitFails = false } = {}) {
@@ -131,5 +131,32 @@ describe("per-batch lane lookups (#4963)", () => {
     const miss = await resolveLane({ issue: 1, repo: "o/r", io: io({ onOrigin: ["main"] }), cwd: "/r", cache, milestone: null });
     assert.equal(miss.ok, false);
     assert.equal((await resolveLane({ issue: 1, repo: "o/r", io: io(), cwd: "/r", cache, milestone: null })).ok, true);
+  });
+});
+
+describe("(#5084) listMilestones", () => {
+  it("(#5084) listMilestones pages with --paginate, path at args[1], state in the query", async () => {
+    const calls = [];
+    const gh = async (a) => { calls.push(a); return '{"number":1,"title":"A"}\n{"number":2,"title":"B"}\n'; };
+    assert.deepEqual(await listMilestones({ gh, repo: "o/r", state: "open" }), [{ number: 1, title: "A" }, { number: 2, title: "B" }]);
+    assert.equal(calls[0][1], "repos/o/r/milestones?state=open&per_page=100");
+    assert.ok(calls[0].includes("--paginate"));
+    assert.equal(calls[0][calls[0].indexOf("--jq") + 1], ".[] | @json");
+    await listMilestones({ gh, repo: "o/r" });
+    assert.match(calls[1][1], /state=all/);
+  });
+  it("(#5084) listMilestones accepts a single array, a single object and empty output", async () => {
+    assert.deepEqual(await listMilestones({ gh: async () => '[{"number":3}]', repo: "o/r" }), [{ number: 3 }]);
+    assert.deepEqual(await listMilestones({ gh: async () => '{"number":4}\n', repo: "o/r" }), [{ number: 4 }]);
+    assert.deepEqual(await listMilestones({ gh: async () => "  \n", repo: "o/r" }), []);
+    assert.deepEqual(await listMilestones({ gh: async () => "", repo: "o/r" }), []);
+  });
+  it("(#5084) listMilestones keeps a description containing '][' intact", async () => {
+    const ms = [{ number: 1, title: "A", description: "see [a][b] and ] [" }, { number: 2, title: "B", description: "]\n[" }];
+    const out = ms.map((m) => JSON.stringify(m)).join("\n");
+    assert.deepEqual(await listMilestones({ gh: async () => out, repo: "o/r" }), ms);
+  });
+  it("(#5084) listMilestones propagates a gh error", async () => {
+    await assert.rejects(listMilestones({ gh: async () => { throw new Error("HTTP 502"); }, repo: "o/r" }), /HTTP 502/);
   });
 });

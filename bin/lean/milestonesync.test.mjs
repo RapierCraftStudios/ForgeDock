@@ -131,3 +131,25 @@ describe("syncMilestone (#4663)", () => {
     assert.equal(remote("rev-parse", "milestone/alpha"), before);
   });
 });
+
+/** #5084: a GitHub-like milestones endpoint: pages of 100; without --paginate only page 1; `--jq '.[] | @json'` prints one object per line. */
+const pagedMilestones = (all) => (a) => {
+  const state = /state=(\w+)/.exec(a[1])?.[1] ?? "open";
+  const items = all.filter((m) => state === "all" || m.state === state);
+  const pages = []; for (let i = 0; i < items.length; i += 100) pages.push(items.slice(i, i + 100));
+  if (!a.includes("--paginate")) return JSON.stringify(pages[0] ?? []);
+  if (a.includes("--jq")) return items.map((m) => JSON.stringify(m)).join("\n") + "\n";
+  return pages.map((p) => JSON.stringify(p)).join("");
+};
+const manyMilestones = (target, n = 120) => [...Array.from({ length: n }, (_, i) => ({ number: i + 1, title: `M ${i + 1}`, state: i % 2 ? "open" : "closed", description: "" })), { number: n + 1, ...target }];
+
+describe("milestone pagination (#5084)", () => {
+  it("finds a milestone on page 2 of the milestones API (#5084)", async () => {
+    sh(work, "push", "-q", "origin", "milestone/alpha:milestone/search-research-api");
+    const list = pagedMilestones(manyMilestones({ title: "Search & Research API", state: "open", description: "" }));
+    const paged = async (args) => (args[0] === "api" && args[1].includes("/milestones?") ? list(args) : gh(args));
+    const r = await syncMilestone({ gh: paged, git, repo: "o/r", slug: "search-research-api", base: "staging", reason: "manual", cfg: {}, tmp: tmpDir("msync-tmp-") });
+    assert.notEqual(r.status, "refused", r.detail);
+    assert.equal(r.status, "up-to-date");
+  });
+});

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
-import { foldSummary, emptySummary, parseSummary, renderSummary, crossingIssues, fileCrossings, flaggedPackages, heldBy, makeDrift } from "./drift.mjs";
+import { foldSummary, emptySummary, parseSummary, renderSummary, crossingIssues, fileCrossings, flaggedPackages, heldBy, makeDrift, readMilestone } from "./drift.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 import { readDrift } from "../engine-cli.mjs";
 import { affectedFiles } from "../orchestrate-preflight.mjs";
@@ -219,5 +219,27 @@ describe("readDrift (forge#4161)", () => {
     const y = "orchestrate:\n  drift:\n    pair_growth: 5\n    package_lines: 10000\n    file_lines: 600\n    block_dispatch: true\n    generated_globs: data/*, *.lock\n";
     assert.deepEqual(withYaml(y, readDrift), { pairGrowth: 5, packageLines: 10000, fileLines: 600, blockDispatch: true, generatedGlobs: ["data/*", "*.lock"] });
     assert.deepEqual(withYaml("orchestrate:\n  drift:\n    file_lines: 600\n", readDrift), { pairGrowth: null, packageLines: null, fileLines: 600, blockDispatch: false, generatedGlobs: [] });
+  });
+});
+
+/** #5084: a GitHub-like milestones endpoint: pages of 100; without --paginate only page 1; `--jq '.[] | @json'` prints one object per line. */
+const pagedMilestones = (all) => (a) => {
+  const state = /state=(\w+)/.exec(a[1])?.[1] ?? "open";
+  const items = all.filter((m) => state === "all" || m.state === state);
+  const pages = []; for (let i = 0; i < items.length; i += 100) pages.push(items.slice(i, i + 100));
+  if (!a.includes("--paginate")) return JSON.stringify(pages[0] ?? []);
+  if (a.includes("--jq")) return items.map((m) => JSON.stringify(m)).join("\n") + "\n";
+  return pages.map((p) => JSON.stringify(p)).join("");
+};
+const manyMilestones = (target, n = 120) => [...Array.from({ length: n }, (_, i) => ({ number: i + 1, title: `M ${i + 1}`, state: i % 2 ? "open" : "closed", description: "" })), { number: n + 1, ...target }];
+
+describe("readMilestone pagination (#5084)", () => {
+  it("(#5084) readMilestone finds a milestone on page 2", async () => {
+    const list = pagedMilestones(manyMilestones({ title: "Search & Research API", state: "open", description: "late" }));
+    const calls = [];
+    const gh = async (a) => { calls.push(a); return list(a); };
+    assert.deepEqual(await readMilestone({ gh, repo: "o/r", title: "Search & Research API" }), { number: 121, description: "late" });
+    assert.equal(calls[0][1], "repos/o/r/milestones?state=all&per_page=100");
+    assert.equal(await readMilestone({ gh, repo: "o/r", title: "Missing" }), null);
   });
 });
