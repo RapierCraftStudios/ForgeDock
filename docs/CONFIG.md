@@ -1353,6 +1353,9 @@ verification:
   test_runners:            # path prefix -> runner command prefix (block-style map)
     services/worker: "poetry -C services/worker run"
     web: "pnpm --filter web exec"
+
+topology:
+  route_reachability: "bash scripts/check-ingress.sh"   # optional; blocking when declared
 ```
 
 | Field | Type | Required | Description |
@@ -1371,6 +1374,7 @@ verification:
 | `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
 | `test_runners` | map (path prefix → runner) | No | Default unset (no runner enforced). For repos whose validate commands need a managed runner (uv, poetry, pnpm workspace). The lean engine checks it at contract freeze (`testRunnerProblems`, `bin/lean/preflight.mjs`): a validate command that touches a configured path prefix without containing that prefix's runner string is reported as a contract problem, instead of failing later as `contract.invalid_command` / `env.tool_missing`. Paths in the command are relative to the runner's cwd. Write it as a block-style map: `parseForgeYaml` does not read inline `{ ... }` maps. |
 | `validate.recipes` | map (regex → replacement) | No | Default unset. A top-level `validate:` block with a block-style `recipes:` map, e.g. `"poetry run pytest": "uv run --with-requirements r.txt pytest"`. Each key is a regex source; the first recipe that matches a frozen validate or `repro_test` command rewrites it at contract freeze (`applyValidateRecipes`), recorded as a decision. Use it for commands whose environment is not installed in lane sandboxes. |
+| `topology.route_reachability` | string (command) | No | Default unset (no check, no behaviour change). A repo-supplied command that takes the route paths a diff adds (Next.js `app/**/route.*`, `pages/api/**`; URL form, route groups removed) as arguments and exits non-zero when the production ingress does not deliver them to the service that implements them. Runs in the lean lane after validate and in `review-pr-staging`; a non-zero exit blocks (`conformance.unimplemented`, kind `route_unreachable`). Read by `readEnvConfig` (`bin/engine-cli.mjs`), run by `bin/lean/routecheck.mjs`. |
 
 **Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
 

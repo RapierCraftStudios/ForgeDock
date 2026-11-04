@@ -164,6 +164,15 @@ run "$(printf 'README.md\nscripts/deploy.sh')" --scores "$SC_QUIET" --changed-li
 expect_has "infra-path-multi-file-list" infra
 run "Scripts/Deploy.SH" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "infra-path-case-insensitive" infra
+# forge#5087: a route-handler diff pulls the Infra reviewer even when no infra file changed
+for f in "web/src/app/(site)/api/v1/agent/signup/pending/route.ts" "web/src/pages/api/health.ts" "app/route.js"; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_has "route-handler-$f" infra
+done
+for f in web/src/app/page.tsx web/src/app/dashboard/layout.tsx web/src/lib/route.ts; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_not "no-route-handler-$f" infra
+done
 run "db/migrations/0042_add.sql" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "migration path" database
 run "sdk/node/src/index.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1

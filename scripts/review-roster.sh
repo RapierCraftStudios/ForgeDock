@@ -198,6 +198,7 @@ if printf '%s\n' "$AUTH_FILES" | grep -qiE '(^|[/_.-])(auth([^o]|o[^r]|$)|author
     add_agent Auth; trig auth-path
 fi
 hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(docker-)?compose[^/]*\.ya?ml$|(^|/)deploy[^/]*\.sh$|(^|/)docker-entrypoint[^/]*$|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
+hit '(^|/)app/(.*/)?route\.[cm]?[jt]sx?$|(^|/)pages/api/' && { add_agent Infra; trig route-handler; } # forge#5087: a new HTTP route needs its ingress confirmed
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }
 hit '^bin/engine' && { add_agent Concurrency; trig bin-engine; }

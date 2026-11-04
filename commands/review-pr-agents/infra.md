@@ -25,6 +25,8 @@ You are auditing PR #[PR_NUMBER] for infrastructure and deployment safety in [PR
 If no infra context is configured above, derive the deployment model from the changed files: read docker-compose files, GitHub Actions workflows, and entrypoint scripts to understand the deployment pipeline.
 
 ## What to Check
+
+**New HTTP route handler (forge#5087)**: when the diff adds a route handler (Next.js `app/**/route.*`, `pages/api/**`, a FastAPI/Express router), confirm the production ingress delivers this path to this service: read the repo's ingress config (Traefik, nginx, gateway) and cite the rule. An app-level rewrite or fallback is not evidence; a path an ingress prefix rule sends to another service is a HIGH finding.
 1. **Downtime risk**: Will this change cause container restarts during deploy?
 1b. **Database container restart risk** (when `docker-compose*.yml` changes touch the `postgres` or `redis` service — `command:`, `image:`, `volumes:`, `environment:`):
    Changing any of these fields forces container recreation on `docker-compose up`. For stateful services this is **HIGH risk by default** — regardless of how simple the config change appears.

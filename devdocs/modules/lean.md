@@ -2475,3 +2475,8 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 `fileFollowups` passes `batchId`/`rollupLabel` as `FORGE_BATCH_ID`/`FORGE_ROLLUP_LABEL`. `track()` records `followups: [{issue, class, count}]` on the lane result, and `formatOutcomeLists` prints one `follow-ups appended: #N (<class>: k item(s) from #a,#b)` line grouped by issue, naming the rollup. Decision: `devdocs/decisions/5078-followup-routing.md`.
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Route reachability and e2e-weakening decisions (#5087)
+forge.yaml `topology.route_reachability` (`readEnvConfig` -> `routeReachability`) is a repo-supplied command. After validate, `lean.mjs` maps the route handlers the diff adds (`routePathsFromFiles`, `routecheck.mjs`) to URL paths and runs it with them as args; a non-zero exit is a blocking `conformance.unimplemented` (`kind: route_unreachable`) passed to `precheck` as `routeFailures`. Unset = no check.
+`validateContract` rejects a `decisions[]` row that replaces an e2e/integration check with mocked tests unless a `forge-probe` acceptance probe is declared (`weakenedE2eDecisions`); the #4726 `[type:e2e]` rule is untouched. `scripts/review-roster.sh` adds Infra for route-handler paths (`route-handler` trigger).
+Tests: `routecheck.test.mjs`, `conformance.test.mjs` "#5087".

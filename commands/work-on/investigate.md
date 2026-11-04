@@ -462,6 +462,10 @@ fi
 
 **Mission**: Validate whether the issue is real. Assume description is wrong until proven otherwise.
 
+### Route-adding fixes: trace the production ingress (forge#5087)
+
+When the fix adds or relies on an HTTP route, trace the request from the production ingress inward, using the repo's declared topology (`forge.yaml topology`, ingress/proxy config such as Traefik or nginx), and cite the ingress rule that delivers each path to the service that implements it. "The app config rewrites it" (Next.js rewrites, filesystem-route precedence) is not evidence of production routing: flag it as insufficient. Existing handlers cited as a "working pattern" need the same check.
+
 ### Resolve target repo and branch
 
 The target repo is `{GH_REPO}` (resolved from `forge.yaml → project`). The working directory is `{REPO_PATH}` (resolved from `forge.yaml → paths.root`).
