@@ -213,7 +213,9 @@ $taskArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$kee
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName 'computeshare-keepalive' -Action $action -Trigger $trigger -Settings $settings -Description 'computeshare agent keep-alive' -Force | Out-Null
+# Highest: on NAT networking the task maintains a netsh portproxy, which needs an elevated token.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName 'computeshare-keepalive' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'computeshare agent keep-alive' -Force | Out-Null
 Start-ScheduledTask -TaskName 'computeshare-keepalive'
 
 Start-Sleep -Seconds 5
