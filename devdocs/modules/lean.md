@@ -2529,3 +2529,11 @@ With `execution.account_rotator: tokenbaton` (`parseExecution` keeps only that v
 With #5095, a remote lane limited on the pool account (`backendId` = `remote.identity()`, `remoteHoldId`) still records that pool hold while the rotator has headroom, so hybrid lanes fall back local; no host-account hold is recorded (`limits.test.mjs` "#5094 #5095 a limited pool account").
 
 Tests: `rotator.test.mjs`, `limits.test.mjs` "#5094 rotator headroom" and "#5094 a hold set for identity A", `lean.test.mjs` "#5094 a rotator switches accounts mid-lane" and the rotation-cap/no-headroom cases. Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Release review of #5103: already-fixed scope, read-only prod routing (#5105, #5106, #5108)
+
+- `alreadyFixedOnBase`: any changed file that is neither a test (`isTestPath`) nor a doc (`DOC_ONLY_RE`: md, mdx, txt, rst, adoc) counts as lane work. A css, json, yaml, sql, vue, tf or html fix with a repro that already passes on base keeps `conformance.unimplemented`; it is never closed as already fixed with its branch dropped.
+- `READONLY_PROD_RE` matches whole words only: `ssh <host>-monitor`, `obs-psql`, `prod(uction) monitor`, read-only ... prod, and prod ... query/queries/capture/telemetry/logs. Bare `*-monitor` and "production data" no longer match, and neither does "product".
+- `EXTERNAL_NEED_RE` also matches password, passphrase, ssh key, private key, login, sudo, and production writes (delete, drop, truncate, wipe, destroy, modify, migrate, write). These stay external, never host.
+- `ownerRoute`: an `EXTERNAL_NEED_RE` match wins over post-promotion wording, so "provide the API key before rollout" is external, not the post-deploy rollup.
+- `scripts/file-deferred-followups.sh` `owner_route` mirrors all of this. It spells word boundaries as `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` (no `\b`, for BSD grep). `scripts/owner-route-parity.test.sh` asserts the JS and shell routes agree.
