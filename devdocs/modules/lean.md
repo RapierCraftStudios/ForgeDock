@@ -2476,14 +2476,12 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
 
-<<<<<<< HEAD
 ## Review roster: Frontend path trigger (forge#5077)
 `scripts/review-roster.sh` has a Frontend path trigger (`web/` or `app/` segment, `.tsx`/`.jsx`, `next.config.*`, `middleware.ts|js`) that calls `add_agent Frontend` in every tier except full, like Infra/Auth. Path triggers are additive to the top-2 score baseline, so a staging→main bundle selects the union of every path-triggered domain with no bundle flag. Output contract and the Security floor are unchanged. `commands/review-pr-agents/frontend.md` gains check 11 (dynamic APIs in static/ISR trees).
 
 Tests: `review-roster.test.sh` "forge#5077" block (not-found.tsx in small/medium/standard, bundle union, negative case). Cost: 0 LLM calls.
-=======
+
 ## Entry 2026-11-04 — One in-lane correction for invalid builder amendment kinds (#5089)
 A builder that invented an amendment kind (`deliverable_change` for an impossible deliverable) used to park a finished lane as `conformance.unimplemented`, because the single conformance resume is shared across all failures. `amendmentKindProblems` (`conformance.mjs`) is a shape-only check (unknown kind, missing `path`/`requirement`; normalised slips and informational kinds pass) that returns the same rejection strings as `applyAmendments`, which is unchanged. At the top of `gate()` in `lean.mjs`, before `amend()`/`precheck`, a non-empty result runs ONE builder resume (`amendmentCorrectionPrompt`, `prompts.mjs`, naming the valid kinds and that an impossible deliverable is `defer`), re-reads `result.json`, and continues; it runs at most once per lane (`amendFixed`) and does not use the conformance `resumes` budget. If the builder still emits a bad kind, the existing conformance resume and `conformance.unimplemented` park apply. The builder prompt now says an impossible deliverable is a `defer`, not a new kind. Unknown kinds are deliberately not auto-mapped to `defer` (deferral changes scope; the reviewer judges it).
 
 Tests: `conformance.test.mjs` "amendmentKindProblems (#5089)", `lean.test.mjs` "an unknown amendment kind ... (#5089)". Cost: 0 LLM calls when valid, one builder resume otherwise.
->>>>>>> origin/staging
