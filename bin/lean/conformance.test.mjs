@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -649,13 +649,33 @@ describe("repro_test on bug lanes (#4271)", () => {
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
     assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [] });
-    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
+    for (const repro of [{ base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
       assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base} HEAD=${repro.head}`));
     }
     assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
     assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
+  });
+  it("#5080 repro_base_green: BASE=RAN HEAD=RAN is its own kind, and a test-only diff with a source deliverable is never the fix", () => {
+    const k = { ...C, repro_test: RT };
+    const green = precheck({ contract: k, result: res, changedFiles: files, repro: { base: "RAN", head: "RAN" } });
+    assert.deepEqual(green.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_base_green"]]);
+    assert.match(green.failures[0].detail, /must fail on the base and pass on head; got BASE=RAN HEAD=RAN/);
+    const testOnly = ["test/leak.test.js"];
+    const pc = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "RAN", head: "RAN" } });
+    assert.deepEqual(pc.failures.map((f) => f.kind), ["repro_base_green", "source_deliverable_untouched"]);
+    assert.equal(alreadyFixedOnBase(pc.failures, testOnly), true);
+    assert.equal(alreadyFixedOnBase(green.failures, testOnly), true);
+    assert.equal(alreadyFixedOnBase(green.failures, ["src/leak.js", "test/leak.test.js"]), false, "a source change keeps conformance.unimplemented (K3)");
+    assert.equal(alreadyFixedOnBase(green.failures, ["docs/a.md", ".forge-lean/x.json"], [".forge-lean/"]), true);
+    assert.equal(alreadyFixedOnBase([{ kind: "repro_base_green" }, { kind: "validate_failed" }]), false);
+    assert.equal(alreadyFixedOnBase([{ kind: "source_deliverable_untouched" }]), false);
+    const only = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "FAILED", head: "RAN" } });
+    assert.deepEqual(only.failures.map((f) => f.kind), ["source_deliverable_untouched"]);
+    assert.deepEqual(sourceDeliverableFailures(k, files), []);
+    assert.deepEqual(sourceDeliverableFailures({ deliverables: [{ id: "D1", path: "docs/a.md" }, { id: "D2", path: "test/leak.test.js" }] }, testOnly), []);
+    assert.deepEqual(sourceDeliverableFailures(k, ["test/leak.test.js", ".forge-lean/x.json"], [".forge-lean/"]).map((f) => f.kind), ["source_deliverable_untouched"]);
   });
   it("a harness UNRUNNABLE on head is env.repro_unrunnable, not conformance.unimplemented (#4334)", () => {
     const k = { ...C, repro_test: RT };
@@ -930,7 +950,7 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
     assert.equal(cls({ disposition: "defer", class: "external" }), "external");
     assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
-    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops"]);
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host"]);
     assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
     const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
     assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
@@ -942,7 +962,7 @@ describe("post-deploy check ids (#4626)", () => {
   it("#4724 a deferred row needs exactly one valid bucket; owner actions are never post-deploy; dates are absolute", () => {
     const contract = (r) => ({ requirements: [{ id: "R1", quote: Q1, why: "w", ...r }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] });
     const probs = (r) => validateContract(contract(r), Q1).problems.filter((x) => /^R1: .*(bucket|never post-deploy|owner)/.test(x));
-    assert.deepEqual(BUCKETS, ["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+    assert.deepEqual(BUCKETS, ["post-deploy", "verify-now", "date", "owner", "new-issue", "host"]);
     assert.equal(probs({ disposition: "defer" }).length, 1); // missing bucket
     for (const bucket of ["post-deploy", "verify-now", "new-issue", "date:2026-12-01", "owner:rotate the key"]) assert.deepEqual(probs({ disposition: "defer", bucket }), [], bucket);
     for (const bucket of ["date:5 weeks after deploy", "date:2026-02-30", "date", "owner:", "owner", "later", "post-deploy:x"]) assert.equal(probs({ disposition: "defer", bucket }).length, 1, bucket);
@@ -964,6 +984,29 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(one({ bucket: "date:2026-12-01" }).why, "post-deploy: [bucket:date] due:2026-12-01 from:2026-10-27 w");
     assert.equal(one({ bucket: "new-issue" }).why, "defer: [bucket:new-issue] w");
     assert.equal(one({}).why, "defer: w"); // an unbucketed (older) row is unchanged
+  });
+  it("#5078 owner is narrowed: post-promotion -> rollup, read-only prod -> host, credentials/spend -> external", () => {
+    const d = (bucket, why = "w") => ({ disposition: "defer", bucket, why });
+    assert.equal(ownerRoute(d(ORCHESTRATOR_BUCKET)), "post-deploy");
+    assert.equal(followupClass(d("owner:orchestrator", "post-deploy action with no registered check")), "post-deploy");
+    assert.equal(followupClass(d("owner:promote:new-nav", "activate the flag")), "post-deploy");
+    assert.equal(followupClass(d("owner:ops", "purge the CDN after release")), "post-deploy");
+    assert.equal(followupClass(d("owner:qa", "verify in production after promotion")), "post-deploy");
+    assert.equal(followupClass(d("owner:obs-psql", "capture the read-only production query counts")), "host");
+    assert.equal(followupClass(d("owner:ssh ovh-monitor", "tail the logs")), "host");
+    assert.equal(followupClass(d("owner:stripe", "needs live Stripe credentials")), "external");
+    assert.equal(followupClass(d("owner:finance", "approve the spend")), "external");
+    assert.equal(followupClass(d("owner:ops", "needs a customer account to read production data")), "external");
+    assert.equal(followupClass({ ...d("owner:obs-psql", "read prod data"), class: "ops" }), "ops");
+    assert.equal(followupClass(d("host")), "host");
+    assert.deepEqual(bucketProblems(d("host")), []);
+    assert.match(bucketProblems({ disposition: "post-deploy", check: "a", bucket: "host" }).join(";"), /never post-deploy/);
+    assert.match(bucketProblems(d("owner:obs-psql", "capture production query counts")).join(";"), /use bucket host/);
+    assert.deepEqual(bucketProblems(d("owner:stripe", "needs live credentials")), []);
+    assert.deepEqual(bucketProblems(d(ORCHESTRATOR_BUCKET, "manual prod action")), []);
+    const [h, o] = followupItems([{ id: "R1", quote: Q1, ...d("host", "count rows") }, { id: "R2", quote: Q1, why: "w", ...d("owner:orchestrator") }]);
+    assert.equal(h.why, "host: [bucket:host] count rows"); assert.equal(h.class, "host");
+    assert.equal(o.class, "post-deploy"); assert.match(o.why, /^owner: orchestrator\. \[bucket:owner\]/);
   });
   it("#4724 bucketTally counts deferred items per bucket kind; an amendment may carry the bucket", () => {
     assert.deepEqual(bucketTally([{ bucket: "date:2026-12-01" }, { bucket: "date:2026-12-02" }, { bucket: "owner:x" }, {}]), { date: 2, owner: 1, none: 1 });
@@ -1116,6 +1159,7 @@ describe("per-kind modes and requirement evidence", () => {
 });
 
 import { mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED } from "./conformance.mjs";
+import { alreadyFixedOnBase, sourceDeliverableFailures } from "./conformance.mjs";
 
 describe("mutation check (#4913)", () => {
   const c = {
@@ -1265,5 +1309,78 @@ describe("#5020 freeze-time environment defects", () => {
     const r = applyAmendments(c, [{ kind: "substitute-validate", validate: "V1", command: "uv run pytest tests/ && (", why: "poetry env missing" }], "q");
     assert.ok(r.problems.some((p) => /not valid shell/.test(p)));
     assert.equal(r.contract.validate[0].command, "poetry run pytest");
+  });
+});
+
+describe("#5087 a plan decision may not weaken an e2e/integration criterion to mocked tests", () => {
+  const K2 = { id: "K2", choice: "No Playwright e2e; integration coverage via route and component tests with mocked getServerSession and fetch", justification: "web/e2e needs a live stack", source: "precedent" };
+  it("rejects the K2 wording of AlterLab#38180 at contract validation", () => {
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [K2] }), ["K2"]);
+    const v = validateContract({ ...C, decisions: [K2] }, ISSUE);
+    assert.equal(v.ok, false);
+    assert.ok(v.problems.some((p) => p.startsWith("K2:") && p.includes("forge-probe")), v.problems.join("|"));
+  });
+  it("accepts it when an acceptance probe is declared, in the decision or elsewhere in the contract", () => {
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ ...K2, justification: "a forge-probe acceptance probe runs the flow after promotion" }] }), []);
+    assert.deepEqual(weakenedE2eDecisions({ ...C, deliverables: [...C.deliverables, { id: "D9", path: "x.md", change: "declare a forge-probe block" }], decisions: [K2] }), []);
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ ...K2, justification: "no acceptance probe" }] }), ["K2"]);
+  });
+  it("leaves unrelated decisions and contracts without decisions alone", () => {
+    assert.deepEqual(weakenedE2eDecisions(C), []);
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);
+    assert.deepEqual(validateContract({ ...C, decisions: [{ id: "K1", choice: "copy the recipes pattern", source: "precedent" }] }, ISSUE), { ok: true, problems: [] });
+  });
+  it("precheck appends routeFailures as blocking failures; absent keeps today's behaviour", () => {
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    assert.equal(precheck({ contract: C, result: res, changedFiles: files }).ok, true);
+    assert.equal(precheck({ contract: C, result: res, changedFiles: files, routeFailures: [] }).ok, true);
+    const pc = precheck({ contract: C, result: res, changedFiles: files, routeFailures: [{ code: "conformance.unimplemented", kind: "route_unreachable", detail: "x" }] });
+    assert.equal(pc.ok, false);
+    assert.deepEqual(pc.failures.map((f) => f.kind), ["route_unreachable"]);
+  });
+  it("#4726 [type:e2e] behaviour is unchanged", () => {
+    assert.equal(isE2eCommand("node --test test/leak.test.js"), false);
+    assert.equal(isE2eCommand("npx playwright test"), true);
+  });
+});
+
+describe("amendmentKindProblems (#5089)", () => {
+  it("flags the invented deliverable_change kind and names the valid kinds", () => {
+    const p = amendmentKindProblems([{ kind: "deliverable_change", requirement: "R1", why: "no Linux build" }]);
+    assert.equal(p.length, 1);
+    assert.match(p[0], /unknown kind 'deliverable_change'; valid kinds are .*defer/);
+  });
+  it("accepts valid kinds, normalised slips and informational kinds", () => {
+    assert.deepEqual(amendmentKindProblems([{ kind: "defer", requirement: "R1", why: "w" }, { type: "limitation", requirement: "R2", why: "w" }, { kind: "scope-note", why: "w" }, { kind: "add-deliverable", path: "a.js", why: "w" }]), []);
+    assert.deepEqual(amendmentKindProblems(undefined), []);
+  });
+  it("flags a missing path or requirement", () => {
+    assert.equal(amendmentKindProblems([{ kind: "add-deliverable", why: "w" }, { kind: "defer", why: "w" }]).length, 2);
+  });
+});
+
+// Release review of #5103: MAT-1/REG-1 (non-code fixes are never "already fixed") and the read-only-prod routing theme
+// (SPEC-1, SEC-4, AUTH-1, BUG-2/3, QA-3, MAT-7, REG-4).
+import { READONLY_PROD_RE as RO5103, EXTERNAL_NEED_RE as EX5103, ownerRoute as route5103, alreadyFixedOnBase as afb5103 } from "./conformance.mjs";
+describe("release review #5103", () => {
+  const green = [{ kind: "repro_base_green" }, { kind: "source_deliverable_untouched" }];
+  it("a lane that changed css/json/yaml/sql/vue/tf is never closed as already fixed on base", () => {
+    for (const f of ["web/app.css", "config/limits.json", "deploy/values.yaml", "db/0042.sql", "web/App.vue", "infra/main.tf", "web/index.html"]) {
+      assert.equal(afb5103(green, [f, "test/x.test.js"]), false, f);
+    }
+  });
+  it("tests and docs only still close as already fixed", () => {
+    assert.equal(afb5103(green, ["test/x.test.js", "docs/a.md", "devdocs/x.mdx"]), true);
+  });
+  const host = (why) => RO5103.test(why) && !EX5103.test(why);
+  it("read-only production telemetry, captures and queries route to host", () => {
+    for (const why of ["read-only production telemetry from ovh", "ssh ovh-monitor to capture the queue", "obs-psql query of prod", "run a production query against the replica", "capture production logs for the run"]) assert.equal(host(why), true, why);
+  });
+  it("owner asks, writes, credentials and product wording stay external", () => {
+    for (const why of ["Should we delete production data older than 90 days?", "add uptime-monitor dashboard", "needs the production database password to query prod data",
+      "needs the prod ssh key to read production logs", "product manager decides the pricing", "production dataset retention policy", "drop the production table after the capture"]) {
+      assert.equal(host(why), false, why);
+    }
+    assert.equal(route5103({ bucket: "owner:decide", why: "Should we delete production data older than 90 days?" }), "external");
   });
 });

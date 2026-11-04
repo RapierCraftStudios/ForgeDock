@@ -18,7 +18,7 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { resolveBaseConflicts } from "./conflictres.mjs";
 import { parseLifecycle } from "./lifecycle.mjs";
 import { parseMinAge } from "./prefilter.mjs";
-import { DEFAULT_FEATURE_PATTERN, milestoneSlug, readBranches } from "./lane.mjs";
+import { DEFAULT_FEATURE_PATTERN, listMilestones, milestoneSlug, readBranches } from "./lane.mjs";
 
 export const SYNC_REASONS = ["ship", "batch", "conflict-risk", "manual"];
 export const DEFAULT_DEBOUNCE_MS = 10 * 60 * 1000;
@@ -57,7 +57,7 @@ export async function syncMilestone({ gh, git, repo, slug, base, branch = `miles
   let wt = null, baseSha;
   try {
     if (!SYNC_REASONS.includes(reason)) return { status: "refused", detail: `sync is on demand: reason must be one of ${SYNC_REASONS.join("|")}` };
-    const list = JSON.parse(String(await gh(["api", `repos/${repo}/milestones?state=all&per_page=100`])) || "[]");
+    const list = await listMilestones({ gh, repo, state: "all" });
     const ms = (Array.isArray(list) ? list : []).find((m) => milestoneSlug(m?.title) === slug);
     if (!ms) return { status: "refused", detail: `no milestone with slug ${slug}` };
     if (!isSyncable(ms)) return { status: "shipped", detail: `milestone is ${parseLifecycle(ms.description)?.state ?? ms.state}: never synced` };

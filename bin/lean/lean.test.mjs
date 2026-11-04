@@ -310,6 +310,22 @@ describe("core work-on", () => {
     assert.match(t, /\| Plan \| not reached \|/);
   });
 
+  it("an unknown amendment kind gets one in-lane correction before the gate and does not use the conformance resume (#5089)", async () => {
+    const w = world({ amendments: [{ kind: "deliverable_change", requirement: "R1", why: "no Linux build" }], resumeAmendments: [], reviews: [ok()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).some((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")), "the correction prompt ran");
+    assert.match(traj(w)[0], /Amendment kinds invalid \(1\); builder asked to correct/);
+  });
+
+  it("an unknown amendment kind the builder does not fix parks only after the one correction (#5089)", async () => {
+    const bad = [{ kind: "deliverable_change", requirement: "R1", why: "w" }];
+    const w = world({ amendments: bad, resumeAmendments: bad, reviews: [ok()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(builders(w).filter((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")).length, 1);
+  });
+
   it("nonconforming review -> builder resumed in its session with the failed rows -> re-review conforms -> merge; the note is re-posted", async () => {
     const w = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] });
     const r = await run(w);
@@ -441,6 +457,19 @@ describe("core work-on", () => {
   it("builder blocked on a typed human reason, or no commit, is needs-human", async () => {
     assert.equal((await run(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } }))).terminalReason, "needs-human");
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
+  });
+
+  it("#5080 a credentials block that is only read-only prod access ends host-task locally, env.capability_remote remotely, never builder.blocked; real credentials stay builder.blocked", async () => {
+    const prod = { result: { status: "blocked", summary: "gated on read-only production telemetry: a host-only prod_monitor capability", block: { kind: "human", why: "credentials" } } };
+    const lw = world(prod);
+    const local = await run(lw);
+    assert.equal(local.terminalReason, "host-task"); assert.equal(local.code, "env.capability_remote");
+    assert.ok(lw.edits.some((e) => e.includes("--add-label") && e.includes("host-task")), JSON.stringify(lw.edits));
+    assert.ok(!lw.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(lw.edits));
+    const remote = await run(world(prod), { placement: { where: "remote", reason: "mode remote" } });
+    assert.equal(remote.code, "env.capability_remote"); assert.notEqual(remote.terminalReason, "host-task");
+    const real = await run(world({ result: { status: "blocked", summary: "needs the production API key to read prod data", block: { kind: "human", why: "credentials" } } }));
+    assert.equal(real.code, "builder.blocked");
   });
 
   // #4124: a builder block is typed; only kind "human" with an allowed reason may reach needs-human.
@@ -928,6 +957,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.equal(w.followups.length, 1);
     assert.deepEqual(w.followups[0].items.map((i) => i.key), ["R2: Existing callers of foo keep working."]);
     assert.match(w.followups[0].items[0].why, /^post-deploy: \[bucket:post-deploy\] callers live in another module/);
+    assert.deepEqual(r.followups, [{ issue: 900, class: "post-deploy", count: 1 }]); // #5078: the batch report's follow-ups line
     const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
     assert.match(body, /## Remaining work tracked\n- #900\n\nCloses #7$/);
     assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && c.includes("#900")));
@@ -1936,6 +1966,17 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
     const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("#5080 a repro that already passes on the base ends already-fixed: the issue closes as completed citing the base, nothing merges, no resume", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = rworld([{ base: "RAN", head: "RAN" }], { changed: ["test/foo.test.js"] });
+      const r = await run(w, { conformance });
+      assert.equal(r.terminalReason, "invalid", conformance); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "no resume"); assert.equal(reviewers(w).length, 0);
+      assert.equal(w.closed.length, 1); assert.equal(w.closed[0][w.closed[0].indexOf("--reason") + 1], "completed");
+      assert.match(w.closed[0][w.closed[0].indexOf("--comment") + 1], /Already fixed on the base/);
+    }
   });
 
   it("a repro test the harness cannot run on head (or no harness result) is env.repro_unrunnable: recoverable, no resume, no reviewer (#4334)", async () => {
@@ -3296,6 +3337,45 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
     assert.equal(sleeps, 2);
     assert.match(r.detail, /resets at unknown/);
+  });
+
+  // #5094: an account rotator re-sends the limited call on the next account at once, with the same args (resume too).
+  const fakeRotator = (o = {}) => ({ kind: "tokenbaton", accounts: o.accounts ?? [{ n: 1 }, { n: 2 }], headroom: () => o.headroom ?? true, resumeAt: () => null,
+    currentIdentity: () => o.id ?? "acct-2", accountIdentity: (n) => `acct-${n}`, isAccount: () => true });
+  const captureBuilders = (w, err, times) => { const orig = w.io.runner; const sent = []; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { sent.push({ prompt: c.prompt, resume: c.resume ?? null, model: c.model ?? null }); if (n++ < times) throw err; } return orig(c); }; return sent; };
+
+  it("#5094 a rotator switches accounts mid-lane: the limited call is re-sent on the next account at once and the lane continues", async () => {
+    const w = world(); const sleeps = []; const dir = tmpDir("core-");
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const sent = captureBuilders(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    w.io.rotator = fakeRotator();
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged", "no deferral: the next account ran the call");
+    assert.equal(sleeps.includes(3 * 3600 * 1000), false, "no pause for the exhausted account's reset");
+    assert.deepEqual(sent[1], sent[0], "the same step is re-sent (same prompt, same resume session): no state lost");
+    const clean = world(); await run(clean);
+    assert.equal(builders(w).length, builders(clean).length, "no builder phase is repeated beyond the re-sent call");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "PHASE_ACCOUNT_ROTATED" && e.phase === "builder"));
+  });
+
+  it("#5094 rotations stop at the account count, then the lane defers naming the rotator's current account", async () => {
+    const w = world();
+    const sent = captureBuilders(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w.io.rotator = fakeRotator({ id: "acct-2" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
+    assert.equal(sent.length, 3, "first call plus one retry per account");
+    assert.equal(r.backendId, "acct-2");
+  });
+
+  it("#5094 a rotator without headroom does not retry: the usual pause/defer applies", async () => {
+    const w = world();
+    const sent = captureBuilders(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w.io.rotator = fakeRotator({ headroom: false });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(sent.length, 1);
   });
 
   it("#4101 a non-limit runner error is still engine-error", async () => {

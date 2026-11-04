@@ -23,7 +23,9 @@
  * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
- * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
+ * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset.
+ * #5095: `remote.identity()` names the pool's account (execution.mjs `remoteHoldId`); while it is held, a remote-placed lane
+ * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  * `getChildren()` + `autoChildren {mode, pollS, epics}` (#4965, `orchestration.auto_add_children`): with mode `epic`|`all`, at most once per `pollS`
@@ -116,6 +118,7 @@ import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
 import { mapLimit } from "./pmap.mjs";
+import { quotaRequeue } from "./rotator.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
@@ -257,7 +260,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -279,7 +282,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let errorTimes = [...(saved?.errorTimes ?? [])];
   // A legacy batch-local `holdUntil` (pre-#4190) names no account and is ignored: a same-account lane re-sets the hold.
   const holds = limits ?? memoryLimits(now);
-  const heldUntil = () => { try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
+  // #5094: with an account rotator, admissions stop only when no account has headroom, and resume when the first one resets.
+  const rotatorHold = () => {
+    if (!rotator) return undefined;
+    try { if (rotator.headroom()) return null; const u = rotator.resumeAt(); return Number.isFinite(u) && u > now() ? u : undefined; } catch { return undefined; }
+  };
+  const heldUntil = () => {
+    const r = rotatorHold();
+    if (r !== undefined) return r;
+    try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; }
+  };
+  // #5094: a quota pause carries its attempt's cost and minutes into the issue's next row once; the resume time labels the report row.
+  const quota = toMap(saved?.quota); // issue -> {cost_usd, minutes, resumeAt (epoch ms), rotations}
   let tripped = saved?.breaker ?? null;
   let pfAll = false, pfRemote = false, pfNoted = new Set(); // #4866: lane preflight holds
   let opHeld = new Set(); // #4592: operator-held issues this pass (the batch `hold` file is the authority)
@@ -344,7 +358,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const save = () => {
     if (!store || halted) return;
     store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(quota.size ? { quota: toObj(quota) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
@@ -507,6 +521,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
     let p = placeOf(n);
+    if (p?.where === "remote" && typeof remote?.identity === "function") {
+      // #5095: the pool account is held for a usage limit: hybrid runs the lane on the host, remote-only waits for the reset
+      let poolHeld = null;
+      try { const u = holds.holdUntil(remote.identity()); poolHeld = Number.isFinite(u) && u > now() ? u : null; } catch { poolHeld = null; }
+      if (poolHeld !== null) {
+        if (!remote.fallbackLocal || heldUntil() !== null) { notBefore.set(n, poolHeld); return false; }
+        p = { where: "local", reason: `fallback to local: pool usage limit until ${new Date(poolHeld).toISOString()}` };
+      }
+    }
     if (p?.where === "remote" && reg?.holder) {
       let other = null;
       try { other = reg.holder(entryOf(n)) ?? null; } catch { other = null; }
@@ -587,11 +610,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
+      ...(Array.isArray(r?.followups) && r.followups.length ? { followups: r.followups } : {}), // #5078
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
       ...(r?.conformance && typeof r.conformance === "object" ? { conformance: r.conformance } : {}), // #4398
       ...(rec?.placement ? { placement: rec.placement } : {}), ...(estimates.has(n) ? { est_minutes: Math.round(estimates.get(n) * 10) / 10 } : {}) }; // #4409
+    const quotaPause = row.outcome === "deferred" && r?.code === "rate_limited" && !cancelled;
+    if (!quotaPause && quota.has(n)) { // #5094: the paused attempts' cost, added once
+      const q = quota.get(n); quota.delete(n);
+      row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(q.cost_usd) || 0)) * 1e6) / 1e6;
+      row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(q.minutes) || 0)) * 10) / 10;
+    }
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     if (subs.length) row.subissues = subs; // #4396: links a decomposed parent to its sub-lanes in the report
@@ -664,10 +694,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // account runs it at once. If the hold cannot be recorded, the reset delay applies to this issue instead.
         let delayMs = pol.delayMs;
         if (pol.hold) {
-          try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          // #5094: an account rotator with headroom means another account runs the next call, so no host hold is recorded.
+          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs });
+          if (rq) {
+            delayMs = rq.delayMs;
+            // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
+            try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
+          } else try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
+          let rotAt = null;
+          if (!rq && rotator) { try { rotAt = rotator.resumeAt(); } catch { rotAt = null; } }
+          const resumeAt = Math.max(now() + (rq ? rq.delayMs : pol.delayMs), Number.isFinite(rotAt) ? rotAt : 0);
+          quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
+            resumeAt, rotations: (q.rotations ?? 0) + (rq?.rotated ? 1 : 0) });
+          requeue(n, delayMs); done(); save();
+          const iso = new Date(resumeAt).toISOString();
+          update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (quota) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+          return;
         }
-        requeue(n, capGated && !pol.hold ? 0 : delayMs); done(); save();
-        update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s${pol.hold ? " (admissions held)" : ""}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+        requeue(n, capGated ? 0 : delayMs); done(); save();
+        update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
         return;
       }
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
@@ -1288,7 +1334,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const [n, r] of results) if (r?.waiting) { const { waiting, ...rest } = r; results.set(n, rest); } // #4687: the batch ended: skipped for good
   save();
   const withRequeue = (r) => (r && requeuedInfo.has(r.issue) ? { ...r, requeued: { reason: requeuedInfo.get(r.issue).reason, by: requeuedInfo.get(r.issue).by, prior: requeuedInfo.get(r.issue).prior.map((p) => ({ outcome: p.outcome, detail: p.detail ?? null, pr: p.pr ?? null })) } } : r);
-  return order.map((n) => withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
+  const quotaRow = (n) => { // #5094: still pending after a quota pause: held (resumable), labelled paused (quota), with the paused attempts' cost
+    const q = quota.get(n);
+    if (!q || cancelled || opHeld.has(n)) return {};
+    const iso = new Date(Number(q.resumeAt) || now()).toISOString();
+    return { cost_usd: Number(q.cost_usd) || 0, minutes: Number(q.minutes) || 0, quota: { resumeAt: iso }, detail: `paused (quota) until ${iso}` };
+  };
+  return order.map((n) => withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n), ...quotaRow(n),
     ...(recovering.has(n) ? { recovery: { code: recovering.get(n).code, attempts: recoveries.get(n) ?? recovering.get(n).attempt, outcome: recovering.get(n).outcome ?? "needs-human",
       ...(recovering.get(n).result_code ? { result_code: recovering.get(n).result_code } : {}), detail: firstLine(recovering.get(n).detail ?? recovering.get(n).code) } } : {}) });
 }
@@ -1314,6 +1366,22 @@ export const OUTCOME_LINE_MAX = 200;
  * mechanical needs-human row (failed recovery or a terminal code), then one escalation list holding only human codes,
  * asked once at the end of the batch. Empty when there is nothing to list.
  */
+/**
+ * #5078: one `follow-ups appended:` line grouped by issue across rows: `#N (<class>: k item(s) from #a,#b)`, the post-deploy
+ * rollup named as such. Null when no row filed follow-ups.
+ */
+function formatFollowupsLine(rows) {
+  const by = new Map();
+  for (const r of rows ?? []) for (const f of Array.isArray(r?.followups) ? r.followups : []) {
+    if (!Number.isInteger(f?.issue) || f.issue <= 0) continue;
+    const g = by.get(f.issue) ?? { classes: new Set(), count: 0, from: new Set() };
+    if (f.class) g.classes.add(String(f.class));
+    g.count += Number(f.count) || 0; g.from.add(r.issue); by.set(f.issue, g);
+  }
+  if (!by.size) return null;
+  const name = (c) => (c === "post-deploy" ? "post-deploy rollup" : c === "external" ? "external aggregate" : c);
+  return `follow-ups appended: ${[...by].sort((a, b) => a[0] - b[0]).map(([n, g]) => `#${n} (${[...g.classes].sort().map(name).join("+") || "follow-up"}: ${g.count} item(s) from ${[...g.from].map((i) => `#${i}`).join(",")})`).join(" ")}`;
+}
 export function formatOutcomeLists(rows) {
   const out = [];
   const one = (x) => String(x ?? "").split("\n")[0].slice(0, OUTCOME_LINE_MAX);
@@ -1332,6 +1400,8 @@ export function formatOutcomeLists(rows) {
   if (rq.length) out.push(`remediation queue (/work-on:remediate): ${rq.map((r) => `#${r.issue} (parked:${r.code}${r.pr ? ` PR #${r.pr}` : ""})`).join(" ")}`);
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
   if (parked) out.push(parked);
+  const fu = formatFollowupsLine(rows); // #5078: follow-ups appended, not "issues filed"
+  if (fu) out.push(fu);
   const decided = (rows ?? []).filter((r) => r?.decided); // #4766: settled by the decision engine, listed not hidden
   if (decided.length) out.push(["decided (north-star engine, veto with the forge:decision-veto label):", ...decided.map((r) => `- #${r.issue}: ${one(r.decided.choice)}${r.decided.shadow ? " (shadow)" : ""}`)].join("\n"));
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));
@@ -1342,7 +1412,7 @@ export function formatTable(rows) {
   // #4255: sandbox minutes and cost next to the token cost, only when some lane ran in a sandbox.
   const sbx = rows.some((r) => r?.sandbox);
   const head = ["issue", "outcome", "PR", "cost", ...(sbx ? ["sbx-min", "sbx-$"] : []), "min"];
-  const body = rows.map((r) => [`#${r.issue}`, (r.waiting && /^dependency #(\d+) /.test(r.detail ?? "") ? `waiting on #${/^dependency #(\d+) /.exec(r.detail)[1]}` : r.outcome) + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
+  const body = rows.map((r) => [`#${r.issue}`, r.quota?.resumeAt && ["held", "paused"].includes(r.outcome) ? `paused (quota) until ${r.quota.resumeAt}` : (r.waiting && /^dependency #(\d+) /.test(r.detail ?? "") ? `waiting on #${/^dependency #(\d+) /.exec(r.detail)[1]}` : r.outcome) + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
     ...(sbx ? (r.sandbox ? [(Number(r.sandbox.minutes) || 0).toFixed(1), `$${(Number(r.sandbox.cost_usd) || 0).toFixed(2)}`] : ["-", "-"]) : []), String(r.minutes ?? 0)]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();

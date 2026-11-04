@@ -13,8 +13,12 @@ import { join } from "node:path";
 import { backendIdentity } from "../engine.mjs";
 import { writeAtomic } from "./batch.mjs";
 
-/** Identity of the account a core lane runs on: the lane always uses the claude CLI with the dispatcher's env. */
-export function laneBackendId(env = process.env) {
+/**
+ * Identity of the account a core lane runs on: the lane always uses the claude CLI with the dispatcher's env. With an
+ * account rotator (#5094, rotator.mjs) the shim picks the account per call, so the rotator's current account is the identity.
+ */
+export function laneBackendId(env = process.env, rotator = null) {
+  if (rotator) { try { const id = rotator.currentIdentity(); if (id) return id; } catch { /* fail-open: the env identity */ } }
   return backendIdentity({ backend: "cli", env });
 }
 

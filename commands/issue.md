@@ -81,7 +81,9 @@ The body MUST contain exactly one marker `<!-- FORGE:BODY-INTEGRITY:<entity>_<ro
 
 Read the actual code before drafting: the investigator inherits your file references. Map the domain (`forge.yaml → review.context`, the project's `CLAUDE.md`), read files from `origin/{STAGING_BRANCH}` via `git show`, and list every file the change touches: the primary file, its tests, config layers (`.env.example`, every compose override), migrations for schema changes, importers of a changed function.
 
-Duplicates: the script's token-overlap dedup is authoritative. Before drafting, also run a semantic search (`gh issue list --state open --search "{key_terms}"`, and `--state closed` for regressions). An open duplicate: tell the user and do not create. A closed one: create, and write "Regression of #N." in the body. If the user explicitly overrides a dedup STOP, re-run with `--exclude <that number>`; agents never do this without the user's authorization.
+Duplicates: the script's token-overlap dedup is authoritative; also run a semantic search (`gh issue list --state open --search "{key_terms}"`, and `--state closed` for regressions). An open duplicate: tell the user and do not create. A closed one: create, and write "Regression of #N." in the body. If the user explicitly overrides a dedup STOP, re-run with `--exclude <that number>`; agents never do this without the user's authorization.
+
+**Prior attempts (MANDATORY for bug/fix)**: `node "$(forge_resolve prior-attempts.mjs)" --repo {GH_REPO} --title "{TITLE}" --body-file "{DRAFT_BODY_FILE}"` searches by subject, not file. Paste its table as `## Prior Attempts`; fill the `?`s.
 
 ### 3. Draft
 
@@ -107,6 +109,9 @@ Duplicates: the script's token-overlap dedup is authoritative. Before drafting, 
 
 ## Acceptance Criteria
 - [ ] {specific, testable criterion} [type:api|unit|e2e|manual]
+
+## Prior Attempts
+{prior-attempts.mjs table; bug/fix only}
 
 ## Dependencies
 Depends on #{N} — {reason}   (omit when none)

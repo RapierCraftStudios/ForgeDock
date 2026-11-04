@@ -152,6 +152,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures go back to the builder
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   #5079: `verify.precheck_block: true` makes that exhausted / no-commit case `needsHuman` `ci.red` (recoverable) instead. forge.yaml `verification.coupled_files` (`readEnvConfig` → `coupledFiles`; `coupled.mjs`) is a block map `{when glob: required glob[, glob]}` (`added:` prefix = newly added files only); a miss is a `coupled_file_missing` `conformance.unimplemented` failure passed to `precheck()` as `coupledFailures`. Path-scoped suites are `.forge/test-map.json` entries.
    Timeout (rc 124, #4589/#4620): retried once longer if the round budget has room; a spent budget defers the
    command to CI, but a command that hit its own timeout with no room for a longer retry stays a failing rc 124.
    A validate rerun that still times out (#4906) is infrastructure: `precheck()` counts it covered when CI verified the
@@ -898,8 +899,10 @@ lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
-`start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
-for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528) instead of engine-error, and tears down after the result is
+`start` to `needs-human` `sandbox.start_failed` for a 4xx config error (not 401/403/429) or a non-HTTP throw (or `deferred` `sandbox.capacity`
+for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528; `deferred` `sandbox.transient` for any other 5xx,
+retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) instead of engine-error. A sandbox that exits without a result while its
+log tail shows a usage limit ends `deferred` `rate_limited` with the reset time, not engine-error (#5095). It tears down after the result is
 in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
@@ -985,6 +988,21 @@ the old path with no extra calls. The pack never enters `issueText`, and neither
 the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
 builder turns, cache tokens and cost per lane type and mode; the default moves to
 `on` only once that A/B shows a win.
+
+Subject history (#5085): **attempts** also carries `subject` rows after the
+issue's own runs. `subjectTerms` takes codes (dotted/underscored, UPPER_SNAKE,
+HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words.
+`subjectHistory` (shared with `scripts/prior-attempts.mjs`, the `/issue`
+`## Prior Attempts` table) runs at most `MAX_SUBJECT_QUERIES`=3 closed
+`search/issues` queries plus one repo-wide `git log --grep` (no pathspec), drops
+self and graph/body links, ranks by matched terms then number, and keeps
+`MAX_SUBJECT_ITEMS`=8. A failed query is a `facts.errors` entry (`attempts:
+subject ...`). Subject rows never count as runs (`priorAttempts`/`laneType`).
+`facts.recall` / pack `recall` says whether `bin/recall.mjs` (repo or ForgeDock
+install) and `~/.forge/index/knowledge.jsonl` exist; when absent, `FORGE:CONTEXT`
+adds `Recall index: absent (<reason>); subject history comes from live search.`
+and `CONTEXT_PACK` records `recall: absent|present`. The status stays out of the
+pack text and hash.
 `ab` (#4444) runs the experiment: `contextArm` (context.mjs) hashes `repo#issue`
 (sha256, first byte parity) to a stable `on` or `shadow` arm, so reruns stay in
 their arm. The lane uses the arm as its effective mode, logs it as `context_pack` /
@@ -2466,3 +2484,63 @@ The release review of #5068 (#4793 decision stage, #5063 salvage resume) found:
 Tests: `issuewatch-decisions.test.mjs` "release #5068 ..." (5), `salvage-resume.test.mjs` lane-branch fetch (2). Cost: 0 LLM calls.
 
 Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNER/MEMBER/COLLABORATOR or `ownLogins`), so a forged `FORGE:DECISION` can neither finish nor suppress a decision (SEC-1). `decisionLaunch` checks `inflight` only for per-issue watches: a batch issue stays inflight until its batch reports, so a running batch is requeued and a reported one has its claim released (SPEC-1). A failed salvage pick logs `SALVAGE_PICK_FAILED` instead of dropping the salvage silently (SPEC-2).
+
+## Entry 2026-11-04 — Deferred follow-ups routed by kind: rollup, host, per-batch external, engineering per parent (#5078)
+`owner` now means credentials, spend, an account, a third party or a customer. `ownerRoute` (`conformance.mjs`, mirrored by `owner_route` in `scripts/file-deferred-followups.sh` as a safety net for frozen contracts) sends `owner:orchestrator`, `owner:promote:*` and post-promotion text (after promotion/release, rollout, purge, production-verify) to class post-deploy. That is the rollup: a line, never a new issue. Read-only production data or capture (the `prod_monitor` signals of `execution.mjs`, a read-only prod query), when no external need is named, goes to the new class/bucket `host`. Everything else is external. `bucketProblems` rejects an owner row that is only read-only prod access (`use bucket host`) and a `host` bucket on a post-deploy disposition. The script:
+- also accepts the lowest open trusted issue labelled `FORGE_ROLLUP_LABEL` (forge.yaml `followups.rollup_issue_label`, `readFollowupsRollupLabel`) as the rollup when no marked one is open;
+- adds host items to the parent's engineering follow-up of the same run (labelled `host-task`), else files one `followup:host` + `host-task` issue, never `needs-human`;
+- files class external into ONE aggregate per batch (`FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID|adhoc>`). It uses the same trusted lookup, lowest-number canonical and post-create re-check as the rollup, adds items under `### #<parent>` with normalized dedup, and is labelled `followup:external`, `external-prerequisite` and `needs-human`. An older per-parent external follow-up is still appended to.
+`fileFollowups` passes `batchId`/`rollupLabel` as `FORGE_BATCH_ID`/`FORGE_ROLLUP_LABEL`. `track()` records `followups: [{issue, class, count}]` on the lane result, and `formatOutcomeLists` prints one `follow-ups appended: #N (<class>: k item(s) from #a,#b)` line grouped by issue, naming the rollup. Decision: `devdocs/decisions/5078-followup-routing.md`.
+
+Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
+
+## Review roster: Frontend path trigger (forge#5077)
+`scripts/review-roster.sh` has a Frontend path trigger (`web/` or `app/` segment, `.tsx`/`.jsx`, `next.config.*`, `middleware.ts|js`) that calls `add_agent Frontend` in every tier except full, like Infra/Auth. Path triggers are additive to the top-2 score baseline, so a staging→main bundle selects the union of every path-triggered domain with no bundle flag. Output contract and the Security floor are unchanged. `commands/review-pr-agents/frontend.md` gains check 11 (dynamic APIs in static/ISR trees).
+
+Tests: `review-roster.test.sh` "forge#5077" block (not-found.tsx in small/medium/standard, bundle union, negative case). Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Already-fixed close, source-deliverable rule, host block routing (#5080)
+
+- `reproFailures`: `BASE=RAN HEAD=RAN` is `repro_base_green`. With no source change in the diff, `alreadyFixedOnBase` closes the issue as completed, citing the base commit (lean.mjs, finish `already-fixed`).
+- `precheck` adds `source_deliverable_untouched`: a diff of only test files cannot close an issue whose contract names a source deliverable (`conformance.unimplemented`).
+- A credentials block naming only read-only production access (`READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match) is host work: on a remote lane `env.capability_remote` (recovered on the host); on a local lane it ends `host-task` (label `host-task`, comment `FORGE:HOST_TASK`, never `needs-human`); `splitEscalation` kind `host`; `prod_monitor` matches `prod_monitor` and read-only production telemetry, and `hostCapabilityBlock` accepts it when no capabilities are declared.
+- `formatProbeSummary` prints the cause of an `error` row; `scripts/issue-dedup.sh` needs at least 2 shared tokens.
+
+## Entry 2026-11-04 — Route reachability and e2e-weakening decisions (#5087)
+forge.yaml `topology.route_reachability` (`readEnvConfig` -> `routeReachability`) is a repo-supplied command. After validate, `lean.mjs` maps the route handlers the diff adds (`routePathsFromFiles`, `routecheck.mjs`) to URL paths and runs it with them as args; a non-zero exit is a blocking `conformance.unimplemented` (`kind: route_unreachable`) passed to `precheck` as `routeFailures`. Unset = no check.
+`validateContract` rejects a `decisions[]` row that replaces an e2e/integration check with mocked tests unless a `forge-probe` acceptance probe is declared (`weakenedE2eDecisions`); the #4726 `[type:e2e]` rule is untouched. `scripts/review-roster.sh` adds Infra for route-handler paths (`route-handler` trigger).
+Tests: `routecheck.test.mjs`, `conformance.test.mjs` "#5087".
+
+## Entry 2026-11-04 — One in-lane correction for invalid builder amendment kinds (#5089)
+A builder that invented an amendment kind (`deliverable_change` for an impossible deliverable) used to park a finished lane as `conformance.unimplemented`, because the single conformance resume is shared across all failures. `amendmentKindProblems` (`conformance.mjs`) is a shape-only check (unknown kind, missing `path`/`requirement`; normalised slips and informational kinds pass) that returns the same rejection strings as `applyAmendments`, which is unchanged. At the top of `gate()` in `lean.mjs`, before `amend()`/`precheck`, a non-empty result runs ONE builder resume (`amendmentCorrectionPrompt`, `prompts.mjs`, naming the valid kinds and that an impossible deliverable is `defer`), re-reads `result.json`, and continues; it runs at most once per lane (`amendFixed`) and does not use the conformance `resumes` budget. If the builder still emits a bad kind, the existing conformance resume and `conformance.unimplemented` park apply. The builder prompt now says an impossible deliverable is a `defer`, not a new kind. Unknown kinds are deliberately not auto-mapped to `defer` (deferral changes scope; the reviewer judges it).
+
+Tests: `conformance.test.mjs` "amendmentKindProblems (#5089)", `lean.test.mjs` "an unknown amendment kind ... (#5089)". Cost: 0 LLM calls when valid, one builder resume otherwise.
+
+## Entry 2026-11-04 — Pool 5xx and pool usage limits are deferrals, not needs-human or engine-error (#5095)
+- `httpTransport` marks 500 `transient` too and honours Retry-After on any 5xx; `retryable` stays 429/503 (capacity). `providerLanes` `startFailed` types any other launch 5xx (or `transient`) as `deferred` `sandbox.transient` (`retryInSeconds` from Retry-After, else 60), capped by `max_deferrals`; `sandbox.capacity` stays uncapped, so a pool answering 500 with free slots cannot hot-loop.
+- The no-result path of `wait()` (and `adoptSaved`) checks the lane log tail with `usageLimitInTail` (the lean `usage limit hit; resets at` line, else `runner.mjs` `detectUsageLimit`) and returns `deferred` `rate_limited` with `resetAt`/`resetAtEpochMs`; `deferPolicy` holds it and the breaker never counts it.
+- `remoteHoldId(provider)` = `remote:<provider.name>` is the pool account's hold key. `engine-cli.mjs` passes it as `providerLanes({holdId})` (every remote `rate_limited` result gets `backendId: holdId`, the sandbox's own id kept as `laneBackendId`) and as `remote.identity()`. In `grant()`, a remote-placed lane while that identity is held runs local in hybrid (`fallbackLocal`, local account not held; reason `fallback to local: pool usage limit until <ISO>`) or waits for the reset (remote-only). Without `remote.identity` orchestrate is unchanged.
+
+Tests: `execution.test.mjs` "#5095 ...", `limits.test.mjs` "#5095: a held pool account places hybrid lanes local", `sandbox-provider.contract.test.mjs` "#5095 httpTransport". Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Account rotators (tokenbaton): identity-aware holds, in-lane rotation, paused (quota) rows (#5094)
+With `execution.account_rotator: tokenbaton` (`parseExecution` keeps only that value as `accountRotator`), an exhausted account no longer stalls the host. `rotator.mjs` is the adapter: `openRotator` reads `~/.tokenbaton/current` and `live.<n>` on every call (no cache, no writes, fail-open to null), `headroom()` is any account under 95% 5-hour and 100% weekly use (a passed reset counts as 0), `resumeAt()` is the earliest epoch at which one regains headroom, and `accountIdentity(n)` is `backendIdentity` over `CLAUDE_CONFIG_DIR=~/.claude-<n>`, the id a lane on that account records. `laneBackendId(env, rotator)` (`limits.mjs`) returns the rotator's current account, so a hold set for account A no longer blocks admissions once tokenbaton switched to B. In `orchestrate.mjs`, the `rotator` option makes `heldUntil()` return null while any account has headroom and `resumeAt()` when none does (admissions restart on their own). A `rate_limited` lane with headroom sets no host hold (`quotaRequeue`): one on a rotator account (or naming none) reruns at once, at most once per account; a remote sandbox credential that is not a rotator account waits its own reset. The requeue row is outcome `paused` with `quota.resumeAt` and detail `paused (quota) until <ISO>`. The paused attempt's cost and minutes are carried in a per-issue `quota` map (persisted in the batch state) and added once to the issue's next settled row. A still-pending issue at batch end stays `held` (the `--resume`/schedd marker), with `quota` and the carried cost; `formatTable` prints `paused (quota) until <ISO>`. In `lean.mjs`, `callRunner` re-sends the same args (including `resume`, as every `~/.claude-<n>/projects` is the shared session store) when `rotatorRetry` holds (headroom, fewer tries than accounts), logging `PHASE_ACCOUNT_ROTATED`; the deferred result's `backendId` is the rotator's current account. `engine-cli.mjs` wires the rotator into `orchestrate`, both `runCore` call sites and `limits show` (one line per account). Without the key, every path is unchanged.
+
+With #5095, a remote lane limited on the pool account (`backendId` = `remote.identity()`, `remoteHoldId`) still records that pool hold while the rotator has headroom, so hybrid lanes fall back local; no host-account hold is recorded (`limits.test.mjs` "#5094 #5095 a limited pool account").
+
+Tests: `rotator.test.mjs`, `limits.test.mjs` "#5094 rotator headroom" and "#5094 a hold set for identity A", `lean.test.mjs` "#5094 a rotator switches accounts mid-lane" and the rotation-cap/no-headroom cases. Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — Release review of #5103: already-fixed scope, read-only prod routing (#5105, #5106, #5108)
+
+- `alreadyFixedOnBase`: any changed file that is neither a test (`isTestPath`) nor a doc (`DOC_ONLY_RE`: md, mdx, txt, rst, adoc) counts as lane work. A css, json, yaml, sql, vue, tf or html fix with a repro that already passes on base keeps `conformance.unimplemented`; it is never closed as already fixed with its branch dropped.
+- `READONLY_PROD_RE` matches whole words only: `ssh <host>-monitor`, `obs-psql`, `prod(uction) monitor`, read-only ... prod, and prod ... query/queries/capture/telemetry/logs. Bare `*-monitor` and "production data" no longer match, and neither does "product".
+- `EXTERNAL_NEED_RE` also matches password, passphrase, ssh key, private key, login, sudo, and production writes (delete, drop, truncate, wipe, destroy, modify, migrate, write). These stay external, never host.
+- `ownerRoute`: an `EXTERNAL_NEED_RE` match wins over post-promotion wording, so "provide the API key before rollout" is external, not the post-deploy rollup.
+- `scripts/file-deferred-followups.sh` `owner_route` mirrors all of this. It spells word boundaries as `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` (no `\b`, for BSD grep). `scripts/owner-route-parity.test.sh` asserts the JS and shell routes agree.
+
+## Entry 2026-11-04 — Milestone reads page through every milestone (#5084)
+Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo, state})`: one `gh api repos/<repo>/milestones?state=<state>&per_page=100 --paginate --jq '.[] | @json'` call, one object per line (a whole-JSON array reply is accepted too). `milestonesync.mjs` `syncMilestone`, `drift.mjs` `readMilestone` (and through it `integration.mjs` and `lifecycle.mjs`) and `integration.mjs` `listOpenMilestones` used to read only page 1, so a repo with more than 100 milestones made `milestone-sync` refuse an existing milestone. Tests: `lane.test.mjs` "(#5084) listMilestones", plus page-2 cases in `milestonesync.test.mjs`, `drift.test.mjs` and `integration.test.mjs`. Cost: 0 LLM calls.
+
+## Entry 2026-11-04 — prior-attempts table cells escape backslashes (release review of #5103, CodeQL)
+
+- `scripts/prior-attempts.mjs` `cell()` escapes `\` before `|`, so a title with a trailing backslash can no longer turn `\|` back into a column break in the `## Prior Attempts` table (CodeQL `js/incomplete-sanitization`).

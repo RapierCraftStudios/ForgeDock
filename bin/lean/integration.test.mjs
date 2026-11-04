@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseIntegration, parseIntegrationState, renderState, isDue, failingSpecs, runMilestone, runIntegration, makeIntegration, runIntegrationCli, emptyState } from "./integration.mjs";
+import { parseIntegration, parseIntegrationState, renderState, isDue, failingSpecs, runMilestone, runIntegration, makeIntegration, runIntegrationCli, emptyState, listOpenMilestones } from "./integration.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
 const SHA = "a".repeat(40), SHA2 = "b".repeat(40);
@@ -185,5 +185,26 @@ describe("integration status", () => {
     const off = [];
     await runIntegrationCli(["status", "--repo", "o/r"], { io, cfg: null, print: (t) => off.push(t) });
     assert.equal(off.length, 1, "without ci.workflow only milestones with a state block");
+  });
+});
+
+/** #5084: a GitHub-like milestones endpoint: pages of 100; without --paginate only page 1; `--jq '.[] | @json'` prints one object per line. */
+const pagedMilestones = (all) => (a) => {
+  const state = /state=(\w+)/.exec(a[1])?.[1] ?? "open";
+  const items = all.filter((m) => state === "all" || m.state === state);
+  const pages = []; for (let i = 0; i < items.length; i += 100) pages.push(items.slice(i, i + 100));
+  if (!a.includes("--paginate")) return JSON.stringify(pages[0] ?? []);
+  if (a.includes("--jq")) return items.map((m) => JSON.stringify(m)).join("\n") + "\n";
+  return pages.map((p) => JSON.stringify(p)).join("");
+};
+const manyMilestones = (target, n = 120) => [...Array.from({ length: n }, (_, i) => ({ number: i + 1, title: `M ${i + 1}`, state: i % 2 ? "open" : "closed", description: "" })), { number: n + 1, ...target }];
+
+describe("listOpenMilestones pagination (#5084)", () => {
+  it("(#5084) listOpenMilestones returns open milestones past page 1", async () => {
+    const all = manyMilestones({ title: "Target", state: "open" }, 220).map((m) => ({ ...m, state: "open" }));
+    const gh = async (a) => pagedMilestones(all)(a);
+    const got = await listOpenMilestones({ gh, repo: "o/r" });
+    assert.equal(got.length, 221);
+    assert.deepEqual(got.at(-1), { number: 221, title: "Target", description: "" });
   });
 });

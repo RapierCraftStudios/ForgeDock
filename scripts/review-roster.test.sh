@@ -164,6 +164,15 @@ run "$(printf 'README.md\nscripts/deploy.sh')" --scores "$SC_QUIET" --changed-li
 expect_has "infra-path-multi-file-list" infra
 run "Scripts/Deploy.SH" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "infra-path-case-insensitive" infra
+# forge#5087: a route-handler diff pulls the Infra reviewer even when no infra file changed
+for f in "web/src/app/(site)/api/v1/agent/signup/pending/route.ts" "web/src/pages/api/health.ts" "app/route.js"; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_has "route-handler-$f" infra
+done
+for f in web/src/app/page.tsx web/src/app/dashboard/layout.tsx web/src/lib/route.ts; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_not "no-route-handler-$f" infra
+done
 run "db/migrations/0042_add.sql" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "migration path" database
 run "sdk/node/src/index.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
@@ -182,8 +191,8 @@ expect_has "billing score in medium tier" billing; expect_has "billing score in 
 run "web/src/app/a.tsx
 web/src/b.tsx" --scores "FRONTEND=3 API=2 BILLING=1 DATABASE=1" --changed-lines 300
 expect_tier "standard" standard; expect_has "standard" frontend; expect_has "standard" api; expect_not "standard top-2 only" billing
-run "web/src/app/a.tsx
-web/src/b.tsx" --scores "FRONTEND=3 API=2" --changed-lines 100
+run "svc/a.py
+svc/b.py" --scores "FRONTEND=3 API=2" --changed-lines 100
 expect_sel "medium has no baseline" "security"
 run "svc/x.py" --scores "FRONTEND=3" --changed-lines ""
 expect_tier "unknown size" standard; expect_has "unknown size" frontend
@@ -249,6 +258,25 @@ run "svc/a.py" --scores "$SC_TOP" --changed-lines 30 --fix-pr true --review-dept
 expect_tier "EXTENDED lifts fix-pr to standard" standard
 run "svc/a.py" --scores "$SC_TOP" --changed-lines 400 --thorough true --review-depth EXTENDED
 expect_tier "full stays full" full
+
+# forge#5077: Frontend path trigger escalates in every tier except full; a bundle selects every path-triggered domain
+for n in 30 100 300; do
+  run "web/src/app/(site)/not-found.tsx" --scores "$SC_QUIET" --changed-lines "$n" --changed-files 1
+  expect_has "frontend path trigger at $n lines" frontend
+done
+for f in next.config.mjs middleware.ts app/page.jsx; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 30 --changed-files 1; expect_has "frontend path $f" frontend
+done
+run "web/src/app/(site)/not-found.tsx
+svc/auth/login.py
+.github/workflows/ci.yml
+db/migrations/001.sql
+sdk/client.py" --scores "FRONTEND=0 API=0 BILLING=2 DATABASE=2" --changed-lines 700000 --changed-files 5
+expect_tier "staging bundle" standard
+for d in frontend auth infra database api; do expect_has "bundle union" "$d"; done
+run "docs/web-notes.md
+svc/a.py" --scores "$SC_QUIET" --changed-lines 30 --changed-files 2
+expect_not "no frontend path" frontend
 
 echo "review-roster: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

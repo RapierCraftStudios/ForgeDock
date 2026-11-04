@@ -144,6 +144,13 @@ if [ -n "$APPEND" ]; then
   BODY="${BODY}${APPEND}"
   echo "WARNING: body was missing mandatory sections; placeholders added before creation" >&2
 fi
+# #5085: a bug/fix issue should carry a ## Prior Attempts table (prior-attempts.mjs); warn only, never block
+IS_BUG=false
+for l in ${LABELS[@]+"${LABELS[@]}"}; do [ "$l" = bug ] && IS_BUG=true; done
+printf '%s' "$TITLE" | grep -qE '^(fix|bug)(\(|:|!)' && IS_BUG=true
+if [ "$IS_BUG" = true ] && ! printf '%s\n' "$BODY" | grep -q '^## Prior Attempts'; then
+  echo "WARNING: bug/fix issue has no ## Prior Attempts section (run prior-attempts.mjs)" >&2
+fi
 
 if [ "$DRY_RUN" = true ]; then
   LABEL_TEXT=""; for l in ${LABELS[@]+"${LABELS[@]}"}; do LABEL_TEXT="${LABEL_TEXT:+$LABEL_TEXT, }$l"; done

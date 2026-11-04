@@ -730,11 +730,21 @@ issue_watch:
 
 ## `followups` (OPTIONAL)
 
-Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issue per class per parent: `engineering`, `post-deploy`, `external` and `ops`. Each carries the label `followup:<class>` (`external` also `external-prerequisite`, and states the parent it is a prerequisite of) and inherits the parent's milestone. A requirement may set an optional `class` in the contract; otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`.
+Deferred follow-ups (`scripts/file-deferred-followups.sh`) are routed by kind (#5078):
+
+| Kind | Where it goes |
+|---|---|
+| Post-promotion, production-verify, rollout-promote (`post-deploy`, `owner:orchestrator`, `owner:promote:<flag>`, or an owner why such as "after release", "rollout", "purge") | A checklist line in the repo's ONE open post-deploy rollup (`FORGE:POSTDEPLOY_ROLLUP`, else the lowest open issue labelled `followups.rollup_issue_label`). Never a new issue when one is open. |
+| Read-only production data or capture (bucket `host`, or an owner why naming obs-psql, a `*-monitor` or a read-only prod query) | Class `host`: added to the parent's engineering follow-up of the same run, else one per-parent follow-up. Labels `followup:host` and `host-task`, never `needs-human`. |
+| Truly external (credentials, spend, an account, a third party, a customer) | ONE issue per batch (`FORGE:EXTERNAL_BATCH: <batch id>`) holding every item under a `### #<parent>` heading, labelled `followup:external`, `external-prerequisite` and `needs-human`. |
+| Engineering | The parent's open follow-up when one exists, else one issue per parent with all its items together. `ops` and `verify-now` also keep one issue per parent. |
+
+Each issue carries the label `followup:<class>` and inherits the parent's milestone. A requirement may set an optional `class` in the contract. Otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`. The batch report lists `follow-ups appended: #N (<class>: k item(s) from #a,#b)` per issue, not "issues filed".
 
 ```yaml
 followups:
-  default_milestone: "Backlog"   # optional: milestone title used when the parent's milestone has shipped and no later one is open
+  default_milestone: "Backlog"     # optional: milestone title used when the parent's milestone has shipped and no later one is open
+  rollup_issue_label: post-deploy  # optional: a repo's own open issue with this label is the post-deploy rollup when no marked one is open
 ```
 
 ## `rollouts` (OPTIONAL)
@@ -888,6 +898,7 @@ verify:
   guard_command:                # optional; per-extension command for the guard gate's base test files
     ".py": "scripts/pytest {path}"
   e2e: auto                     # optional e2e merge gate: auto (default) | always | never
+  precheck_block: false         # optional (#5079); true: a declared pre-PR check still failing after the fix round (or a round with no commit) ends the lane needs-human ci.red (recoverable) instead of opening the PR with an anomaly
   e2e_label: full-ci            # PR label that makes the repo's CI run e2e (label path)
   e2e_checks: "e2e"             # check names of the e2e jobs the label path waits on
   # e2e_workflow: e2e.yml       # or: a workflow_dispatch workflow that runs e2e (wins over the label)
@@ -1018,6 +1029,7 @@ execution:
 | `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
 | `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
 | `fallback_local` | boolean | No | `true`: a remote-placed lane runs on the host while the provider reports no agent online (`GET {endpoint}/status -> {"online": N}`, the built-in router answers it with `online`, `total` and per-agent `ok`/`paused`), so a batch completes locally with every pool agent offline or asleep (forge#4547). Default `false`: such lanes defer (`sandbox.capacity`). A missing or failing `/status` is unknown and never triggers it. |
+| `account_rotator` | string | No | `tokenbaton`: the `claude` on PATH is the tokenbaton shim, which runs each call on the logged-in account with the most room (`CLAUDE_CONFIG_DIR=~/.claude-<n>`) (forge#5094). forgedock reads `~/.tokenbaton/current` (the account number) and `~/.tokenbaton/live.<n>` (`<5h used %> <5h reset s> <weekly used %> <weekly reset s> <updated s>`), re-read on every check and never written. An account has headroom when its 5-hour use is under 95% and its weekly use under 100% (a window whose reset has passed counts as 0). While any account has headroom no host-wide usage hold is recorded and admissions continue; they stop only when every account is exhausted and resume when the first one resets. A lane whose call hits a usage limit retries that same call (same session) on the next account at once, at most once per account, before it pauses or defers. `forgedock limits show` lists each account's 5-hour use. Any other value, or unreadable files: off (per-account holds as before). |
 | `warm_sandboxes` | integer | No | Warm sandboxes per repo the pool agent keeps ready (checkout at the base ref, dependency cache primed). When `N > 0` the launch spec carries `warm: N` and the lane first calls `POST {endpoint}/sandboxes/claim`; a ready warm sandbox takes the lane (refreshed to the lane's base ref with an incremental fetch before work starts), and when none is ready, the claim fails or the endpoint lacks the route the lane starts cold. Default `0` (off): no claim call and the launch spec is unchanged (forge#4912). |
 | `unreachable_window_min` | number | No | Remote providers: how long a lane keeps polling (with backoff, up to 30s) after the provider's transport fails (connection refused/reset, `fetch failed`, timeout, 502/503/504) before it ends `deferred` with `sandbox.unreachable` (forge#4672). Inside the window the lane never ends and the sandbox is never torn down; after it the sandbox is kept and adopted on the next attempt or `--resume`; the engine-error breaker does not count it. `adopt` applies the same window. Default: 5 |
 | `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
@@ -1343,6 +1355,9 @@ verification:
   test_runners:            # path prefix -> runner command prefix (block-style map)
     services/worker: "poetry -C services/worker run"
     web: "pnpm --filter web exec"
+
+topology:
+  route_reachability: "bash scripts/check-ingress.sh"   # optional; blocking when declared
 ```
 
 | Field | Type | Required | Description |
@@ -1360,7 +1375,9 @@ verification:
 | `consumer_sweep.mode` | string | No | `advisory` (default): the validate consumer sweep (`scripts/consumer-sweep.sh`, V4.6) records unaddressed referencing sites and never fails. `blocking`: unaddressed sites fail validate with `consumer_unaddressed`, build runs one repair round, and sites still unaddressed are recorded as `CONSUMERS: unresolved` and passed to review as known risk (never `needs-human`). Flip to `blocking` only after `bash scripts/consumer-sweep.sh --eval-history 20` shows a mean of at most 2 flagged sites per merge and none above 10 on your repo |
 | `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
 | `test_runners` | map (path prefix → runner) | No | Default unset (no runner enforced). For repos whose validate commands need a managed runner (uv, poetry, pnpm workspace). The lean engine checks it at contract freeze (`testRunnerProblems`, `bin/lean/preflight.mjs`): a validate command that touches a configured path prefix without containing that prefix's runner string is reported as a contract problem, instead of failing later as `contract.invalid_command` / `env.tool_missing`. Paths in the command are relative to the runner's cwd. Write it as a block-style map: `parseForgeYaml` does not read inline `{ ... }` maps. |
+| `coupled_files` | map (glob → glob list) | No | Default unset (#5079). "If file A changes, file B must change": a block map `{when glob: required glob[, glob]}`, e.g. `"infra/guard/bootstrap.sh": "infra/guard/MANIFEST.sha256"`. A key prefixed `added:` fires only for files the lane adds (`"added:scripts/tests/test_*.py": ".github/workflows/ci.yml"`). A lane that changes a `when` file without a matching required file fails precheck with `coupled_file_missing` (`conformance.unimplemented`, builder resumed once). Quote keys that contain `*`, and list alternatives as separate keys: brace globs (`*.{ts,tsx}`) are not expanded. |
 | `validate.recipes` | map (regex → replacement) | No | Default unset. A top-level `validate:` block with a block-style `recipes:` map, e.g. `"poetry run pytest": "uv run --with-requirements r.txt pytest"`. Each key is a regex source; the first recipe that matches a frozen validate or `repro_test` command rewrites it at contract freeze (`applyValidateRecipes`), recorded as a decision. Use it for commands whose environment is not installed in lane sandboxes. |
+| `topology.route_reachability` | string (command) | No | Default unset (no check, no behaviour change). A repo-supplied command that takes the route paths a diff adds (Next.js `app/**/route.*`, `pages/api/**`; URL form, route groups removed) as arguments and exits non-zero when the production ingress does not deliver them to the service that implements them. Runs in the lean lane after validate and in `review-pr-staging`; a non-zero exit blocks (`conformance.unimplemented`, kind `route_unreachable`). Read by `readEnvConfig` (`bin/engine-cli.mjs`), run by `bin/lean/routecheck.mjs`. |
 
 **Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
 

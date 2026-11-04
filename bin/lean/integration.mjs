@@ -14,7 +14,7 @@
  *   or over N, until a green run.
  * The workflow is dispatched on the milestone branch and awaited through runCiVerify (verify.mjs).
  */
-import { milestoneSlug, readBranches, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
+import { listMilestones, milestoneSlug, readBranches, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
 import { readMilestone } from "./drift.mjs";
 import { runCiVerify } from "./verify.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
@@ -174,7 +174,7 @@ export async function runMilestone({ io, repo, ms, cfg, pattern, nowFn = () => D
 
 /** Every open milestone → {number, title, description}. */
 export async function listOpenMilestones({ gh, repo }) {
-  return arr(JSON.parse(String(await gh(["api", `repos/${repo}/milestones?state=open&per_page=100`])) || "[]")).map((m) => ({ number: m.number, title: m.title, description: m.description ?? "" }));
+  return arr(await listMilestones({ gh, repo, state: "open" })).map((m) => ({ number: m.number, title: m.title, description: m.description ?? "" }));
 }
 
 /** Run every due active milestone (optionally only `only`, a title). Sequential: one suite at a time. Resolves the per-milestone results. */
