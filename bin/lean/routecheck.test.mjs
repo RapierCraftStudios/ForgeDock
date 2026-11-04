@@ -1,15 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { routePathOf, routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { readEnvConfig } from "../engine-cli.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 // Stand-in for AlterLab's scripts/generate-traefik-config.sh: the api-router sends /api/v1/* to FastAPI;
 // only /api/v1/batch and /api/v1/b2b/jobs go to web (#5087).
-const dir = mkdtempSync(join(tmpdir(), "routecheck-"));
+const dir = tmpDir("routecheck-");
 const ingress = join(dir, "check-ingress.sh");
 writeFileSync(ingress, `#!/usr/bin/env bash
 rc=0
@@ -60,7 +60,7 @@ describe("#5087 route reachability", () => {
     assert.match(f[0].detail, /exited 127/);
   });
   it("forge.yaml topology.route_reachability is read; repos without topology get no key", () => {
-    const withKey = mkdtempSync(join(tmpdir(), "rc-yaml-")), without = mkdtempSync(join(tmpdir(), "rc-yaml-"));
+    const withKey = tmpDir("rc-yaml-"), without = tmpDir("rc-yaml-");
     writeFileSync(join(withKey, "forge.yaml"), "topology:\n  route_reachability: \"bash scripts/check-ingress.sh\"\n");
     writeFileSync(join(without, "forge.yaml"), "project: x/y\n");
     assert.equal(readEnvConfig(withKey).routeReachability, "bash scripts/check-ingress.sh");
