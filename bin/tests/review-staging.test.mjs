@@ -85,6 +85,15 @@ describe("review-staging args", () => {
 });
 
 describe("review-staging flow", () => {
+  it("retries a transient failure of the route comment post", async () => {
+    const w = world({ env: { FORGE_GH_RETRY_SLEEP: "0" } });
+    let fails = 2;
+    w.io.gh = ((orig) => async (args) => { if (args[0] === "pr" && args[1] === "comment" && fails-- > 0) { w.gh.push(args); throw new Error("boom"); } return orig(args); })(w.io.gh);
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
+    assert.equal(comments(w).length, 3);
+    assert.match(comments(w)[2], /FORGE:REVIEW_ROUTE/);
+  });
+
   it("posts the unchanged route marker, writes one brief per roster domain and lists exactly those", async () => {
     const w = world();
     assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
@@ -386,6 +395,26 @@ describe("review-staging --finalize", () => {
     assert.equal(await reviewStagingFromCli(FIN, w.io), 1);
     assert.equal(rfCalls(w).length, 0);
     assert.match(w.err.join("\n"), /RESULT: BLOCK DEPLOY/);
+  });
+
+  it("--finalize refuses a moved head: no gate failure, no label, no panel scripts, points at --delta", async () => {
+    const reviewed = "e".repeat(40);
+    const w = postWorld({ files: { [CTX]: JSON.stringify(ctxJson({ pr: { number: 42, title: "t", review_sha: reviewed } })) } });
+    assert.equal(await reviewStagingFromCli(FIN, w.io), 1);
+    assert.match(w.out.concat(w.err).join("\n"), new RegExp(`run forgedock review-staging 42 --delta ${reviewed}`));
+    assert.equal(w.scripts.length, 0);
+    assert.equal(comments(w).length, 0);
+    assert.ok(!w.gh.some((a) => a[0] === "label"));
+  });
+
+  it("a finding skipped as fixed-in-delta never blocks and is listed as fixed in delta", async () => {
+    const w = postWorld({ findings: [{ id: "A-1", severity: "HIGH", confidence: "CONFIRMED", title: "gone" }], items: [{ id: "A-1", action: "skip-fixed-in-delta" }] });
+    assert.equal(await reviewStagingFromCli(FIN, w.io), 0, w.err.join("\n"));
+    const st = JSON.parse(w.files[`${SD}/42_finalize.json`]);
+    assert.deepEqual(st.resolved.map((r) => r.id), ["A-1"]);
+    w.gh.length = 0;
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    assert.match(comments(w)[0], /resolved \(excluded from the verdict\): HIGH A-1 gone \(fixed in delta\)/);
   });
 
   it("review-finalize exit 3 (BLOCKED) stops and files nothing", async () => {
