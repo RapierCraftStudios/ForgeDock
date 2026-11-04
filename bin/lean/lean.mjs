@@ -53,6 +53,7 @@ import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
 import { e2eSpecs, e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
+import { openRotator, rotatorRetry } from "./rotator.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
@@ -231,6 +232,7 @@ export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
     toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
+  const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
   if (!VERIFY_MODES.includes(vcfg.mode)) vcfg.mode = "local";
@@ -630,7 +632,7 @@ export async function runCore(o) {
   }
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
   async function callRunner(args) {
-    let pauses = 0;
+    let pauses = 0, rotations = 0;
     for (;;) {
       // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
       const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
@@ -642,6 +644,7 @@ export async function runCore(o) {
       catch (e) {
         const epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
+        if (rotatorRetry(rotator, rotations)) { rotations++; ev({ event: "PHASE_ACCOUNT_ROTATED", phase: args.role }); continue; } // #5094: same args (resume too), next account
         const waitMs = epoch !== null && epoch > now() ? epoch - now() : DEFAULT_SESSION_LIMIT_WAIT_MS;
         if (pauses >= maxSessionLimitPauses || waitMs > sessionLimitMaxWaitMs) { e.deferUsageLimit = true; throw e; }
         pauses++;
@@ -3027,7 +3030,7 @@ export async function runCore(o) {
   } catch (e) {
     if (e?.deferUsageLimit) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
-      return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env) }, OUTCOME_CODES.RATE_LIMITED);
+      return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env, rotator) }, OUTCOME_CODES.RATE_LIMITED);
     }
     if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}) }, e.deferCode);
     // #4505: a turn overrun is mechanical: a non-human end the batch recovers, needs-human only once a budget recovery failed too
