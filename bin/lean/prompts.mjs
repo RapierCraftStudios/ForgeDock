@@ -201,7 +201,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row.
+- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row. An impossible deliverable is a defer, not a new kind.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
 - {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure (e.g. new enum code).
 - {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
@@ -329,6 +329,11 @@ export function sequenceSyncPrompt(base, files, mode = "local") {
 
 export function contractCorrectionPrompt(problems) {
   return `Your ${CONTRACT_FILE} is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nFix the contract (planning only, no code, no commit) and stop. Do not push or touch GitHub.`;
+}
+
+/** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
+export function amendmentCorrectionPrompt(problems) {
+  return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind: add-deliverable, add-requirement, defer, post-deploy, amend-requirement, supersedes, decision, substitute-validate or out-of-band. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
 }
 
 /** The one bounded correction round, in the builder's own session. */
