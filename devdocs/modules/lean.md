@@ -152,6 +152,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures go back to the builder
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   #5079: `verify.precheck_block: true` makes that exhausted / no-commit case `needsHuman` `ci.red` (recoverable) instead. forge.yaml `verification.coupled_files` (`readEnvConfig` → `coupledFiles`; `coupled.mjs`) is a block map `{when glob: required glob[, glob]}` (`added:` prefix = newly added files only); a miss is a `coupled_file_missing` `conformance.unimplemented` failure passed to `precheck()` as `coupledFailures`. Path-scoped suites are `.forge/test-map.json` entries.
    Timeout (rc 124, #4589/#4620): retried once longer if the round budget has room; a spent budget defers the
    command to CI, but a command that hit its own timeout with no room for a longer retry stays a failing rc 124.
    A validate rerun that still times out (#4906) is infrastructure: `precheck()` counts it covered when CI verified the
