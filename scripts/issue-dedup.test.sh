@@ -144,7 +144,7 @@ ONE_NOUN="$TMP_FIXTURES/one_noun.tsv"
 printf '30575\tintegrate platform policy with browser actions and workflows\n' > "$ONE_NOUN"
 MOCK_GH_CANDIDATES="$ONE_NOUN" assert_exit \
   "one shared noun (workflows) does not match an unrelated feature -> exit 0" \
-  0 "bug: workflows page returns 401" -R test/repo
+  0 "bug: workflows broken" -R test/repo
 
 TWO_SHARED="$TMP_FIXTURES/two_shared.tsv"
 printf '31000\tworkflows page returns 401\n' > "$TWO_SHARED"
