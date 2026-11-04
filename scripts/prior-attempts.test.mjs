@@ -33,6 +33,13 @@ describe("#5085: prior-attempts.mjs", () => {
     assert.ok(o.out[0].startsWith("## Prior Attempts") && o.err.some((e) => e.startsWith("WARNING: attempts: subject search")));
   });
 
+  it("a title with a backslash or pipe stays inside its table cell (CodeQL js/incomplete-sanitization, release review #5103)", () => {
+    const t = renderPriorAttempts({ terms: ["x"], rows: [{ number: 7, title: "path a\\|b ends in \\", kind: "issue", status: "merged" }] });
+    const row = t.split("\n").find((l) => l.startsWith("| #7"));
+    assert.ok(row.includes("a\\\\\\|b ends in \\\\ "), row);
+    assert.equal(row.split(/(?<!\\)\|/).length, 6, row);
+  });
+
   it("usage errors exit 2; --json prints the raw rows", async () => {
     const { io } = cap();
     assert.equal(await main(["--title", "x"], io), 2);

@@ -2537,3 +2537,7 @@ Tests: `rotator.test.mjs`, `limits.test.mjs` "#5094 rotator headroom" and "#5094
 - `EXTERNAL_NEED_RE` also matches password, passphrase, ssh key, private key, login, sudo, and production writes (delete, drop, truncate, wipe, destroy, modify, migrate, write). These stay external, never host.
 - `ownerRoute`: an `EXTERNAL_NEED_RE` match wins over post-promotion wording, so "provide the API key before rollout" is external, not the post-deploy rollup.
 - `scripts/file-deferred-followups.sh` `owner_route` mirrors all of this. It spells word boundaries as `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` (no `\b`, for BSD grep). `scripts/owner-route-parity.test.sh` asserts the JS and shell routes agree.
+
+## Entry 2026-11-04 — prior-attempts table cells escape backslashes (release review of #5103, CodeQL)
+
+- `scripts/prior-attempts.mjs` `cell()` escapes `\` before `|`, so a title with a trailing backslash can no longer turn `\|` back into a column break in the `## Prior Attempts` table (CodeQL `js/incomplete-sanitization`).
