@@ -899,8 +899,10 @@ lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
-`start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
-for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528) instead of engine-error, and tears down after the result is
+`start` to `needs-human` `sandbox.start_failed` for a 4xx config error (not 401/403/429) or a non-HTTP throw (or `deferred` `sandbox.capacity`
+for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528; `deferred` `sandbox.transient` for any other 5xx,
+retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) instead of engine-error. A sandbox that exits without a result while its
+log tail shows a usage limit ends `deferred` `rate_limited` with the reset time, not engine-error (#5095). It tears down after the result is
 in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
@@ -2488,3 +2490,10 @@ Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engin
 A builder that invented an amendment kind (`deliverable_change` for an impossible deliverable) used to park a finished lane as `conformance.unimplemented`, because the single conformance resume is shared across all failures. `amendmentKindProblems` (`conformance.mjs`) is a shape-only check (unknown kind, missing `path`/`requirement`; normalised slips and informational kinds pass) that returns the same rejection strings as `applyAmendments`, which is unchanged. At the top of `gate()` in `lean.mjs`, before `amend()`/`precheck`, a non-empty result runs ONE builder resume (`amendmentCorrectionPrompt`, `prompts.mjs`, naming the valid kinds and that an impossible deliverable is `defer`), re-reads `result.json`, and continues; it runs at most once per lane (`amendFixed`) and does not use the conformance `resumes` budget. If the builder still emits a bad kind, the existing conformance resume and `conformance.unimplemented` park apply. The builder prompt now says an impossible deliverable is a `defer`, not a new kind. Unknown kinds are deliberately not auto-mapped to `defer` (deferral changes scope; the reviewer judges it).
 
 Tests: `conformance.test.mjs` "amendmentKindProblems (#5089)", `lean.test.mjs` "an unknown amendment kind ... (#5089)". Cost: 0 LLM calls when valid, one builder resume otherwise.
+
+## Entry 2026-11-04 — Pool 5xx and pool usage limits are deferrals, not needs-human or engine-error (#5095)
+- `httpTransport` marks 500 `transient` too and honours Retry-After on any 5xx; `retryable` stays 429/503 (capacity). `providerLanes` `startFailed` types any other launch 5xx (or `transient`) as `deferred` `sandbox.transient` (`retryInSeconds` from Retry-After, else 60), capped by `max_deferrals`; `sandbox.capacity` stays uncapped, so a pool answering 500 with free slots cannot hot-loop.
+- The no-result path of `wait()` (and `adoptSaved`) checks the lane log tail with `usageLimitInTail` (the lean `usage limit hit; resets at` line, else `runner.mjs` `detectUsageLimit`) and returns `deferred` `rate_limited` with `resetAt`/`resetAtEpochMs`; `deferPolicy` holds it and the breaker never counts it.
+- `remoteHoldId(provider)` = `remote:<provider.name>` is the pool account's hold key. `engine-cli.mjs` passes it as `providerLanes({holdId})` (every remote `rate_limited` result gets `backendId: holdId`, the sandbox's own id kept as `laneBackendId`) and as `remote.identity()`. In `grant()`, a remote-placed lane while that identity is held runs local in hybrid (`fallbackLocal`, local account not held; reason `fallback to local: pool usage limit until <ISO>`) or waits for the reset (remote-only). Without `remote.identity` orchestrate is unchanged.
+
+Tests: `execution.test.mjs` "#5095 ...", `limits.test.mjs` "#5095: a held pool account places hybrid lanes local", `sandbox-provider.contract.test.mjs` "#5095 httpTransport". Cost: 0 LLM calls.
