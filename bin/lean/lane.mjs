@@ -21,6 +21,19 @@ export function milestoneSlug(title) {
   return String(title ?? "").toLowerCase().replace(/ /g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
+/**
+ * Every milestone of `repo` in `state` (all|open|closed), across every page (#5084: one page of 100 hid newer milestones).
+ * One `gh api --paginate` call, one object per line; a whole-JSON reply (a single array) is accepted too. gh errors propagate.
+ */
+export async function listMilestones({ gh, repo, state = "all" }) {
+  const text = String(await gh(["api", `repos/${repo}/milestones?state=${state}&per_page=100`, "--paginate", "--jq", ".[] | @json"]) ?? "").trim();
+  if (!text) return [];
+  let whole;
+  try { whole = JSON.parse(text); } catch { whole = undefined; }
+  if (whole !== undefined) return Array.isArray(whole) ? whole : whole && typeof whole === "object" ? [whole] : [];
+  return text.split("\n").map((l) => l.trim()).filter(Boolean).flatMap((l) => JSON.parse(l));
+}
+
 /** forge.yaml `branches` from the checkout: {default, staging, featurePattern}; missing keys are null. */
 export function readBranches(cwd = process.cwd()) {
   let b = {};

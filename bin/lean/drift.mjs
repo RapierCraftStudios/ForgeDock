@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { listMilestones } from "./lane.mjs";
 
 export const SUMMARY_MARKER = "FORGE:DRIFT";
 const SUMMARY_RE = /<!-- FORGE:DRIFT (\{[\s\S]*?\}) -->/;
@@ -134,9 +135,9 @@ export function heldBy(files, flagged) {
   return null;
 }
 
-/** {number, description} of the milestone titled `title`, or null. One `gh api` read. */
+/** {number, description} of the milestone titled `title`, or null. One paginated read (lane.mjs `listMilestones`, every page). */
 export async function readMilestone({ gh, repo, title }) {
-  const list = JSON.parse(String(await gh(["api", `repos/${repo}/milestones?state=all&per_page=100`])) || "[]");
+  const list = await listMilestones({ gh, repo, state: "all" });
   const m = arr(list).find((x) => x?.title === title);
   return m ? { number: m.number, description: m.description ?? "" } : null;
 }

@@ -2538,6 +2538,9 @@ Tests: `rotator.test.mjs`, `limits.test.mjs` "#5094 rotator headroom" and "#5094
 - `ownerRoute`: an `EXTERNAL_NEED_RE` match wins over post-promotion wording, so "provide the API key before rollout" is external, not the post-deploy rollup.
 - `scripts/file-deferred-followups.sh` `owner_route` mirrors all of this. It spells word boundaries as `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` (no `\b`, for BSD grep). `scripts/owner-route-parity.test.sh` asserts the JS and shell routes agree.
 
+## Entry 2026-11-04 — Milestone reads page through every milestone (#5084)
+Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo, state})`: one `gh api repos/<repo>/milestones?state=<state>&per_page=100 --paginate --jq '.[] | @json'` call, one object per line (a whole-JSON array reply is accepted too). `milestonesync.mjs` `syncMilestone`, `drift.mjs` `readMilestone` (and through it `integration.mjs` and `lifecycle.mjs`) and `integration.mjs` `listOpenMilestones` used to read only page 1, so a repo with more than 100 milestones made `milestone-sync` refuse an existing milestone. Tests: `lane.test.mjs` "(#5084) listMilestones", plus page-2 cases in `milestonesync.test.mjs`, `drift.test.mjs` and `integration.test.mjs`. Cost: 0 LLM calls.
+
 ## Entry 2026-11-04 — prior-attempts table cells escape backslashes (release review of #5103, CodeQL)
 
 - `scripts/prior-attempts.mjs` `cell()` escapes `\` before `|`, so a title with a trailing backslash can no longer turn `\|` back into a column break in the `## Prior Attempts` table (CodeQL `js/incomplete-sanitization`).
