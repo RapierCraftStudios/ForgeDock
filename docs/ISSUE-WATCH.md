@@ -34,7 +34,7 @@ Each watch has `~/.forge/watch/<owner>__<repo>/<name>/` (or `$FORGEDOCK_WATCH_DI
 
 ## Selectors
 
-All optional, AND-ed. Only issues from an owner, member or collaborator are claimed (bot-filed issues only through `include_followups`).
+All optional, AND-ed. Only issues from an owner, member or collaborator are claimed (bot-filed issues only through `include_followups` or `trust_app`).
 
 | Key | Meaning |
 |---|---|
@@ -64,6 +64,27 @@ The lane follows the repo rule: a milestone issue goes to `milestone/<slug>` (fo
 ## Follow-ups
 
 `include_followups: defer-only` claims bot-filed `follow-up:` issues that have an unchecked `— defer` item. Post-deploy-only follow-ups are not claimed: with `postdeploy_rollup: <issue>` each is appended once as a checklist line to that release issue. Other bot issues stay excluded.
+
+## Issues filed by the ForgeDock App
+
+When agents and `gh` run as the ForgeDock App, the issues they file are authored by `rapiercraft-forgedock[bot]` with association `NONE`, so a watch skips them. `trust_app: true` (default false) claims issues authored by this repo's own ForgeDock App. Other bots and outsiders (`NONE` humans) stay excluded. It is an explicit opt-in because the App also files issues from untrusted inputs (prod-watch, ingestion). `trust_app_labels: [operator]` (needs `trust_app`) narrows it further: the App issue must carry one of those labels. `follow-up:` issues from the App still follow `include_followups`.
+
+## Dry run
+
+In `per-issue` and `batch` mode, `forgedock issue-watch run --name <w> --dry-run` prints what one pass would claim and why, then the needs-human classification. It writes nothing: no claim, no status, no launch.
+
+```
+would claim #12 -> staging: ForgeDock App author (trust_app)
+would fold #14
+skip #13: excluded label epic
+skip #15: untrusted author mallory (NONE)
+skip #16: already claimed by watch other
+skip #17: over capacity (room 4)
+```
+
+## gh errors
+
+A failed `gh` call raises an error that names the call. An HTTP 401 or 403 also prints one line naming the call and its effect on the pass, for example `issue-watch: gh api repos/o/r/issues?state=open&per_page=100 --paginate -> HTTP 403: ...; effect: pass degraded: author associations unknown, every author untrusted (nothing claimed or settled this pass)`. Under an App token, `gh api user` (403) and `gh api app` (401) report `no effect`.
 
 ## Merge verification
 

@@ -25,7 +25,7 @@ import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
 
-const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches"];
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels"];
 export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
@@ -79,8 +79,11 @@ export function validateWatch(name, cfg = {}) {
   const w = { name, milestone: cfg.milestone || null, labels: list(cfg.labels), exclude_labels: list(cfg.exclude_labels), search: cfg.search || null, title_regex: cfg.title_regex || null,
     since: cfg.since || null, version: cfg.version ? String(cfg.version) : null, lane: cfg.lane || null, max_issues: int("max_issues", null), max_inflight: int("max_inflight", 4),
     until: cfg.until || null, mode: cfg.mode || "per-issue", parallel: int("parallel", 4), include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null,
-    max_launches: int("max_launches", null), sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true" };
+    max_launches: int("max_launches", null), sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true",
+    trust_app: cfg.trust_app === true || String(cfg.trust_app).toLowerCase() === "true", trust_app_labels: list(cfg.trust_app_labels) };
   if (cfg.sweep_needs_human !== undefined && !/^(true|false)$/i.test(String(cfg.sweep_needs_human))) throw new Error(`watch ${name}: sweep_needs_human must be true or false`);
+  if (cfg.trust_app !== undefined && !/^(true|false)$/i.test(String(cfg.trust_app))) throw new Error(`watch ${name}: trust_app must be true or false`);
+  if (w.trust_app_labels.length && !w.trust_app) throw new Error(`watch ${name}: trust_app_labels needs trust_app: true`);
   if (!["per-issue", "batch", "release"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue, batch or release`);
   if (w.mode === "release") validateRelease(name, cfg, w, int);
   else for (const k of ["threshold", "immediate", "max_release_issues", "theme_map", "tracker"]) if (cfg[k] !== undefined) throw new Error(`watch ${name}: ${k} needs mode: release`);
@@ -123,17 +126,22 @@ export function issueVersion(issue) {
   return null;
 }
 
-/** AND of every set selector. `search` is applied by gh, not here. */
-export function matchesSelectors(issue, sel) {
+/** The first selector `issue` fails, as a reason (`missing label x`, `excluded label x`, ...), or null when all match. `search` is applied by gh, not here. */
+export function selectorMiss(issue, sel) {
   const names = labelNames(issue);
-  if (sel.milestone === "none" ? issue.milestone : sel.milestone && milestoneSlug(issue.milestone?.title) !== milestoneSlug(sel.milestone)) return false;
-  if ((sel.labels ?? []).some((l) => !names.includes(l))) return false;
-  if ((sel.exclude_labels ?? []).some((l) => names.includes(l))) return false;
-  if (sel.title_regex && !new RegExp(sel.title_regex).test(issue.title ?? "")) return false;
-  if (sel.since && !(Date.parse(issue.createdAt) >= Date.parse(sel.since))) return false;
-  if (sel.version && issueVersion(issue) !== sel.version) return false;
-  return true;
+  if (sel.milestone === "none" ? issue.milestone : sel.milestone && milestoneSlug(issue.milestone?.title) !== milestoneSlug(sel.milestone)) return "milestone";
+  const missing = (sel.labels ?? []).find((l) => !names.includes(l));
+  if (missing !== undefined) return `missing label ${missing}`;
+  const excluded = (sel.exclude_labels ?? []).find((l) => names.includes(l));
+  if (excluded !== undefined) return `excluded label ${excluded}`;
+  if (sel.title_regex && !new RegExp(sel.title_regex).test(issue.title ?? "")) return "title_regex";
+  if (sel.since && !(Date.parse(issue.createdAt) >= Date.parse(sel.since))) return "since";
+  if (sel.version && issueVersion(issue) !== sel.version) return "version";
+  return null;
 }
+
+/** AND of every set selector. `search` is applied by gh, not here. */
+export const matchesSelectors = (issue, sel) => !selectorMiss(issue, sel);
 
 const CHECK_RE = /^\s*[-*]\s+\[ \]\s+(.*)$/;
 /** True when the body has an unchecked `— defer` checklist item. */
@@ -141,18 +149,40 @@ export const hasUnresolvedDefer = (body) => noComments(body).split("\n").some((l
 
 // Bot authorship comes from the author only, never the body: a `FORGE:DEFERRED` marker in an outsider's issue is not
 // the App. `gh` reports the ForgeDock App as a bare login with no `[bot]` suffix (#4467), so it is matched by slug.
-export const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || l.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "") === APP_SLUG; };
+const bareLogin = (i) => String(i.author?.login ?? "").trim().toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");
+export const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || bareLogin(i) === APP_SLUG; };
+/** #5088: the issue's author is this repo's ForgeDock App (`app/<slug>`, `<slug>[bot]` or the bare slug); never another bot. */
+// Release review of #5123 (AUTH-1): the slug alone is a username anyone could register. Require a bot signal too: the
+// REST/gh forms `<slug>[bot]` / `app/<slug>`, or `is_bot: true` (gh --json author) for the bare GraphQL login.
+export const isOwnApp = (i) => {
+  if (bareLogin(i) !== APP_SLUG) return false;
+  const l = String(i.author?.login ?? "").trim();
+  return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true;
+};
 const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
 
-/** `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch). */
-export function classifyIssue(issue, watch) {
+/** {kind, reason}: `kind` as classifyIssue returns it; `reason` says why (shown by the per-issue/batch `--dry-run`). */
+function classifyWhy(issue, watch) {
+  const login = issue.author?.login ?? "unknown";
   if (isBot(issue)) {
-    if (!isFollowup(issue) || watch.include_followups !== "defer-only") return null;
-    if (postDeployOnly(issue.body)) return watch.postdeploy_rollup ? "fold" : null;
-    return hasUnresolvedDefer(issue.body) ? "claim" : null;
+    if (isFollowup(issue)) { // trust_app never overrides the follow-up rules: a post-deploy-only follow-up folds, never claims (#5088 K3)
+      if (watch.include_followups !== "defer-only") return { kind: null, reason: `bot follow-up by ${login} (include_followups: none)` };
+      if (postDeployOnly(issue.body)) return watch.postdeploy_rollup ? { kind: "fold", reason: "post-deploy-only follow-up" } : { kind: null, reason: "post-deploy-only follow-up (no postdeploy_rollup)" };
+      return hasUnresolvedDefer(issue.body) ? { kind: "claim", reason: "defer follow-up" } : { kind: null, reason: "bot follow-up without an unchecked defer item" };
+    }
+    if (!watch.trust_app || !isOwnApp(issue)) return { kind: null, reason: `bot author ${login}` };
+    const want = watch.trust_app_labels ?? [];
+    if (want.length && !labelNames(issue).some((l) => want.includes(l))) return { kind: null, reason: `bot author ${login} (trust_app_labels not matched)` };
+    return { kind: "claim", reason: "ForgeDock App author (trust_app)" };
   }
-  return TRUSTED.has(issue.authorAssociation) ? "claim" : null;
+  return TRUSTED.has(issue.authorAssociation) ? { kind: "claim", reason: `trusted author (${issue.authorAssociation})` } : { kind: null, reason: `untrusted author ${login} (${issue.authorAssociation ?? "unknown"})` };
 }
+
+/**
+ * `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch).
+ * #5088: with `trust_app: true` an issue the repo's own ForgeDock App authored is claimed (narrowed by `trust_app_labels`).
+ */
+export const classifyIssue = (issue, watch) => classifyWhy(issue, watch).kind;
 
 /** `milestone/<slug>` (forge.yaml feature pattern) for a milestone issue, else staging; a pinned `lane:` wins but is never a default branch. Throws on a default-branch lane. */
 export function laneFor(issue, watch, { branches = {}, defaults = [] } = {}) {
@@ -281,21 +311,11 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   if (capped && state.phase === "running") state.phase = "draining";
   if (state.phase === "draining") { if (!state.inflight.length && !Object.keys(state.verifyFrom ?? {}).length) state.phase = "done"; return state; } // a merge mid-verification holds the drain
 
-  const room = Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - used.issues : Infinity, watch.max_launches ? watch.max_launches - used.launches : Infinity);
-  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
-  if (watch.search) args.push("--search", watch.search);
-  const candidates = [];
-  const assoc = await listAssociations(io.gh, repo); // #4859: not a `gh issue list` field
-  for (const raw of await ghJson(args)) {
-    const i = { ...raw, authorAssociation: assoc.get(raw.number) };
-    if (!matchesSelectors(i, watch)) continue;
-    const kind = classifyIssue(i, watch);
-    if (kind === "fold") { await fold({ issue: i, watch, repo, io, state }); continue; }
-    if (kind === "claim" && !state.claimed.includes(i.number)) candidates.push(i);
-  }
-  const ordered = watch.mode === "batch" ? dagOrder(candidates) : candidates;
+  const room = roomFor(watch, state);
+  const plan = await planClaims({ watch, repo, io, state, branches, defaults, room });
+  for (const i of plan.folds) await fold({ issue: i, watch, repo, io, state });
   const taken = [];
-  for (const i of ordered) {
+  for (const i of plan.candidates) {
     if (taken.length >= room) break;
     const lane = laneFor(i, watch, { branches, defaults });
     if (!claimIssue(repoDir(repo, io.env), i.number, watch.name)) continue;
@@ -306,6 +326,50 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
     if (state.batch) io.batch.add(state.batch, nums); else state.batch = await io.batch.start(nums, watch.parallel, taken[0].lane);
   } else for (const t of taken) handles.set(t.n, io.launch(t.n, t.lane));
   return state;
+}
+
+const roomFor = (watch, state) => { const used = claimsUsed(state); return Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - used.issues : Infinity, watch.max_launches ? watch.max_launches - used.launches : Infinity); };
+
+/**
+ * #5088: what one pass would take, without writing anything. `candidates` are the issues `tick` tries to claim (in order);
+ * `claim` [{number, lane, reason}] and `skip` [{number, reason}] are the read-only forecast (registry read, never written;
+ * `room` caps the claims), `fold` the post-deploy-only follow-up numbers (`folds` the issues).
+ */
+export async function planClaims({ watch, repo, io, state, branches = {}, defaults = [], room = Infinity }) {
+  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
+  if (watch.search) args.push("--search", watch.search);
+  const found = [], folds = [], skip = [], why = new Map();
+  const assoc = await listAssociations(io.gh, repo); // #4859: not a `gh issue list` field
+  for (const raw of JSON.parse(String(await io.gh(args)))) {
+    const i = { ...raw, authorAssociation: assoc.get(raw.number) };
+    const miss = selectorMiss(i, watch);
+    if (miss) { skip.push({ number: i.number, reason: miss }); continue; }
+    const c = classifyWhy(i, watch);
+    if (c.kind === "fold") { folds.push(i); continue; }
+    if (c.kind !== "claim") { skip.push({ number: i.number, reason: c.reason }); continue; }
+    if (state.claimed.includes(i.number)) { skip.push({ number: i.number, reason: "already claimed by this watch" }); continue; }
+    found.push(i); why.set(i.number, c.reason);
+  }
+  const candidates = watch.mode === "batch" ? dagOrder(found) : found;
+  const registry = readJson(join(repoDir(repo, io.env), "claims.json")) ?? {};
+  const claim = [];
+  for (const i of candidates) {
+    const owner = registry[i.number];
+    if (owner && owner !== watch.name) { skip.push({ number: i.number, reason: `already claimed by watch ${owner}` }); continue; }
+    let lane;
+    try { lane = laneFor(i, watch, { branches, defaults }); } catch (e) { skip.push({ number: i.number, reason: String(e?.message ?? e) }); continue; }
+    if (claim.length >= room) { skip.push({ number: i.number, reason: `over capacity (room ${Math.max(0, room)})` }); continue; }
+    claim.push({ number: i.number, lane, reason: why.get(i.number) });
+  }
+  return { candidates, claim, fold: folds.map((i) => i.number), folds, skip };
+}
+
+/** The per-issue/batch `--dry-run` lines of a planClaims result. */
+export function formatClaimPlan(plan) {
+  const out = plan.claim.length ? plan.claim.map((c) => `would claim #${c.number} -> ${c.lane}: ${c.reason}`) : ["would claim: none"];
+  for (const n of plan.fold) out.push(`would fold #${n}`);
+  for (const s of plan.skip) out.push(`skip #${s.number}: ${s.reason}`);
+  return out.join("\n");
 }
 
 /** True when the registry leaves issue `n` to watch `name`: unclaimed, or already this watch's own claim (crash-safe re-claim, #4825). */
@@ -402,7 +466,7 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
 const judgePrompt = ({ decision, options, policy, policyPath, precedent }) => `You settle one decision for a repository from its own policy file (${policyPath ?? "none"}) and prior decisions. Reply with only a JSON object {"choice","clause","rejected","reversibility":"reversible|one-way","confidence":"high|medium|low","anchors":[]}. "clause" quotes the policy clause or precedent that supports the choice; leave it empty when none applies.\n\nPolicy:\n${policy}\n\nPrior decisions:\n${JSON.stringify((precedent ?? []).slice(0, 20))}\n\nDecision needed:\n${decision}\n${(options ?? []).length ? `Options: ${options.join(" | ")}\n` : ""}`;
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
 function realIo(repo, env = process.env) {
-  const gh = (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const gh = ghRunner(execFileSync, (l) => console.error(l));
   const root = batchRoot(env);
   return { env, gh, now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     classify: (issues, themes) => { // the one LLM judgment of release mode: issues no theme_map rule classifies
@@ -433,9 +497,37 @@ function realIo(repo, env = process.env) {
     } };
 }
 
+/** #5088: what a failed gh call does to the watch pass, from its argv (the callers that swallow it degrade; the rest fail). */
+export function ghFailureEffect(args) {
+  const a = (args ?? []).map(String), s = a.join(" ");
+  if (a[0] === "api" && /(^| )repos\/[^ ]+\/issues\?state=open/.test(s)) return "pass degraded: author associations unknown, every author untrusted (nothing claimed or settled this pass)";
+  if (a[0] === "api" && (a[1] === "user" || a[1] === "app")) return "no effect: the App slug stands in for the engine's own login";
+  if (/\/protection\/required_status_checks|\/rules\/branches\//.test(s)) return "verification degraded: required checks unknown, a merge is verified without them";
+  if (/\/check-runs|\/commits\/[^ /]+\/status/.test(s)) return "verification degraded: check states unread";
+  if (/\/compare\//.test(s)) return "verification pending: merge placement unknown";
+  return "the error is raised to its caller (that step fails)";
+}
+
+/**
+ * #5088: `gh(args)→stdout` over `exec` (execFileSync's signature) with gh's stderr captured instead of leaked. A failure
+ * throws an Error naming the call (`.status`, `.stderr` kept); an HTTP 401/403 first `warn`s one line with the call and
+ * its effect on the pass (ghFailureEffect).
+ */
+export function ghRunner(exec, warn = () => {}) {
+  return (args) => {
+    try { return exec("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }); } catch (e) {
+      const call = args.slice(0, 3).join(" "), stderr = String(e?.stderr ?? "");
+      const first = stderr.split("\n").map((l) => l.trim()).find(Boolean) ?? String(e?.message ?? e).split("\n")[0];
+      const code = /HTTP (40[13])\b/.exec(stderr)?.[1];
+      if (code) warn(`issue-watch: gh ${call} -> HTTP ${code}: ${first}; effect: ${ghFailureEffect(args)}`);
+      throw Object.assign(new Error(`gh ${call} failed: ${first}`), { status: e?.status, stderr });
+    }
+  };
+}
+
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 
-/** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`; `--dry-run` (mode release) prints the would-cut set and writes nothing. */
+/** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`; `--dry-run` writes nothing: mode release prints the would-cut set, per-issue/batch the would-claim/fold/skip plan (#5088) and the needs-human classification. */
 export async function issueWatchFromCli(argv, deps = {}) {
   const [op] = argv;
   const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status [--name <w>] [--repo owner/repo]";
@@ -455,10 +547,15 @@ export async function issueWatchFromCli(argv, deps = {}) {
     return { ok: true };
   }
   const ctx = decisionContext({ loadPolicy, readFile, cwd }), shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
-  if (argv.includes("--dry-run") && watch.mode !== "release") { // #4793: classification of the needs-human escalations, nothing written
-    const { rows } = await decisionStep({ watch, repo, io, state: readJson(join(dir, "status.json")) ?? fresh(watch, repo), ctx, shared, dryRun: true });
+  if (argv.includes("--dry-run") && watch.mode !== "release") { // #5088 would-claim/skip with reasons, then #4793 the needs-human classification; nothing written
+    const real = deps.io ?? realIo(repo, env), branches = readBranches(cwd);
+    const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
+    const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
+    const { claim, fold: folded, skip } = await planClaims({ watch, repo, io: real, state, branches, defaults, room: roomFor(watch, state) });
+    print(formatClaimPlan({ claim, fold: folded, skip }));
+    const { rows } = await decisionStep({ watch, repo, io: real, state, ctx, shared, dryRun: true });
     print(formatDecisionDryRun(rows));
-    return { ok: true, dryRun: { rows } };
+    return { ok: true, dryRun: { rows, claim, fold: folded, skip } };
   }
   if (argv.includes("--dry-run")) {
     const real = deps.io ?? realIo(repo, env), branches = readBranches(cwd);
