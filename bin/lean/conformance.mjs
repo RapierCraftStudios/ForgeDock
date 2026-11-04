@@ -402,6 +402,21 @@ function amendmentProblem(a, tag) {
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
 
+/** #5089: shape-only check of the builder's amendments (unknown kind, missing path or requirement), run before the gate so one in-lane correction can fix them. Returns the rejection strings; [] when valid. */
+export function amendmentKindProblems(amendments) {
+  const out = [];
+  for (const raw of Array.isArray(amendments) ? amendments : []) {
+    const a = normalizeAmendment(raw);
+    if (a?.kind === UNRELATED_CI_KIND || INFO_KINDS.includes(a?.kind)) continue;
+    const tag = JSON.stringify(raw ?? null).slice(0, 400);
+    const known = AMEND_KINDS.includes(a?.kind);
+    const missing = a?.kind === "add-deliverable" ? blank(a.path)
+      : TRACKED.includes(a?.kind) || a?.kind === "amend-requirement" ? blank(a.requirement) : false;
+    if (!known || missing) out.push(amendmentProblem(a, tag));
+  }
+  return out;
+}
+
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
  * defer|post-deploy {requirement: id}. Every amendment needs a why (or the engine's defaultWhy); `addedPaths` are lane-added files that count as decision anchors when a deliverable lists them. Returns {contract, applied[], toTrack[], problems[]}.
