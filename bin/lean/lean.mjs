@@ -2327,7 +2327,7 @@ export async function runCore(o) {
       const validatePhase = phaseLedger.during("validate", async () => ({ runs: await rerunFailedValidatesRaw(effective), subs: await rerunSubstitutedOriginals(effective) })).finally(() => { validateMs = now() - gateT0; });
       const [{ runs: validateRuns, subs: substitutedRuns }, guardFailures] = await Promise.all([validatePhase, guardGate(files)]);
       // #5087: forge.yaml topology.route_reachability gates the route handlers this diff adds; unset = no check
-      const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }))?.r ?? { rc: 127 } }) : [];
+      const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
       // #4705: only the part not hidden behind the validate rerun; 0 when the gate errored or skipped
       const guardRunMs = guardEv && !guardEv.error ? Math.max(0, now() - gateT0 - validateMs) : 0;
       guardAddedMs += guardRunMs;

@@ -31,14 +31,14 @@ const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 /**
  * Blocking failures (conformance.unimplemented, kind route_unreachable) when the declared command exits non-zero for the
  * added route paths. [] when no command is declared or no route was added. A command that cannot start (rc 127) is
- * reported too: a declared blocking check that never ran is no evidence. `run` is ({command}) => {rc, output}.
-
+ * reported too: a declared blocking check that never ran is no evidence. `run` is ({command}) => {rc, output}
+ * (a `{r: {rc, output}}` wrapper is unwrapped).
  */
 export async function routeReachabilityFailures({ command, paths, run }) {
   const cmd = typeof command === "string" ? command.trim() : "";
   if (!cmd || !paths?.length) return [];
   let r;
-  try { r = await run({ command: `${cmd} ${paths.map(sq).join(" ")}` }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+  try { r = await run({ command: `${cmd} ${paths.map(sq).join(" ")}` }); r = r?.r ?? r; } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
   if (r?.rc === 0) return [];
   const tail = String(r?.output ?? "").trim().split("\n").slice(-12).join("\n").slice(0, 1500);
   return [{

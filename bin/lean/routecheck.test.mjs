@@ -44,6 +44,11 @@ describe("#5087 route reachability", () => {
   it("passes a route the ingress delivers to web", async () => {
     assert.deepEqual(await routeReachabilityFailures({ command: `bash ${ingress}`, paths: ["/api/v1/batch"], run }), []);
   });
+  it("a passing command wrapped as {r: {rc, output}} (lean io.runCommand shape) is not reported as a failure", async () => {
+    const wrapped = async (a) => ({ r: await run(a) });
+    assert.deepEqual(await routeReachabilityFailures({ command: `bash ${ingress}`, paths: ["/api/v1/batch"], run: wrapped }), []);
+    assert.equal((await routeReachabilityFailures({ command: `bash ${ingress}`, paths: ["/api/v1/agent/signup/pending"], run: wrapped })).length, 1);
+  });
   it("is a no-op without a declared command or without added routes", async () => {
     const never = async () => { throw new Error("must not run"); };
     assert.deepEqual(await routeReachabilityFailures({ command: undefined, paths: ["/api/v1/x"], run: never }), []);
