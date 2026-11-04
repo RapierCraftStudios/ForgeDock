@@ -35,6 +35,14 @@ test("#4766 loadPolicy: defaults, fallback order, matrix schema", () => {
   assert.equal(loadPolicy({ io: files({}) }).policyPath, null);
 });
 
+test("#5080 splitEscalation: a credentials block that is only read-only production access is host work; real credentials stay external", () => {
+  const matrix = loadPolicy({ io: files({ "AGENTS.md": "a" }) }).matrix;
+  const host = splitEscalation({ text: "D1 is gated by K1 on read-only production telemetry: a host-only prod_monitor capability this sandbox lacks", blockType: "credentials", terminalCode: "builder.blocked" }, matrix);
+  assert.equal(host.kind, "host");
+  assert.deepEqual(host.external, []);
+  assert.equal(splitEscalation({ text: "needs the production API key to read prod data", blockType: "credentials", terminalCode: "builder.blocked" }, matrix).kind, "external");
+});
+
 test("#4766 splitEscalation: the six AlterLab fixtures", () => {
   const { matrix } = policy();
   for (const [n, f] of Object.entries(FIX)) assert.equal(splitEscalation(f, matrix).kind, f.want, `#${n}`);

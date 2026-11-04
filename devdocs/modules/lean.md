@@ -2477,6 +2477,13 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
 
+## Entry 2026-11-04 — Already-fixed close, source-deliverable rule, host block routing (#5080)
+
+- `reproFailures`: `BASE=RAN HEAD=RAN` is `repro_base_green`. With no source change in the diff, `alreadyFixedOnBase` closes the issue as completed, citing the base commit (lean.mjs, finish `already-fixed`).
+- `precheck` adds `source_deliverable_untouched`: a diff of only test files cannot close an issue whose contract names a source deliverable (`conformance.unimplemented`).
+- A credentials block naming only read-only production access (`READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match) is host work: on a remote lane `env.capability_remote` (recovered on the host); on a local lane it ends `host-task` (label `host-task`, comment `FORGE:HOST_TASK`, never `needs-human`); `splitEscalation` kind `host`; `prod_monitor` matches `prod_monitor` and read-only production telemetry, and `hostCapabilityBlock` accepts it when no capabilities are declared.
+- `formatProbeSummary` prints the cause of an `error` row; `scripts/issue-dedup.sh` needs at least 2 shared tokens.
+
 ## Entry 2026-11-04 — Route reachability and e2e-weakening decisions (#5087)
 forge.yaml `topology.route_reachability` (`readEnvConfig` -> `routeReachability`) is a repo-supplied command. After validate, `lean.mjs` maps the route handlers the diff adds (`routePathsFromFiles`, `routecheck.mjs`) to URL paths and runs it with them as args; a non-zero exit is a blocking `conformance.unimplemented` (`kind: route_unreachable`) passed to `precheck` as `routeFailures`. Unset = no check.
 `validateContract` rejects a `decisions[]` row that replaces an e2e/integration check with mocked tests unless a `forge-probe` acceptance probe is declared (`weakenedE2eDecisions`); the #4726 `[type:e2e]` rule is untouched. `scripts/review-roster.sh` adds Infra for route-handler paths (`route-handler` trigger).
