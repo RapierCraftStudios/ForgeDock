@@ -266,7 +266,7 @@ do_extract() {
     # carried head's, and only a VERIFIED carry record (trusted, same head, resolver agrees) selects that SHA. DELTA: reviewers
     # saw only the delta, so the earlier fully reviewed head's findings are read too (they must still reach the Phase 8 gates);
     # the 6B.4 head-SHA and provenance gates then drop any whose cited line is gone from the current head.
-    PRIMARY_SHA="$REVIEW_SHA"; EARLIER_SHA=""
+    PRIMARY_SHA="$REVIEW_SHA"; EARLIER_SHA=""; PRIMARY_FINDINGS=""
     if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then
         CARRIED_FROM=$(carry_verified_from); [ -n "$CARRIED_FROM" ] && PRIMARY_SHA="$CARRIED_FROM"
     fi
@@ -280,6 +280,8 @@ do_extract() {
     if [ -n "$EARLIER_SHA" ]; then
         EARLIER_BODIES=$(bodies_at "$EARLIER_SHA") && [ -n "$EARLIER_BODIES" ] \
             || { echo "REVIEW_RESULT: status: BLOCKED, blocker: earlier reviewed head ${EARLIER_SHA} findings unreadable (fail closed)"; exit 3; }
+        # forge#5081: the findings the delta-head reviewers themselves raised; an earlier-pass finding absent from them is "earlier only".
+        PRIMARY_FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
         SOURCE_BODIES=$(printf '%s\n%s' "$SOURCE_BODIES" "$EARLIER_BODIES")
         CARRIER_BODIES=$(printf '%s\n%s' "$CARRIER_BODIES" "$(agent_bodies_at "$EARLIER_SHA")")
     fi
@@ -385,10 +387,18 @@ do_extract() {
             | tr '[:upper:]' '[:lower:]' | sed -E 's/.*(fails|regresses).*/\1/')
         TEXT_FILE="$WORKDIR/text.$N_EXTRACTED"
         { printf '%s\n%s\n' "$F_TITLE" "$F_FILE"; cat "$SECTION_FILE" 2>/dev/null; } > "$TEXT_FILE"
+        # DELTA: earlier_only = raised only at the earlier head (not by the delta reviewers, not re-raised on the same file within 5 lines).
+        EARLIER_ONLY=false
+        if [ -n "$EARLIER_SHA" ] && ! printf '%s\n' "$PRIMARY_FINDINGS" | grep -qxF -- "${F_ID}|${F_CONF}|${F_SEV}|${F_LOC}|${F_TITLE}" \
+            && ! printf '%s\n' "$PRIMARY_FINDINGS" | awk -F'|' -v f="$F_FILE" -v l="${L1:-0}" '{ loc = $4; i = match(loc, /:[0-9]+(-[0-9]+)?$/)
+                if (i) { file = substr(loc, 1, i - 1); split(substr(loc, i + 1), b, "-"); st = b[1] + 0 } else { file = loc; st = 0 }
+                if (file == f && (l + 0 == 0 || st == 0 || (st >= l - 5 && st <= l + 5))) found = 1 } END { exit !found }'; then
+            EARLIER_ONLY=true
+        fi
         jq -n -c --arg id "$F_ID" --arg c "$F_CONF" --arg s "$F_SEV" --arg loc "$F_LOC" --arg file "$F_FILE" --arg l1 "$L1" --arg l2 "$L2" \
-            --arg title "$F_TITLE" --arg agent "$AGENT" --arg scen "$SCENARIO" --arg fe "$FIX_EFF" --rawfile text "$TEXT_FILE" \
+            --arg title "$F_TITLE" --arg agent "$AGENT" --arg scen "$SCENARIO" --arg fe "$FIX_EFF" --rawfile text "$TEXT_FILE" --argjson eo "$EARLIER_ONLY" \
             '{id: $id, confidence: $c, severity: $s, loc: $loc, file: $file, line_start: ($l1 | tonumber? // null), line_end: ($l2 | tonumber? // null),
-              title: $title, agent: $agent, scenario: $scen, fix_efficacy: $fe, text: $text}' >> "$RAW"
+              title: $title, agent: $agent, scenario: $scen, fix_efficacy: $fe, text: $text} + (if $eo then {earlier_only: true} else {} end)' >> "$RAW"
     done <<EOF
 $FINDINGS
 EOF
@@ -934,6 +944,21 @@ do_file_prepare() {
     }
 
     OUT_ITEMS="$WORKDIR/items.jsonl"; : > "$OUT_ITEMS"
+    # forge#5081: DELTA: the old-side line ranges (file, start, count) the delta rewrote or deleted; an earlier-only finding inside one was fixed there.
+    DELTA_OLD_RANGES="$WORKDIR/delta-old-ranges"; : > "$DELTA_OLD_RANGES"
+    if [ "$REVIEW_MODE" = "DELTA" ] && is_sha "$DELTA_FROM" && is_sha "$REVIEW_SHA"; then
+        _dtop=$(git rev-parse --show-toplevel 2>/dev/null) || _dtop=""
+        if [ -n "$_dtop" ]; then
+            { git -C "$_dtop" diff -U0 --no-color --no-renames "$DELTA_FROM" "$REVIEW_SHA" 2>/dev/null || true; } | while IFS= read -r _l; do
+                case "$_l" in
+                    "--- a/"*) _f="${_l#--- a/}" ;;
+                    "@@ "*) _h="${_l#@@ -}"; _o="${_h%% *}"
+                        case "$_o" in *,*) _oc="${_o#*,}" ;; *) _oc=1 ;; esac
+                        printf '%s\t%s\t%s\n' "$_f" "${_o%%,*}" "$_oc" ;;
+                esac
+            done > "$DELTA_OLD_RANGES" || : > "$DELTA_OLD_RANGES"
+        fi
+    fi
     TOTAL=$(jq '.findings | length' "$IN_FILE"); I=0; N_FILE=0
     while [ "$I" -lt "$TOTAL" ]; do
         F_ROUTE=$(fj .route); F_CLASS=$(fj .class)
@@ -954,7 +979,13 @@ do_file_prepare() {
         else
             DEDUP_RESULT=""; DEDUP_EXIT=0
         fi
-        if [ "$DEDUP_EXIT" -eq 1 ]; then
+        F_EARLIER_ONLY=$(fj .earlier_only)
+        if [ "$F_EARLIER_ONLY" = "true" ] && [ "$F_LINE" -gt 0 ] && [ -s "$DELTA_OLD_RANGES" ] \
+            && awk -F'\t' -v f="$F_FILE" -v l="$F_LINE" '$1 == f && $3 + 0 > 0 && l >= $2 + 0 && l <= $2 + $3 - 1 { found = 1 } END { exit !found }' "$DELTA_OLD_RANGES"; then
+            # The delta rewrote the cited lines and its reviewers did not re-raise the finding: fixed in the delta, never re-filed.
+            ACTION="skip-fixed-in-delta"; NOTE="fixed in delta ${DELTA_FROM:0:7}..${REVIEW_SHA:0:7}"
+            echo "FIXED-IN-DELTA: ${F_FILE}:${F_LINE} was changed by the delta and not re-raised"
+        elif [ "$DEDUP_EXIT" -eq 1 ]; then
             ACTION="skip-dedup"; NOTE="$DEDUP_RESULT"; DEDUP_OF=$(printf '%s' "$DEDUP_RESULT" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)
             echo "DEDUP: Skipping — $DEDUP_RESULT"
         elif [ "$DEDUP_EXIT" -eq 2 ]; then

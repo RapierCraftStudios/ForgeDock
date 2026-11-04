@@ -72,7 +72,7 @@ gh_retry() {
 # One review-finding search fetch; fails (so gh_retry retries) on a gh error or non-array output.
 fetch_findings() {
   local raw
-  raw=$(gh issue list -R "$GH_REPO" --label "review-finding" --state open --search "PR #${1}" --limit 20 --json number,title,body 2>/dev/null) || return 1
+  raw=$(gh issue list -R "$GH_REPO" --label "review-finding" --state open --search "PR #${1}" --limit 20 --json number,title,body,labels 2>/dev/null) || return 1
   printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
   printf '%s' "$raw"
 }
@@ -156,7 +156,9 @@ for pr_num in $ALL_PR_NUMBERS; do
   # Search for open review-finding issues that reference this PR. The search is only a coarse
   # candidate fetch (full-text, tokenized: it also hits hidden markers and longer numbers), so
   # narrow it with the anchored FINDING_PR_FILTER: title suffix `PR #N)` or a `**Source**: PR #N` line.
-  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
+  # Only a blocking finding gates: labelled `blocking`, priority:P0/P1, or carrying no priority:* label (unknown severity fails closed).
+  # A priority:P2/P3 follow-up (NOTE-class, POSSIBLE, over review.max_filed_findings) never blocks the bundle.
+  FINDING_PR_FILTER='[.[] | select(([.labels[]?.name] | (index("blocking") != null) or (index("priority:P0") != null) or (index("priority:P1") != null) or (map(select(startswith("priority:"))) | length == 0))) | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
   OPEN_FINDINGS=""
   if _RAW=$(gh_retry --search fetch_findings "$pr_num"); then
     OPEN_FINDINGS=$(printf '%s' "$_RAW" | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null) || READ_FAILURES="$READ_FAILURES #${pr_num}(findings)"  # uses FINDING_PR_FILTER
@@ -177,7 +179,7 @@ if [ -n "$READ_FAILURES" ]; then
   echo "Re-run the gate once GitHub reads succeed."
   echo "RESULT: BLOCK DEPLOY"
   if [ -n "$PR_NUMBER" ]; then
-    gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
+    gh_retry gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
 ## Deploy Gate: BLOCKED
 
 **Gate**: open-review-finding (read failure)
@@ -195,7 +197,7 @@ if [ -n "$DEGRADED_REVIEWS" ]; then
   echo "⛔ DEPLOY BLOCKED — An included PR has an incomplete isolated review panel."
   echo "$DEGRADED_REVIEWS"
   if [ -n "$PR_NUMBER" ]; then
-    gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
+    gh_retry gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
 ## Deploy Gate: BLOCKED
 
 **Gate**: review-panel-integrity
@@ -245,7 +247,7 @@ if [ -n "$BLOCKING_FINDINGS" ]; then
     FINDING_COUNT=$(echo "$BLOCKING_FINDINGS" | grep -c '^\s*- #' || echo "unknown")
     GATE_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     if [ -n "$PR_NUMBER" ]; then
-      gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
+      gh_retry gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
 ## Deploy Gate: BLOCKED
 
 **Gate**: open-review-finding
@@ -274,7 +276,7 @@ else
   echo "✅ Open review-finding gate: PASSED — no open findings for PRs in this bundle."
   # Post FORGE:GATE_PASS for symmetric observability — bypass is indistinguishable from clean pass without this
   if [ -n "$PR_NUMBER" ]; then
-    gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_PASS -->
+    gh_retry gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_PASS -->
 ## Deploy Gate: PASSED
 
 **Gate**: open-review-finding check
