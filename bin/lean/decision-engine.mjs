@@ -13,6 +13,7 @@
  * Not yet called in production: the issue-watch stage (#4765) is meant to call `settle` once per escalation (key: the escalation comment id).
  */
 import { parseForgeYaml } from "../forge-utils.mjs";
+import { READONLY_PROD_RE, EXTERNAL_NEED_RE } from "./conformance.mjs";
 import { foldDecisions, recordDecisions as recordToRegister } from "./decisions.mjs";
 
 export const VETO_LABEL = "forge:decision-veto";
@@ -80,7 +81,8 @@ const POSTDEPLOY_RE = /\b(all (remaining )?(items|checks|criteria) (are|is) post
 /**
  * Splits an escalation into decision and external parts from facts. `{terminalCode, blockType, text}`, `matrix` from
  * loadPolicy, `retryable` a set of codes recovery owns. Returns `{kind, decisions:[text], external:[{class, text}]}` with
- * kind `recovery | evidence | post-deploy | external | decision | mixed`.
+ * kind `recovery | evidence | post-deploy | host | external | decision | mixed`. #5080: `host` is read-only production access with no
+ * credential/spend/account/customer need: host work (a `host-task`), never a human ask.
  */
 export function splitEscalation({ terminalCode = null, blockType = null, text = "" } = {}, matrix = [], { retryable = [] } = {}) {
   const body = String(text ?? "");
@@ -88,6 +90,7 @@ export function splitEscalation({ terminalCode = null, blockType = null, text = 
   if (terminalCode && new Set(retryable).has(terminalCode)) return out("recovery");
   if (terminalCode === "conformance.unimplemented" || EVIDENCE_RE.test(body)) return out("evidence");
   if (POSTDEPLOY_RE.test(body)) return out("post-deploy");
+  if (READONLY_PROD_RE.test(body) && !EXTERNAL_NEED_RE.test(body)) return out("host");
   const klass = (t) => matrix.find((m) => m.re.test(t))?.class ?? null;
   if (blockType === "credentials" && matrix.some((m) => m.class === "credentials")) return out("external", [], [{ class: "credentials", text: body.slice(0, 200) }]);
   const lines = body.split("\n").map((l) => l.replace(/^\s*(?:[-*]|\d+[.)])\s+/, "").trim()).filter(Boolean);
@@ -177,6 +180,7 @@ export async function settle(item, policy, deps = {}, opts = {}) {
     if (s.kind === "recovery") return { ...row, reason: "recovery owns this code" };
     if (s.kind === "external") return { ...row, action: "external", kept: true, class: s.external[0]?.class, reason: `skip: external (${s.external[0]?.class})` };
     if (s.kind === "evidence") return { ...row, action: "evidence-needed" };
+    if (s.kind === "host") return { ...row, action: "host-task" };
     if (s.kind === "post-deploy") return { ...row, action: "post-deploy-only" };
     const key = `Escalation: ${item.escalationId ?? "-"}`;
     const precedent = foldDecisions(deps.records ?? []).filter((d) => d.status !== "superseded");

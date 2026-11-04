@@ -206,7 +206,7 @@ export function placement(exec) {
 /** Host-only capabilities and the issue-text signals that mean a lane needs them (#4542). */
 const CAPABILITY_SIGNALS = Object.freeze({
   sops: /\.secrets\/[^\s`'")]*\.enc\.ya?ml|\bsops\b|\bage key\b|\.age\//i,
-  prod_monitor: /\bssh\s+[\w.-]*-monitor\b|\b(?:ovh|netcup)-monitor\b|\bobs-psql\b|\bprod(?:uction)? monitor/i,
+  prod_monitor: /\bssh\s+[\w.-]*-monitor\b|\b(?:ovh|netcup)-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor|\bread[- ]only (?:prod(?:uction)? )?(?:prod(?:uction)? )?telemetry\b/i,
   ops_credentials: /\bcredentials\.yaml\b|\bops[ _-]credentials\b/i,
 });
 
@@ -225,7 +225,8 @@ export function detectNeeds(text, exec = null) {
 
 /** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */
 export function hostCapabilityBlock(summary, caps = null) {
-  const have = new Set(caps?.hostCapabilities ?? []);
+  // #5080: with no declared capabilities, the read-only prod monitor (the dispatching host's, never a secret) still counts
+  const have = new Set(caps?.hostCapabilities?.length ? caps.hostCapabilities : ["prod_monitor"]);
   const named = detectNeeds(summary, caps);
   return named.length && named.every((n) => have.has(n)) ? named : [];
 }

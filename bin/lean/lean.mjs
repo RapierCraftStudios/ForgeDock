@@ -15,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, alreadyFixedOnBase, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -479,6 +479,7 @@ export async function runCore(o) {
     if (["merged", "invalid", "needs-human", "budget-exceeded"].includes(reason)) {
       if (reason === "budget-exceeded") T.close = ["left open", "recoverable budget.exceeded"]; // #4505: not a human escalation
       else if (reason === "merged") T.close = [extra.close === "partial" ? "issue closed (partial)" : "issue closed (completed)", "label workflow:merged"];
+      else if (reason === "invalid" && extra.close === "already-fixed") T.close = ["issue closed (completed)", "already fixed on the base"]; // #5080
       else if (reason === "invalid") T.close = ["issue closed (not planned)", "label workflow:invalid"];
       else { T.close = ["left open", "label needs-human"]; T.anomalies.push(`needs-human: ${String(detail).split("\n")[0].slice(0, 300)}`); }
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
@@ -2371,6 +2372,8 @@ export async function runCore(o) {
       const envFails = pc.failures.filter((f) => ENV_CODES.includes(f.code));
       const pre = [...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems, ...mutBlock];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
+      // #5080: the repro already passes on the base and the diff changes no source: the fix is on the base, not missing
+      if (alreadyFixedOnBase(pre)) return { state: "already-fixed", by: "precheck", failures: pre };
       if (pre.length && !recording()) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
       const hard = recording() ? blockingOf(pre, SHADOW_PRE_BLOCKS).block : [];
@@ -2466,6 +2469,13 @@ export async function runCore(o) {
         const explained = explainFailures(outcome.failures, effective); // #4265: name the unmet requirement, not only the code
         const list = explained.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
         if (outcome.state === "environment") return await envNeedsHuman(outcome.failures);
+        if (outcome.state === "already-fixed") { // #5080: close as delivered, citing the base commit
+          const sha = String(await git(["rev-parse", base]).catch(() => "")).trim().slice(0, 12) || base;
+          const note = `Already fixed on the base: the repro test passes on \`${base}\` (${sha}) without this change, and the diff changes no source file. Closing as delivered.\n\n${list}`;
+          T.decisions.push(`Already fixed on base ${sha} (repro BASE=RAN HEAD=RAN)`);
+          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed", "--comment", note]);
+          return await finish("invalid", `already fixed on base ${sha}`, { close: "already-fixed" });
+        }
         if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
         if (shadow && reviewIncomplete === "degraded" && (outcome.state === "review.incomplete" || outcome.state === "review.inconsistent")) {
           degraded = { state: outcome.state, missing: outcome.missing ?? [] };

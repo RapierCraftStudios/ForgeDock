@@ -649,13 +649,31 @@ describe("repro_test on bug lanes (#4271)", () => {
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
     assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [] });
-    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
+    for (const repro of [{ base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
       assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base} HEAD=${repro.head}`));
     }
     assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
     assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
+  });
+  it("#5080 repro_base_green: BASE=RAN HEAD=RAN is its own kind, and a test-only diff with a source deliverable is never the fix", () => {
+    const k = { ...C, repro_test: RT };
+    const green = precheck({ contract: k, result: res, changedFiles: files, repro: { base: "RAN", head: "RAN" } });
+    assert.deepEqual(green.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_base_green"]]);
+    assert.match(green.failures[0].detail, /BASE=RAN HEAD=RAN/);
+    const testOnly = ["test/leak.test.js"];
+    const pc = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "RAN", head: "RAN" } });
+    assert.deepEqual(pc.failures.map((f) => f.kind), ["repro_base_green", "source_deliverable_untouched"]);
+    assert.equal(alreadyFixedOnBase(pc.failures), true);
+    assert.equal(alreadyFixedOnBase(green.failures), true);
+    assert.equal(alreadyFixedOnBase([{ kind: "repro_base_green" }, { kind: "validate_failed" }]), false);
+    assert.equal(alreadyFixedOnBase([{ kind: "source_deliverable_untouched" }]), false);
+    const only = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "FAILED", head: "RAN" } });
+    assert.deepEqual(only.failures.map((f) => f.kind), ["source_deliverable_untouched"]);
+    assert.deepEqual(sourceDeliverableFailures(k, files), []);
+    assert.deepEqual(sourceDeliverableFailures({ deliverables: [{ id: "D1", path: "docs/a.md" }, { id: "D2", path: "test/leak.test.js" }] }, testOnly), []);
+    assert.deepEqual(sourceDeliverableFailures(k, ["test/leak.test.js", ".forge-lean/x.json"], [".forge-lean/"]).map((f) => f.kind), ["source_deliverable_untouched"]);
   });
   it("a harness UNRUNNABLE on head is env.repro_unrunnable, not conformance.unimplemented (#4334)", () => {
     const k = { ...C, repro_test: RT };
@@ -1139,6 +1157,7 @@ describe("per-kind modes and requirement evidence", () => {
 });
 
 import { mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED } from "./conformance.mjs";
+import { alreadyFixedOnBase, sourceDeliverableFailures } from "./conformance.mjs";
 
 describe("mutation check (#4913)", () => {
   const c = {
