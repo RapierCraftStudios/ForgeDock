@@ -757,6 +757,14 @@ describe("host capabilities in placement (#4542)", () => {
     assert.deepEqual(hostCapabilityBlock("owner must create an account", caps), []);
   });
 
+  it("#5080 the read-only prod monitor is a host capability by its own name or as read-only production telemetry, declared or not", () => {
+    const text = "D1 is gated by contract decision K1 on read-only production telemetry: a host-only prod_monitor capability this sandbox lacks";
+    assert.deepEqual(detectNeeds(text), ["prod_monitor"]);
+    assert.deepEqual(hostCapabilityBlock(text, null), ["prod_monitor"]);
+    assert.deepEqual(hostCapabilityBlock(text, { hostCapabilities: ["sops"] }), []);
+    assert.deepEqual(hostCapabilityBlock("no sops key", null), []);
+  });
+
   it("#4785 placementText: body, FORGE:DECISION comments and the last frozen contract's validate commands", () => {
     const exec = parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "promtool" });
     const k = (cmd) => "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: cmd }] }, "abcdef123456");

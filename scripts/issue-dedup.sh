@@ -43,8 +43,8 @@
 #   3. Remove any --exclude'd issue numbers from the candidate set.
 #   4. For each remaining candidate open issue, count shared tokens (length ≥ 4)
 #      between the proposed title and the candidate title.
-#   5. MATCH threshold: ≥ 3 shared tokens OR shared token count ≥ 50% of
-#      the shorter title's token set — whichever fires first.
+#   5. MATCH threshold: ≥ 3 shared tokens OR (≥ 2 shared tokens AND ≥ 50% of
+#      the shorter title's token set). One shared word never matches (#5080).
 #   6. On match: print "DUPLICATE: #<N> <title>" to stdout, exit 1.
 #   7. On no match: exit 0 (silent).
 #
@@ -243,7 +243,8 @@ fi
 # --------------------------------------------------------------------------- #
 # Token overlap matching
 # For each candidate, count shared tokens between proposed and candidate titles.
-# Match if: shared_count >= 3  OR  shared_count >= 50% of the shorter token set.
+# Match if: shared_count >= 3  OR  (shared_count >= 2 AND >= 50% of the shorter token set).
+# A single shared word never matches (#5080: one generic noun is not a duplicate).
 # --------------------------------------------------------------------------- #
 MATCH_NUMBER=""
 MATCH_TITLE=""
@@ -279,7 +280,7 @@ while IFS=$'\t' read -r CAND_NUMBER CAND_TITLE; do
   # 50% threshold: shared >= ceil(shorter / 2)
   HALF_THRESHOLD=$(( (SHORTER + 1) / 2 ))
 
-  if [[ "$SHARED_COUNT" -ge 3 ]] || [[ "$SHARED_COUNT" -ge "$HALF_THRESHOLD" && "$SHORTER" -ge 2 ]]; then
+  if [[ "$SHARED_COUNT" -ge 3 ]] || [[ "$SHARED_COUNT" -ge 2 && "$SHARED_COUNT" -ge "$HALF_THRESHOLD" && "$SHORTER" -ge 2 ]]; then
     MATCH_NUMBER="$CAND_NUMBER"
     MATCH_TITLE="$CAND_TITLE"
     break

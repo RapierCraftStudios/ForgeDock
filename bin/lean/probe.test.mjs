@@ -199,6 +199,10 @@ describe("probe (#4399)", () => {
       "probes: pass #1; fail (reopened) #2; awaiting promotion #3");
     assert.equal(formatProbeSummary([{ issue: 4, outcome: "already-recorded" }]), "");
   });
+  it("#5080 an error row names the probe and the cause, not a bare issue number", () => {
+    assert.equal(formatProbeSummary([{ issue: 38074, outcome: "error", detail: "probe #38074: gh: HTTP 502" }]), "probes: error #38074 (probe #38074: gh: HTTP 502)");
+    assert.equal(formatProbeSummary([{ issue: 7, outcome: "error" }]), "probes: error #7");
+  });
 
   it("forge.yaml config defaults and a real spawn honour exit, timeout and env", async () => {
     assert.deepEqual(readProbeConfig("/nonexistent"), { env: [], timeoutS: 120, sweepDays: 30, enabled: true });

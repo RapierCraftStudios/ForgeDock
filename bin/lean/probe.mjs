@@ -282,7 +282,7 @@ export async function sweepProbes({ repo, cwd = process.cwd(), io, issues = null
   const rows = [];
   for (const issue of list) {
     try { rows.push(await probeIssue({ issue, repo, cwd, io, defaultBranch, dryRun, config, env, spawn })); } catch (e) {
-      rows.push({ issue, outcome: "error", detail: String(e?.message ?? e).slice(0, 160) });
+      rows.push({ issue, outcome: "error", detail: `probe #${issue}: ${String(e?.message ?? e).slice(0, 140)}` });
     }
     try { if (!dryRun) await onResult?.(rows[rows.length - 1]); } catch { /* an event sink never fails the sweep (#4630) */ }
   }
@@ -292,7 +292,9 @@ export async function sweepProbes({ repo, cwd = process.cwd(), io, issues = null
 const GROUPS = [["pass", "pass"], ["fail", "fail (reopened)"], ["awaiting-promotion", "awaiting promotion"], ["unresolved", "unresolved fix"], ["untrusted", "untrusted (not run)"], ["error", "error"]];
 /** One line, e.g. `probes: pass #A; fail (reopened) #B; awaiting promotion #C`; "" when nothing ran or waits. */
 export function formatProbeSummary(rows) {
-  const parts = GROUPS.map(([k, label]) => [label, (rows ?? []).filter((r) => r.outcome === k).map((r) => `#${r.issue}`)])
+  // #5080: an error row names its cause (the probe step and message) instead of a bare issue number
+  const ref = (r) => r.outcome === "error" && String(r.detail ?? "").trim() ? `#${r.issue} (${String(r.detail).replace(/\s+/g, " ").trim().slice(0, 120)})` : `#${r.issue}`;
+  const parts = GROUPS.map(([k, label]) => [label, (rows ?? []).filter((r) => r.outcome === k).map(ref)])
     .filter(([, l]) => l.length).map(([label, l]) => `${label} ${l.join(" ")}`);
   return parts.length ? `probes: ${parts.join("; ")}` : "";
 }

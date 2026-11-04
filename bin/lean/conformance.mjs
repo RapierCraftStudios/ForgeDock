@@ -735,7 +735,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -800,9 +800,11 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
+  failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
   for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
+  for (const f of coupledFailures ?? []) failures.push(f); // #5079
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
@@ -834,8 +836,36 @@ export function reproFailures(contract, { base, head } = {}) {
       detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on head (environment, not the change); got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}` }];
   }
   const skipped = base === "SKIPPED" ? " (base not run: head did not pass)" : "";
+  // #5080: the test already passes on the base: the fix is there (a hotfix or another PR), not missing from this change
+  if (base === "RAN") return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_base_green",
+    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)` }];
   return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
+}
+
+const SOURCE_EXT_RE = /\.(?:m?[jt]sx?|cjs|py|go|rs|rb|java|kt|swift|php|cs|c|cc|cpp|h|hpp|sh)$/i;
+/**
+ * #5080: a diff of test files only, for a contract that names a code deliverable (a non-test source file): the tests pin
+ * behaviour but nothing was changed, so it must not be accepted as the fix. Returns the failure rows ([] otherwise).
+ */
+export function sourceDeliverableFailures(contract, changedFiles = [], ignore = []) {
+  const files = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)));
+  if (!files.length || !files.every(isTestPath)) return [];
+  const src = (contract.deliverables ?? []).map((d) => cleanPath(d.path)).filter((p) => p && !/[*?]|\/$/.test(p) && !isTestPath(p) && SOURCE_EXT_RE.test(p));
+  if (!src.length) return [];
+  return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "source_deliverable_untouched",
+    detail: `the diff changes only test files (${files.slice(0, 3).join(", ")}${files.length > 3 ? ", ..." : ""}) but the contract names source deliverable(s) ${src.slice(0, 3).join(", ")}: tests that pin current behaviour are not the fix` }];
+}
+
+/**
+ * #5080: the repro already passes on the base (repro_base_green), the diff has no non-test source change, and the only other
+ * failure is source_deliverable_untouched: the issue is already fixed on the base, so it closes as delivered instead of
+ * needs-human. A diff that changes source keeps the conformance.unimplemented path (K3).
+ */
+export function alreadyFixedOnBase(failures = [], changedFiles = [], ignore = []) {
+  const files = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)));
+  if (files.some((f) => !isTestPath(f) && SOURCE_EXT_RE.test(f))) return false;
+  return failures.some((f) => f.kind === "repro_base_green") && failures.every((f) => f.kind === "repro_base_green" || f.kind === "source_deliverable_untouched");
 }
 
 const EXEMPT_RE = /hotspot-exempt:\s*\S/i;
@@ -1170,9 +1200,9 @@ export function bucketProblems(r) {
 }
 /** #5078: post-promotion / production-verify / rollout text (the rollup) and read-only production data or capture (the host: the prod_monitor signals of execution.mjs plus a read-only prod query). Mirrored in scripts/file-deferred-followups.sh. */
 const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
-const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|obs-psql|[a-z0-9.-]+-monitor\b|prod(?:uction)? monitor|read[- ]only[^.]{0,40}prod|prod(?:uction)?[^.]{0,30}(?:query|queries|capture|data|logs?)\b/i;
+export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|obs-psql|[a-z0-9.-]+-monitor\b|prod(?:uction)? monitor|read[- ]only[^.]{0,40}prod|prod(?:uction)?[^.]{0,30}(?:query|queries|capture|data|logs?)\b/i;
 /** An item that truly needs the outside world stays external even when it also reads production. */
-const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal/i;
+export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal/i;
 /**
  * #5078: where an owner deferral goes. `owner:orchestrator`, `owner:promote:*` or post-promotion text -> post-deploy (the
  * rollup); read-only production data or capture (with no credential/spend/account/third-party/customer need) -> host; else external (credentials, spend, an account, a third party or a customer).
