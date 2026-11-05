@@ -266,10 +266,16 @@ export function heavyShimScript(name, real, { node = process.execPath, script = 
   return `${SHIM_HEADER}export FORGE_HEAVY_SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"\nexec ${q(node)} ${q(script)} run --name ${q(name)} -- ${q(real)} "$@"\n`;
 }
 
-/** True when `text` is a shell-style script that looks `name` up on PATH itself (a pass-through wrapper, #4680). */
+/**
+ * True when `text` is a shell-style script that looks `name` up on PATH itself (a pass-through wrapper, #4680). The lookup
+ * target may be the literal name, or (#5148) a variable/substitution when the script derives that name from `$0`
+ * (a `${0##…}` strip or `basename "$0"`), the shape of a wrapper symlinked under several command names.
+ */
 export function isPassThroughWrapper(text, name) {
   const t = String(text ?? "");
-  return t.startsWith("#!") && t.includes(name) && /\b(command\s+-v|which|type\s+-p)\b/.test(t);
+  if (!t.startsWith("#!") || !/\b(command\s+-v|which|type\s+-p)\b/.test(t)) return false;
+  if (t.includes(name)) return true;
+  return /(?:command\s+-v|which|type\s+-p)\s+(?:-\s+)?["']?\$/.test(t) && /\$\{0##\*\/\}|basename\s+(?:--\s+)?["']?\$\{?0\b/.test(t);
 }
 const head = (p) => { try { return readFileSync(p, "utf8").slice(0, 4096); } catch { return ""; } };
 
@@ -332,6 +338,8 @@ export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = h
 }
 
 export const SHIM_LOOP_MAX = 4;
+/** #5148: hard bound on shim entries (FORGE_HEAVY_DEPTH) whatever the wrapper shape; far above legitimate `npm run` nesting. */
+export const SHIM_DEPTH_MAX = 32;
 /**
  * Re-entry guard (#4680): FORGE_HEAVY_CHAIN lists `name:cmd` per shim run. A repeat of the same name+cmd where cmd is a
  * pass-through wrapper means it sent the call back to the shim; a repeat of a real binary is a legitimate nested call
@@ -342,15 +350,17 @@ export function guardChain(name, cmd, env, read = head) {
   const chain = String(env.FORGE_HEAVY_CHAIN ?? "").split("|").filter(Boolean);
   const dirs = chain.map((e) => dirname(e.slice(e.indexOf(":") + 1)));
   const loop = (why) => ({ error: `env.shim_loop: ${name} ${why} (PATH dirs: ${[env.FORGE_HEAVY_SHIM_DIR, ...dirs].filter(Boolean).join(", ") || "none"})` });
+  const depth = Math.max(0, Number.parseInt(env.FORGE_HEAVY_DEPTH, 10) || 0);
+  if (depth >= SHIM_DEPTH_MAX) return loop(`re-entered the heavy shim ${depth} levels deep (max ${SHIM_DEPTH_MAX})`);
   const repeat = chain.includes(`${name}:${cmd}`);
-  if (repeat && !isPassThroughWrapper(read(cmd), name)) return { cmd, env };
+  if (repeat && !isPassThroughWrapper(read(cmd), name)) return { cmd, env: { ...env, FORGE_HEAVY_DEPTH: String(depth + 1) } };
   if (chain.length >= SHIM_LOOP_MAX) return loop(`re-entered the heavy shim more than ${SHIM_LOOP_MAX} times`);
   if (repeat) {
     const next = which(name, env.PATH ?? "", [env.FORGE_HEAVY_SHIM_DIR, ...dirs].filter(Boolean));
     if (!next) return loop(`re-entered via ${cmd} and no other ${name} is on PATH`);
     cmd = next;
   }
-  return { cmd, env: { ...env, FORGE_HEAVY_CHAIN: [...chain, `${name}:${cmd}`].join("|") } };
+  return { cmd, env: { ...env, FORGE_HEAVY_DEPTH: String(depth + 1), FORGE_HEAVY_CHAIN: [...chain, `${name}:${cmd}`].join("|") } };
 }
 
 /**
