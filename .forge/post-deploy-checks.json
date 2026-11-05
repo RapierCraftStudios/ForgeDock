@@ -1,0 +1,8 @@
+{
+  "remote-lane-no-claude-attribution": {
+    "run": "git fetch -q origin staging && test \"$(git log --since='1 day ago' origin/staging -i --grep='Co-Authored-By: Claude' --grep='Generated with \\[Claude Code\\]' --format=%H | wc -l)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
+  }
+}
