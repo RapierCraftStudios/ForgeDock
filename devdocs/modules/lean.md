@@ -2538,7 +2538,7 @@ Tests: `rotator.test.mjs`, `limits.test.mjs` "#5094 rotator headroom" and "#5094
 
 - `alreadyFixedOnBase`: any changed file that is neither a test (`isTestPath`) nor a doc (`DOC_ONLY_RE`: md, mdx, txt, rst, adoc) counts as lane work. A css, json, yaml, sql, vue, tf or html fix with a repro that already passes on base keeps `conformance.unimplemented`; it is never closed as already fixed with its branch dropped.
 - `READONLY_PROD_RE` matches whole words only: `ssh <host>-monitor`, `obs-psql`, `prod(uction) monitor`, read-only ... prod, and prod ... query/queries/capture/telemetry/logs. Bare `*-monitor` and "production data" no longer match, and neither does "product".
-- `EXTERNAL_NEED_RE` also matches password, passphrase, ssh key, private key, login, sudo, and production writes (delete, drop, truncate, wipe, destroy, modify, migrate, write). These stay external, never host.
+- `EXTERNAL_NEED_RE` also matches password, passphrase, ssh key, private key, login, sudo, and production writes (delete, drop, truncate, wipe, destroy, modify, migrate, write, update, restart, rotate, remove, grant, alter). These stay external, never host.
 - `ownerRoute`: an `EXTERNAL_NEED_RE` match wins over post-promotion wording, so "provide the API key before rollout" is external, not the post-deploy rollup.
 - `scripts/file-deferred-followups.sh` `owner_route` mirrors all of this. It spells word boundaries as `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` (no `\b`, for BSD grep). `scripts/owner-route-parity.test.sh` asserts the JS and shell routes agree.
 

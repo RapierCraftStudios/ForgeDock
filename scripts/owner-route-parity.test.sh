@@ -26,6 +26,12 @@ external|needs the prod ssh key to read production logs
 external|product manager decides the pricing page
 external|production dataset retention policy
 external|provide the Stripe API key, needed before rollout
+external|ssh ovh-monitor and restart the worker
+external|rotate the prod monitor webhook
+external|update the production telemetry config
+external|remove the stale prod monitor alert
+external|grant read-only prod access to the analyst
+external|alter the production query timeout
 post-deploy|verify the dashboard after release
 CASES
 echo "passed=$PASS failed=$FAIL"
