@@ -524,8 +524,10 @@ export function remoteTransportFor(exec = {}, { transport = null, env = process.
   if (isActionsEndpoint(exec.endpoint) && exec.allowActions !== true) {
     throw typedError("execution.provider.actions_refused", "execution.endpoint is a GitHub Actions API; set execution.allow_actions: true to spend Actions minutes");
   }
-  const token = credentials ? (exec.tokenEnv ? credentials(exec.tokenEnv) : null)
-    : poolCredential({ provider: "remote", ...exec }, { env, router: router !== undefined ? router : poolRouterConfig({ env }) }).token;
+  // #5144: a getter, so the bearer is resolved on every request (a token fixed or rotated mid-batch is picked up), not once here.
+  const rt = credentials ? null : (router !== undefined ? router : poolRouterConfig({ env }));
+  const token = credentials ? () => (exec.tokenEnv ? credentials(exec.tokenEnv) : null)
+    : () => poolCredential({ provider: "remote", ...exec }, { env, router: rt }).token;
   return httpTransport({ endpoint: exec.endpoint, token, ...(fetchFn ? { fetchFn } : {}) });
 }
 
@@ -556,11 +558,18 @@ export function providerByName(name, opts) {
     let forgeYaml = null;
     if (pool) { try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; } }
     const endpoint = exec.endpoint ?? (pool ? router?.endpoint : undefined);
-    const resolve = () => poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router });
-    const resolved = resolve();
+    // #5144: the router's token file is re-read per call (a rotated or newly written token), its endpoint stays as at construction.
+    const routerEligible = !(opts?.transport || (pool && exec.endpoint));
+    const routerNow = () => {
+      if (!routerEligible) return null;
+      const c = poolRouterConfig({ env, ...(opts?.poolConfigPath ? { path: opts.poolConfigPath } : {}) });
+      return c ? { endpoint: router?.endpoint ?? c.endpoint, token: c.token } : router;
+    };
+    const resolve = () => poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router: routerNow() });
     // A token read from a file is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
+    // #5144: set even when no token exists yet, so one that appears later is still resolved per call (and redacted).
     const fixed = pool ? "FORGEDOCK_POOL_TOKEN" : "FORGEDOCK_REMOTE_TOKEN";
-    const tokenEnv = exec.tokenEnv ?? (resolved.token ? fixed : undefined);
+    const tokenEnv = exec.tokenEnv ?? fixed;
     // #4685/#5131: an empty env/keychain lookup of `token_env` falls back to `token_file`, then the (matching) router's token file.
     const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env })); // per call, like resolveCredential
     const settings = { ...exec, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
