@@ -31,6 +31,8 @@
  * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
+ * #5138: `remote.max`, `remote.fallbackLocal` and `remote.place` are read on every grant too (engine-cli puts live getters on
+ * them, live-execution.mjs), so `--set-max-remote` / `--set-placement` change a running batch; running lanes are not stopped.
  * `getChildren()` + `autoChildren {mode, pollS, epics}` (#4965, `orchestration.auto_add_children`): with mode `epic`|`all`, at most once per `pollS`
  * it reads one `{list, elsewhere}` and adds the open children (`**Parent**: #P`, sub-issues) of every batch issue and `epics` through the same
  * path as `getAdded` (one decision and one `added` row listing the edges); mode `off` also stops the decomposed-lane join.
@@ -319,7 +321,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const integHeld = new Map(); // issue -> reason (red integration streak on its milestone lane, #4667) holding it this pass
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
-  const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
+  // #5138: read on every grant, so `--set-max-remote` reaches a running batch (a getter on `remote`); running lanes are never stopped.
+  const remoteMax = () => { const m = remote?.max; return Number.isInteger(m) && m >= 0 ? m : 0; };
+  const remoteCapped = new Set(); // #5138: issues waiting for a max_remote slot; polled so a raised live max_remote admits them
   let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
   const capWait = makeCapWait({ now }); // #4909: a lane refused for capacity waits for a free slot, recorded as queue time
   let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
@@ -601,11 +605,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         } else if (cap && Number.isInteger(cap.free)) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
           if (capWait.blocked(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
-          if (capAdmits >= cap.free && remoteRun.size < remoteMax) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
+          if (capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
-        if (p.where === "remote" && remoteRun.size < remoteMax) { capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
-        if (p.where === "remote" && !remote.fallbackLocal) return false;
-        if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
+        if (p.where === "remote" && remoteRun.size < remoteMax()) { remoteCapped.delete(n); capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
+        if (p.where === "remote" && !remote.fallbackLocal) { remoteCapped.add(n); return false; }
+        if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax()} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
         noteBudget(adm.reason);
         if (remote.onBudget !== "local" && !remote.fallbackLocal) { budgetStop = adm.reason; return false; }
@@ -1345,6 +1349,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
+      if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
@@ -1366,6 +1371,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch
+      else if (pending.some((n) => remoteCapped.has(n))) await nap(wake ?? pollMs); // #5138: live max_remote 0: wait for a raise or another placement
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
         for (const n of pending.splice(0)) skip(n, "dependency cycle");
         save();
