@@ -1093,17 +1093,23 @@ describe("#5112: late dependents of a decomposed issue, edge re-read on --requeu
   });
 
   it("#5112 --requeue re-reads the edited Depends on edges", async () => {
-    const bodies = { 1: "", 2: "Depends on #1" };
+    const bodies = { 1: "", 2: "Depends on #1", 3: "" };
     let entries = [];
-    const started = [], log = [], decisions = [];
-    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getRequeued: () => entries,
+    const started = [], log = [], decisions = [], g3 = gate();
+    const done = orchestrate({ issues: [1, 2, 3], parallel: 3, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getRequeued: () => entries,
       decide: (d) => { decisions.push(d); }, onUpdate: (r) => log.push(r),
-      runOne: async (n) => { started.push(n); return n === 1 ? { terminalReason: "needs-human", detail: "builder.blocked: product-decision" } : { terminalReason: "merged" }; } });
+      runOne: async (n) => {
+        started.push(n);
+        if (n === 3) { await g3.p; return { terminalReason: "merged" }; }
+        return n === 1 ? { terminalReason: "needs-human", detail: "builder.blocked: product-decision" } : { terminalReason: "merged" };
+      } });
     await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
     bodies[2] = ""; // the operator dropped the wrong edge
     entries = [{ issue: 2, reason: "edge dropped", by: "operator", at: "2026-11-05T00:00:00Z" }];
+    await until(() => started.includes(2), 3000);
+    g3.open();
     const rows = await done;
-    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "needs-human"], [2, "merged"]]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "needs-human"], [2, "merged"], [3, "merged"]]);
     assert.ok(decisions.some((d) => d.issue === 2 && /edges re-read: #2 -> none/.test(d.what)));
   });
 
