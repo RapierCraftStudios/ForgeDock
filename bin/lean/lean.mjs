@@ -32,7 +32,7 @@ import { runChecks, runWithTimeoutRetry, planPrecheck, worktreeFingerprint, self
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
-import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
+import { computeTrigger, riskPathHits, TRIGGER_MODES, pathDomains, parseEnforceDomains } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
@@ -205,7 +205,8 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {"off"|"report"} [o.conformanceMutation] forge.yaml engine.conformance_mutation (#4913): rerun each evidence test with the change reverted; a survivor is conformance.mutation_survived (shadow unless conformance_kinds enforces it)
  * @param {Record<string,"enforce"|"shadow">} [o.conformanceKinds] forge.yaml engine.conformance_kinds: a failure code's own mode (enforce blocks, shadow is recorded only); others follow `conformance`
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
- * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs}
+ * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs,
+ *                                   enforceDomains: review.enforce_domains (#5099), a touched listed domain makes the lane enforce}
  * @param {object} [o.verifier]      forge.yaml review.verifier/verifier_model (#4397): {mode: off (default)|shadow|enforce, model}
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  * @param {object} [o.precheck]      {commands, maxMinutes}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240);
@@ -239,6 +240,7 @@ export async function runCore(o) {
   const remoteVerify = vcfg.mode !== "local";
   const triggerMode = TRIGGER_MODES.includes(o.reviewTrigger?.mode) ? o.reviewTrigger.mode : "shadow";
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
+  const enforceDomains = parseEnforceDomains(o.reviewTrigger?.enforceDomains ?? []); // #5099
   const verifierCfg = parseVerifierConfig(o.verifier ?? {});
   const routingCfg = parseBuilderRouting(o.builderRouting ?? {});
   // #4394: the build's model tier, routed from the frozen contract; a failed validate round on the mid tier escalates once
@@ -336,6 +338,7 @@ export async function runCore(o) {
   let guardAddedMs = 0; // #4705 (R12): wall time the guard gate added, summed over the lane, carried on RUN_TERMINAL
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   const kinds = normalizeKindModes(conformanceKinds); // engine.conformance_kinds: a failure code's own mode
+  let domains = [], domainsLogged = null; // #5099: review domains the diff touches (review-roster.sh path triggers)
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   let light = false, modelMs = 0; // #4451: the light lane finished without an upgrade (the same structure/hotspot gates as the full lane, #4502); summed session time
@@ -2211,7 +2214,7 @@ export async function runCore(o) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
           prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
+            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
@@ -2341,6 +2344,20 @@ export async function runCore(o) {
         shadow = false; riskEnforced = hits;
         ev({ event: "CONFORMANCE_RISK_ENFORCED", paths: hits });
         T.decisions.push(`Conformance enforced (review.risk_paths): ${hits.slice(0, 10).join(", ")}${hits.length > 10 ? ` and ${hits.length - 10} more` : ""}`);
+      }
+      // #5099: the domains the diff touches get domain checks in the review; a review.enforce_domains hit enforces (sticky)
+      const pd = pathDomains(files);
+      const dErr = "Review domains unavailable: scripts/review-roster.sh failed; reviewed without domain checks";
+      if (pd === null && !T.anomalies.includes(dErr)) T.anomalies.push(dErr);
+      domains = pd ?? [];
+      const dHits = shadow ? domains.filter((d) => enforceDomains.includes(d)) : [];
+      if (dHits.length) {
+        shadow = false; riskEnforced = dHits.map((d) => `domain:${d}`);
+        T.decisions.push(`Conformance enforced (review.enforce_domains): ${dHits.join(", ")}`);
+      }
+      if (domainsLogged !== domains.join(",")) {
+        domainsLogged = domains.join(",");
+        ev({ event: "REVIEW_DOMAINS", domains, enforced: dHits.length ? dHits : undefined, ...(pd === null ? { error: "roster.failed" } : {}) });
       }
       if (!amendFixed && sessionId && amendmentKindProblems(result?.amendments).length) { // #5089: one in-lane correction, outside the conformance resume budget
         amendFixed = true;

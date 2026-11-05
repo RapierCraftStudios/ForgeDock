@@ -240,6 +240,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    settings.json force. A child env var can't undo that, because settings env wins over it. `CLAUDE_CODE_SUBAGENT_MODEL` is
    set only from forge.yaml `agents.subagent_model` (`readSubagentModel`, the `makeLeanIo` default); unset leaves the
    operator's own default alone.
+   **Attribution pin** (#5118): the same `--settings` always carries `includeCoAuthoredBy: false` and
+   `attribution: {commit: "", pr: ""}`, so Claude Code's default `Co-Authored-By: Claude` trailer is off in every lane, even
+   a remote sandbox whose config dir has no operator settings. When `makeLeanRunner` is `sandboxed` (default `IS_SANDBOX=1`
+   or `CS_SANDBOX_ID`, see `inSandbox`) it also registers `bin/hooks/pre-tool-use.mjs` (`PRE_TOOL_USE_HOOK`) as a PreToolUse
+   hook on `Bash`, so its attribution rule blocks a trailer commit; kept under `FORGEDOCK_FULL_SESSION=1` and for read-only
+   and no-tool roles. Local lanes don't register it (operator user settings already carry it). Post-deploy check
+   `remote-lane-no-claude-attribution` (`.forge/post-deploy-checks.json`) scans staging for the trailer.
    **Re-read nudge** (#4456): the builder session (`builderOnce`, full and light lane) runs with `rereadNudge: true`, and
    `makeLeanRunner` merges `rereadHooks()` into that same `--settings`, registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
    hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
@@ -736,6 +743,8 @@ Lanes run with the client's env. The plan keeps the allowlist
 `PATH|HOME|USER|SHELL|LANG|LC_ALL|TMPDIR|FORGEDOCK_*|CLAUDE_*|ANTHROPIC_*|GH_*|GITHUB_*`
 (`batchEnv`). `mergeEnv` drops the daemon's own allowlisted keys, so an account
 selector never leaks between batches.
+A secret-named key is pinned only when named (`env_passthrough`, `token_env`). A non-empty pin wins over the daemon's value. An empty one never
+overrides it (#5131), and the daemon fills keys the plan lacks (release review #5142 REG-1, #5143).
 
 `--foreground`, `FORGEDOCK_SCHEDD=0` or injected test deps run the batch
 in-process as before.
@@ -1885,6 +1894,7 @@ Cite: #4550.
 ## Entry 2026-10-24 — `pool` execution provider (#4546)
 
 `execution.provider: pool` (`execution.mjs` `providerByName`) is `remoteProvider` (`name: "pool"`) with the endpoint and token defaulted from the local router config (`poolRouterConfig`: `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, token from `forgedock_token_file` or the sibling `forgedock.token`); an explicit `endpoint`/`token_env` wins, and no router config plus no endpoint is `execution.provider.misconfigured`. The token is only sent as the Authorization header and kept in the redaction set.
+#5131: `pool`, `remote`, `remoteTransportFor` (so `gc`) and `preflight.pool_auth` share one resolver, `poolCredential(exec, { env, router, keychain })` -> `{token, source}`: `token_env` from the env then the keychain; then `execution.token_file` (trimmed, `~/` expands; any endpoint); then the router's `forgedock_token_file`, always for `pool` and for `remote` only when its endpoint is unset or equals the local router's (scheme, host and port compared; path and trailing slash ignored). The local pool token is never sent to another endpoint. `source` names the env var, `token_file` or `forgedock_token_file`, never the value. A file-read token is registered under `FORGEDOCK_POOL_TOKEN` (`pool`) or `FORGEDOCK_REMOTE_TOKEN` (`remote`) so `remoteProvider` redacts it. `providerByName`/`remoteTransportFor` take an optional `fetchFn` (test seam, forwarded to `httpTransport`; `runBatch` `deps.sandboxFetch`).
 The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `settings.forgeYaml`; `remoteProvider` adds `env.CS_FORGE_YAML_B64` to the launch spec, so the router's `repos` map is optional (it still takes precedence). Placement is unchanged.
 
 ## Entry 2026-10-24 — Opt-in local fallback when no pool agent is online (#4547)
@@ -2037,7 +2047,7 @@ comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_m
 ## Entry 2026-10-27 — AlterLab engine gaps (#4685)
 - A remote lane's `credentials` block naming a missing tool/module (`missingToolBlock`, lean.mjs) ends `env.tool_missing` (recoverable), not `builder.blocked`.
 - `scripts/hotspots.sh` always excludes lockfiles (basename match at any depth) on top of `exclude_globs`.
-- Pool provider: a `token_env` credential that resolves empty falls back to the router token file; HTTP 401/403 at sandbox start defers `sandbox.auth` (300s), never needs-human.
+- Pool provider: a `token_env` credential that resolves empty falls back to `execution.token_file`, then the router token file (#5131: `remote` too, but only on an endpoint match); HTTP 401/403 at sandbox start defers `sandbox.auth` (300s), never needs-human.
 - Breaker: `orchestrate --clear-breaker <id>` clears it; a breaker tripped only by transport errors (`tripped.transport`) auto-closes after 5 min and is cleared on a daemon-restart resume. Submit-time env replay was already delivered by #4691.
 
 ## Entry 2026-10-27 — Validate results across a merge-time CI fix round (#4708)
@@ -2172,7 +2182,7 @@ Cite: #4769.
 
 ## Entry 2026-10-30 — Batch plan.json never holds secrets (#4787)
 
-`batch.mjs` `writePlan` drops secret-named `plan.env` keys (`SECRET_ENV`, now defined in `batch.mjs`, imported by `schedd.mjs` (not re-exported), also matching a bare `*_KEY`) and records only their names in `plan.envSecrets`; state files stay 0600. On `--resume` the lanes re-read the value from the daemon/client environment (`mergeEnv`) or the keychain (`execution.token_env`). `batch.scrubPlan()` rewrites a pre-fix plan.json (secrets removed, chmod 0600); it runs on every `--resume` and for each batch at schedd start. `--set-env` refuses secret-named keys.
+`batch.mjs` `writePlan` drops secret-named `plan.env` keys (`SECRET_ENV`, now defined in `batch.mjs`, imported by `schedd.mjs` (not re-exported), also matching a bare `*_KEY`) and records only their names in `plan.envSecrets`; state files stay 0600. On `--resume` the lanes re-read the value from the daemon/client environment (`mergeEnv`) or the keychain (`execution.token_env`). #5131: a fresh daemon-hosted batch behaves the same: `batchEnv` never pins an empty value (passthrough keys included), and `mergeEnv` keeps the daemon's non-empty value of a secret-named key over the client's in-memory pin; a non-empty pin only fills a secret the daemon lacks (client-spawned daemon). Non-secret pinned keys still win. `batch.scrubPlan()` rewrites a pre-fix plan.json (secrets removed, chmod 0600); it runs on every `--resume` and for each batch at schedd start. `--set-env` refuses secret-named keys.
 Cite: #4787.
 
 ## Entry 2026-10-30 — Transient lane-resolution failures retry; `lane-refused` is requeueable (#4791)
@@ -2242,7 +2252,7 @@ Cite: #4865.
 
 ## Entry 2026-10-31 — Lane preflight (#4866)
 
-`lanecheck.mjs` (pure, injected io) runs four checks: `preflight.pool_auth` (token resolves, router does not answer 401/403), `preflight.pool_version` (router `GET /agents` version vs CLI, names the upgrade command), `preflight.path_loop` (heavy.mjs `findShimLoops`: a PATH wrapper resolving a shimmed tool back to the shim, names the dir), `preflight.gh_fields` (gh lacks a `--json` field the engine uses). It runs at daemon start (`schedd.mjs`, logged once), on each `orchestrate` admission pass (`preflight` seam: a failure holds admission, all lanes or remote only by scope, one row per distinct code+detail, re-checked each pass, never the breaker) and on demand as `forgedock doctor --lanes`. A sandbox clone failure ends `deferred` `sandbox.clone` with retry-in (`execution.mjs`), never an engine-error. Distinct from the contract preflight in `preflight.mjs`.
+`lanecheck.mjs` (pure, injected io) runs four checks: `preflight.pool_auth` (token resolves, router does not answer 401/403; #5131: through `io.poolToken`, which `hostLaneIo({ env })` wires to `poolCredential` on the dispatch env, so preflight and lane dispatch resolve the same token, and the agents read uses it too; the FAIL detail names the sources tried and the source used, never the value. A null or rejected token holds remote admission before any lane starts, so no lane defers on `sandbox.auth`), `preflight.pool_version` (router `GET /agents` version vs CLI, names the upgrade command), `preflight.path_loop` (heavy.mjs `findShimLoops`: a PATH wrapper resolving a shimmed tool back to the shim, names the dir), `preflight.gh_fields` (gh lacks a `--json` field the engine uses). It runs at daemon start (`schedd.mjs`, logged once), on each `orchestrate` admission pass (`preflight` seam: a failure holds admission, all lanes or remote only by scope, one row per distinct code+detail, re-checked each pass, never the breaker) and on demand as `forgedock doctor --lanes`. A sandbox clone failure ends `deferred` `sandbox.clone` with retry-in (`execution.mjs`), never an engine-error. Distinct from the contract preflight in `preflight.mjs`.
 
 ## Entry 2026-10-31 — issue-watch escalation is resumable, reopen last (#4891)
 
@@ -2452,6 +2462,10 @@ Release review of #5045 (SPEC-1 / BUG-1, CONC-1 / BUG-2). `runBatch` computed `b
 
 `unmetDependencies` (`scripts/plan-validate-live.mjs`) read a dependency's merged PR only from `closedByPullRequestsReferences`, which GitHub fills only for default-branch merges, so every dependency merged into a `milestone/*` lane read as "closed but not merged". When the references yield neither a PR on the base nor a merge commit, it now runs `gh pr list --head feat/issue-<dep>-lean --state merged` and applies the same rule to each PR (merged into the base, or `isAncestor(mergeCommit, base)`). A found PR whose commit is not on the base is held (`kind: commit`) as before. No merged PR, a failed lookup or a non-array reply keeps the refusal. `bin/engine-cli.mjs` is unchanged. Tests: `plan-validate-live.test.mjs` "closed with empty closedByPullRequestsReferences (#5086)". Cost: 0 LLM calls.
 
+## Entry 2026-11-05 — milestone-start gate reads the engine record and PR bodies (#5120)
+
+`unmetDependencies` (`scripts/plan-validate-live.mjs`) now has two more sources for a closed dependency whose closing references are empty, tried in order: the trusted FORGE:STATE `mergedTo` record on the dependency issue (same lane, PR reads merged with the recorded commit), then, after the `feat/issue-<dep>-lean` head lookup, merged PRs on the base whose title or body closes the dependency (`gh pr list --base <base> --search "<dep> in:body"`, closing verb required). Every hit goes through the same rule (merged into the base, or `isAncestor(mergeCommit, base)`, else held as `kind: commit`). Each lookup that fails finds nothing, so a dependency with no merged PR is still refused. No change to the review/merge step: lane PR bodies already end with `Closes #N`.
+
 ## Entry 2026-11-03 — `sched show` pool state follows only a failed capacity probe (#5048)
 
 `orchestrate()` grant used `notePool(cap === null)`, so an unknown capacity (first admission pass, a provider without `capacity()`, a non-integer sample) showed `pool: unreachable` for a healthy pool. Now only a thrown `remote.capacity()` calls `notePool(true, "capacity probe failed")`; a non-null sample calls `notePool(false)`; null leaves the state unchanged and no call is made when `capacity` is not a function. `engine-cli.mjs` remembers a rejected provider probe (`capFailed`) and throws once on the next sync `capacity()` call; `sandbox-remote` `capacity()` still returns null on failure, and unknown capacity still admits. Tests: `orchestrate-blocked.test.mjs` "#5048". Cost: 0 LLM calls.
@@ -2556,3 +2570,20 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-05 — e2e-weakening check is scoped, not co-occurrence (#5116)
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`) flags a decision only when a weakener (no/not/without/never/drop/skip/replace/downgrade/swap) governs the e2e term within a few words in one clause, or a mocked term is named as the substitute ("mocked tests instead of e2e"). A negated mock ("do not mock", "no stubs") and fake timers/clock no longer count as mocking, so "do not mock the API" and "fake timers, no sleeps" pass. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5116".
+
+## Entry 2026-11-05 — e2e-weakening check: double negatives, word boundaries, trailing negations (#5130)
+
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`) now blanks negated weakeners ("do not skip the e2e suite", "e2e tests are not replaced") before matching, so they are not flagged. `MOCKED_RE` regains its trailing `\b` and `unit` matches only as a word, so "units", "United" and "Unity" are not mocks. `DROP_AFTER_RE` accepts trailing negations ("not needed/required/run", "no longer runs", "unnecessary"), and the clause-local gap is 5 words ("skip the slow flaky nightly e2e and use mocks"). The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5130".
+
+## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
+
+- `review-trigger.mjs` `pathDomains(files)` runs the bundled `scripts/review-roster.sh` (`--files-file -`). It maps its path triggers to review domains: frontend-path → frontend, auth-path → auth, infra-path/route-handler → infra, migration-path → database, sdk-path → api. The roster stays the single source of domain path rules. A script failure is `null`: the reviewer runs without domain checks, with an anomaly and `REVIEW_DOMAINS {error: "roster.failed"}`, and the lane is never failed.
+- `lean.mjs` `gate()` computes the domains on every gate, logs `REVIEW_DOMAINS {domains, enforced}` when the set changes, and passes them to `prompts.mjs` `reviewerPrompt({domains})`. With domains, the prompt ends in a `<domain_checks>` block: one line per domain, with `DOMAIN_CHECKS.frontend` for the dynamic API in a static/ISR tree (mirrors `commands/review-pr-agents/frontend.md`). Findings are reported as `regressions` rows, which block in shadow (`SHADOW_BLOCKS`). Without domains the prompt is byte-identical.
+- forge.yaml `review.enforce_domains` (`engine-cli.mjs` `readReviewTrigger` → `reviewTrigger.enforceDomains`, `parseEnforceDomains`): a touched listed domain makes a shadow lane enforce, sticky. It reuses the #4398 `riskEnforced` path (`domain:<d>` entries) and the decision line "Conformance enforced (review.enforce_domains): …". Default empty. Cost: 0 LLM calls (one prompt block in the existing reviewer call).
+Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.test.mjs` "#5099 a web/ diff gets frontend domain checks…" and the `readReviewTrigger` test.
+
+## Entry 2026-11-05 — late dependents of a decomposed issue, requeue re-reads edges, capacity fallback_local (#5112)
+
+- `orchestrate` resolves every `deps` write through `throughDecomposed` (`readDeps`, the `drainAdds` / `drainChildren` pending re-reads, the dependency-open union): a dependency that ended `decomposed` with sub-issues is replaced by them (fixpoint), so an issue added (`--add`, resume, body re-read) after its dependency decomposed waits on the sub-issues instead of ending `skipped`. With autoChildren mode `off` nothing is resolved and the dependent is still skipped.
+- `drainRequeues` re-reads each moved issue's body and REPLACES its edges (`declared` then `throughDecomposed`); an unreadable body keeps the old edges, an unchanged body leaves them unchanged. The decision text lists changed edges (`edges re-read: #N -> ...`). `--add` of a skipped issue routes through `batch.requeue`, so it gets the same re-read. No `--refresh-deps` flag.
+- Capacity fallback: with `execution.fallback_local` (`remote.offlineFallback`), an issue deferred `remote.capacityFallbackAfter` times (`execution.capacity_fallback_after`, default `CAPACITY_FALLBACK_AFTER` = 3) for `sandbox.capacity` is placed local in `grant()` when `remote.headroom()` (engine-cli passes `execMod.hostHeadroom`, now hoisted out of the hybrid `place`) allows it; `ok: false` or a throw keeps it remote. The count is the persisted state key `capDeferrals` (separate from `deferrals`, so `sandbox.capacity` stays uncapped), reset on requeue. One decision per issue on the first fallback. Tests: `batch.test.mjs` "#5112".

@@ -32,6 +32,9 @@
  * `openExecutionBudget` enforces the hard caps (`budget_minutes`/`budget_usd` per batch, `day_budget_*` per host UTC day,
  * from the host-day store `execution-budget.json` in the sched dir): pure arithmetic, no LLM.
  *
+ * #5112: `execution.capacity_fallback_after` (positive integer, `capacityFallbackAfter`) is how many `sandbox.capacity` deferrals of one
+ * issue make `fallback_local` run it on the host (orchestrate `CAPACITY_FALLBACK_AFTER` when unset), gated by `hostHeadroom`.
+ *
  * Hybrid (#4256): `placeLane` places each lane from facts (lane kind, validation weight, host headroom, verify.mode);
  * orchestrate runs a remote-placed lane locally when `max_remote` or the execution budget is exhausted.
  *
@@ -113,9 +116,12 @@ export function parseExecution(sec = {}) {
   let endpoint = null;
   try { const u = new URL(str(s.endpoint)); if (u.protocol === "https:" || u.protocol === "http:") endpoint = str(s.endpoint); } catch { endpoint = null; }
   const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
+  const tokenFile = str(s.token_file) || null; // #5131: explicit pool/remote token file
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
   const fallbackLocal = str(s.fallback_local).toLowerCase() === "true";
+  const cfa = Number(str(s.capacity_fallback_after));
+  const capacityFallbackAfter = Number.isInteger(cfa) && cfa > 0 ? cfa : null; // #5112: unset: orchestrate's CAPACITY_FALLBACK_AFTER
   const heavyRaw = str(s.heavy).toLowerCase();
   const heavy = heavyRaw === "true" ? true : heavyRaw === "false" ? false : null;
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
@@ -133,7 +139,7 @@ export function parseExecution(sec = {}) {
   const uw = Number(str(s.unreachable_window_min));
   const accountRotator = str(s.account_rotator) === "tokenbaton" ? "tokenbaton" : null; // #5094: rotator.mjs reads its per-account quota state
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -480,18 +486,47 @@ export function containerProvider({ batch, repo, image, gitDir, cacheDir = `${ho
 
 const typedError = (code, message) => Object.assign(new Error(message), { code });
 
+/** #5131: an endpoint as `scheme://host:port` (default ports filled, no path or trailing slash); null when unparsable. */
+const endpointKey = (u) => { try { const x = new URL(String(u)); return `${x.protocol}//${x.hostname}:${x.port || (x.protocol === "https:" ? "443" : "80")}`; } catch { return null; } };
+
+/** #5131: the trimmed contents of a token file (`~/` is the home dir); null when unset, unreadable or empty. */
+const readTokenFile = (file) => {
+  if (!file) return null;
+  try { return readFileSync(String(file).startsWith("~/") ? join(homedir(), String(file).slice(2)) : String(file), "utf8").trim() || null; } catch { return null; }
+};
+
+/**
+ * #5131: the one pool/remote credential resolver, shared by both providers, `remoteTransportFor` and `preflight.pool_auth`:
+ * `token_env` from the env, then the keychain; then `execution.token_file`; then the local router's `forgedock_token_file`
+ * (`router`, poolRouterConfig output): always for `pool`, for `remote` only when its endpoint is unset or the router's.
+ * Returns `{token, source}`; `source` names where it came from (env name, `token_file`, `forgedock_token_file`), never the value.
+ */
+export function poolCredential(exec = {}, { env = process.env, router = null, keychain } = {}) {
+  if (exec?.tokenEnv) {
+    const v = resolveCredential(exec.tokenEnv, { env, ...(keychain ? { keychain } : {}) });
+    if (v) return { token: v, source: exec.tokenEnv };
+  }
+  const f = readTokenFile(exec?.tokenFile);
+  if (f) return { token: f, source: "token_file" };
+  const routerOk = Boolean(router?.token) && ((exec?.provider ?? "pool") === "pool" || !exec?.endpoint || endpointKey(exec.endpoint) === endpointKey(router.endpoint));
+  return routerOk ? { token: router.token, source: "forgedock_token_file" } : { token: null, source: null };
+}
+
 /**
  * The remote transport for forge.yaml `execution` settings: `opts.transport` when injected, else `httpTransport` on
- * `exec.endpoint` with the credential `exec.tokenEnv` (env, then keychain). Throws `execution.provider.misconfigured`
+ * `exec.endpoint` with the credential `exec.tokenEnv` from `credentials`, or by default poolCredential (#5131: env,
+ * keychain, `token_file`, the matching local router's token). `fetchFn` is a test seam. Throws `execution.provider.misconfigured`
  * without an endpoint, `execution.provider.actions_refused` for a GitHub Actions endpoint without `allow_actions`.
  */
-export function remoteTransportFor(exec = {}, { transport = null, env = process.env, credentials = (n) => resolveCredential(n, { env }) } = {}) {
+export function remoteTransportFor(exec = {}, { transport = null, env = process.env, credentials = null, router, fetchFn } = {}) {
   if (transport) return transport;
   if (!exec?.endpoint) throw typedError("execution.provider.misconfigured", "execution.provider remote needs execution.endpoint");
   if (isActionsEndpoint(exec.endpoint) && exec.allowActions !== true) {
     throw typedError("execution.provider.actions_refused", "execution.endpoint is a GitHub Actions API; set execution.allow_actions: true to spend Actions minutes");
   }
-  return httpTransport({ endpoint: exec.endpoint, token: exec.tokenEnv ? credentials(exec.tokenEnv) : null });
+  const token = credentials ? (exec.tokenEnv ? credentials(exec.tokenEnv) : null)
+    : poolCredential({ provider: "remote", ...exec }, { env, router: router !== undefined ? router : poolRouterConfig({ env }) }).token;
+  return httpTransport({ endpoint: exec.endpoint, token, ...(fetchFn ? { fetchFn } : {}) });
 }
 
 /**
@@ -510,26 +545,28 @@ export function poolRouterConfig({ env = process.env, path = env.COMPUTESHARE_CO
 export function providerByName(name, opts) {
   if (name === "local") return localProvider(opts);
   if (name === "container") return containerProvider(opts);
-  if (name === "remote") {
-    const exec = opts?.exec ?? {};
-    const env = opts?.env ?? process.env;
-    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: { ...exec, ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
-  }
-  if (name === "pool") {
-    // #4546: `remote` with the endpoint and token defaulted to the local router, and the repo's forge.yaml sent along.
+  if (name === "remote" || name === "pool") {
     const env = opts?.env ?? process.env;
     const exec = opts?.exec ?? {};
-    const router = opts?.transport || exec.endpoint ? null : poolRouterConfig({ env, ...(opts?.poolConfigPath ? { path: opts.poolConfigPath } : {}) });
-    if (!opts?.transport && !exec.endpoint && !router) throw typedError("execution.provider.misconfigured", "execution.provider pool needs a local router config (forgedock pool router) or execution.endpoint");
+    const pool = name === "pool";
+    // #4546: `pool` is `remote` with the endpoint and token defaulted to the local router, and the repo's forge.yaml sent along.
+    // #5131: `remote` reads the router config too, for the token fallback when its endpoint is the local router's.
+    const router = opts?.transport || (pool && exec.endpoint) ? null : poolRouterConfig({ env, ...(opts?.poolConfigPath ? { path: opts.poolConfigPath } : {}) });
+    if (pool && !opts?.transport && !exec.endpoint && !router) throw typedError("execution.provider.misconfigured", "execution.provider pool needs a local router config (forgedock pool router) or execution.endpoint");
     let forgeYaml = null;
-    try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; }
-    // The router's token is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
-    const tokenEnv = exec.tokenEnv ?? (router?.token ? "FORGEDOCK_POOL_TOKEN" : undefined);
-    // #4685: an empty env/keychain lookup of a configured token_env falls back to the router's token file.
-    const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }) ?? router?.token ?? null);
-    const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
+    if (pool) { try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; } }
+    const endpoint = exec.endpoint ?? (pool ? router?.endpoint : undefined);
+    const resolve = () => poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router });
+    const resolved = resolve();
+    // A token read from a file is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
+    const fixed = pool ? "FORGEDOCK_POOL_TOKEN" : "FORGEDOCK_REMOTE_TOKEN";
+    const tokenEnv = exec.tokenEnv ?? (resolved.token ? fixed : undefined);
+    // #4685/#5131: an empty env/keychain lookup of `token_env` falls back to `token_file`, then the (matching) router's token file.
+    const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env })); // per call, like resolveCredential
+    const settings = { ...exec, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
       ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
-    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, name: "pool", env, credentials, transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials }), ...(opts?.now ? { now: opts.now } : {}) });
+    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, ...(pool ? { name: "pool" } : {}), env, credentials,
+      transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials, ...(opts?.fetchFn ? { fetchFn: opts.fetchFn } : {}) }), ...(opts?.now ? { now: opts.now } : {}) });
   }
   const e = new Error(`unknown execution.provider ${JSON.stringify(name)} (known: ${SANDBOX_PROVIDERS.join(", ")})`);
   e.code = "execution.provider.unknown";

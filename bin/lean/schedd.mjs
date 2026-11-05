@@ -87,10 +87,11 @@ export function sanitizePath(path, { exclude = [], exists = existsSync, tmpRoots
 /**
  * The allowlisted part of `env`, with PATH sanitised. `passthrough` names extra keys to keep (`orchestration.env_passthrough`,
  * the configured `execution.token_env`); `pathExclude` is `orchestration.path_exclude`. Secret-looking names are dropped unless named.
+ * An empty value is never pinned, passthrough keys included (#5131: an empty pin would mask the daemon's secret).
  */
 export function batchEnv(env = process.env, { passthrough = [], pathExclude = [], exists = existsSync, tmpRoots } = {}) {
   const extra = new Set(passthrough);
-  const out = Object.fromEntries(Object.entries(env).filter(([k, v]) => typeof v === "string" && (extra.has(k) || (ENV_KEEP.test(k) && !SECRET_ENV.test(k)))));
+  const out = Object.fromEntries(Object.entries(env).filter(([k, v]) => typeof v === "string" && v !== "" && (extra.has(k) || (ENV_KEEP.test(k) && !SECRET_ENV.test(k)))));
   if (typeof out.PATH === "string") out.PATH = sanitizePath(out.PATH, { exclude: pathExclude, exists, ...(tmpRoots ? { tmpRoots } : {}) });
   return out;
 }
@@ -105,10 +106,17 @@ export function redactEnv(env) {
   return Object.fromEntries(Object.entries(env ?? {}).map(([k, v]) => [k, SECRET_ENV.test(k) ? "<redacted>" : v]));
 }
 
-/** `base` without its allowlisted non-secret keys (secret-named ones, e.g. GH_TOKEN, stay from the daemon: never pinned), plus `kept`: an account selector the client did not set never leaks in from the daemon. */
+/**
+ * `base` without its allowlisted non-secret keys, plus `kept`: an account selector the client did not set never leaks in from
+ * the daemon, and a pinned key wins. A secret-named key is only pinned when named (`env_passthrough`, `token_env`): a non-empty
+ * pin wins, as before #5131 (the operator chose that account); an empty secret pin never overrides the daemon's value (#5131).
+ */
 export function mergeEnv(base, kept) {
   const out = Object.fromEntries(Object.entries(base).filter(([k]) => k in kept || !ENV_KEEP.test(k) || SECRET_ENV.test(k)));
-  return { ...out, ...kept };
+  for (const [k, v] of Object.entries(kept)) {
+    if (!SECRET_ENV.test(k) || (typeof v === "string" && v !== "")) out[k] = v;
+  }
+  return out;
 }
 
 /** Take the daemon lock: `{took}` (the dead owner's pid it replaced, or null); null when another live daemon holds it. */

@@ -1335,6 +1335,14 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
       assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
     }
   });
+  it("#5130 double negatives and word prefixes are not weakenings; trailing negations and distant weakeners are", () => {
+    for (const choice of ["Do not skip the e2e suite; mock the mailer", "E2E tests are not replaced by mocks", "Skip the e2e run for billing units", "No integration with United Airlines API", "Skip e2e; ship the Unity build"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
+    }
+    for (const choice of ["Mock everything; the e2e suite is not needed", "e2e is not run, jest mocks cover it", "e2e tests are not required, rely on mocked unit tests", "e2e suite no longer runs; mocks used", "Skip the slow flaky nightly e2e and use mocks", "Use stubbed unit tests, e2e not needed"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+  });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);

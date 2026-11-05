@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { computeTrigger, riskPathHits, parseRiskPaths, riskClassOf, triggerReport, readRunLogs, formatReport } from "./review-trigger.mjs";
+import { computeTrigger, riskPathHits, parseRiskPaths, riskClassOf, triggerReport, readRunLogs, formatReport, pathDomains, parseEnforceDomains } from "./review-trigger.mjs";
+import { reviewerPrompt, domainChecksBlock } from "./prompts.mjs";
 
 const HOT = { enabled: true, file_lines: 2000, growth_lines: 150, files: [] };
 const clean = (patch = {}) => computeTrigger({ files: ["src/foo.js", "test/foo.test.js"], hotspots: HOT, ...patch });
@@ -116,5 +117,31 @@ describe("triggerReport (#4273)", () => {
     const cli = spawnSync(process.execPath, [fileURLToPath(new URL("./review-trigger.mjs", import.meta.url)), "--dir", dir, "--json"], { encoding: "utf8" });
     assert.equal(cli.status, 0);
     assert.deepEqual(JSON.parse(cli.stdout)["o/a"].would_skip_flagged, 1);
+  });
+});
+
+describe("pathDomains / domain checks (#5099)", () => {
+  it("maps review-roster.sh path triggers to domains: web/ is frontend", () => {
+    assert.deepEqual(pathDomains(["web/src/app/(site)/not-found.tsx"]), ["frontend"]);
+    assert.deepEqual(pathDomains(["src/auth/x.js", "app/api/route.ts", "db/migrations/0001.sql", "sdk/client.py"]), ["api", "auth", "database", "frontend", "infra"]);
+    assert.deepEqual(pathDomains(["src/foo.js"]), []);
+    assert.deepEqual(pathDomains([]), []);
+  });
+  it("a failing roster script is null (never throws)", () => {
+    assert.equal(pathDomains(["web/a.tsx"], { script: "/nonexistent/review-roster.sh" }), null);
+  });
+  it("parseEnforceDomains keeps known domains only", () => {
+    assert.deepEqual(parseEnforceDomains("Frontend, bogus , auth"), ["auth", "frontend"]);
+    assert.deepEqual(parseEnforceDomains(["infra", "infra"]), ["infra"]);
+    assert.deepEqual(parseEnforceDomains(undefined), []);
+  });
+  it("the reviewer prompt gains a frontend check only when frontend is touched, and is unchanged without domains", () => {
+    const args = { issue: { number: 7, title: "t", body: "b" }, contract: {}, diff: "" };
+    assert.equal(reviewerPrompt(args), reviewerPrompt({ ...args, domains: [] }));
+    assert.equal(domainChecksBlock([]), "");
+    const p = reviewerPrompt({ ...args, domains: ["frontend"] });
+    assert.ok(p.endsWith("</domain_checks>"));
+    assert.match(p, /- frontend: .*headers\(\), cookies\(\).*ISR/);
+    assert.match(p, /regressions row with path:line/);
   });
 });

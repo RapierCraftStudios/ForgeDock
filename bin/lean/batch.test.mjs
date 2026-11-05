@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
-import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists } from "./orchestrate.mjs";
+import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
@@ -47,7 +47,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     const pids = () => Object.values(batch.store.load()?.running ?? {}).map((r) => r.pid).filter(Boolean);
     let lanePids = [];
     try {
-      const child = spawn(process.execPath, [dispatcher], { stdio: "ignore" });
+      // The two-lane wait must not depend on host memory: the live local lane cap (#4777) reads forge.yaml from the dispatcher's cwd.
+      writeFileSync(join(work, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+      const child = spawn(process.execPath, [dispatcher], { stdio: "ignore", cwd: work });
       const exited = new Promise((r) => child.on("exit", r));
       await until(() => readFileSync(launches, "utf8").trim().split("\n").filter(Boolean).length === 2 && pids().length === 2);
       lanePids = pids();
@@ -1062,6 +1064,108 @@ describe("#4547: opt-in local fallback in mode remote when no pool agent is onli
       const { where } = await run({ offlineFallback: true }, online);
       assert.ok([...where.values()].every((w) => w === "remote"), String(online));
     }
+  });
+});
+
+describe("#5112: late dependents of a decomposed issue, edge re-read on --requeue, capacity fallback_local", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  it("#5112 an issue added after its dependency decomposed waits on the sub-issues, not skipped", async () => {
+    const bodies = { 1: "", 3: "Depends on #1", 5: "Depends on #1", 6: "", 11: "", 12: "" };
+    let added = [];
+    const started = [], finished = [], log = [], g = gate();
+    const done = orchestrate({ issues: [1, 3], parallel: 4, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getAdded: () => added, onUpdate: (r) => log.push(r),
+      runOne: async (n) => {
+        started.push(n);
+        if (n === 1) return { terminalReason: "decomposed", subissues: [11, 12] };
+        if (n === 11 || n === 12) await g.p;
+        finished.push(n);
+        return { terminalReason: "merged", pr: 100 + n };
+      } });
+    await until(() => started.includes(11) && started.includes(12));
+    added = [5];
+    await until(() => log.some((r) => r.outcome === "added" && /#5/.test(r.detail ?? "")));
+    added = [5, 6]; // an unrelated later --add re-reads the pending bodies: #3's edge to #1 must stay resolved
+    await until(() => log.some((r) => r.outcome === "added" && /#6/.test(r.detail ?? "")));
+    g.open();
+    const rows = await done;
+    const out = Object.fromEntries(rows.map((r) => [r.issue, r.outcome]));
+    assert.equal(out[5], "merged", JSON.stringify(rows.find((r) => r.issue === 5)));
+    assert.equal(out[3], "merged", JSON.stringify(rows.find((r) => r.issue === 3)));
+    for (const n of [3, 5]) assert.ok(finished.indexOf(n) > finished.indexOf(11) && finished.indexOf(n) > finished.indexOf(12), `#${n} ran after the sub-issues`);
+  });
+
+  it("#5112 --requeue re-reads the edited Depends on edges", async () => {
+    const bodies = { 1: "", 2: "Depends on #1", 3: "" };
+    let entries = [];
+    const started = [], log = [], decisions = [], g3 = gate();
+    const done = orchestrate({ issues: [1, 2, 3], parallel: 3, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getRequeued: () => entries,
+      decide: (d) => { decisions.push(d); }, onUpdate: (r) => log.push(r),
+      runOne: async (n) => {
+        started.push(n);
+        if (n === 3) { await g3.p; return { terminalReason: "merged" }; }
+        return n === 1 ? { terminalReason: "needs-human", detail: "builder.blocked: product-decision" } : { terminalReason: "merged" };
+      } });
+    await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
+    bodies[2] = ""; // the operator dropped the wrong edge
+    entries = [{ issue: 2, reason: "edge dropped", by: "operator", at: "2026-11-05T00:00:00Z" }];
+    await until(() => started.includes(2), 3000);
+    g3.open();
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "needs-human"], [2, "merged"], [3, "merged"]]);
+    assert.ok(decisions.some((d) => d.issue === 2 && /edges re-read: #2 -> none/.test(d.what)));
+  });
+
+  it("#5112 --requeue of a dependent skipped behind a decomposed issue waits on its sub-issues", async () => {
+    const saved = { v: 1, order: [1, 2, 11], deps: { 1: [], 2: [1], 11: [] }, pending: [11],
+      results: { 1: { issue: 1, outcome: "decomposed", subissues: [11] }, 2: { issue: 2, outcome: "skipped", detail: "dependency #1 ended decomposed" } } };
+    let entries = [];
+    const finished = [], g = gate();
+    const done = orchestrate({ issues: [], parallel: 2, pollMs: 5, readBody: async (n) => (n === 2 ? "Depends on #1" : ""), getRequeued: () => entries,
+      store: { load: () => saved, save: () => {} },
+      runOne: async (n) => { if (n === 11) await g.p; finished.push(n); return { terminalReason: "merged" }; } });
+    entries = [{ issue: 2, reason: "parent decomposed", by: "operator", at: "2026-11-05T00:00:00Z" }];
+    await new Promise((r) => setTimeout(r, 50));
+    g.open();
+    const rows = await done;
+    assert.equal(rows.find((r) => r.issue === 2)?.outcome, "merged");
+    assert.deepEqual(finished, [11, 2]);
+  });
+
+  const runCap = async (remoteExtra) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const where = [], decisions = [];
+    let remoteTries = 0;
+    const rows = await orchestrate({ issues: [1], parallel: 1, now: () => c.t, sleep, pollMs: 1, readBody: async () => "", decide: (d) => decisions.push(d),
+      remote: { max: 1, isRemote: () => true, capacity: () => ({ free: null, online: 1, at: 1 }), ...remoteExtra },
+      runOne: async (n, _ln, ctx = {}) => {
+        where.push(ctx.placement ?? { where: "remote" });
+        if (ctx.placement?.where === "local") return { terminalReason: "merged", pr: 101 };
+        remoteTries++;
+        return remoteTries >= 5 ? { terminalReason: "merged", pr: 101 } : { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "HTTP 503 capacity" };
+      } });
+    return { rows, where, remoteTries, decisions };
+  };
+  it("#5112 fallback_local runs a lane locally after N sandbox.capacity deferrals when the host has headroom", async () => {
+    const { rows, where, remoteTries, decisions } = await runCap({ offlineFallback: true, capacityFallbackAfter: 2, headroom: () => ({ ok: true, detail: "" }) });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(remoteTries, 2);
+    assert.equal(where.at(-1).where, "local");
+    assert.match(where.at(-1).reason, /pool at capacity after 2 deferrals/);
+    assert.equal(decisions.filter((d) => d.issue === 1 && /capacity/.test(d.what)).length, 1);
+  });
+  it("#5112 a busy host (headroom not ok, or a throwing probe) or fallback_local off keeps the lane remote", async () => {
+    for (const extra of [{ offlineFallback: true, capacityFallbackAfter: 2, headroom: () => ({ ok: false, detail: "mem" }) },
+      { offlineFallback: true, capacityFallbackAfter: 2, headroom: () => { throw new Error("probe"); } }, { capacityFallbackAfter: 2 }]) {
+      const { where, remoteTries } = await runCap(extra);
+      assert.equal(remoteTries, 5);
+      assert.ok(where.every((w) => w.where !== "local"));
+    }
+  });
+  it("#5112 without capacityFallbackAfter the default CAPACITY_FALLBACK_AFTER applies", async () => {
+    const { remoteTries, where } = await runCap({ offlineFallback: true });
+    assert.equal(remoteTries, CAPACITY_FALLBACK_AFTER);
+    assert.equal(where.at(-1).where, "local");
   });
 });
 
