@@ -1772,11 +1772,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const emitSbx = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
       // #4256: hybrid places each lane from facts (pure placeLane); validation weight is a repo fact, read once per batch.
       const relays = Array.isArray(provider.relays) ? provider.relays : [];
+      // #5112: the host-busy guard, shared by hybrid placement and the fallback_local capacity fallback.
+      const hostHeadroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
       const place = !hybrid ? (n) => execMod.placeLane({ exec, needs: needsOf.get(n) ?? [], relays }) : await (async () => {
         const verifyMode = (deps.verify !== undefined ? deps.verify : readVerify(cwd))?.mode ?? "local";
         let weight = deps.validationWeight ?? null;
         if (!weight) { try { weight = await execMod.validationWeight({ cwd, precheckCommands: readPrecheckCommands(cwd) ?? [] }); } catch { weight = { heavy: false, signals: [] }; } }
-        const headroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
+        const headroom = hostHeadroom;
         return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom(), needs: needsOf.get(n) ?? [], relays });
       })();
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
@@ -1791,7 +1793,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
       };
       remote = {
-        capacity, max: exec.maxRemote, isRemote: () => true, place, identity: () => holdId, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        capacity, max: exec.maxRemote, isRemote: () => true, place, identity: () => holdId, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";

@@ -4,7 +4,8 @@
  * Thin orchestrate: run core work-on for several issues with bounded concurrency, honouring `Depends on` / `Blocked by`
  * among the given issues (wait for the dependency to merge; skip when it ends anywhere but merged/invalid).
  * A `dependency-open` run is requeued behind its dependencies, pulling an out-of-set one into the batch; a
- * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124). A dependency that is parked
+ * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124); an issue read later (`--add`,
+ * `--requeue`, a resume, a body re-read) resolves a decomposed dependency to its sub-issues too (#5112). A dependency that is parked
  * (ended needs-human in this batch, or an out-of-set issue labelled needs-human per `issueLabels(n)`) is never pulled in:
  * the issue ends `skipped` (`dependency #N needs-human`) and its dependents with it (#4387).
  * A skipped dependent whose blocker later closes or merges outside its lane is re-admitted (#4595, needs `dispatchCheck`).
@@ -21,6 +22,8 @@
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and deferrals other than a wait (`host.busy`,
  * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784) stop after `maxDeferrals`.
+ * #5112: with `remote.offlineFallback` (`execution.fallback_local`), an issue deferred `remote.capacityFallbackAfter` times (default
+ * `CAPACITY_FALLBACK_AFTER`) for `sandbox.capacity` runs on the host when `remote.headroom()` (host-busy guard) allows it.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset.
@@ -136,6 +139,8 @@ export const HOST_BUSY_RETRY_S = 60;
 // #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
 const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "lane.unresolved"]);
 export const POOL_OFFLINE_ALERT_MIN = 10;
+// #5112: `sandbox.capacity` deferrals of one issue after which `execution.fallback_local` runs it on the host (headroom permitting).
+export const CAPACITY_FALLBACK_AFTER = 3;
 export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
@@ -274,6 +279,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const notBefore = toMap(saved?.notBefore);
   const requeues = toMap(saved?.requeues);
   const deferrals = toMap(saved?.deferrals);
+  const capDefers = toMap(saved?.capDeferrals); // #5112: issue -> `sandbox.capacity` deferrals (uncapped, so not in `deferrals`)
+  const capFellBack = new Set(); // #5112: issues already reported as a capacity fallback (one decision each)
   const engineErrors = toMap(saved?.engineErrors);
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
   const estimates = toMap(saved?.estimates); // #4409: issue -> estimated lane minutes; only with `estimate`
@@ -358,7 +365,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const save = () => {
     if (!store || halted) return;
     store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(quota.size ? { quota: toObj(quota) } : {}),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(quota.size ? { quota: toObj(quota) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
@@ -391,6 +398,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (typeof trusted === "function") { let ok = false; try { ok = (await trusted(n)) === true; } catch { ok = false; } if (!ok) return []; }
     return parseDeps(body, n);
   };
+  // #5112: a dependency that ended `decomposed` (sub-issues joined, mode not off) is its sub-issues, to a fixpoint; used on every edge write.
+  const throughDecomposed = (ds) => {
+    if (!joinsDecomposed(autoChildren?.mode ?? "decomposed")) return [...new Set(ds)];
+    const out = [], seen = new Set(), stack = [...ds].reverse();
+    while (stack.length) {
+      const d = stack.pop();
+      if (seen.has(d)) continue;
+      seen.add(d);
+      const r = results.get(d), subs = r?.outcome === "decomposed" && Array.isArray(r.subissues) ? r.subissues.filter((x) => Number.isSafeInteger(x) && x > 0) : [];
+      if (subs.length) stack.push(...[...subs].reverse()); else out.push(d);
+    }
+    return [...new Set(out)];
+  };
+  // #5112: the issue's declared edges re-read from its body (null when unreadable: the caller keeps what it has).
+  const reread = async (n) => {
+    let body;
+    try { body = await readBody(n); } catch { return null; }
+    if (drift?.holds) bodies.set(n, body);
+    return declared(n, body);
+  };
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
@@ -401,7 +428,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     await readPriority(n);
     if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; } lanes.set(n, l); }
     // deps marks the issue read (a resume skips it): set it last, so a concurrent setup save never persists a half-read issue (#4963)
-    deps.set(n, d);
+    deps.set(n, throughDecomposed(d));
   };
   const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
   // A milestone issue waiting on a staging fix (or the reverse) never sees that fix on its own base: surface the edge.
@@ -516,6 +543,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     return "busy";
   };
+  // #5112: opt-in (`execution.fallback_local`): an issue the pool refused `capacityFallbackAfter` times (default CAPACITY_FALLBACK_AFTER)
+  // for `sandbox.capacity` runs on the host when the host-busy guard (`remote.headroom()`, absent = allowed) passes; not ok or a throw waits.
+  const capacityFallback = (n) => {
+    if (!remote?.offlineFallback) return false;
+    const after = Number.isInteger(remote.capacityFallbackAfter) && remote.capacityFallbackAfter > 0 ? remote.capacityFallbackAfter : CAPACITY_FALLBACK_AFTER;
+    if ((capDefers.get(n) ?? 0) < after) return false;
+    if (typeof remote.headroom !== "function") return true;
+    try { return remote.headroom()?.ok !== false; } catch { return false; }
+  };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
   // true: start it; false: no capacity now; "busy" (#4481): another batch runs `n`, try the next issue.
   const grant = (n, wanted) => {
@@ -555,6 +591,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
         if (remote.offlineFallback && cap && cap.online === 0) {
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
+        } else if (capacityFallback(n)) {
+          p = { where: "local", reason: `fallback to local: pool at capacity after ${capDefers.get(n)} deferrals (${p.reason})` };
+          if (!capFellBack.has(n)) {
+            capFellBack.add(n);
+            decided({ issue: n, what: `run #${n} on the host: the pool refused it ${capDefers.get(n)} times for capacity (execution.fallback_local)`, why: "sustained sandbox.capacity and the host has headroom",
+              alternative: "keep deferring until a pool slot frees" });
+          }
         } else if (cap && Number.isInteger(cap.free)) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
           if (capWait.blocked(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
@@ -664,7 +707,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
       // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
       requeues.set(n, (requeues.get(n) ?? 0) + 1);
-      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...depList])]);
+      deps.set(n, throughDecomposed([...(deps.get(n) ?? []), ...depList]));
       await addIssues(depList);
       // Dependencies already done but still open on GitHub: a delay instead of a hot relaunch loop.
       const allDone = depList.every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
@@ -686,6 +729,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n);
+        capDefers.set(n, (capDefers.get(n) ?? 0) + 1); // #5112: counted for the fallback_local capacity fallback
         try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
       }
       if (!pol.capped) {
@@ -929,10 +973,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!fresh.length) return kids;
     // An edge an operator wrote into a pending issue after the batch started (it waits on an added issue) holds too.
     for (const n of pending) {
-      let body;
-      try { body = await readBody(n); } catch { continue; }
-      if (drift?.holds) bodies.set(n, body);
-      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...(await declared(n, body))])]);
+      const d = await reread(n);
+      if (d) deps.set(n, throughDecomposed([...(deps.get(n) ?? []), ...d]));
     }
     await addIssues(fresh);
     save();
@@ -964,10 +1006,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       .filter((n) => { try { return !(reg?.holder && reg.holder(entryOf(n)) != null); } catch { return true; } });
     if (!fresh.length) return 0;
     for (const n of pending) {
-      let body;
-      try { body = await readBody(n); } catch { continue; }
-      if (drift?.holds) bodies.set(n, body);
-      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...(await declared(n, body))])]);
+      const d = await reread(n);
+      if (d) deps.set(n, throughDecomposed([...(deps.get(n) ?? []), ...d]));
     }
     await addIssues(fresh);
     save();
@@ -980,7 +1020,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     return fresh.length;
   };
   // #4550: `--requeue` entries (batch `requeue` file) not applied yet: a terminal issue and the dependents skipped behind it
-  // return to pending, the prior rows kept in history; edges stay, so a dependent still waits for the issue to merge.
+  // return to pending, the prior rows kept in history; their `Depends on` edges are re-read from the body and replaced (#5112).
   const drainRequeues = async () => {
     if (!getRequeued) return 0;
     let got = [];
@@ -1000,14 +1040,25 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       for (const m of moved) {
-        for (const x of [requeues, deferrals, engineErrors, recoveries, recovering]) x.delete(m);
+        for (const x of [requeues, deferrals, capDefers, engineErrors, recoveries, recovering]) x.delete(m);
         relabelled.delete(m);
         if (m === e.issue) requeuedInfo.set(m, { reason: e.reason, by: e.by, at: e.at, prior: [...(requeuedInfo.get(m)?.prior ?? []), priors.get(m)] });
         if (!pending.includes(m)) requeue(m, 0);
       }
+      // #5112: the requeued issues' `Depends on` edges are re-read and replaced, so a body edit drops or repoints an edge
+      // (a decomposed dependency resolves to its sub-issues); an unreadable body keeps the edges it had.
+      const edited = [];
+      for (const m of moved) {
+        const d = await reread(m);
+        if (!d) continue;
+        const before = deps.get(m) ?? [], after = throughDecomposed(d);
+        deps.set(m, after);
+        if (before.length !== after.length || before.some((x) => !after.includes(x))) edited.push(`#${m} -> ${after.length ? after.map((x) => `#${x}`).join(", ") : "none"}`);
+      }
+      noteCrossLane();
       save();
       const list = moved.filter((m) => m !== e.issue).map((m) => `#${m}`);
-      decided({ issue: e.issue, what: `requeued by ${e.by ?? "operator"} (forgedock orchestrate --requeue); prior outcome ${row.outcome}${list.length ? `; dependents back to pending: ${list.join(", ")}` : ""}`,
+      decided({ issue: e.issue, what: `requeued by ${e.by ?? "operator"} (forgedock orchestrate --requeue); prior outcome ${row.outcome}${list.length ? `; dependents back to pending: ${list.join(", ")}` : ""}${edited.length ? `; edges re-read: ${edited.join("; ")}` : ""}`,
         why: e.reason || "operator decision", alternative: "start a second batch" });
       update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (was ${row.outcome})` });
       for (const m of moved) if (m !== e.issue) update({ issue: m, outcome: "requeued", detail: `dependency #${e.issue} requeued`, trigger: e.issue }); // #4687
