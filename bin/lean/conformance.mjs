@@ -268,15 +268,17 @@ const tmpInputProblem = (id, p) => `${id}: reads ${p}, which the command does no
 
 const E2E_TERM = String.raw`(?:e2e|end-to-end|integration|playwright|cypress|live[- ]stack)`;
 const E2E_WORD_RE = new RegExp(String.raw`\b${E2E_TERM}\b`, "i");
-const MOCKED_TERM = String.raw`(?:mock\w*|stub\w*|fake\w*|unit|vitest|jest|component tests?|route tests?)`;
-const MOCKED_RE = new RegExp(String.raw`\b${MOCKED_TERM}`, "i");
+const MOCKED_TERM = String.raw`(?:mock\w*|stub\w*|fake\w*|unit(?:[- ]tests?)?|vitest|jest|component tests?|route tests?)`;
+const MOCKED_RE = new RegExp(String.raw`\b${MOCKED_TERM}\b`, "i");
 // #5116: a negated mock ("do not mock", "no stubs") or a fake clock is not a substitute for the e2e check.
 const NEG_MOCK_RE = /\b(?:do(?:es)? not|don't|never|no|not|without)\s+(?:use\s+|any\s+)?(?:mock\w*|stub\w*|fake\w*)/gi;
+// #5130: a negated weakener ("do not skip the e2e suite", "e2e tests are not replaced") keeps the e2e check.
+const NEG_DROP_RE = /\b(?:do(?:es)? not|don't|never|not)\s+(?:be\s+|been\s+|being\s+)?(?:skip|drop|replac|swap|downgrad)\w*/gi;
 const FAKE_CLOCK_RE = /\bfake[- ](?:timers?|clocks?)\b/gi;
 // A weakener governs the e2e term only within a few words and the same clause (no . or ; between them).
-const GAP = String.raw`(?:[\s,]+\w+){0,3}?[\s,]+`;
+const GAP = String.raw`(?:[\s,]+\w+){0,5}?[\s,]+`;
 const DROP_BEFORE_RE = new RegExp(String.raw`\b(?:no|not|without|never|drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|swap\w*)${GAP}${E2E_TERM}\b`, "i");
-const DROP_AFTER_RE = new RegExp(String.raw`\b${E2E_TERM}${GAP}(?:replaced|dropped|skipped|swapped|downgraded)\b`, "i");
+const DROP_AFTER_RE = new RegExp(String.raw`\b${E2E_TERM}${GAP}(?:replaced|dropped|skipped|swapped|downgraded|unnecessary|(?:not|no longer)\s+(?:needed|required|necessary|run\w*|used|executed))\b`, "i");
 const INSTEAD_OF_RE = new RegExp(String.raw`\b${MOCKED_TERM}[^.;]{0,60}?\b(?:instead of|rather than|in lieu of)\b${GAP}${E2E_TERM}\b`, "i");
 const PROBE_RE = /forge-probe|acceptance[- ]probe/i;
 const NEG_PROBE_RE = /\b(?:no|not|without|never)\b[^.;]{0,30}(?:forge-probe|acceptance[- ]probe)/i;
@@ -292,7 +294,7 @@ export function weakenedE2eDecisions(c) {
   return decisions.filter((k) => {
     const choice = String(k?.choice ?? "");
     if (!E2E_WORD_RE.test(choice)) return false;
-    const mocked = choice.replace(NEG_MOCK_RE, " ").replace(FAKE_CLOCK_RE, " ");
+    const mocked = choice.replace(NEG_MOCK_RE, " ").replace(FAKE_CLOCK_RE, " ").replace(NEG_DROP_RE, " ");
     if (!MOCKED_RE.test(mocked) || !(DROP_BEFORE_RE.test(mocked) || DROP_AFTER_RE.test(mocked) || INSTEAD_OF_RE.test(mocked))) return false;
     const own = `${choice} ${k?.justification ?? ""}`;
     return !((PROBE_RE.test(own) && !NEG_PROBE_RE.test(own)) || /forge-probe/i.test(elsewhere(k?.id)));

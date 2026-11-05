@@ -2557,6 +2557,10 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`) flags a decision only when a weakener (no/not/without/never/drop/skip/replace/downgrade/swap) governs the e2e term within a few words in one clause, or a mocked term is named as the substitute ("mocked tests instead of e2e"). A negated mock ("do not mock", "no stubs") and fake timers/clock no longer count as mocking, so "do not mock the API" and "fake timers, no sleeps" pass. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5116".
 
+## Entry 2026-11-05 — e2e-weakening check: double negatives, word boundaries, trailing negations (#5130)
+
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`) now blanks negated weakeners ("do not skip the e2e suite", "e2e tests are not replaced") before matching, so they are not flagged. `MOCKED_RE` regains its trailing `\b` and `unit` matches only as a word, so "units", "United" and "Unity" are not mocks. `DROP_AFTER_RE` accepts trailing negations ("not needed/required/run", "no longer runs", "unnecessary"), and the clause-local gap is 5 words ("skip the slow flaky nightly e2e and use mocks"). The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5130".
+
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 
 - `review-trigger.mjs` `pathDomains(files)` runs the bundled `scripts/review-roster.sh` (`--files-file -`). It maps its path triggers to review domains: frontend-path → frontend, auth-path → auth, infra-path/route-handler → infra, migration-path → database, sdk-path → api. The roster stays the single source of domain path rules. A script failure is `null`: the reviewer runs without domain checks, with an anomaly and `REVIEW_DOMAINS {error: "roster.failed"}`, and the lane is never failed.
