@@ -644,6 +644,18 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.equal(env.COMPUTESHARE_TOKEN, "daemon-tok");
   });
 
+  it("5131: a daemon secret wins over an empty or stale pin, the pin fills one the daemon lacks, batchEnv pins no empty value", () => {
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "" }).COMPUTESHARE_TOKEN, "daemon-tok");
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "stale" }).COMPUTESHARE_TOKEN, "daemon-tok");
+    assert.equal(mergeEnv({ PATH: "/d" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok");
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok");
+    assert.equal(mergeEnv({}, { COMPUTESHARE_TOKEN: "" }).COMPUTESHARE_TOKEN, undefined, "an empty pin never overrides");
+    assert.equal(mergeEnv({ CLAUDE_CONFIG_DIR: "/d" }, { CLAUDE_CONFIG_DIR: "/c" }).CLAUDE_CONFIG_DIR, "/c", "non-secret pins keep winning");
+    const kept = batchEnv({ PATH: "/", COMPUTESHARE_TOKEN: "", GH_HOST: "" }, { passthrough: ["COMPUTESHARE_TOKEN"], exists: () => true });
+    assert.deepEqual(Object.keys(kept), ["PATH"]);
+    assert.deepEqual(batchEnv({ COMPUTESHARE_TOKEN: "client-tok" }, { passthrough: ["COMPUTESHARE_TOKEN"] }), { COMPUTESHARE_TOKEN: "client-tok" });
+  });
+
   it("#4734: the pin keeps non-secret provider selectors, drops secrets and session ids, and droppedEnv names what was left out", () => {
     const client = { PATH: "/", GH_TOKEN: "fresh", CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BASE_URL: "http://proxy", ANTHROPIC_MODEL: "m", ANTHROPIC_API_KEY: "k",
       FORGEDOCK_POOL_TOKEN: "p", CLAUDE_CONFIG_DIR: "/acct", CLAUDE_CODE_SESSION_ID: "s", CLAUDE_PID: "1" };
