@@ -1419,31 +1419,27 @@ export async function runCore(o) {
         try { filed = await io.fileFollowups({ parent: issue, repo, items, milestone, defaultMilestone: o.followupsDefaultMilestone ?? null, lane, batchId: o.batchId ?? null, rollupLabel: o.followupsRollupLabel ?? null }); } catch (e) {
           throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`, /DEFERRED_TSV=INVALID/.test(`${e?.stdout ?? ""}${e?.message ?? ""}`));
         }
-        const got = [];
         for (const [i, r] of reqs.entries()) {
+          if (recorded.has(i)) continue; // tracked in an earlier attempt: keeps its r.tracked, never re-counted
           const n = Number(filed?.[items[i].key]);
           if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`, false);
           let st = null;
           try { st = JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "number,state"]))); } catch { st = null; }
           if (String(st?.state).toUpperCase() !== "OPEN") throw fail(`tracking issue #${n} for ${r.id} is not open or unreadable`, false);
-          got.push(n);
+          recorded.add(i);
+          r.tracked = `#${n}`;
+          const f = followupsFiled.find((x) => x.issue === n && x.class === items[i].class); // #5078: grouped per issue and class
+          if (f) f.count += 1; else followupsFiled.push({ issue: n, class: items[i].class, count: 1 });
         }
-        return got;
       };
+      const recorded = new Set();
       const waits = [5000, 15000];
-      let nums;
       for (let k = 0; ; k++) {
-        try { nums = await attempt(); break; } catch (e) {
+        try { await attempt(); break; } catch (e) {
           if (e.final || k >= waits.length) throw e;
           T.decisions.push(`Follow-up filing attempt ${k + 1} failed (${String(e.message).slice(0, 160)}); retrying in-lane in ${waits[k] / 1000}s`);
           await sleep(waits[k]);
         }
-      }
-      for (const [i, r] of reqs.entries()) { // recorded only once every requirement is tracked: a retry never double-counts
-        const n = nums[i];
-        r.tracked = `#${n}`;
-        const f = followupsFiled.find((x) => x.issue === n && x.class === items[i].class); // #5078: grouped per issue and class
-        if (f) f.count += 1; else followupsFiled.push({ issue: n, class: items[i].class, count: 1 });
       }
       const buckets = Object.entries(bucketTally(reqs)).map(([k, c]) => `${k}:${c}`).join(","); // #4724
       T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why}; buckets ${buckets})`);

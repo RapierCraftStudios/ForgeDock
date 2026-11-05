@@ -366,6 +366,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    whose identity starts with `<id>:`, and never an ambiguous one. `track()` retries
    the whole file-and-verify step in-lane up to 3 times, waiting 5 s and then 15 s
    (`io.sleep`; the script is idempotent), and logs each retry in the decisions.
+   A requirement verified open in an earlier attempt keeps its `tracked` issue and
+   is neither re-verified nor counted again in `followupsFiled`.
    Only then does it defer with `followup.unavailable`. A malformed TSV
    (`DEFERRED_TSV=INVALID`) is not retried.
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,

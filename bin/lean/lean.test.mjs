@@ -187,6 +187,7 @@ function world(o = {}) {
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
     fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
+      if (o.followupRet) return o.followupRet(w.followups.length, items);
       if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
@@ -1008,6 +1009,21 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const r = await run(w);
     assert.notEqual(r.code, "followup.unavailable");
     assert.equal(w.followups.length, 3);
+  });
+
+  it("#5141 a requirement tracked in an earlier attempt keeps its tracking issue; the retry tracks only the rest, once each", async () => {
+    const base = two("defer", { why: "w" });
+    const k = { ...base, requirements: [...base.requirements, { id: "R3", quote: "Old callers log a warning.", disposition: "defer", bucket: "post-deploy", why: "w" }] };
+    let views900 = 0;
+    const w = world({ contract: k, body: `${ISSUE_BODY}\n- Old callers log a warning.`, issueStates: { get 900() { views900 += 1; return "OPEN"; } }, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)],
+      followupRet: (call, items) => (call === 1 ? { [items[0].key]: 900 } : { [items[0].key]: 900, [items[1].key]: 901 }) });
+    const r = await run(w);
+    assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.followups.length, 2);
+    const t = traj(w).join("\n");
+    assert.match(t, /Follow-up filing attempt 1 failed \(no tracking issue was returned for R3\); retrying in-lane in 5s/);
+    assert.match(t, /Tracked R2 \(defer\), R3 \(defer\) in #900, #901/);
+    assert.equal(views900, 1, "R2, verified open in attempt 1, is not re-verified or re-counted by the retry");
   });
 
   it("#5141 a persistent follow-up failure defers after 3 in-lane attempts; a malformed TSV is not retried", async () => {
