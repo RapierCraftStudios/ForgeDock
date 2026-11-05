@@ -368,8 +368,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`io.sleep`; the script is idempotent), and logs each retry in the decisions.
    A requirement verified open in an earlier attempt keeps its `tracked` issue and
    is neither re-verified nor counted again in `followupsFiled`.
-   Only then does it defer with `followup.unavailable`. A malformed TSV
-   (`DEFERRED_TSV=INVALID`) is not retried.
+   A malformed TSV (`DEFERRED_TSV=INVALID`) is not retried and still defers with
+   `followup.unavailable`. When the 3 attempts fail for any other reason, the run
+   does not defer: it keeps the merge-capable work and goes on to review, PR and
+   merge. The unfiled requirements (id, quote, why, `FORGE:DEFERRED_FROM: #<n>`)
+   go into `pendingFollowups`, which is kept in FORGE:STATE and the lane result.
+   The close step files them again after the merge (the marker keeps this
+   idempotent). Anything still unfiled is posted as `FORGE:FOLLOWUP_PENDING` on
+   the issue for a later pass.
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its

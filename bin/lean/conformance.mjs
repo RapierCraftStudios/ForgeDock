@@ -1284,6 +1284,16 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
 }
 
 /**
+ * #5141: the FORGE:FOLLOWUP_PENDING note for follow-ups the lane could not file before or after the merge. Each row keeps the
+ * requirement text and the `FORGE:DEFERRED_FROM: #<n>` marker the follow-up script looks up, so a later pass files it once.
+ */
+export function renderPendingFollowups(rows, pr) {
+  const flat = (s) => String(s ?? "").replace(/[\t\r\n]+/g, " ").trim();
+  return [`## Follow-up pending`, `Merged by PR #${pr}, but the tracking issue could not be filed. Still to file (idempotent by the marker):`, "",
+    ...rows.map((r) => `- ${flat(r.id)} (${flat(r.disposition)}): ${flat(r.quote)} | why: ${flat(r.why)} | \`${r.marker}\``)].join("\n");
+}
+
+/**
  * #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}; unmatched items omitted. Both sides get every
  * identity rule of scripts/file-deferred-followups.sh: trimmed (#4388), backticks stripped (#4984) and repeated leading
  * `R<n>: R<m>:` prefixes collapsed to the first (#5141: a quote starting with its own id looped on followup.unavailable).
