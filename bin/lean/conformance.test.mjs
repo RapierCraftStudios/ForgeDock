@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -903,6 +903,22 @@ describe("#4594 amend-requirement", () => {
   it("the reviewer prompt tells it to compare amended_from with the amendment (#4996)", () => {
     assert.match(readFileSync(new URL("./prompts.mjs", import.meta.url), "utf8"), /amended_from\.quote and amended_from\.why with amendment\.text/);
   });
+  it("followupMap matches a key whose quote repeats its own R<n>: prefix, as the script collapses it (#5141)", () => {
+    const items = followupItems([{ id: "R6", disposition: "defer", bucket: "host", quote: "R6: Fleet: x in (browser, replay) over 48h.", why: "w" }, { id: "R1", disposition: "defer", bucket: "new-issue", quote: "R3: Named accounts", why: "w" }]);
+    assert.deepEqual(followupMap("R6: Fleet: x in (browser, replay) over 48h.\t901\nR1: Named accounts\t902\n", items), { [items[0].key]: 901, [items[1].key]: 902 });
+  });
+
+  it("renderPendingFollowups lists each unfiled follow-up with its text and the FORGE:DEFERRED_FROM marker (#5141)", () => {
+    const md = renderPendingFollowups([{ id: "R2", disposition: "defer", quote: "a\tb\nc", why: "w", marker: "FORGE:DEFERRED_FROM: #7" }], 12);
+    assert.match(md, /^## Follow-up pending\nMerged by PR #12/);
+    assert.match(md, /\n- R2 \(defer\): a b c \| why: w \| `FORGE:DEFERRED_FROM: #7`$/);
+  });
+  it("followupMap falls back to the single echoed row carrying the item id, never to an ambiguous one (#5141)", () => {
+    assert.deepEqual(followupMap("R2: drifted text\t7\n", [{ id: "R2", key: "R2: original text" }]), { "R2: original text": 7 });
+    assert.deepEqual(followupMap("R2: a\t7\nR2: b\t8\n", [{ id: "R2", key: "R2: c" }]), {});
+    assert.deepEqual(followupMap("R20: a\t7\n", [{ id: "R2", key: "R2: c" }]), {});
+  });
+
   it("followupMap matches an item key whose backticks the script stripped (#4984)", () => {
     assert.deepEqual(followupMap("R2: wire pd.py in\t20\n", [{ key: "R2: wire `pd.py` in" }]), { "R2: wire `pd.py` in": 20 });
   });
@@ -1341,6 +1357,14 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
     }
     for (const choice of ["Mock everything; the e2e suite is not needed", "e2e is not run, jest mocks cover it", "e2e tests are not required, rely on mocked unit tests", "e2e suite no longer runs; mocks used", "Skip the slow flaky nightly e2e and use mocks", "Use stubbed unit tests, e2e not needed"]) {
       assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+  });
+  it("#5145 unittest/unittests and substitute units are mocks; a negator across a preposition is not a weakener", () => {
+    for (const choice of ["Replace e2e with unittest cases", "Skip e2e, covered by unittests", "e2e dropped, use units", "Use unittest cases instead of the e2e check"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+    for (const choice of ["Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
     }
   });
   it("leaves unrelated decisions and contracts without decisions alone", () => {

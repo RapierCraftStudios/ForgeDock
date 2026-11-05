@@ -1345,3 +1345,71 @@ describe("batch plan secrets (#4787)", () => {
     assert.ok(fast < 10 * LAT, `first lane after ${fast} ms`);
   });
 });
+
+describe("#5138: live max_remote and placement of a running batch", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 1));
+  it("live max_remote raised from 1 to 2 admits a waiting remote lane while the first still runs", async () => {
+    let m = 1, open;
+    const gate = new Promise((r) => { open = r; });
+    const live = new Set(), seen = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick,
+      remote: { get max() { return m; }, isRemote: () => true, capacity: () => null },
+      runOne: async (n, _ln, ctx = {}) => { live.add(n); seen.push([n, ctx.placement?.where, [...live].sort()]); if (n === 1) await gate; live.delete(n); return { terminalReason: "merged", pr: 100 + n }; } });
+    await until(() => live.has(1));
+    for (let i = 0; i < 20; i++) await tick();
+    assert.ok(!seen.some(([n]) => n === 2), "#2 waits: max_remote 1 is taken by #1");
+    m = 2;
+    await until(() => seen.some(([n]) => n === 2));
+    assert.deepEqual(seen.find(([n]) => n === 2), [2, "remote", [1, 2]]);
+    open();
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("live max_remote raised from 0 to 1 admits a waiting remote lane (nothing running)", async () => {
+    let m = 0;
+    const seen = [];
+    const done = orchestrate({ issues: [1], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick,
+      remote: { get max() { return m; }, isRemote: () => true, capacity: () => null },
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); return { terminalReason: "merged", pr: 100 + n }; } });
+    for (let i = 0; i < 20; i++) await tick();
+    assert.deepEqual(seen, [], "#1 waits under max_remote 0");
+    m = 1;
+    const rows = await done;
+    assert.deepEqual(seen, [[1, "remote"]]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged"]);
+  });
+  it("live max_remote lowered from 2 to 1 stops no running lane and holds new remote admissions", async () => {
+    let m = 2;
+    const live = new Set(), gates = new Map(), seen = [];
+    const gate = (n) => { let open; const p = new Promise((r) => { open = r; }); gates.set(n, open); return p; };
+    const done = orchestrate({ issues: [1, 2, 3], parallel: 3, pollMs: 1, readBody: async () => "", sleep: tick,
+      remote: { get max() { return m; }, isRemote: () => true, capacity: () => null },
+      runOne: async (n) => { live.add(n); seen.push([n, [...live].sort()]); if (n !== 3) await gate(n); live.delete(n); return { terminalReason: "merged", pr: 100 + n }; } });
+    await until(() => live.size === 2);
+    m = 1;
+    gates.get(1)();
+    for (let i = 0; i < 20; i++) await tick();
+    assert.ok(!seen.some(([n]) => n === 3), "#3 waits while #2 holds the one remote slot");
+    assert.ok(live.has(2), "#2 keeps running");
+    gates.get(2)();
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
+    assert.deepEqual(seen.find(([n]) => n === 3)[1], [3]);
+  });
+  it("--set-max-remote / --set-placement write the batch's execution file; bad values and provider-less remote refused", async () => {
+    const root = tmpDir("batch-live-exec-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"] });
+    await quiet(() => orchestrateFromCli(["--set-max-remote", "b1", "3"], { batchRoot: root }));
+    assert.deepEqual(b.readExecution(), { maxRemote: 3 });
+    await quiet(() => orchestrateFromCli(["--set-placement", "b1", "local"], { batchRoot: root }));
+    assert.deepEqual(b.readExecution(), { maxRemote: 3, mode: "local" });
+    await assert.rejects(orchestrateFromCli(["--set-placement", "b1", "hybrid"], { batchRoot: root }), /no remote provider/);
+    await assert.rejects(orchestrateFromCli(["--set-max-remote", "b1", "-1"], { batchRoot: root }), /non-negative integer/);
+    await assert.rejects(orchestrateFromCli(["--set-placement", "b1", "cloud"], { batchRoot: root }), /placement must be one of/);
+    await assert.rejects(orchestrateFromCli(["--set-max-remote", "nope", "1"], { batchRoot: root }), /no batch nope/);
+    b.setExecution({ provider: true });
+    await quiet(() => orchestrateFromCli(["--set-placement", "b1", "hybrid"], { batchRoot: root }));
+    assert.equal(b.readExecution().mode, "hybrid");
+  });
+});

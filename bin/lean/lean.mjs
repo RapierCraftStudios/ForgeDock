@@ -15,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -319,7 +319,8 @@ export async function runCore(o) {
     const terminal = ["merged", "invalid", "needs-human", "engine-error"].includes(reason);
     // forge#4275: the typed outcome code and failure classes ride on FORGE:STATE, so the next run's context pack reads them typed.
     const typed = terminal ? { terminalCode: code ?? null, failureClasses: [...failureClasses].sort(), ...(reason === "merged" && mergedTo ? { mergedTo } : {}) } : {}; // #4711: where the change landed
-    try { await writeLease(null, terminal ? { terminal: true, terminalReason: reason, ...typed } : {}); } catch { /* best effort */ }
+    const pending = pendingRecord().length ? { pendingFollowups: pendingRecord() } : {}; // #5141: unfiled follow-ups, filed later by the marker
+    try { await writeLease(null, terminal ? { terminal: true, terminalReason: reason, ...typed, ...pending } : pending); } catch { /* best effort */ }
   }
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
@@ -357,6 +358,8 @@ export async function runCore(o) {
   let seqLease = null; // #4386: the host sequence lease, held from the merge-gate renumber through the merge
   const waits = {};
   const followupsFiled = []; // #5078: {issue, class, count} per tracking issue this lane filed into, for the batch report
+  const pendingFollowups = []; // #5141: {req, why} whose filing kept failing in-lane; filed after the merge, else recorded
+  const pendingRecord = () => pendingFollowups.filter((p) => !p.req.tracked).map((p) => ({ id: p.req.id, quote: String(p.req.quote ?? ""), disposition: p.req.disposition, why: p.why, marker: `FORGE:DEFERRED_FROM: #${issue}` }));
   let precheckMs = 0, precheckDeferred = 0, precheckRan = false; // #4331: pre-PR check wall time and deferrals, for the batch report
   const addWait = (phase, ms, queued = 0) => {
     if (Number.isFinite(ms) && ms > 0) waits[phase] = (waits[phase] ?? 0) + ms;
@@ -494,7 +497,7 @@ export async function runCore(o) {
     await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
-      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(followupsFiled.length ? { followups: followupsFiled.map((f) => ({ ...f })) } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
+      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(followupsFiled.length ? { followups: followupsFiled.map((f) => ({ ...f })) } : {}), ...(pendingRecord().length ? { pendingFollowups: pendingRecord() } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
       ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced), ...(Object.keys(kinds).length ? { kinds: [...failureClasses] } : {}) } } : {}), ...extra };
@@ -1404,25 +1407,54 @@ export async function runCore(o) {
       }
       return block ? await endBlocked(block, result.summary) : null;
     }
-    /** File (or append to) the parent's one batched follow-up issue for these requirements, then verify each tracking issue is open. */
-    async function track(reqs, why) {
-      const fail = (detail) => Object.assign(new Error(detail), { deferCode: OUTCOME_CODES.FOLLOWUP_UNAVAILABLE, deferDetail: `${detail}; nothing merged, rerun to retry` });
+    /**
+     * File (or append to) the parent's one batched follow-up issue for these requirements, then verify each tracking issue is open.
+     * #5141: the whole step is retried in-lane (3 attempts, 5s then 15s): the script is idempotent (claim marker /
+     * FORGE:DEFERRED_FROM lookup, checklist dedup, duplicate close), so only a persistent failure defers the run.
+     * A malformed TSV (DEFERRED_TSV=INVALID) is deterministic and never retried. #5141: when the retries are spent the run
+     * keeps going (keep): the untracked requirements join pendingFollowups, recorded in FORGE:STATE and filed after the merge.
+     */
+    async function track(reqs, why, { keep = true } = {}) {
+      const fail = (detail, final = true) => Object.assign(new Error(detail), { deferCode: OUTCOME_CODES.FOLLOWUP_UNAVAILABLE, deferDetail: `${detail}; nothing merged, rerun to retry`, final });
       if (!io.fileFollowups) throw fail("no follow-up filing effect is configured");
       const items = followupItems(reqs, { now: now() });
-      let filed;
-      try { filed = await io.fileFollowups({ parent: issue, repo, items, milestone, defaultMilestone: o.followupsDefaultMilestone ?? null, lane, batchId: o.batchId ?? null, rollupLabel: o.followupsRollupLabel ?? null }); } catch (e) { throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`); }
-      for (const [i, r] of reqs.entries()) {
-        const n = Number(filed?.[items[i].key]);
-        if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`);
-        let st = null;
-        try { st = JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "number,state"]))); } catch { st = null; }
-        if (String(st?.state).toUpperCase() !== "OPEN") throw fail(`tracking issue #${n} for ${r.id} is not open or unreadable`);
-        r.tracked = `#${n}`;
-        const f = followupsFiled.find((x) => x.issue === n && x.class === items[i].class); // #5078: grouped per issue and class
-        if (f) f.count += 1; else followupsFiled.push({ issue: n, class: items[i].class, count: 1 });
+      const attempt = async () => {
+        let filed;
+        try { filed = await io.fileFollowups({ parent: issue, repo, items, milestone, defaultMilestone: o.followupsDefaultMilestone ?? null, lane, batchId: o.batchId ?? null, rollupLabel: o.followupsRollupLabel ?? null }); } catch (e) {
+          throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`, /DEFERRED_TSV=INVALID/.test(`${e?.stdout ?? ""}${e?.message ?? ""}`));
+        }
+        for (const [i, r] of reqs.entries()) {
+          if (recorded.has(i)) continue; // tracked in an earlier attempt: keeps its r.tracked, never re-counted
+          const n = Number(filed?.[items[i].key]);
+          if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`, false);
+          let st = null;
+          try { st = JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "number,state"]))); } catch { st = null; }
+          if (String(st?.state).toUpperCase() !== "OPEN") throw fail(`tracking issue #${n} for ${r.id} is not open or unreadable`, false);
+          recorded.add(i);
+          r.tracked = `#${n}`;
+          const f = followupsFiled.find((x) => x.issue === n && x.class === items[i].class); // #5078: grouped per issue and class
+          if (f) f.count += 1; else followupsFiled.push({ issue: n, class: items[i].class, count: 1 });
+        }
+      };
+      const recorded = new Set();
+      const waits = [5000, 15000];
+      for (let k = 0; ; k++) {
+        try { await attempt(); break; } catch (e) {
+          if (e.final || (k >= waits.length && !keep)) throw e;
+          if (k >= waits.length) { // #5141: keep the merge-capable work; the close step files these after the merge
+            const left = reqs.filter((_, i) => !recorded.has(i));
+            for (const r of left) if (!pendingFollowups.some((p) => p.req === r)) pendingFollowups.push({ req: r, why });
+            T.anomalies.push(`follow-up filing failed ${k + 1} times (${String(e.message).slice(0, 160)}): ${left.map((r) => r.id).join(", ")} pending, filed after the merge (FORGE:DEFERRED_FROM: #${issue})`);
+            break;
+          }
+          T.decisions.push(`Follow-up filing attempt ${k + 1} failed (${String(e.message).slice(0, 160)}); retrying in-lane in ${waits[k] / 1000}s`);
+          await sleep(waits[k]);
+        }
       }
-      const buckets = Object.entries(bucketTally(reqs)).map(([k, c]) => `${k}:${c}`).join(","); // #4724
-      T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why}; buckets ${buckets})`);
+      const done = reqs.filter((r) => r.tracked);
+      if (!done.length) return;
+      const buckets = Object.entries(bucketTally(done)).map(([k, c]) => `${k}:${c}`).join(","); // #4724
+      T.decisions.push(`Tracked ${done.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(done.map((r) => r.tracked))].join(", ")} (${why}; buckets ${buckets})`);
     }
     /**
      * #4328: probe the host for the tools and modules a contract's validate commands need; #4393: then flag `$NAME`s the lane
@@ -3015,8 +3047,22 @@ export async function runCore(o) {
     }
     try { await recordStructure(pr); } catch (e) { ev({ event: "STRUCTURE_DELTA_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
     await deleteMergedBranch();
+    let keepOpen = false;
+    if (pendingRecord().length) { // #5141: the close step files what the lane could not track before the PR (idempotent by the marker)
+      const left = pendingFollowups.filter((p) => !p.req.tracked);
+      for (const why of new Set(left.map((p) => p.why))) {
+        try { await track(left.filter((p) => p.why === why).map((p) => p.req), `${why}; filed after the merge`); } catch (e) { T.anomalies.push(`follow-up filing after the merge failed: ${String(e?.message ?? e).slice(0, 160)}`); }
+      }
+      for (const p of left) if (p.req.tracked && !closing.tracked.includes(p.req.tracked)) closing.tracked.push(p.req.tracked);
+      const still = pendingRecord();
+      if (still.length) {
+        keepOpen = true; // release review #5155 (#5156): nothing re-files a pending item, so the issue stays open as the durable record
+        T.decisions.push(`Follow-up still unfiled after the merge: ${still.map((x) => x.id).join(", ")}; issue left open (FORGE:FOLLOWUP_PENDING, FORGE:STATE pendingFollowups) until it is tracked`);
+        try { await post("FORGE:FOLLOWUP_PENDING", renderPendingFollowups(still, pr)); } catch { /* FORGE:STATE and the lane result carry them too */ }
+      }
+    }
     const partial = closing.reason === "partial";
-    await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
+    if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
     if (partial) {
       try { await post("FORGE:TRACKED", `## Closed as partial\nThe investigation's stated question is not answered in this change (PR #${pr}); carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
     } else if (closing.tracked.length) {

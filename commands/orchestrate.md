@@ -100,7 +100,8 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   (live lanes are re-adopted, nothing is launched twice). The runner is hosted by the detached `forgedock schedd` daemon,
   which resumes every daemon-hosted batch that has no report yet when it starts, so a closed session needs no manual
   `--resume`; a batch started without the daemon still needs `forgedock orchestrate --resume <id>`. Change K of a running batch with
-  `forgedock orchestrate --set-parallel <id> K`. Issues filed while a batch runs join it with
+  `forgedock orchestrate --set-parallel <id> K`. Change its remote lane cap or placement with `forgedock orchestrate --set-max-remote <id> N` and
+  `--set-placement <id> remote|hybrid|local` (remote/hybrid only for a batch started with a remote provider; running lanes keep running). Issues filed while a batch runs join it with
   `forgedock orchestrate --add <id> N...` (or `--resume <id> N...`), under its K and DAG; never start a second batch
   for them. After a decision (a `FORGE:DECISION` posted and `needs-human` removed), a blocked issue that already ended in the batch
   (`needs-human`, `invalid`, `skipped`, `dependency-*`, `ci-pending`, `deferred`) returns to it with

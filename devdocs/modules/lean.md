@@ -31,6 +31,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
    promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
    flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
+   #5148: `isPassThroughWrapper` also detects a wrapper that looks up a `$0`-derived name (`${0##*/}`, `basename "$0"`), so
+   `writeHeavyShims` bakes the real binary past it and the preflight flags it; `guardChain` counts `FORGE_HEAVY_DEPTH` and
+   stops at `SHIM_DEPTH_MAX` (32) with `env.shim_loop` (exit 126), whatever the wrapper shape.
    Local lane cap (#4777): `admission.mjs` `localLaneCap` = max(1, min(floor(cores / `lane_cpu_reservation`, default 1),
    floor((MemAvailable − `min_free_mem_mb`) / `lane_mem_mb`, default 2048))), forge.yaml `engine.lane_cpu_reservation|
    lane_mem_mb`. `engine-cli.mjs` `liveLaneCap` passes it (min `global_parallel`) as `sched.cap` function, which
@@ -359,6 +362,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
+   `followupMap` applies every identity rule of the script to both sides: trim,
+   strip backticks, and collapse repeated leading `R<n>: R<m>:` prefixes to the
+   first (#5141: a quote starting with its own id, `R6: R6: …`, looped on
+   `followup.unavailable`). An item that still has no match takes the one echoed row
+   whose identity starts with `<id>:`, and never an ambiguous one. `track()` retries
+   the whole file-and-verify step in-lane up to 3 times, waiting 5 s and then 15 s
+   (`io.sleep`; the script is idempotent), and logs each retry in the decisions.
+   A requirement verified open in an earlier attempt keeps its `tracked` issue and
+   is neither re-verified nor counted again in `followupsFiled`.
+   A malformed TSV (`DEFERRED_TSV=INVALID`) is not retried and still defers with
+   `followup.unavailable`. When the 3 attempts fail for any other reason, the run
+   does not defer: it keeps the merge-capable work and goes on to review, PR and
+   merge. The unfiled requirements (id, quote, why, `FORGE:DEFERRED_FROM: #<n>`)
+   go into `pendingFollowups`, which is kept in FORGE:STATE and the lane result.
+   The close step files them again after the merge (the marker keeps this
+   idempotent). Anything still unfiled is posted as `FORGE:FOLLOWUP_PENDING` on
+   the issue, and the issue is left open, not closed (#5156). Nothing re-files
+   a pending item automatically, so the open issue is the durable record.
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its
@@ -721,6 +742,22 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   in the daemon (breaker reset, as an operator resume).
 - `set-parallel {id, k}` sets K live. With no daemon running, the client writes
   the `parallel` file itself.
+- `set-execution {id, maxRemote?, mode?}` (#5138, `--set-max-remote <id> N`,
+  `--set-placement <id> remote|hybrid|local`) changes `max_remote` and the placement
+  mode live. It merges into the batch's `execution` file (`{maxRemote?, mode?,
+  provider?}`); with no daemon running, the client writes the file itself. The runner
+  puts live getters on its `remote` object (`bin/lean/live-execution.mjs`
+  `liveRemote`): `max`, `fallbackLocal` (true in hybrid) and `place` re-read the file
+  on every admission, and orchestrate reads `remoteMax()` per grant. Running lanes are
+  never stopped: a lower `max_remote` only holds new remote admissions (polled, so a
+  raise admits them, even with nothing running); hybrid runs them on the host instead,
+  and placement `local` runs every new lane on the host. A batch that built a
+  remote provider records `provider: true` at start (`false` when a resume builds
+  none); `remote`/`hybrid` are refused without it, because the provider, ledger and
+  execution budget are built once at start. Switching a remote batch to hybrid
+  computes the validation weight on first use (light until it resolves). The override
+  is per batch, survives `--resume`, and logs one `execution: live placement ...` line
+  per change.
 - `add {id, issues}` (#4408, `--add <id> N...`, also `--resume <id> N...`) merges
   issues into the batch's cumulative `add` file, hosted or not. The client skips
   closed issues first; non-integers and issues already in the batch are skipped.
@@ -907,7 +944,7 @@ keychain service `forgedock`) and the `run-issue` argv. The env also carries the
 lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
-Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
+Actions endpoint without `allow_actions: true`. The bearer is resolved per request (#5144): `httpTransport`'s `token` may be a function, `remoteTransportFor` passes a getter over `poolCredential`, and `providerByName` always names the token (`FORGEDOCK_POOL_TOKEN`/`FORGEDOCK_REMOTE_TOKEN`) and re-reads the router's token file per call, so a token fixed or rotated mid-batch is the next request's bearer (and is redacted). `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` for a 4xx config error (not 401/403/429) or a non-HTTP throw (or `deferred` `sandbox.capacity`
 for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528; `deferred` `sandbox.transient` for any other 5xx,
 retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) instead of engine-error. A sandbox that exits without a result while its
@@ -2574,6 +2611,10 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-05 — e2e-weakening check: double negatives, word boundaries, trailing negations (#5130)
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`) now blanks negated weakeners ("do not skip the e2e suite", "e2e tests are not replaced") before matching, so they are not flagged. `MOCKED_RE` regains its trailing `\b` and `unit` matches only as a word, so "units", "United" and "Unity" are not mocks. `DROP_AFTER_RE` accepts trailing negations ("not needed/required/run", "no longer runs", "unnecessary"), and the clause-local gap is 5 words ("skip the slow flaky nightly e2e and use mocks"). The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5130".
+
+## Entry 2026-11-05 — e2e-weakening check: unittest forms and negator scope (#5145)
+
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): `MOCKED_TERM` now matches `unittest`/`unittests`/`unit-testing` and "units" only as the named substitute ("use/using/via/by units"); bare "units", "United" and "Unity" stay unflagged. A bare negator (no/not/without/never) in `DROP_BEFORE_RE` cannot reach the e2e term across a preposition, so "no new fixtures needed for e2e" is not a weakening; the verb weakeners keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5145".
 
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 

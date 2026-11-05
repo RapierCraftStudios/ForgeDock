@@ -1183,6 +1183,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * `--resume <id>` continues after the dispatcher dies, re-adopting live lanes. `deferred` lanes are requeued by code,
  * forge.yaml `orchestration.breaker` ({errors, window_min}, default 3 in 30) stops admissions on an engine-error
  * burst, and `--set-parallel <id> K` changes K of a running batch.
+ * `--set-max-remote <id> N` and `--set-placement <id> remote|hybrid|local` (#5138) change its execution live (live-execution.mjs).
  * Maintenance budget (#4197), only with forge.yaml `maintenance.enabled: true` (or `deps.maintenance`): open issues carrying
  * a `maintenance.labels` label join the batch, each issue is classified from its labels (maintenance; `priority:P<n>`,
  * unlabelled = P2) and admission reserves `maintenance.share` of lane starts for maintenance (`when_idle` drains the rest).
@@ -1248,7 +1249,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1463,6 +1464,17 @@ async function orchestrateClient(argv, deps = {}) {
     console.log(`batch ${id}: parallel set to ${k}`);
     return { ok: true, batch: id, parallel: k };
   }
+  if (argv.includes("--set-max-remote") || argv.includes("--set-placement")) {
+    // #5138: through the daemon when one runs, else the batch's `execution` file directly (nothing hosts the batch).
+    const liveExec = await import("./lean/live-execution.mjs");
+    const { id, patch } = liveExec.parseSetExecution(argv);
+    let sock = null, execution = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    if (sock) execution = (await schedd.request(sock, { op: "set-execution", id, ...patch }, undefined, { timeoutMs: schedd.REQUEST_MS }))?.execution ?? null;
+    else { const batchMod = await import("./lean/batch.mjs"); execution = liveExec.applySetExecution(batchMod.openBatch(batchMod.batchRoot(), id), patch); }
+    console.log(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    return { ok: true, batch: id, execution };
+  }
   // #4408: --add, and the extra issues of --resume <id> N..., go to the batch (through the daemon when one runs).
   const addVia = (id) => async (issues) => {
     let sock = null;
@@ -1583,6 +1595,14 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     b.setParallel(k);
     sink.line(`batch ${b.id}: parallel set to ${k}`);
     return { ok: true, batch: b.id, parallel: k };
+  }
+  if (argv.includes("--set-max-remote") || argv.includes("--set-placement")) {
+    // #5138: live max_remote / placement mode of a batch, re-read by its runner on every admission.
+    const liveExec = await import("./lean/live-execution.mjs");
+    const { id, patch } = liveExec.parseSetExecution(argv);
+    const execution = liveExec.applySetExecution(batchMod.openBatch(root, id), patch);
+    sink.line(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    return { ok: true, batch: id, execution };
   }
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
@@ -1774,13 +1794,14 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const relays = Array.isArray(provider.relays) ? provider.relays : [];
       // #5112: the host-busy guard, shared by hybrid placement and the fallback_local capacity fallback.
       const hostHeadroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
-      const place = !hybrid ? (n) => execMod.placeLane({ exec, needs: needsOf.get(n) ?? [], relays }) : await (async () => {
-        const verifyMode = (deps.verify !== undefined ? deps.verify : readVerify(cwd))?.mode ?? "local";
-        let weight = deps.validationWeight ?? null;
-        if (!weight) { try { weight = await execMod.validationWeight({ cwd, precheckCommands: readPrecheckCommands(cwd) ?? [] }); } catch { weight = { heavy: false, signals: [] }; } }
-        const headroom = hostHeadroom;
-        return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom(), needs: needsOf.get(n) ?? [], relays });
-      })();
+      // #5138: placement and max_remote re-read the batch's live `execution` override (--set-placement / --set-max-remote).
+      const liveExec = await import("./lean/live-execution.mjs");
+      const verifyMode = (deps.verify !== undefined ? deps.verify : readVerify(cwd))?.mode ?? "local";
+      const computeWeight = () => deps.validationWeight ?? execMod.validationWeight({ cwd, precheckCommands: readPrecheckCommands(cwd) ?? [] });
+      const weight = liveExec.lazyWeight({ initial: hybrid ? (await Promise.resolve().then(computeWeight).catch(() => null)) ?? { heavy: false, signals: [] } : null, compute: computeWeight });
+      const place = (e, n) => (e.mode !== "hybrid" ? execMod.placeLane({ exec: e, needs: needsOf.get(n) ?? [], relays })
+        : execMod.placeLane({ exec: e, verifyMode, labels: labelsOf.get(n) ?? [], weight: weight.get(), headroom: hostHeadroom(), needs: needsOf.get(n) ?? [], relays }));
+      if (batch.readExecution()?.provider !== true) batch.setExecution({ provider: true });
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
       let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity, capFailed = false; // #5048: capFailed = last probe rejected // #4547: online = agents alive, null unknown
       const capacity = () => {
@@ -1792,18 +1813,19 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         }
         return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
       };
-      remote = {
-        capacity, max: exec.maxRemote, isRemote: () => true, place, identity: () => holdId, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+      remote = liveExec.liveRemote({
+        capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
           try { execBudget.record(`${batch.id}#${sb.id ?? n}#${startedAt}`, sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
-      };
+      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn }));
+      if (batch.readExecution()?.provider === true) batch.setExecution({ provider: false }); // #5138: a resume without a provider refuses live remote/hybrid
     }
     // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");

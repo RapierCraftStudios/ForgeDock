@@ -268,7 +268,7 @@ const tmpInputProblem = (id, p) => `${id}: reads ${p}, which the command does no
 
 const E2E_TERM = String.raw`(?:e2e|end-to-end|integration|playwright|cypress|live[- ]stack)`;
 const E2E_WORD_RE = new RegExp(String.raw`\b${E2E_TERM}\b`, "i");
-const MOCKED_TERM = String.raw`(?:mock\w*|stub\w*|fake\w*|unit(?:[- ]tests?)?|vitest|jest|component tests?|route tests?)`;
+const MOCKED_TERM = String.raw`(?:mock\w*|stub\w*|fake\w*|unit(?:[- ]?test\w*)?|(?:use[sd]?|using|via|by)\s+units|vitest|jest|component tests?|route tests?)`;
 const MOCKED_RE = new RegExp(String.raw`\b${MOCKED_TERM}\b`, "i");
 // #5116: a negated mock ("do not mock", "no stubs") or a fake clock is not a substitute for the e2e check.
 const NEG_MOCK_RE = /\b(?:do(?:es)? not|don't|never|no|not|without)\s+(?:use\s+|any\s+)?(?:mock\w*|stub\w*|fake\w*)/gi;
@@ -277,7 +277,9 @@ const NEG_DROP_RE = /\b(?:do(?:es)? not|don't|never|not)\s+(?:be\s+|been\s+|bein
 const FAKE_CLOCK_RE = /\bfake[- ](?:timers?|clocks?)\b/gi;
 // A weakener governs the e2e term only within a few words and the same clause (no . or ; between them).
 const GAP = String.raw`(?:[\s,]+\w+){0,5}?[\s,]+`;
-const DROP_BEFORE_RE = new RegExp(String.raw`\b(?:no|not|without|never|drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|swap\w*)${GAP}${E2E_TERM}\b`, "i");
+// #5145: a bare negator ("no new fixtures needed for e2e") stops at a preposition; the verb weakeners keep the wide GAP.
+const NEG_GAP = String.raw`(?:[\s,]+(?!(?:for|to|of|in|on|at|by|with|from|via)\b)\w+){0,5}?[\s,]+`;
+const DROP_BEFORE_RE = new RegExp(String.raw`\b(?:(?:no|not|without|never)${NEG_GAP}|(?:drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|swap\w*)${GAP})${E2E_TERM}\b`, "i");
 const DROP_AFTER_RE = new RegExp(String.raw`\b${E2E_TERM}${GAP}(?:replaced|dropped|skipped|swapped|downgraded|unnecessary|(?:not|no longer)\s+(?:needed|required|necessary|run\w*|used|executed))\b`, "i");
 const INSTEAD_OF_RE = new RegExp(String.raw`\b${MOCKED_TERM}[^.;]{0,60}?\b(?:instead of|rather than|in lieu of)\b${GAP}${E2E_TERM}\b`, "i");
 const PROBE_RE = /forge-probe|acceptance[- ]probe/i;
@@ -1283,12 +1285,37 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
   });
 }
 
-/** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */
+/**
+ * #5141: the FORGE:FOLLOWUP_PENDING note for follow-ups the lane could not file before or after the merge. Each row keeps the
+ * requirement text and the `FORGE:DEFERRED_FROM: #<n>` marker the follow-up script looks up, so a later pass files it once.
+ */
+export function renderPendingFollowups(rows, pr) {
+  const flat = (s) => String(s ?? "").replace(/[\t\r\n]+/g, " ").trim();
+  return [`## Follow-up pending`, `Merged by PR #${pr}, but the tracking issue could not be filed, so this issue stays open until it is. Still to file (idempotent by the marker):`, "",
+    ...rows.map((r) => `- ${flat(r.id)} (${flat(r.disposition)}): ${flat(r.quote)} | why: ${flat(r.why)} | \`${r.marker}\``)].join("\n");
+}
+
+/**
+ * #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}; unmatched items omitted. Both sides get every
+ * identity rule of scripts/file-deferred-followups.sh: trimmed (#4388), backticks stripped (#4984) and repeated leading
+ * `R<n>: R<m>:` prefixes collapsed to the first (#5141: a quote starting with its own id looped on followup.unavailable).
+ * An item still unmatched takes the one echoed row whose identity starts with `<item.id>:`; never when several do.
+ */
 export function followupMap(out, items) {
+  const norm = (k) => {
+    let s = String(k).replace(/`/g, "").trim(), m;
+    while ((m = /^(R\d+:)\s*R\d+:\s*(.*)$/s.exec(s))) s = `${m[1]} ${m[2]}`;
+    return s;
+  };
   const echoed = new Map();
-  const norm = (k) => String(k).replace(/`/g, "").trim(); // #4984: the script strips backticks from the label it echoes
   for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(norm(k), Number(n)); }
-  return Object.fromEntries(items.filter((i) => echoed.has(norm(i.key))).map((i) => [i.key, echoed.get(norm(i.key))]));
+  const byId = (id) => { const hits = [...echoed].filter(([k]) => k.startsWith(`${id}:`)); return hits.length === 1 ? hits[0][1] : undefined; };
+  const res = {};
+  for (const i of items) {
+    const n = echoed.get(norm(i.key)) ?? (i.id ? byId(String(i.id)) : undefined);
+    if (n !== undefined) res[i.key] = n;
+  }
+  return res;
 }
 
 /**

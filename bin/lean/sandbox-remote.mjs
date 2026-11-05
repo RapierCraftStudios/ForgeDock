@@ -43,7 +43,8 @@ export function isActionsEndpoint(endpoint) {
 /**
  * Generic HTTP transport: POST {endpoint}/sandboxes (body = launch spec), GET /sandboxes/:id -> {state},
  * GET /sandboxes/:id/logs?cursor=N -> {text, cursor}, GET /sandboxes/:id/result -> lane result (404 = none yet),
- * GET /sandboxes/:id/usage -> {minutes, agent?} (agent: the pool agent that ran it, #4549), DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
+ * GET /sandboxes/:id/usage -> {minutes, agent?} (agent: the pool agent that ran it, #4549), DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`
+ * (`token` is a string, or a function called per request, #5144).
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
  * Optional `POST /sandboxes/:id/stop` (#4612) asks the pool to SIGTERM the lane so its teardown checkpoints and it reports `deferred run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (never a DELETE fallback).
  * Optional relay (#4778): `GET /sandboxes/:id/relay -> {requests: [{rid, argv}]}` lists a sandbox's pending read-only capability
@@ -53,7 +54,9 @@ export function isActionsEndpoint(endpoint) {
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
   const call = async (method, path, body) => {
-    const res = await fetchFn(`${root}${path}`, { method, headers: { accept: "application/json", ...(body ? { "content-type": "application/json" } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    // #5144: `token` may be a function, resolved on every request so a token fixed or rotated mid-batch is the next bearer.
+    const bearer = typeof token === "function" ? token() : token;
+    const res = await fetchFn(`${root}${path}`, { method, headers: { accept: "application/json", ...(body ? { "content-type": "application/json" } : {}), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}) });
     let data = null;
     try { const t = await res.text(); data = t ? JSON.parse(t) : null; } catch { data = null; }
@@ -195,6 +198,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const id = idFor(issue);
       // Each allowlisted secret from the env, else the keychain (#4254); nothing else from the host.
       const resolved = {};
+      if (settings.tokenEnv) remember(credentials(settings.tokenEnv)); // #5144: a token rotated since construction is redacted too
       for (const k of secrets) { const v = laneEnv?.[k] !== undefined && laneEnv[k] !== "" ? String(laneEnv[k]) : credentials(k); if (v) { resolved[k] = v; remember(v); } }
       const li = args.indexOf("--lane");
       const resultFile = `/result/${issue}.json`;

@@ -208,6 +208,27 @@ describe("remote adapter (#4254)", () => {
     await assert.rejects(r.status("x"), /router auth/);
   });
 
+  it("5144 httpTransport: a function token is resolved per call", async () => {
+    let cur = null;
+    const seen = [];
+    const t = httpTransport({ endpoint: "https://pool.example", token: () => cur, fetchFn: async (url, init) => { seen.push(init.headers.authorization ?? null); return { status: 200, ok: true, text: async () => JSON.stringify({ state: "running" }), headers: { get: () => null } }; } });
+    await t.status("x"); cur = "tok-new"; await t.status("x"); cur = "tok-rotated"; await t.status("x"); cur = null; await t.status("x");
+    assert.deepEqual(seen, [null, "Bearer tok-new", "Bearer tok-rotated", null]);
+  });
+
+  it("5144 remoteProvider: a token rotated after construction is redacted from pulled logs", async () => {
+    const batch = openBatch(join(tmpDir("remote-5144-"), "batches"), "bt");
+    const transport = fakeTransport();
+    let tok = null;
+    const p = remoteProvider({ batch, repo: "o/r", settings: { tokenEnv: "FD_TOKEN" }, transport, env: {}, credentials: (n) => (n === "FD_TOKEN" ? tok : null), gitIdentity: () => ({}) });
+    tok = "rotated-secret-789";
+    const h = await p.start({ issue: 3, args: [], env: {}, secrets: [] });
+    transport.boxes.get(h.id).log = `leak ${tok}\n`;
+    await p.status(h);
+    const log = readFileSync(batch.logFile(3), "utf8");
+    assert.equal(log.includes(tok), false);
+  });
+
   it("httpTransport: bearer token, JSON protocol, 404 = gone/destroyed, 429 retryable; the token never in errors", async () => {
     const calls = [];
     const reply = (status, body, headers = {}) => ({ status, ok: status >= 200 && status < 300, text: async () => (body === undefined ? "" : JSON.stringify(body)), headers: { get: (k) => headers[k] ?? null } });
