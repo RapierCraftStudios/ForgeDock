@@ -724,6 +724,21 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   in the daemon (breaker reset, as an operator resume).
 - `set-parallel {id, k}` sets K live. With no daemon running, the client writes
   the `parallel` file itself.
+- `set-execution {id, maxRemote?, mode?}` (#5138, `--set-max-remote <id> N`,
+  `--set-placement <id> remote|hybrid|local`) changes `max_remote` and the placement
+  mode live. It merges into the batch's `execution` file (`{maxRemote?, mode?,
+  provider?}`); with no daemon running, the client writes the file itself. The runner
+  puts live getters on its `remote` object (`bin/lean/live-execution.mjs`
+  `liveRemote`): `max`, `fallbackLocal` (true in hybrid) and `place` re-read the file
+  on every admission, and orchestrate reads `remoteMax()` per grant. Running lanes are
+  never stopped: a lower `max_remote` only holds new remote admissions, and
+  `max_remote 0` or placement `local` runs new lanes on the host. A batch that built a
+  remote provider records `provider: true` at start (`false` when a resume builds
+  none); `remote`/`hybrid` are refused without it, because the provider, ledger and
+  execution budget are built once at start. Switching a remote batch to hybrid
+  computes the validation weight on first use (light until it resolves). The override
+  is per batch, survives `--resume`, and logs one `execution: live placement ...` line
+  per change.
 - `add {id, issues}` (#4408, `--add <id> N...`, also `--resume <id> N...`) merges
   issues into the batch's cumulative `add` file, hosted or not. The client skips
   closed issues first; non-integers and issues already in the batch are skipped.

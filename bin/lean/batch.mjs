@@ -19,6 +19,7 @@ import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { sanitizeOverride, validateExecutionPatch } from "./live-execution.mjs";
 
 export const RAM_FS = new Set(["tmpfs", "ramfs"]);
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -144,6 +145,14 @@ export function openBatch(root, id) {
     setParallel: (k) => {
       if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
       put(f("parallel"), `${k}\n`);
+    },
+    /** Live execution override (#5138): the `execution` file `{maxRemote?, mode?, provider?}`, read on every admission; null when missing or invalid. */
+    readExecution: () => sanitizeOverride(readJson(f("execution"))),
+    /** Merge a validated patch into the `execution` file. @returns the stored override. */
+    setExecution: (patch) => {
+      const next = { ...(sanitizeOverride(readJson(f("execution"))) ?? {}), ...validateExecutionPatch(patch) };
+      put(f("execution"), JSON.stringify(next) + "\n");
+      return next;
     },
     /** Issues added by `--add` (#4408): the `add` file, sorted unique positive integers; [] when missing or invalid. */
     readAdded: () => readAdded(f("add")),

@@ -11,6 +11,7 @@
  *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
+ *   {op:"set-execution", id, maxRemote?, mode?} → {type:"ok", execution} (#5138): live max_remote / placement (remote|hybrid|local); remote/hybrid refused for a batch with no provider
  *   {op:"requeue", id, issues, reason, by} → {type:"ok", requeued, refused, hosted, reopened} (#4550): see batch.requeue; a finished batch is hosted again
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
  *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
@@ -42,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
+import { applySetExecution } from "./live-execution.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
@@ -249,6 +251,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       b.setParallel(Number(req.k));
       return send({ type: "ok", parallel: Number(req.k) }, true);
+    }
+    if (req.op === "set-execution") {
+      // #5138: live max_remote / placement mode; the hosted runner re-reads the batch's `execution` file on every admission.
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const execution = applySetExecution(b, { ...(req.maxRemote !== undefined ? { maxRemote: req.maxRemote } : {}), ...(req.mode !== undefined ? { mode: req.mode } : {}) });
+      return send({ type: "ok", execution }, true);
     }
     if (req.op === "add") {
       const b = openBatch(root, req.id);
