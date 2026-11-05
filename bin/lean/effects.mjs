@@ -94,11 +94,22 @@ export const ownedModelEnv = (subagentModel = null) => {
   const m = sanitizeCliModel(subagentModel);
   return { ...(m ? { CLAUDE_CODE_SUBAGENT_MODEL: m } : {}), CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "0" };
 };
-/** The one `--settings` of a lean session: the owned model env, plus the re-read hooks for builder sessions (#4456). */
-export const leanSettingsFlags = ({ subagentModel = null, reread = false } = {}) =>
-  ["--settings", JSON.stringify({ env: ownedModelEnv(subagentModel), ...(reread ? { hooks: rereadHooks() } : {}) })];
+/** #5118: ForgeDock's pre-tool-use guard (bin/hooks/pre-tool-use.mjs, rule 6 blocks Claude attribution trailers). */
+export const PRE_TOOL_USE_HOOK = fileURLToPath(new URL("../hooks/pre-tool-use.mjs", import.meta.url));
+/** #5118: a lane container has no operator settings.json, so it carries neither the guard nor the attribution pins. */
+export const inSandbox = (env = process.env) => env.IS_SANDBOX === "1" || Boolean(env.CS_SANDBOX_ID);
+/**
+ * The one `--settings` of a lean session: the owned model env, the attribution pins (#5118: Claude Code's default
+ * Co-Authored-By trailer off, whatever the config dir holds), the re-read hooks for builder sessions (#4456), and in a
+ * sandbox the pre-tool-use guard on Bash (#5118: second line of defence; local lanes get it from operator settings).
+ */
+export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard = false } = {}) => {
+  const hooks = reread ? rereadHooks() : {};
+  if (guard) hooks.PreToolUse = [...(hooks.PreToolUse ?? []), { matcher: "Bash", hooks: [{ type: "command", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(PRE_TOOL_USE_HOOK)}` }] }];
+  return ["--settings", JSON.stringify({ env: ownedModelEnv(subagentModel), includeCoAuthoredBy: false, attribution: { commit: "", pr: "" }, ...(Object.keys(hooks).length ? { hooks } : {}) })];
+};
 
-export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null } = {}) {
+export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
@@ -106,7 +117,7 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
     const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
     // #4843 owned models, in extraArgs so FORGEDOCK_FULL_SESSION=1 (which drops sessionFlags) keeps them (#4848 BUG-1);
     // #4456 re-read hooks: builder sessions only, and like the other session flags not in a full session
-    const settings = leanSettingsFlags({ subagentModel, reread: rereadNudge && !readOnly && !noTools && process.env.FORGEDOCK_FULL_SESSION !== "1" });
+    const settings = leanSettingsFlags({ subagentModel, reread: rereadNudge && !readOnly && !noTools && process.env.FORGEDOCK_FULL_SESSION !== "1", guard: sandboxed });
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: [...(resume ? ["--resume", resume] : []), ...settings],
       logger: { log() {} },
