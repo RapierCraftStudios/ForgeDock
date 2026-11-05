@@ -2552,3 +2552,7 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-05 — issue-watch App trust needs a bot signal (release review of #5123)
 
 - `isOwnApp` (`bin/lean/issuewatch.mjs`) requires a bot signal as well as the App slug: the `<slug>[bot]` or `app/<slug>` login form, or `is_bot: true` for the bare GraphQL login. A human account registered under the slug's name (user logins and App slugs are separate namespaces) is never the App, so `trust_app: true` never claims its issues.
+
+## Entry 2026-11-05 — e2e-weakening check is scoped, not co-occurrence (#5116)
+
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`) flags a decision only when a weakener (no/not/without/never/drop/skip/replace/downgrade/swap) governs the e2e term within a few words in one clause, or a mocked term is named as the substitute ("mocked tests instead of e2e"). A negated mock ("do not mock", "no stubs") and fake timers/clock no longer count as mocking, so "do not mock the API" and "fake timers, no sleeps" pass. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5116".

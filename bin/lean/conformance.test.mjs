@@ -1325,6 +1325,16 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
     assert.deepEqual(weakenedE2eDecisions({ ...C, deliverables: [...C.deliverables, { id: "D9", path: "x.md", change: "declare a forge-probe block" }], decisions: [K2] }), []);
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ ...K2, justification: "no acceptance probe" }] }), ["K2"]);
   });
+  it("#5116 negated or strengthening wording is not a weakening; real weakenings still are", () => {
+    for (const choice of ["Run the Playwright e2e suite against the live stack; do not mock the API", "Integration tests use fake timers, no sleeps", "E2E check hits the real server rather than a stubbed one"]) {
+      const c = { ...C, decisions: [{ id: "K1", choice, source: "doc" }] };
+      assert.deepEqual(weakenedE2eDecisions(c), [], choice);
+      assert.ok(!validateContract(c, ISSUE).problems.some((p) => p.startsWith("K1:")), choice);
+    }
+    for (const choice of ["No Playwright e2e; integration coverage via route and component tests", "Replace the e2e test with mocked unit tests", "Skip e2e, use vitest instead", "Use mocked unit tests instead of the e2e check"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+  });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);
