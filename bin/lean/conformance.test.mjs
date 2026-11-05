@@ -1343,6 +1343,14 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
       assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
     }
   });
+  it("#5145 unittest/unittests and substitute units are mocks; a negator across a preposition is not a weakener", () => {
+    for (const choice of ["Replace e2e with unittest cases", "Skip e2e, covered by unittests", "e2e dropped, use units", "Use unittest cases instead of the e2e check"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+    for (const choice of ["Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
+    }
+  });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);
