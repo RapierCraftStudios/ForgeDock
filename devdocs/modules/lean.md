@@ -743,6 +743,8 @@ Lanes run with the client's env. The plan keeps the allowlist
 `PATH|HOME|USER|SHELL|LANG|LC_ALL|TMPDIR|FORGEDOCK_*|CLAUDE_*|ANTHROPIC_*|GH_*|GITHUB_*`
 (`batchEnv`). `mergeEnv` drops the daemon's own allowlisted keys, so an account
 selector never leaks between batches.
+A secret-named key is pinned only when named (`env_passthrough`, `token_env`). A non-empty pin wins over the daemon's value. An empty one never
+overrides it (#5131), and the daemon fills keys the plan lacks (release review #5142 REG-1, #5143).
 
 `--foreground`, `FORGEDOCK_SCHEDD=0` or injected test deps run the batch
 in-process as before.
