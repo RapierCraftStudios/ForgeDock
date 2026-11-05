@@ -1283,12 +1283,27 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
   });
 }
 
-/** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */
+/**
+ * #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}; unmatched items omitted. Both sides get every
+ * identity rule of scripts/file-deferred-followups.sh: trimmed (#4388), backticks stripped (#4984) and repeated leading
+ * `R<n>: R<m>:` prefixes collapsed to the first (#5141: a quote starting with its own id looped on followup.unavailable).
+ * An item still unmatched takes the one echoed row whose identity starts with `<item.id>:`; never when several do.
+ */
 export function followupMap(out, items) {
+  const norm = (k) => {
+    let s = String(k).replace(/`/g, "").trim(), m;
+    while ((m = /^(R\d+:)\s*R\d+:\s*(.*)$/s.exec(s))) s = `${m[1]} ${m[2]}`;
+    return s;
+  };
   const echoed = new Map();
-  const norm = (k) => String(k).replace(/`/g, "").trim(); // #4984: the script strips backticks from the label it echoes
   for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(norm(k), Number(n)); }
-  return Object.fromEntries(items.filter((i) => echoed.has(norm(i.key))).map((i) => [i.key, echoed.get(norm(i.key))]));
+  const byId = (id) => { const hits = [...echoed].filter(([k]) => k.startsWith(`${id}:`)); return hits.length === 1 ? hits[0][1] : undefined; };
+  const res = {};
+  for (const i of items) {
+    const n = echoed.get(norm(i.key)) ?? (i.id ? byId(String(i.id)) : undefined);
+    if (n !== undefined) res[i.key] = n;
+  }
+  return res;
 }
 
 /**

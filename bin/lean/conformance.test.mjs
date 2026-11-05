@@ -903,6 +903,17 @@ describe("#4594 amend-requirement", () => {
   it("the reviewer prompt tells it to compare amended_from with the amendment (#4996)", () => {
     assert.match(readFileSync(new URL("./prompts.mjs", import.meta.url), "utf8"), /amended_from\.quote and amended_from\.why with amendment\.text/);
   });
+  it("followupMap matches a key whose quote repeats its own R<n>: prefix, as the script collapses it (#5141)", () => {
+    const items = followupItems([{ id: "R6", disposition: "defer", bucket: "host", quote: "R6: Fleet: x in (browser, replay) over 48h.", why: "w" }, { id: "R1", disposition: "defer", bucket: "new-issue", quote: "R3: Named accounts", why: "w" }]);
+    assert.deepEqual(followupMap("R6: Fleet: x in (browser, replay) over 48h.\t901\nR1: Named accounts\t902\n", items), { [items[0].key]: 901, [items[1].key]: 902 });
+  });
+
+  it("followupMap falls back to the single echoed row carrying the item id, never to an ambiguous one (#5141)", () => {
+    assert.deepEqual(followupMap("R2: drifted text\t7\n", [{ id: "R2", key: "R2: original text" }]), { "R2: original text": 7 });
+    assert.deepEqual(followupMap("R2: a\t7\nR2: b\t8\n", [{ id: "R2", key: "R2: c" }]), {});
+    assert.deepEqual(followupMap("R20: a\t7\n", [{ id: "R2", key: "R2: c" }]), {});
+  });
+
   it("followupMap matches an item key whose backticks the script stripped (#4984)", () => {
     assert.deepEqual(followupMap("R2: wire pd.py in\t20\n", [{ key: "R2: wire `pd.py` in" }]), { "R2: wire `pd.py` in": 20 });
   });

@@ -1404,19 +1404,43 @@ export async function runCore(o) {
       }
       return block ? await endBlocked(block, result.summary) : null;
     }
-    /** File (or append to) the parent's one batched follow-up issue for these requirements, then verify each tracking issue is open. */
+    /**
+     * File (or append to) the parent's one batched follow-up issue for these requirements, then verify each tracking issue is open.
+     * #5141: the whole step is retried in-lane (3 attempts, 5s then 15s): the script is idempotent (claim marker /
+     * FORGE:DEFERRED_FROM lookup, checklist dedup, duplicate close), so only a persistent failure defers the run.
+     * A malformed TSV (DEFERRED_TSV=INVALID) is deterministic and never retried.
+     */
     async function track(reqs, why) {
-      const fail = (detail) => Object.assign(new Error(detail), { deferCode: OUTCOME_CODES.FOLLOWUP_UNAVAILABLE, deferDetail: `${detail}; nothing merged, rerun to retry` });
+      const fail = (detail, final = true) => Object.assign(new Error(detail), { deferCode: OUTCOME_CODES.FOLLOWUP_UNAVAILABLE, deferDetail: `${detail}; nothing merged, rerun to retry`, final });
       if (!io.fileFollowups) throw fail("no follow-up filing effect is configured");
       const items = followupItems(reqs, { now: now() });
-      let filed;
-      try { filed = await io.fileFollowups({ parent: issue, repo, items, milestone, defaultMilestone: o.followupsDefaultMilestone ?? null, lane, batchId: o.batchId ?? null, rollupLabel: o.followupsRollupLabel ?? null }); } catch (e) { throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`); }
-      for (const [i, r] of reqs.entries()) {
-        const n = Number(filed?.[items[i].key]);
-        if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`);
-        let st = null;
-        try { st = JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "number,state"]))); } catch { st = null; }
-        if (String(st?.state).toUpperCase() !== "OPEN") throw fail(`tracking issue #${n} for ${r.id} is not open or unreadable`);
+      const attempt = async () => {
+        let filed;
+        try { filed = await io.fileFollowups({ parent: issue, repo, items, milestone, defaultMilestone: o.followupsDefaultMilestone ?? null, lane, batchId: o.batchId ?? null, rollupLabel: o.followupsRollupLabel ?? null }); } catch (e) {
+          throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`, /DEFERRED_TSV=INVALID/.test(`${e?.stdout ?? ""}${e?.message ?? ""}`));
+        }
+        const got = [];
+        for (const [i, r] of reqs.entries()) {
+          const n = Number(filed?.[items[i].key]);
+          if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`, false);
+          let st = null;
+          try { st = JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "number,state"]))); } catch { st = null; }
+          if (String(st?.state).toUpperCase() !== "OPEN") throw fail(`tracking issue #${n} for ${r.id} is not open or unreadable`, false);
+          got.push(n);
+        }
+        return got;
+      };
+      const waits = [5000, 15000];
+      let nums;
+      for (let k = 0; ; k++) {
+        try { nums = await attempt(); break; } catch (e) {
+          if (e.final || k >= waits.length) throw e;
+          T.decisions.push(`Follow-up filing attempt ${k + 1} failed (${String(e.message).slice(0, 160)}); retrying in-lane in ${waits[k] / 1000}s`);
+          await sleep(waits[k]);
+        }
+      }
+      for (const [i, r] of reqs.entries()) { // recorded only once every requirement is tracked: a retry never double-counts
+        const n = nums[i];
         r.tracked = `#${n}`;
         const f = followupsFiled.find((x) => x.issue === n && x.class === items[i].class); // #5078: grouped per issue and class
         if (f) f.count += 1; else followupsFiled.push({ issue: n, class: items[i].class, count: 1 });

@@ -186,7 +186,8 @@ function world(o = {}) {
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
     fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
-    fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
+    fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
+      if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
 }
@@ -990,6 +991,33 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.ok(!w.comments.some((c) => c.includes("FORGE:REVIEW")), "no verdict is published for a run that cannot link its tracking");
     assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.equal(w.closed.length, 0);
     assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")));
+  });
+
+  it("#5141 a follow-up filing that fails once is retried in-lane, not requeued: the run proceeds and tracks once", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupFailTimes: 1 });
+    const r = await run(w);
+    assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.followups.length, 2, "one retry of the whole filing step");
+    assert.equal(w.prs.length, 1);
+  });
+
+  it("#5141 a follow-up filing that returns no tracking issue is retried in-lane before deferring", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupMissingTimes: 2 });
+    const r = await run(w);
+    assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.followups.length, 3);
+  });
+
+  it("#5141 a persistent follow-up failure defers after 3 in-lane attempts; a malformed TSV is not retried", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupMissingTimes: 9 });
+    const r = await run(w);
+    assert.equal(r.code, "followup.unavailable"); assert.equal(w.followups.length, 3); assert.equal(w.prs.length, 0);
+    const w2 = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupError: "Command failed", followupStdout: "DEFERRED_TSV=INVALID\n" });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "followup.unavailable"); assert.equal(w2.followups.length, 1);
   });
 
   it("a tracking issue that is not open is not a tracking issue (followup.unavailable)", async () => {
