@@ -9,7 +9,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseDependsOn } from "../bin/engine/phases.mjs";
+import { parseDependsOn, isTrustedComment } from "../bin/engine/phases.mjs";
+import { parseState } from "../bin/engine/state.mjs";
 
 /** Milestones in train order. Input: [{ title, number, due_on }]. */
 export function orderMilestones(milestones) {
@@ -60,7 +61,9 @@ export async function readLive({ gh, repo }) {
  * Parallel-start gate: dependencies of `issues` (not themselves in the batch) that are not merged into `baseOf(issue)`.
  * A dep is merged when it is CLOSED by a PR that is merged with that base, or whose merge commit is an ancestor of
  * that base (`isAncestor(sha, base)`, e.g. it arrived through a milestone sync). With no linked PR (GitHub links only
- * default-branch merges, #5086) the merged `feat/issue-<dep>-lean` PR is looked up instead. Unreadable issues are skipped (fail open:
+ * default-branch merges, #5086) the PR is looked up instead, in order: the trusted FORGE:STATE `mergedTo` record whose PR reads merged
+ * with the recorded commit (#5120), the merged `feat/issue-<dep>-lean` PR, then merged PRs on the base whose title/body closes the
+ * dependency (#5120). Each lookup that fails finds nothing. Unreadable issues are skipped (fail open:
  * the engine's own openDependency still guards each lane); an unreadable dep counts as unmet.
  * `sha`/`kind` (#5031): `kind` is "commit" when the dependency merged but its commit is not on the base yet (`sha`), else "other".
  * @returns {Promise<Array<{ issue: number, dep: number, base: string, why: string, sha: string|null, kind: "commit"|"other" }>>}
@@ -95,12 +98,26 @@ export async function unmetDependencies({ issues, baseOf, gh, repo, isAncestor }
             await check(parse(await gh(["pr", "view", String(pr.number), ...r, "--json", "baseRefName,mergedAt,mergeCommit"])));
             if (merged) break;
           }
-          // #5086: GitHub links closing PRs only for default-branch merges, so a milestone-lane dependency has no references.
-          // Fall back to the lane PR by head-branch convention; a failed or non-array lookup finds nothing (still refused).
+          // #5086/#5120: GitHub links closing PRs only for default-branch merges, so a milestone-lane dependency has no references.
+          // Fall back to the engine's record, the lane PR by head-branch convention, then PR bodies; a failed or non-array lookup finds nothing.
+          const list = async (args) => { try { const j = parse(await gh(["pr", "list", ...r, ...args])); return Array.isArray(j) ? j : []; } catch { return []; } };
           if (!merged && !missing) {
-            let prs = [];
-            try { prs = parse(await gh(["pr", "list", ...r, "--head", `feat/issue-${dep}-lean`, "--state", "merged", "--json", "number,baseRefName,mergedAt,mergeCommit", "--limit", "5"])); } catch { prs = []; }
-            for (const p of Array.isArray(prs) ? prs : []) { await check(p); if (merged) break; }
+            try {
+              const rec = parse(await gh(["api", `repos/${repo ?? "{owner}/{repo}"}/issues/${dep}`]));
+              const m = isTrustedComment(rec) && typeof rec.body === "string" ? parseState(rec.body)?.mergedTo : null;
+              if (m && m.lane === base && Number.isInteger(m.pr) && typeof m.sha === "string" && /^[0-9a-f]{7,64}$/i.test(m.sha)) {
+                const p = parse(await gh(["pr", "view", String(m.pr), ...r, "--json", "baseRefName,mergedAt,mergeCommit"]));
+                if (p?.mergeCommit?.oid === m.sha) await check(p);
+              }
+            } catch { /* no usable record */ }
+          }
+          if (!merged && !missing) {
+            for (const p of await list(["--head", `feat/issue-${dep}-lean`, "--state", "merged", "--json", "number,baseRefName,mergedAt,mergeCommit", "--limit", "5"])) { await check(p); if (merged) break; }
+          }
+          if (!merged && !missing) {
+            const closes = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\b:?\\s+(?:[\\w.-]+/[\\w.-]+)?#${dep}(?!\\d)`, "i");
+            const prs = await list(["--state", "merged", "--base", base, "--search", `${dep} in:body`, "--json", "number,baseRefName,mergedAt,mergeCommit,title,body", "--limit", "20"]);
+            for (const p of prs.filter((x) => closes.test(`${x?.title ?? ""}\n${x?.body ?? ""}`))) { await check(p); if (merged) break; }
           }
           if (!merged) sha = missing;
           if (!merged) why = missing ? `merge commit ${missing.slice(0, 10)} is not on ${base}` : `closed but not merged into ${base}`;

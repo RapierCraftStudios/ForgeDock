@@ -463,12 +463,25 @@ export function decisionNote(comments = []) {
   return kept.length ? `\n\nBinding decisions posted after the contract froze (trusted; they override the issue text where they conflict, and the frozen contract still applies):\n${kept.join("\n---\n")}` : "";
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null }) {
+/** #5099: one check line per review domain (domains from review-trigger.mjs pathDomains); mirrors the /review-pr personas. */
+export const DOMAIN_CHECKS = Object.freeze({
+  frontend: "Dynamic API in a static/ISR tree: a headers(), cookies(), connection() or searchParams read in a layout, a not-found/error boundary or a module they import, when the route tree is static or ISR (revalidate, generateStaticParams, dynamic = 'force-static'), opts the route out of static rendering or throws at render and turns pages into HTTP 500.",
+});
+
+/** #5099: the <domain_checks> block for the domains the diff touches; "" when none. */
+export function domainChecksBlock(domains = []) {
+  const ds = [...new Set((domains ?? []).map(String).filter(Boolean))].sort();
+  if (!ds.length) return "";
+  const lines = ds.map((d) => `- ${d}: check the diff for breakage in this domain.${DOMAIN_CHECKS[d] ? ` ${DOMAIN_CHECKS[d]}` : ""}`);
+  return `\n<domain_checks>\nThis diff touches these review domains. Report every finding below as a regressions row with path:line (it blocks the merge).\n${lines.join("\n")}\n</domain_checks>`;
+}
+
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [] }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}`;
 }
 
 /**

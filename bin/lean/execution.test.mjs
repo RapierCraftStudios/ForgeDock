@@ -716,6 +716,10 @@ describe("#4547: fallback_local and agent liveness", () => {
     assert.equal(parseExecution({ mode: "remote", max_remote: "2", fallback_local: "true" }).fallbackLocal, true);
     assert.equal(parseExecution({ mode: "remote", fallback_local: "yes" }).fallbackLocal, undefined);
   });
+  it("#5112 parseExecution: capacity_fallback_after is a positive integer, absent otherwise", () => {
+    assert.equal(parseExecution({ mode: "remote", fallback_local: "true", capacity_fallback_after: "5" }).capacityFallbackAfter, 5);
+    for (const v of [undefined, "", "0", "-1", "2.5", "x"]) assert.equal("capacityFallbackAfter" in parseExecution({ mode: "remote", capacity_fallback_after: v }), false, String(v));
+  });
   it("transport capacity carries free and liveness; none valid is unknown", async () => {
     const { httpTransport } = await import("./sandbox-remote.mjs");
     const cap = async (data, ok = true) => httpTransport({ endpoint: "http://pool.test", token: "t", fetchFn: async () => ({ ok, status: ok ? 200 : 500, headers: new Headers(), text: async () => JSON.stringify(data) }) }).capacity();

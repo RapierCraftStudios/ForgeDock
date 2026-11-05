@@ -24,6 +24,7 @@ import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane, makeLaneCache } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
+import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
 import { otherLaneOwner } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
@@ -192,7 +193,7 @@ export function readContextPack(cwd = process.cwd(), warn = stderrWarn) {
 }
 /**
  * forge.yaml `review.trigger` (shadow|enforce|off) and `review.risk_paths` (#4273): a comma-separated scalar or a block
- * list (`  risk_paths:` then `    - glob`). Returns {mode, riskPaths}; undefined when neither is set (the core defaults to
+ * list (`  risk_paths:` then `    - glob`); `review.enforce_domains` (#5099) the same way. Returns {mode, riskPaths, enforceDomains?}; undefined when none is set (the core defaults to
  * shadow with the built-in risk patterns). An invalid mode reads as unset.
  */
 export function readReviewTrigger(cwd = process.cwd()) {
@@ -202,19 +203,24 @@ export function readReviewTrigger(cwd = process.cwd()) {
   try { sec = parseForgeYaml(raw)?.review ?? {}; } catch { /* unreadable: no trigger config */ }
   const m = String(sec?.trigger ?? "").trim();
   const mode = ["shadow", "enforce", "off"].includes(m) ? m : undefined;
-  const riskPaths = typeof sec?.risk_paths === "string" ? sec.risk_paths.split(",").map((x) => x.trim()).filter(Boolean) : [];
-  let inReview = false, listIndent = null;
+  const scalar = (v) => (typeof v === "string" ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
+  const lists = { risk_paths: scalar(sec?.risk_paths), enforce_domains: scalar(sec?.enforce_domains) }; // #5099: enforce_domains
+  const keyOf = (line) => /^\s+(risk_paths|enforce_domains):\s*(#.*)?$/.exec(line)?.[1] ?? null;
+  let inReview = false, listIndent = null, listKey = null;
   for (const line of raw.split(/\r?\n/)) {
     if (/^\s*(#.*)?$/.test(line)) continue;
     if (/^\S/.test(line)) { inReview = /^review:\s*(#.*)?$/.test(line); listIndent = null; continue; }
     if (!inReview) continue;
     const indent = line.length - line.trimStart().length;
-    if (listIndent === null) { if (/^\s+risk_paths:\s*(#.*)?$/.test(line)) listIndent = indent; continue; }
-    if (indent <= listIndent) { listIndent = /^\s+risk_paths:\s*(#.*)?$/.test(line) ? indent : null; continue; }
+    if (listIndent === null) { listKey = keyOf(line); if (listKey) listIndent = indent; continue; }
+    if (indent <= listIndent) { listKey = keyOf(line); listIndent = listKey ? indent : null; continue; }
     const li = /^\s+-\s+["']?([^"'#]+?)["']?\s*(#.*)?$/.exec(line);
-    if (li) riskPaths.push(li[1].trim());
+    if (li) lists[listKey].push(li[1].trim());
   }
-  return mode || riskPaths.length ? { mode: mode ?? "shadow", riskPaths } : undefined;
+  const riskPaths = lists.risk_paths;
+  const enforceDomains = parseEnforceDomains(lists.enforce_domains);
+  if (!mode && !riskPaths.length && !enforceDomains.length) return undefined;
+  return { mode: mode ?? "shadow", riskPaths, ...(enforceDomains.length ? { enforceDomains } : {}) };
 }
 /**
  * forge.yaml `review.verifier` (off|shadow|enforce) and `review.verifier_model`, else `engine.lean_verifier_model` (#4397).
@@ -1766,11 +1772,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const emitSbx = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
       // #4256: hybrid places each lane from facts (pure placeLane); validation weight is a repo fact, read once per batch.
       const relays = Array.isArray(provider.relays) ? provider.relays : [];
+      // #5112: the host-busy guard, shared by hybrid placement and the fallback_local capacity fallback.
+      const hostHeadroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
       const place = !hybrid ? (n) => execMod.placeLane({ exec, needs: needsOf.get(n) ?? [], relays }) : await (async () => {
         const verifyMode = (deps.verify !== undefined ? deps.verify : readVerify(cwd))?.mode ?? "local";
         let weight = deps.validationWeight ?? null;
         if (!weight) { try { weight = await execMod.validationWeight({ cwd, precheckCommands: readPrecheckCommands(cwd) ?? [] }); } catch { weight = { heavy: false, signals: [] }; } }
-        const headroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
+        const headroom = hostHeadroom;
         return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom(), needs: needsOf.get(n) ?? [], relays });
       })();
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
@@ -1785,7 +1793,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
       };
       remote = {
-        capacity, max: exec.maxRemote, isRemote: () => true, place, identity: () => holdId, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        capacity, max: exec.maxRemote, isRemote: () => true, place, identity: () => holdId, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";

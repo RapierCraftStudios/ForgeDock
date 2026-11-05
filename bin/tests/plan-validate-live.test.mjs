@@ -92,7 +92,7 @@ describe("parallel start gate", () => {
   });
   describe("closed with empty closedByPullRequestsReferences (#5086)", () => {
     const lane = (list) => async (a) => {
-      if (a[0] === "pr" && a[1] === "list") { if (list instanceof Error) throw list; assert.ok(a.includes("feat/issue-9-lean")); return JSON.stringify(list); }
+      if (a[0] === "pr" && a[1] === "list") { if (a.includes("--search")) return "[]"; if (list instanceof Error) throw list; assert.ok(a.includes("feat/issue-9-lean")); return JSON.stringify(list); }
       return gh({ state: "CLOSED", closedByPullRequestsReferences: [] })(a);
     };
     const run = (list, isAncestor) => unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: lane(list), isAncestor });
@@ -112,6 +112,57 @@ describe("parallel start gate", () => {
     });
     it("still refuses when the lane PR lookup fails", async () => {
       const [u] = await run(new Error("boom"));
+      assert.equal(u.kind, "other");
+    });
+  });
+  describe("engine record and PR bodies when closing references are empty (#5120)", () => {
+    const state = (m) => `Body\n\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, mergedTo: m })}\n-->`;
+    const mk = ({ rec, head = [], search = [], prs = {}, throwAll = false }) => async (a) => {
+      if (a[0] === "issue" && a[2] === "7") return JSON.stringify({ body: "Depends on #9", milestone: { title: "M2" } });
+      if (a[0] === "issue" && a[2] === "9") return JSON.stringify({ state: "CLOSED", closedByPullRequestsReferences: [] });
+      if (throwAll) throw new Error("boom");
+      if (a[0] === "api") return JSON.stringify(rec ?? {});
+      if (a[0] === "pr" && a[1] === "view") return JSON.stringify(prs[a[2]] ?? {});
+      if (a[0] === "pr" && a[1] === "list") return JSON.stringify(a.includes("--search") ? search : head);
+      throw new Error("unexpected");
+    };
+    const run = (g, isAncestor) => unmetDependencies({ issues: [7], baseOf: async () => "milestone/m2", gh: g, isAncestor });
+    const trusted = (m) => ({ body: state(m), author_association: "MEMBER", user: { type: "User" } });
+    const merged = { baseRefName: "milestone/m2", mergedAt: "x", mergeCommit: { oid: "abc1234" } };
+    it("passes on a trusted mergedTo record whose PR merged with that commit", async () => {
+      const g = mk({ rec: trusted({ lane: "milestone/m2", pr: 4, sha: "abc1234" }), prs: { 4: merged } });
+      assert.deepEqual(await run(g), []);
+    });
+    it("refuses a mergedTo record from an untrusted author", async () => {
+      const rec = { ...trusted({ lane: "milestone/m2", pr: 4, sha: "abc1234" }), author_association: "NONE" };
+      const [u] = await run(mk({ rec, prs: { 4: merged } }));
+      assert.match(u.why, /closed but not merged into milestone\/m2/);
+    });
+    it("refuses a mergedTo record naming another lane or a different commit", async () => {
+      const other = await run(mk({ rec: trusted({ lane: "staging", pr: 4, sha: "abc1234" }), prs: { 4: merged } }));
+      assert.equal(other.length, 1);
+      const diff = await run(mk({ rec: trusted({ lane: "milestone/m2", pr: 4, sha: "fff9999" }), prs: { 4: merged } }));
+      assert.equal(diff.length, 1);
+    });
+    it("passes on a merged PR whose body closes the dependency", async () => {
+      const search = [{ number: 6, baseRefName: "milestone/m2", mergedAt: "x", mergeCommit: { oid: "c1" }, title: "t", body: "Root cause\n\nCloses #9" }];
+      assert.deepEqual(await run(mk({ search })), []);
+    });
+    it("ignores a body hit without a closing reference to the dependency", async () => {
+      const mkp = (body) => [{ number: 6, baseRefName: "milestone/m2", mergedAt: "x", mergeCommit: { oid: "c1" }, title: "t", body }];
+      assert.equal((await run(mk({ search: mkp("see #9") }))).length, 1);
+      assert.equal((await run(mk({ search: mkp("Closes #90") }))).length, 1);
+    });
+    it("holds a body-search PR merged elsewhere whose commit is not on the base", async () => {
+      const search = [{ number: 6, baseRefName: "staging", mergedAt: "x", mergeCommit: { oid: "c1" }, title: "Fixes #9", body: "" }];
+      const [u] = await run(mk({ search }), async () => false);
+      assert.deepEqual([u.kind, u.sha], ["commit", "c1"]);
+    });
+    it("every fallback failing still reads as closed but not merged, not unreadable", async () => {
+      const g = mk({});
+      const failing = async (a) => (a[0] === "api" || a[0] === "pr" ? Promise.reject(new Error("boom")) : g(a));
+      const [u] = await run(failing);
+      assert.match(u.why, /closed but not merged into milestone\/m2/);
       assert.equal(u.kind, "other");
     });
   });

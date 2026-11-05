@@ -32,6 +32,9 @@
  * `openExecutionBudget` enforces the hard caps (`budget_minutes`/`budget_usd` per batch, `day_budget_*` per host UTC day,
  * from the host-day store `execution-budget.json` in the sched dir): pure arithmetic, no LLM.
  *
+ * #5112: `execution.capacity_fallback_after` (positive integer, `capacityFallbackAfter`) is how many `sandbox.capacity` deferrals of one
+ * issue make `fallback_local` run it on the host (orchestrate `CAPACITY_FALLBACK_AFTER` when unset), gated by `hostHeadroom`.
+ *
  * Hybrid (#4256): `placeLane` places each lane from facts (lane kind, validation weight, host headroom, verify.mode);
  * orchestrate runs a remote-placed lane locally when `max_remote` or the execution budget is exhausted.
  *
@@ -117,6 +120,8 @@ export function parseExecution(sec = {}) {
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
   const fallbackLocal = str(s.fallback_local).toLowerCase() === "true";
+  const cfa = Number(str(s.capacity_fallback_after));
+  const capacityFallbackAfter = Number.isInteger(cfa) && cfa > 0 ? cfa : null; // #5112: unset: orchestrate's CAPACITY_FALLBACK_AFTER
   const heavyRaw = str(s.heavy).toLowerCase();
   const heavy = heavyRaw === "true" ? true : heavyRaw === "false" ? false : null;
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
@@ -134,7 +139,7 @@ export function parseExecution(sec = {}) {
   const uw = Number(str(s.unreachable_window_min));
   const accountRotator = str(s.account_rotator) === "tokenbaton" ? "tokenbaton" : null; // #5094: rotator.mjs reads its per-account quota state
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
