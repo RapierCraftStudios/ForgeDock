@@ -47,7 +47,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     const pids = () => Object.values(batch.store.load()?.running ?? {}).map((r) => r.pid).filter(Boolean);
     let lanePids = [];
     try {
-      const child = spawn(process.execPath, [dispatcher], { stdio: "ignore" });
+      // The two-lane wait must not depend on host memory: the live local lane cap (#4777) reads forge.yaml from the dispatcher's cwd.
+      writeFileSync(join(work, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+      const child = spawn(process.execPath, [dispatcher], { stdio: "ignore", cwd: work });
       const exited = new Promise((r) => child.on("exit", r));
       await until(() => readFileSync(launches, "utf8").trim().split("\n").filter(Boolean).length === 2 && pids().length === 2);
       lanePids = pids();
