@@ -240,6 +240,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    settings.json force. A child env var can't undo that, because settings env wins over it. `CLAUDE_CODE_SUBAGENT_MODEL` is
    set only from forge.yaml `agents.subagent_model` (`readSubagentModel`, the `makeLeanIo` default); unset leaves the
    operator's own default alone.
+   **Attribution pin** (#5118): the same `--settings` always carries `includeCoAuthoredBy: false` and
+   `attribution: {commit: "", pr: ""}`, so Claude Code's default `Co-Authored-By: Claude` trailer is off in every lane, even
+   a remote sandbox whose config dir has no operator settings. When `makeLeanRunner` is `sandboxed` (default `IS_SANDBOX=1`
+   or `CS_SANDBOX_ID`, see `inSandbox`) it also registers `bin/hooks/pre-tool-use.mjs` (`PRE_TOOL_USE_HOOK`) as a PreToolUse
+   hook on `Bash`, so its attribution rule blocks a trailer commit; kept under `FORGEDOCK_FULL_SESSION=1` and for read-only
+   and no-tool roles. Local lanes don't register it (operator user settings already carry it). Post-deploy check
+   `remote-lane-no-claude-attribution` (`.forge/post-deploy-checks.json`) scans staging for the trailer.
    **Re-read nudge** (#4456): the builder session (`builderOnce`, full and light lane) runs with `rereadNudge: true`, and
    `makeLeanRunner` merges `rereadHooks()` into that same `--settings`, registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
    hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
