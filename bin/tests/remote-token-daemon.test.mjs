@@ -7,19 +7,15 @@
  */
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runBatch } from "../engine-cli.mjs";
 import { parseExecution } from "../lean/execution.mjs";
-
-const dirs = [];
-after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+import { tmpDir } from "./_tmp.mjs";
 
 /** Run a fresh daemon-hosted batch with `clientEnv`; resolves with the first router request's headers, then cancels the batch. */
 async function firstRouterRequest(clientEnv) {
-  const work = mkdtempSync(join(tmpdir(), "remote-token-5131-"));
-  dirs.push(work);
+  const work = tmpDir("remote-token-5131-");
   const stub = join(work, "stub-lane.mjs");
   writeFileSync(stub, "setTimeout(() => process.exit(0), 50);\n");
   // The repo pins token_env, so the client's pin passes COMPUTESHARE_TOKEN through (engine-cli readPinnedEnvConfig).
