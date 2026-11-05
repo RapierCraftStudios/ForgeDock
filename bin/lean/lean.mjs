@@ -3047,6 +3047,7 @@ export async function runCore(o) {
     }
     try { await recordStructure(pr); } catch (e) { ev({ event: "STRUCTURE_DELTA_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
     await deleteMergedBranch();
+    let keepOpen = false;
     if (pendingRecord().length) { // #5141: the close step files what the lane could not track before the PR (idempotent by the marker)
       const left = pendingFollowups.filter((p) => !p.req.tracked);
       for (const why of new Set(left.map((p) => p.why))) {
@@ -3055,12 +3056,13 @@ export async function runCore(o) {
       for (const p of left) if (p.req.tracked && !closing.tracked.includes(p.req.tracked)) closing.tracked.push(p.req.tracked);
       const still = pendingRecord();
       if (still.length) {
-        T.decisions.push(`Follow-up still unfiled after the merge: ${still.map((x) => x.id).join(", ")} recorded in FORGE:STATE pendingFollowups and FORGE:FOLLOWUP_PENDING for the next pass`);
+        keepOpen = true; // release review #5155 (#5156): nothing re-files a pending item, so the issue stays open as the durable record
+        T.decisions.push(`Follow-up still unfiled after the merge: ${still.map((x) => x.id).join(", ")}; issue left open (FORGE:FOLLOWUP_PENDING, FORGE:STATE pendingFollowups) until it is tracked`);
         try { await post("FORGE:FOLLOWUP_PENDING", renderPendingFollowups(still, pr)); } catch { /* FORGE:STATE and the lane result carry them too */ }
       }
     }
     const partial = closing.reason === "partial";
-    await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
+    if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
     if (partial) {
       try { await post("FORGE:TRACKED", `## Closed as partial\nThe investigation's stated question is not answered in this change (PR #${pr}); carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
     } else if (closing.tracked.length) {

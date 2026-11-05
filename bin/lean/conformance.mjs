@@ -1291,7 +1291,7 @@ export function followupItems(reqs, { now = Date.now() } = {}) {
  */
 export function renderPendingFollowups(rows, pr) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n]+/g, " ").trim();
-  return [`## Follow-up pending`, `Merged by PR #${pr}, but the tracking issue could not be filed. Still to file (idempotent by the marker):`, "",
+  return [`## Follow-up pending`, `Merged by PR #${pr}, but the tracking issue could not be filed, so this issue stays open until it is. Still to file (idempotent by the marker):`, "",
     ...rows.map((r) => `- ${flat(r.id)} (${flat(r.disposition)}): ${flat(r.quote)} | why: ${flat(r.why)} | \`${r.marker}\``)].join("\n");
 }
 

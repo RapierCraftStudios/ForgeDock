@@ -984,13 +984,14 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     });
   }
 
-  it("#5141 a follow-up that cannot be filed keeps the work: PR, merge and close proceed, the unfiled item is recorded, never needs-human", async () => {
+  it("#5141 a follow-up that cannot be filed keeps the work: PR and merge proceed, the issue stays open with the unfiled item recorded, never needs-human (#5156)", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupError: "DEFERRED_LOOKUP=FAILED" });
     w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.notEqual(r.code, "followup.unavailable");
-    assert.equal(w.prs.length, 1); assert.equal(w.merges.length, 1); assert.equal(w.closed.length, 1);
+    assert.equal(w.prs.length, 1); assert.equal(w.merges.length, 1);
+    assert.equal(w.closed.length, 0, "release review #5155 (#5156): nothing re-files a pending item, so the issue is not closed over it");
     assert.equal(w.followups.length, 6, "3 in-lane attempts before the PR, 3 more in the close step");
     assert.deepEqual(r.pendingFollowups, [{ id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "accepted by the conformance review", marker: "FORGE:DEFERRED_FROM: #7" }]);
     assert.deepEqual(w.leaseWrites.at(-1).pendingFollowups, r.pendingFollowups, "the issue's FORGE:STATE carries the unfiled item");
@@ -1058,6 +1059,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.pendingFollowups[0].id, "R2");
     assert.ok(w.comments.some((c) => c.includes("FORGE:FOLLOWUP_PENDING")));
+    assert.equal(w.closed.length, 0, "left open while R2 is untracked (#5156)");
   });
 
   it("an existing PR gets the tracking links in its body before merge", async () => {
