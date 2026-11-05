@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
+import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, SHIM_DEPTH_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy, readAdmission, liveLaneCap } from "../engine-cli.mjs";
@@ -345,5 +345,59 @@ describe("validation steps and the local lane cap (#4777)", () => {
     assert.equal(liveLaneCap(null, { cfg: {}, host })(), 6, "defaults: 2048 MB per lane");
     writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_cpu_reservation: 8\n");
     assert.equal(liveLaneCap(null, { cfg: readAdmission(d), host: { cores: () => 16, memAvailableMb: () => 64000 } })(), 2);
+  });
+});
+
+describe("#5148 dynamic-name pass-through wrapper", () => {
+  const WRAP = (log) => `#!/bin/bash\nname=\${0##*/}\necho w >> "${log}"\n[ "$(wc -l < "${log}")" -gt 12 ] && exit 99\nself_dir=$(cd "\${0%/*}" && pwd)\nreal=$(PATH=$(printf '%s' "$PATH" | tr ':' '\\n' | grep -vxF "$self_dir" | paste -sd:) command -v "$name")\nexec "$real" "$@"\n`;
+  const fixture = () => {
+    const d = tmpDir("heavy-5148-"), wrap = join(d, "wrap"), real = join(d, "real"), bin = join(d, "bin"), log = join(d, "log");
+    for (const x of [wrap, real, bin]) mkdirSync(x, { recursive: true });
+    writeFileSync(log, "");
+    writeFileSync(join(wrap, "docker"), WRAP(log));
+    writeFileSync(join(real, "docker"), `#!/bin/sh\necho r >> ${log}\necho real-docker\n`);
+    for (const x of [wrap, real]) chmodSync(join(x, "docker"), 0o755);
+    return { d, wrap, real, bin, log };
+  };
+  const lines = (log) => readFileSync(log, "utf8").split("\n").filter(Boolean);
+
+  it("#5148: a ${0##*/} pass-through wrapper on PATH does not recurse through the heavy shim", async () => {
+    const { wrap, real, bin, log } = fixture();
+    assert.ok(isPassThroughWrapper(readFileSync(join(wrap, "docker"), "utf8"), "docker"));
+    assert.ok(isPassThroughWrapper('#!/bin/sh\nexec "$(command -v "$(basename "$0")")" "$@"', "docker"));
+    assert.ok(!isPassThroughWrapper("#!/bin/sh\necho hi\n", "docker"));
+    assert.ok(!isPassThroughWrapper('#!/bin/sh\nx=git\nexec "$(command -v "$x")" "$@"', "docker"), "dynamic lookup without a $0-derived name is not a wrapper");
+    assert.deepEqual(await writeHeavyShims(bin, { path: `${wrap}:${real}`, warn: () => {} }), ["docker"]);
+    assert.match(readFileSync(join(bin, "docker"), "utf8"), new RegExp(`-- '${real}/docker' "\\$@"`));
+    const env = { ...process.env, PATH: `${bin}:${wrap}:${real}:/usr/bin:/bin`, FORGE_HEAVY_DISABLED: "1" };
+    const r = spawnSync(join(bin, "docker"), ["ps"], { env, encoding: "utf8", timeout: 20000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /real-docker/);
+    assert.deepEqual(lines(log), ["r"], "the wrapper never ran; the real binary ran once");
+  });
+
+  it("#5148: with the shim baking the wrapper, the call reaches the real binary within SHIM_LOOP_MAX levels", () => {
+    const { wrap, real, bin, log } = fixture();
+    writeFileSync(join(bin, "docker"), heavyShimScript("docker", join(wrap, "docker"))); chmodSync(join(bin, "docker"), 0o755);
+    const env = { ...process.env, PATH: `${bin}:${wrap}:${real}:/usr/bin:/bin`, FORGE_HEAVY_DISABLED: "1" };
+    const r = spawnSync(join(bin, "docker"), ["ps"], { env, encoding: "utf8", timeout: 20000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(lines(log).length <= SHIM_LOOP_MAX + 1, lines(log).join(","));
+    assert.equal(lines(log).at(-1), "r");
+  });
+
+  it("#5148: guardChain stops at SHIM_DEPTH_MAX even for a repeat it judges legitimate, and counts each entry", () => {
+    const env = { PATH: "/s:/r", FORGE_HEAVY_SHIM_DIR: "/s", FORGE_HEAVY_CHAIN: "npm:/r/npm", FORGE_HEAVY_DEPTH: String(SHIM_DEPTH_MAX) };
+    assert.match(guardChain("npm", "/r/npm", env, () => "").error, /^env\.shim_loop: npm .*levels deep/);
+    const ok = guardChain("npm", "/r/npm", { ...env, FORGE_HEAVY_DEPTH: String(SHIM_DEPTH_MAX - 1) }, () => "");
+    assert.equal(ok.error, undefined); assert.equal(ok.env.FORGE_HEAVY_DEPTH, String(SHIM_DEPTH_MAX));
+  });
+
+  it("#5148: under systemd-run TasksMax the shimmed call finishes without hitting the limit", { skip: spawnSync("systemd-run", ["--user", "--scope", "-q", "true"], { timeout: 10000 }).status !== 0 && "no systemd --user manager" }, () => {
+    const { wrap, real, bin, log } = fixture();
+    writeFileSync(join(bin, "docker"), heavyShimScript("docker", join(wrap, "docker"))); chmodSync(join(bin, "docker"), 0o755);
+    const r = spawnSync("systemd-run", ["--user", "--scope", "-q", "-p", "TasksMax=64", "env", `PATH=${bin}:${wrap}:${real}:/usr/bin:/bin`, "FORGE_HEAVY_DISABLED=1", join(bin, "docker"), "ps"], { encoding: "utf8", timeout: 30000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(lines(log).length < 13);
   });
 });
