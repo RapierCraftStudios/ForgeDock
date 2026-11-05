@@ -186,7 +186,9 @@ function world(o = {}) {
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
     fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
-    fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
+    fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
+      if (o.followupRet) return o.followupRet(w.followups.length, items);
+      if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
 }
@@ -982,21 +984,80 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     });
   }
 
-  it("a follow-up that cannot be filed defers the run (followup.unavailable): no PR, merge or close; never needs-human", async () => {
+  it("#5141 a follow-up that cannot be filed keeps the work: PR, merge and close proceed, the unfiled item is recorded, never needs-human", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupError: "DEFERRED_LOOKUP=FAILED" });
+    w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
     const r = await run(w);
-    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "followup.unavailable");
-    assert.ok(!w.comments.some((c) => c.includes("FORGE:REVIEW")), "no verdict is published for a run that cannot link its tracking");
-    assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.equal(w.closed.length, 0);
+    assert.equal(r.terminalReason, "merged"); assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.prs.length, 1); assert.equal(w.merges.length, 1); assert.equal(w.closed.length, 1);
+    assert.equal(w.followups.length, 6, "3 in-lane attempts before the PR, 3 more in the close step");
+    assert.deepEqual(r.pendingFollowups, [{ id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "accepted by the conformance review", marker: "FORGE:DEFERRED_FROM: #7" }]);
+    assert.deepEqual(w.leaseWrites.at(-1).pendingFollowups, r.pendingFollowups, "the issue's FORGE:STATE carries the unfiled item");
+    const note = w.comments.find((c) => c.includes("FORGE:FOLLOWUP_PENDING"));
+    assert.match(note, /R2 \(defer\): Existing callers of foo keep working\..*`FORGE:DEFERRED_FROM: #7`/);
     assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")));
   });
 
-  it("a tracking issue that is not open is not a tracking issue (followup.unavailable)", async () => {
+  it("#5141 a follow-up that keeps failing before the PR is filed by the close step after the merge", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupMissingTimes: 3 });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.followups.length, 4); assert.equal(r.pendingFollowups, undefined);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:TRACKED") && c.includes("#900")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:FOLLOWUP_PENDING")));
+    assert.match(traj(w).join("\n"), /Tracked R2 \(defer\) in #900 \(accepted by the conformance review; filed after the merge/);
+  });
+
+  it("#5141 a follow-up filing that fails once is retried in-lane, not requeued: the run proceeds and tracks once", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupFailTimes: 1 });
+    const r = await run(w);
+    assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.followups.length, 2, "one retry of the whole filing step");
+    assert.equal(w.prs.length, 1);
+  });
+
+  it("#5141 a follow-up filing that returns no tracking issue is retried in-lane before deferring", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupMissingTimes: 2 });
+    const r = await run(w);
+    assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.followups.length, 3);
+  });
+
+  it("#5141 a requirement tracked in an earlier attempt keeps its tracking issue; the retry tracks only the rest, once each", async () => {
+    const base = two("defer", { why: "w" });
+    const k = { ...base, requirements: [...base.requirements, { id: "R3", quote: "Old callers log a warning.", disposition: "defer", bucket: "post-deploy", why: "w" }] };
+    let views900 = 0;
+    const w = world({ contract: k, body: `${ISSUE_BODY}\n- Old callers log a warning.`, issueStates: { get 900() { views900 += 1; return "OPEN"; } }, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)],
+      followupRet: (call, items) => (call === 1 ? { [items[0].key]: 900 } : { [items[0].key]: 900, [items[1].key]: 901 }) });
+    const r = await run(w);
+    assert.notEqual(r.code, "followup.unavailable");
+    assert.equal(w.followups.length, 2);
+    const t = traj(w).join("\n");
+    assert.match(t, /Follow-up filing attempt 1 failed \(no tracking issue was returned for R3\); retrying in-lane in 5s/);
+    assert.match(t, /Tracked R2 \(defer\), R3 \(defer\) in #900, #901/);
+    assert.equal(views900, 1, "R2, verified open in attempt 1, is not re-verified or re-counted by the retry");
+  });
+
+  it("#5141 a persistent follow-up failure is retried 3 times in-lane, then the run keeps going; a malformed TSV is not retried and defers", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupMissingTimes: 99 });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.followups.length, 6); assert.equal(w.prs.length, 1);
+    assert.equal(r.pendingFollowups[0].id, "R2");
+    const w2 = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupError: "Command failed", followupStdout: "DEFERRED_TSV=INVALID\n" });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "followup.unavailable"); assert.equal(w2.followups.length, 1); assert.equal(w2.prs.length, 0);
+  });
+
+  it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });
     const r = await run(w);
-    assert.equal(r.code, "followup.unavailable"); assert.equal(w.merges.length, 0);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.pendingFollowups[0].id, "R2");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:FOLLOWUP_PENDING")));
   });
 
   it("an existing PR gets the tracking links in its body before merge", async () => {

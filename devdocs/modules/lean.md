@@ -362,6 +362,23 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
+   `followupMap` applies every identity rule of the script to both sides: trim,
+   strip backticks, and collapse repeated leading `R<n>: R<m>:` prefixes to the
+   first (#5141: a quote starting with its own id, `R6: R6: …`, looped on
+   `followup.unavailable`). An item that still has no match takes the one echoed row
+   whose identity starts with `<id>:`, and never an ambiguous one. `track()` retries
+   the whole file-and-verify step in-lane up to 3 times, waiting 5 s and then 15 s
+   (`io.sleep`; the script is idempotent), and logs each retry in the decisions.
+   A requirement verified open in an earlier attempt keeps its `tracked` issue and
+   is neither re-verified nor counted again in `followupsFiled`.
+   A malformed TSV (`DEFERRED_TSV=INVALID`) is not retried and still defers with
+   `followup.unavailable`. When the 3 attempts fail for any other reason, the run
+   does not defer: it keeps the merge-capable work and goes on to review, PR and
+   merge. The unfiled requirements (id, quote, why, `FORGE:DEFERRED_FROM: #<n>`)
+   go into `pendingFollowups`, which is kept in FORGE:STATE and the lane result.
+   The close step files them again after the merge (the marker keeps this
+   idempotent). Anything still unfiled is posted as `FORGE:FOLLOWUP_PENDING` on
+   the issue for a later pass.
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its
