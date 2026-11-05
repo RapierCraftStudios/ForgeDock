@@ -648,9 +648,10 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.equal(env.COMPUTESHARE_TOKEN, "daemon-tok");
   });
 
-  it("5131: a daemon secret wins over an empty or stale pin, the pin fills one the daemon lacks, batchEnv pins no empty value", () => {
+  it("5131: a daemon secret wins over an empty pin, a non-empty pin wins (REG-1 #5142), batchEnv pins no empty value", () => {
     assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "" }).COMPUTESHARE_TOKEN, "daemon-tok");
-    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "stale" }).COMPUTESHARE_TOKEN, "daemon-tok");
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok", "a non-empty passthrough pin wins (release review #5142 REG-1)");
+    assert.equal(mergeEnv({ GH_TOKEN: "daemon-acct" }, { GH_TOKEN: "pinned-acct" }).GH_TOKEN, "pinned-acct", "an env_passthrough GH_TOKEN keeps the batch's account");
     assert.equal(mergeEnv({ PATH: "/d" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok");
     assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok");
     assert.equal(mergeEnv({}, { COMPUTESHARE_TOKEN: "" }).COMPUTESHARE_TOKEN, undefined, "an empty pin never overrides");

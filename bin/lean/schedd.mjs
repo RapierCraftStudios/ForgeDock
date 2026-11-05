@@ -108,14 +108,13 @@ export function redactEnv(env) {
 
 /**
  * `base` without its allowlisted non-secret keys, plus `kept`: an account selector the client did not set never leaks in from
- * the daemon, and a non-secret pinned key wins. A secret-named key (GH_TOKEN, a `token_env` passthrough) stays from the daemon
- * when the daemon's value is non-empty (#5131); a non-empty pin only fills one the daemon lacks, and an empty pin never overrides.
+ * the daemon, and a pinned key wins. A secret-named key is only pinned when named (`env_passthrough`, `token_env`): a non-empty
+ * pin wins, as before #5131 (the operator chose that account); an empty secret pin never overrides the daemon's value (#5131).
  */
 export function mergeEnv(base, kept) {
   const out = Object.fromEntries(Object.entries(base).filter(([k]) => k in kept || !ENV_KEEP.test(k) || SECRET_ENV.test(k)));
   for (const [k, v] of Object.entries(kept)) {
-    if (!SECRET_ENV.test(k)) out[k] = v;
-    else if (typeof v === "string" && v !== "" && !(typeof base[k] === "string" && base[k] !== "")) out[k] = v;
+    if (!SECRET_ENV.test(k) || (typeof v === "string" && v !== "")) out[k] = v;
   }
   return out;
 }
