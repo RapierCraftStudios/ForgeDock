@@ -1365,6 +1365,19 @@ describe("#5138: live max_remote and placement of a running batch", () => {
     const rows = await done;
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
   });
+  it("live max_remote raised from 0 to 1 admits a waiting remote lane (nothing running)", async () => {
+    let m = 0;
+    const seen = [];
+    const done = orchestrate({ issues: [1], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick,
+      remote: { get max() { return m; }, isRemote: () => true, capacity: () => null },
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); return { terminalReason: "merged", pr: 100 + n }; } });
+    for (let i = 0; i < 20; i++) await tick();
+    assert.deepEqual(seen, [], "#1 waits under max_remote 0");
+    m = 1;
+    const rows = await done;
+    assert.deepEqual(seen, [[1, "remote"]]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged"]);
+  });
   it("live max_remote lowered from 2 to 1 stops no running lane and holds new remote admissions", async () => {
     let m = 2;
     const live = new Set(), gates = new Map(), seen = [];

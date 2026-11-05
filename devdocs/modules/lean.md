@@ -731,8 +731,9 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   puts live getters on its `remote` object (`bin/lean/live-execution.mjs`
   `liveRemote`): `max`, `fallbackLocal` (true in hybrid) and `place` re-read the file
   on every admission, and orchestrate reads `remoteMax()` per grant. Running lanes are
-  never stopped: a lower `max_remote` only holds new remote admissions, and
-  `max_remote 0` or placement `local` runs new lanes on the host. A batch that built a
+  never stopped: a lower `max_remote` only holds new remote admissions (polled, so a
+  raise admits them, even with nothing running); hybrid runs them on the host instead,
+  and placement `local` runs every new lane on the host. A batch that built a
   remote provider records `provider: true` at start (`false` when a resume builds
   none); `remote`/`hybrid` are refused without it, because the provider, ledger and
   execution budget are built once at start. Switching a remote batch to hybrid

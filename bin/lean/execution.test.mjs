@@ -399,6 +399,27 @@ describe("runBatch wiring (#4253)", () => {
       assert.deepEqual(prov.calls, []);
     }
   });
+
+  it("#5138: a live --set-placement local makes the next lane of a remote batch a detached host lane", async () => {
+    const work = tmpDir("exec-cli-live-");
+    const stub = join(work, "stub.mjs");
+    writeFileSync(stub, `import { writeFileSync } from "node:fs"; const a = process.argv.slice(2); writeFileSync(a[a.indexOf("--result-file") + 1], JSON.stringify({ terminalReason: "merged", pr: 9 }));\n`);
+    const root = join(work, "batches");
+    let recorded = null;
+    const prov = fakeProvider({ finish: (n) => {
+      const b = openBatch(root, "blive");
+      recorded = b.readExecution();
+      if (n === 1) b.setExecution({ mode: "local" }); // the operator's --set-placement before #2 is admitted
+      return { terminalReason: "merged", pr: 100 + n, cost_usd: 0 };
+    } });
+    const res = await quiet(() => orchestrateFromCli(["1", "2", "--repo", "o/r", "--no-prefilter", "--parallel", "1"], base(work, { batchId: "blive", laneScript: stub,
+      execution: parseExecution({ mode: "remote", max_remote: "1" }), sandboxProvider: prov,
+      sandboxLedger: (n) => makeLedger({ root: join(work, "ledger"), batch: "blive", lane: `sandbox-${n}`, owner: "t", issue: n }) })));
+    assert.deepEqual(recorded, { provider: true });
+    assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.pr, r.placement?.where]), [[1, "merged", 101, "remote"], [2, "merged", 9, "local"]]);
+    assert.match(res.rows[1].placement.reason, /live placement/);
+    assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
+  });
 });
 
 describe("execution budget and sandbox cost (#4255)", () => {
