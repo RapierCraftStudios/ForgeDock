@@ -378,7 +378,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    go into `pendingFollowups`, which is kept in FORGE:STATE and the lane result.
    The close step files them again after the merge (the marker keeps this
    idempotent). Anything still unfiled is posted as `FORGE:FOLLOWUP_PENDING` on
-   the issue for a later pass.
+   the issue, and the issue is left open, not closed (#5156). Nothing re-files
+   a pending item automatically, so the open issue is the durable record.
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its
