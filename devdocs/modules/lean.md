@@ -910,7 +910,7 @@ keychain service `forgedock`) and the `run-issue` argv. The env also carries the
 lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
-Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
+Actions endpoint without `allow_actions: true`. The bearer is resolved per request (#5144): `httpTransport`'s `token` may be a function, `remoteTransportFor` passes a getter over `poolCredential`, and `providerByName` always names the token (`FORGEDOCK_POOL_TOKEN`/`FORGEDOCK_REMOTE_TOKEN`) and re-reads the router's token file per call, so a token fixed or rotated mid-batch is the next request's bearer (and is redacted). `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` for a 4xx config error (not 401/403/429) or a non-HTTP throw (or `deferred` `sandbox.capacity`
 for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528; `deferred` `sandbox.transient` for any other 5xx,
 retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) instead of engine-error. A sandbox that exits without a result while its

@@ -960,6 +960,50 @@ describe("remote/pool credential resolver (#5131)", () => {
     assert.equal(hit.seen[0].auth, "Bearer file-tok");
   });
 
+  it("5144: a token that appears or rotates after the provider is built is the next request's bearer", async () => {
+    const dir = tmpDir("router-5144-");
+    const tokenFile = join(dir, "forgedock.token");
+    writeFileSync(join(dir, "router.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 7710 } }));
+    writeFileSync(tokenFile, "\n"); // router config with no token yet
+    const hit = recorder();
+    const env = {};
+    const mk = (name, exec) => providerByName(name, { batch: { id: "b5144" }, repo: "o/r", exec: parseExecution({ mode: "remote", max_remote: "1", provider: name, ...exec }),
+      env, poolConfigPath: join(dir, "router.json"), fetchFn: hit.fetchFn });
+    for (const [name, exec] of [["remote", { endpoint: "http://127.0.0.1:7710" }], ["pool", {}]]) {
+      writeFileSync(tokenFile, "\n");
+      hit.seen.length = 0;
+      const p = mk(name, exec);
+      await p.capacity();
+      assert.equal(hit.seen.at(-1).auth, null, `${name}: no token at construction`);
+      writeFileSync(tokenFile, "router-new\n");
+      await p.capacity();
+      assert.equal(hit.seen.at(-1).auth, "Bearer router-new", `${name}: a token written later is sent`);
+      writeFileSync(tokenFile, "router-rotated\n");
+      await p.capacity();
+      assert.equal(hit.seen.at(-1).auth, "Bearer router-rotated", `${name}: a rotated token is sent`);
+    }
+  });
+
+  it("5144: an env token_env that is set after construction is sent; remoteTransportFor default path resolves per call", async () => {
+    const dir = routerDir();
+    const hit = recorder();
+    const penv = {};
+    const q = providerByName("remote", { batch: { id: "b5144e" }, repo: "o/r", exec: parseExecution({ mode: "remote", max_remote: "1", provider: "remote", endpoint: "https://runner.example.com", token_env: "COMPUTESHARE_TOKEN" }),
+      env: penv, poolConfigPath: join(dir, "router.json"), fetchFn: hit.fetchFn });
+    await q.capacity();
+    assert.equal(hit.seen.at(-1).auth, null);
+    penv.COMPUTESHARE_TOKEN = "env-late";
+    await q.capacity();
+    assert.equal(hit.seen.at(-1).auth, "Bearer env-late");
+    const tenv = {};
+    const t = remoteTransportFor({ endpoint: "https://runner.example.com", tokenEnv: "COMPUTESHARE_TOKEN" }, { env: tenv, router: null, fetchFn: hit.fetchFn });
+    await t.capacity();
+    assert.equal(hit.seen.at(-1).auth, null);
+    tenv.COMPUTESHARE_TOKEN = "env-late-2";
+    await t.capacity();
+    assert.equal(hit.seen.at(-1).auth, "Bearer env-late-2");
+  });
+
   it("5131: remoteTransportFor's default credentials (gc) fall back to the matching router token", async () => {
     const hit = recorder();
     const t = remoteTransportFor({ endpoint: "http://127.0.0.1:7710" }, { env: {}, router: { endpoint: "http://127.0.0.1:7710", token: "router-tok" }, fetchFn: hit.fetchFn });
