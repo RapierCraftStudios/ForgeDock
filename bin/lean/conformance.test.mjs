@@ -1383,4 +1383,12 @@ describe("release review #5103", () => {
     }
     assert.equal(route5103({ bucket: "owner:decide", why: "Should we delete production data older than 90 days?" }), "external");
   });
+  it("#5115: production-mutating verbs naming a prod monitor stay external, never host", () => {
+    for (const why of ["ssh ovh-monitor and restart the worker", "rotate the prod monitor webhook", "update the production telemetry config",
+      "remove the stale prod monitor alert", "grant read-only prod access to the analyst", "alter the production query timeout"]) {
+      assert.equal(RO5103.test(why), true, `read-only prod phrase: ${why}`);
+      assert.equal(host(why), false, why);
+      assert.equal(route5103({ bucket: "owner:x", why }), "external", why);
+    }
+  });
 });
