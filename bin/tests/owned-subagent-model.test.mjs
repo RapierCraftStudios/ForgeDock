@@ -4,9 +4,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpDir } from "./_tmp.mjs";
-import { makeLeanRunner, ownedModelEnv, leanSettingsFlags } from "../lean/effects.mjs";
+import { makeLeanRunner, ownedModelEnv, leanSettingsFlags, PRE_TOOL_USE_HOOK } from "../lean/effects.mjs";
 import { readSubagentModel } from "../engine-cli.mjs";
 import { explorerAgents, parseExploreConfig } from "../lean/explore.mjs";
 
@@ -20,7 +21,7 @@ describe("#4843 engine-owned subagent model", () => {
   it("every lean session carries one --settings with the owned env; the builder's explorer keeps its own model", async () => {
     const seen = [], agentsSeen = [];
     const runCli = async (o) => { seen.push(o.extraArgs); agentsSeen.push(o.sessionFlags); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
-    const run = makeLeanRunner({ runCli, subagentModel: "sonnet" });
+    const run = makeLeanRunner({ runCli, subagentModel: "sonnet", sandboxed: false });
     const base = { issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
     await run({ ...base, role: "builder", rereadNudge: true, agents: explorerAgents(parseExploreConfig({ mode: "on" })) });
     await run({ ...base, role: "reviewer", readOnly: true });
@@ -38,7 +39,7 @@ describe("#4843 engine-owned subagent model", () => {
     const runCli = async (o) => { seen.push(o.extraArgs); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
     const prev = process.env.FORGEDOCK_FULL_SESSION;
     process.env.FORGEDOCK_FULL_SESSION = "1";
-    try { await makeLeanRunner({ runCli })({ role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "", rereadNudge: true, resume: "sid" }); }
+    try { await makeLeanRunner({ runCli, sandboxed: false })({ role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "", rereadNudge: true, resume: "sid" }); }
     finally { if (prev === undefined) delete process.env.FORGEDOCK_FULL_SESSION; else process.env.FORGEDOCK_FULL_SESSION = prev; }
     const a = seen[0];
     assert.deepEqual(a.slice(0, 2), ["--resume", "sid"]);
@@ -51,6 +52,47 @@ describe("#4843 engine-owned subagent model", () => {
     const s = JSON.parse(leanSettingsFlags({ subagentModel: null, reread: true })[1]);
     assert.equal(s.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, "0");
     assert.ok(s.hooks.PostToolUse && s.hooks.PreToolUse);
+  });
+
+  it("#5118 lean --settings pins attribution off and registers the pre-tool-use guard in sandboxes", async () => {
+    for (const reread of [false, true]) {
+      const s = JSON.parse(leanSettingsFlags({ reread })[1]);
+      assert.equal(s.includeCoAuthoredBy, false);
+      assert.deepEqual(s.attribution, { commit: "", pr: "" });
+      assert.ok(!JSON.stringify(s.hooks ?? {}).includes("pre-tool-use.mjs"), "no guard unless sandboxed");
+    }
+    const run = async (sandboxed) => {
+      const seen = [];
+      const runCli = async (o) => { seen.push(o.extraArgs); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+      const base = { issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
+      const r = makeLeanRunner({ runCli, sandboxed });
+      await r({ ...base, role: "builder", rereadNudge: true });
+      await r({ ...base, role: "reviewer", readOnly: true });
+      await r({ ...base, role: "grouper", noTools: true });
+      return seen.map((f) => JSON.parse(f[f.indexOf("--settings") + 1]));
+    };
+    const guardOf = (s) => (s.hooks?.PreToolUse ?? []).find((e) => e.matcher === "Bash");
+    const prev = process.env.FORGEDOCK_FULL_SESSION;
+    try {
+      for (const full of [false, true]) {
+        if (full) process.env.FORGEDOCK_FULL_SESSION = "1"; else delete process.env.FORGEDOCK_FULL_SESSION;
+        for (const s of await run(true)) {
+          assert.equal(s.includeCoAuthoredBy, false);
+          assert.deepEqual(s.attribution, { commit: "", pr: "" });
+          assert.ok(guardOf(s)?.hooks[0].command.includes("pre-tool-use.mjs"));
+        }
+        for (const s of await run(false)) { assert.equal(guardOf(s), undefined); assert.equal(s.includeCoAuthoredBy, false); }
+      }
+    } finally { if (prev === undefined) delete process.env.FORGEDOCK_FULL_SESSION; else process.env.FORGEDOCK_FULL_SESSION = prev; }
+    const [builder] = await run(true);
+    assert.ok(builder.hooks.PreToolUse.some((e) => e.matcher === "Read"), "re-read hook kept next to the guard");
+    // the registered guard blocks a commit carrying the trailer (exit 2)
+    // (the hook only enforces in a ForgeDock-managed dir, i.e. one with a forge.yaml)
+    const managed = tmpDir("attr-guard-");
+    writeFileSync(join(managed, "forge.yaml"), "project:\n  owner: test\n  repo: test\n");
+    const payload = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: 'git commit -m "fix: x" -m "Co-Authored-By: Claude <noreply@anthropic.com>"' } });
+    const r = spawnSync(process.execPath, [PRE_TOOL_USE_HOOK], { input: payload, encoding: "utf8", cwd: managed, timeout: 5000, env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_AI_ATTRIBUTION: "" } });
+    assert.equal(r.status, 2, r.stderr);
   });
 
   it("readSubagentModel reads forge.yaml agents.subagent_model; null when absent or invalid", () => {
