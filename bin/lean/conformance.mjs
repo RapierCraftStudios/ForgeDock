@@ -266,9 +266,18 @@ export function tmpdirInputs(command) {
 
 const tmpInputProblem = (id, p) => `${id}: reads ${p}, which the command does not create; the run TMPDIR is per run, so the engine's rerun and red-green check will not find it. Create the file inside the command (\`… > ${p} && …\`) or use a path the repo tracks`;
 
-const E2E_WORD_RE = /\b(?:e2e|end-to-end|integration|playwright|cypress|live[- ]stack)\b/i;
-const WEAKEN_RE = /\b(?:no|not|without|drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|instead of|rather than|in lieu of|swap\w*)\b/i;
-const MOCKED_RE = /\b(?:mock\w*|stub\w*|fake\w*|unit|vitest|jest|component tests?|route tests?)\b/i;
+const E2E_TERM = String.raw`(?:e2e|end-to-end|integration|playwright|cypress|live[- ]stack)`;
+const E2E_WORD_RE = new RegExp(String.raw`\b${E2E_TERM}\b`, "i");
+const MOCKED_TERM = String.raw`(?:mock\w*|stub\w*|fake\w*|unit|vitest|jest|component tests?|route tests?)`;
+const MOCKED_RE = new RegExp(String.raw`\b${MOCKED_TERM}`, "i");
+// #5116: a negated mock ("do not mock", "no stubs") or a fake clock is not a substitute for the e2e check.
+const NEG_MOCK_RE = /\b(?:do(?:es)? not|don't|never|no|not|without)\s+(?:use\s+|any\s+)?(?:mock\w*|stub\w*|fake\w*)/gi;
+const FAKE_CLOCK_RE = /\bfake[- ](?:timers?|clocks?)\b/gi;
+// A weakener governs the e2e term only within a few words and the same clause (no . or ; between them).
+const GAP = String.raw`(?:[\s,]+\w+){0,3}?[\s,]+`;
+const DROP_BEFORE_RE = new RegExp(String.raw`\b(?:no|not|without|never|drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|swap\w*)${GAP}${E2E_TERM}\b`, "i");
+const DROP_AFTER_RE = new RegExp(String.raw`\b${E2E_TERM}${GAP}(?:replaced|dropped|skipped|swapped|downgraded)\b`, "i");
+const INSTEAD_OF_RE = new RegExp(String.raw`\b${MOCKED_TERM}[^.;]{0,60}?\b(?:instead of|rather than|in lieu of)\b${GAP}${E2E_TERM}\b`, "i");
 const PROBE_RE = /forge-probe|acceptance[- ]probe/i;
 const NEG_PROBE_RE = /\b(?:no|not|without|never)\b[^.;]{0,30}(?:forge-probe|acceptance[- ]probe)/i;
 /**
@@ -282,7 +291,9 @@ export function weakenedE2eDecisions(c) {
   const elsewhere = (id) => JSON.stringify({ r: c?.requirements ?? [], d: c?.deliverables ?? [], k: decisions.filter((k) => k?.id !== id) });
   return decisions.filter((k) => {
     const choice = String(k?.choice ?? "");
-    if (!E2E_WORD_RE.test(choice) || !WEAKEN_RE.test(choice) || !MOCKED_RE.test(choice)) return false;
+    if (!E2E_WORD_RE.test(choice)) return false;
+    const mocked = choice.replace(NEG_MOCK_RE, " ").replace(FAKE_CLOCK_RE, " ");
+    if (!MOCKED_RE.test(mocked) || !(DROP_BEFORE_RE.test(mocked) || DROP_AFTER_RE.test(mocked) || INSTEAD_OF_RE.test(mocked))) return false;
     const own = `${choice} ${k?.justification ?? ""}`;
     return !((PROBE_RE.test(own) && !NEG_PROBE_RE.test(own)) || /forge-probe/i.test(elsewhere(k?.id)));
   }).map((k) => k.id).filter(Boolean);
@@ -1228,7 +1239,7 @@ export function bucketProblems(r) {
 const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
 export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor\b|\bread[- ]only\b[^.]{0,40}\bprod(?:uction)?\b|\bprod(?:uction)?\b[^.]{0,30}\b(?:query|queries|capture|telemetry|logs?)\b/i;
 /** An item that truly needs the outside world (or a write to production) stays external even when it also reads production. */
-export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write)\b/i;
+export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)\b/i;
 /**
  * #5078: where an owner deferral goes. `owner:orchestrator`, `owner:promote:*` or post-promotion text -> post-deploy (the
  * rollup); read-only production data or capture (with no credential/spend/account/third-party/customer need) -> host; else external (credentials, spend, an account, a third party or a customer).
