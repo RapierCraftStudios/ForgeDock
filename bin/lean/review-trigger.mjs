@@ -7,6 +7,7 @@
  * log REVIEW_TRIGGER, always review), enforce (skip the reviewer when not triggered), off (today's behaviour).
  * Run directly, it reports per repo how many would-skip lanes the reviewer flagged as nonconforming.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -41,6 +42,30 @@ export function riskClassOf(path) {
 export function parseRiskPaths(v) {
   const xs = Array.isArray(v) ? v : typeof v === "string" ? v.split(",") : [];
   return xs.map((x) => String(x ?? "").trim()).filter(Boolean);
+}
+
+/** #5099: the review domains a lane can touch, from scripts/review-roster.sh path triggers. */
+export const DOMAINS = Object.freeze(["api", "auth", "database", "frontend", "infra"]);
+const DOMAIN_OF_TRIGGER = Object.freeze({ "frontend-path": "frontend", "auth-path": "auth", "infra-path": "infra", "route-handler": "infra", "migration-path": "database", "sdk-path": "api" });
+const ROSTER = fileURLToPath(new URL("../../scripts/review-roster.sh", import.meta.url));
+
+/** forge.yaml review.enforce_domains (#5099): a comma-separated string or a list -> known domains, lowercased, unique. */
+export function parseEnforceDomains(v) {
+  return [...new Set(parseRiskPaths(v).map((x) => x.toLowerCase()).filter((x) => DOMAINS.includes(x)))].sort();
+}
+
+/**
+ * #5099: the domains the changed files touch, by the path triggers of the bundled scripts/review-roster.sh (the one
+ * source of the domain path rules). Sorted, unique; [] without files; null when the script fails (the caller logs it).
+ */
+export function pathDomains(files = [], { script = ROSTER } = {}) {
+  const list = [...new Set((files ?? []).map(String).filter(Boolean))];
+  if (!list.length) return [];
+  let out;
+  try { out = execFileSync("bash", [script, "--files-file", "-", "--changed-lines", "1"], { input: `${list.join("\n")}\n`, encoding: "utf8", timeout: 15000, stdio: ["pipe", "pipe", "ignore"] }); } catch { return null; }
+  const m = /^REASON=.*?triggers:([^\n]*)$/m.exec(String(out));
+  if (!/^SELECTED_AGENTS=/m.test(String(out))) return null;
+  return [...new Set((m ? m[1].trim().split(/\s+/) : []).map((t) => DOMAIN_OF_TRIGGER[t]).filter(Boolean))].sort();
 }
 
 /**

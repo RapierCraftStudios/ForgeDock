@@ -1659,6 +1659,24 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(traj(w)[0].includes("| Close | issue closed (partial) |"));
   });
 
+  it("#5099 a web/ diff gets frontend domain checks in the reviewer prompt; review.enforce_domains makes the lane enforce", async () => {
+    const k = { ...CONTRACT, preserve: [] }, changed = ["web/app/page.tsx", "test/foo.test.js"];
+    const seenPrompts = (w) => { const out = [], r0 = w.io.runner; w.io.runner = async (c) => { if (c.role === "reviewer") out.push(c.prompt); return r0(c); }; return out; };
+    const dir = tmpDir("dom-"), s = world({ contract: k, changed, reviews: [omission()] }), ps = seenPrompts(s);
+    const rs = await runShadow(s, { dir });
+    assert.equal(rs.terminalReason, "merged", "without enforce_domains the lane stays shadow");
+    assert.match(ps[0], /<domain_checks>[\s\S]*regressions row[\s\S]*- frontend: [\s\S]*not-found\/error boundary/);
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "REVIEW_DOMAINS").map((e) => e.domains), [["frontend"]]);
+    const plain = world({ contract: k, reviews: [ok({}, k)] }), pp = seenPrompts(plain);
+    await runShadow(plain);
+    assert.ok(!pp[0].includes("<domain_checks>"), "no domain touched: no domain block");
+    const e = world({ contract: k, changed, reviews: [omission(), omission()] });
+    const re = await runShadow(e, { reviewTrigger: { mode: "shadow", riskPaths: [], enforceDomains: ["frontend"] } });
+    assert.equal(re.terminalReason, "needs-human"); assert.equal(e.merges.length, 0);
+    assert.deepEqual(re.conformance, { mode: "enforce", would: null, risk: true });
+    assert.ok(traj(e)[0].includes("Conformance enforced (review.enforce_domains): frontend"));
+  });
+
   it("#4398 an investigation whose answer the review marks deferred is tracked before the PR and closes partial, even though shadow merges it", async () => {
     const k = { ...CONTRACT, preserve: [] };
     const w = world({ title: "investigate: foo", contract: k, reviews: [conf({ requirements: [{ id: "R1", status: "deferred", evidence: "", validated_by: "", note: "question open" }] }, k)] });
@@ -5930,6 +5948,8 @@ describe("review trigger (#4273): shadow logs and always reviews, enforce skips 
     assert.deepEqual(at('review:\n  trigger: enforce\n  risk_paths: "db/**, *.sql"\n'), { mode: "enforce", riskPaths: ["db/**", "*.sql"] });
     assert.deepEqual(at("review:\n  tech_stack: x\n  risk_paths:\n    - \"infra/**\"\n    - lib/acct/*.ts  # c\n  trigger: bogus\n"), { mode: "shadow", riskPaths: ["infra/**", "lib/acct/*.ts"] });
     assert.equal(at("engine:\n  path: core\n"), undefined);
+    assert.deepEqual(at('review:\n  enforce_domains: "Frontend, bogus"\n'), { mode: "shadow", riskPaths: [], enforceDomains: ["frontend"] }, "#5099");
+    assert.deepEqual(at("review:\n  enforce_domains:\n    - auth\n  risk_paths:\n    - db/**\n"), { mode: "shadow", riskPaths: ["db/**"], enforceDomains: ["auth"] }, "#5099 block lists");
   });
 });
 
