@@ -551,12 +551,13 @@ export function providerByName(name, opts) {
     let forgeYaml = null;
     if (pool) { try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; } }
     const endpoint = exec.endpoint ?? (pool ? router?.endpoint : undefined);
-    const resolved = poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router });
+    const resolve = () => poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router });
+    const resolved = resolve();
     // A token read from a file is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
     const fixed = pool ? "FORGEDOCK_POOL_TOKEN" : "FORGEDOCK_REMOTE_TOKEN";
     const tokenEnv = exec.tokenEnv ?? (resolved.token ? fixed : undefined);
     // #4685/#5131: an empty env/keychain lookup of `token_env` falls back to `token_file`, then the (matching) router's token file.
-    const credentials = (n) => (n === tokenEnv ? resolved.token : resolveCredential(n, { env }));
+    const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env })); // per call, like resolveCredential
     const settings = { ...exec, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
       ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, ...(pool ? { name: "pool" } : {}), env, credentials,
