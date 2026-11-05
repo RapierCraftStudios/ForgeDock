@@ -31,20 +31,49 @@ const C = PREFLIGHT_CODES;
 /** A remote or hybrid execution is configured (the only case the pool checks apply to). */
 export const usesPool = (exec) => Boolean(exec) && (exec.mode === "remote" || exec.mode === "hybrid") && ["pool", "remote"].includes(exec.provider ?? "pool");
 
-/** The pool token resolves (env/keychain `token_env`, else the router's `forgedock_token_file`) and the router does not answer 401/403 to an authenticated ping. */
-export async function checkPoolAuth({ exec, router = null, credential = () => null, ping = null }) {
+/** #5131: `a` and `b` name the same `scheme://host:port` (default ports filled, path and trailing slash ignored). */
+const sameEndpoint = (a, b) => {
+  const key = (u) => { try { const x = new URL(String(u)); return `${x.protocol}//${x.hostname}:${x.port || (x.protocol === "https:" ? "443" : "80")}`; } catch { return null; } };
+  return key(a) !== null && key(a) === key(b);
+};
+
+/**
+ * The injectable stand-in for execution.mjs `poolCredential` when no `poolToken` is given (tests, older callers): `credential`
+ * on `token_env` (default COMPUTESHARE_TOKEN), then the router token, for `remote` only when its endpoint is unset or the router's.
+ */
+export const legacyPoolToken = (credential = () => null) => (exec, router) => {
+  const name = exec?.tokenEnv ?? "COMPUTESHARE_TOKEN";
+  const v = credential(name);
+  if (v) return { token: v, source: name };
+  const ok = Boolean(router?.token) && ((exec?.provider ?? "pool") === "pool" || !exec?.endpoint || sameEndpoint(exec.endpoint, router.endpoint));
+  return ok ? { token: router.token, source: "forgedock_token_file" } : { token: null, source: null };
+};
+
+/** The sources a resolver tries for `exec` (names only, never values), for a FAIL detail. */
+const sourcesTried = (exec, router) => [
+  `env/keychain ${exec.tokenEnv ?? (exec.provider === "remote" ? "(no token_env)" : "COMPUTESHARE_TOKEN")}`,
+  ...(exec.tokenFile ? [`token_file ${exec.tokenFile}`] : []),
+  !router ? "no router config (COMPUTESHARE_CONFIG / ~/.config/computeshare/router.json)"
+    : (exec.provider ?? "pool") === "remote" && exec.endpoint && !sameEndpoint(exec.endpoint, router.endpoint) ? `the router's forgedock_token_file (not used: endpoint ${exec.endpoint} is not the local router ${router.endpoint})`
+      : "the router's forgedock_token_file",
+].join(", ");
+
+/**
+ * The pool token resolves through `poolToken(exec, router) -> {token, source}` (#5131: hostLaneIo wires execution.mjs
+ * poolCredential with the dispatch env, so preflight and lane dispatch resolve the same token), else `credential`/`router`
+ * (legacyPoolToken), and the router does not answer 401/403 to an authenticated ping. Details name sources, never values.
+ */
+export async function checkPoolAuth({ exec, router = null, credential = () => null, ping = null, poolToken = null }) {
   const code = C.PREFLIGHT_POOL_AUTH;
   if (!usesPool(exec)) return pass(code, "skipped: no remote or hybrid execution", "remote");
-  const name = exec.tokenEnv ?? "COMPUTESHARE_TOKEN";
-  const fromEnv = credential(name);
-  const token = fromEnv || router?.token || null;
-  if (!token) return fail(code, `pool token does not resolve: tried env/keychain ${name}, ${router ? "the router's forgedock_token_file" : "no router config (COMPUTESHARE_CONFIG / ~/.config/computeshare/router.json)"}`, "remote");
+  const { token, source } = (poolToken ?? legacyPoolToken(credential))(exec, router) ?? {};
+  if (!token) return fail(code, `pool token does not resolve: tried ${sourcesTried(exec, router)}`, "remote");
   const endpoint = exec.endpoint ?? router?.endpoint ?? null;
-  if (!endpoint || typeof ping !== "function") return pass(code, `token resolved from ${fromEnv ? name : "forgedock_token_file"}`, "remote");
+  if (!endpoint || typeof ping !== "function") return pass(code, `token resolved from ${source}`, "remote");
   let r = null;
   try { r = await ping(endpoint, token); } catch { r = null; }
-  if ([401, 403].includes(r?.status)) return fail(code, `router ${endpoint} answered HTTP ${r.status} to the token from ${fromEnv ? name : "forgedock_token_file"}`, "remote");
-  return pass(code, `token resolved from ${fromEnv ? name : "forgedock_token_file"}${r ? "" : "; router unreachable (not an auth failure)"}`, "remote");
+  if ([401, 403].includes(r?.status)) return fail(code, `router ${endpoint} answered HTTP ${r.status} to the token from ${source}`, "remote");
+  return pass(code, `token resolved from ${source}${r ? "" : "; router unreachable (not an auth failure)"}`, "remote");
 }
 
 /** Every online pool agent runs the CLI's version. `agents` is the router's `GET /agents` list (each spreads versionOf: version, image). */
@@ -99,9 +128,11 @@ export async function runLaneChecks({ exec = null, env = process.env, cliVersion
   let router = null;
   try { router = io.router?.() ?? null; } catch { router = null; }
   const ping = io.ping ?? null;
-  const agentsOf = async () => { try { return (await io.agents?.(exec?.endpoint ?? router?.endpoint, exec?.tokenEnv ? (io.credential?.(exec.tokenEnv) ?? router?.token) : router?.token)) ?? null; } catch { return null; } };
+  // #5131: one resolver for the auth check and the agents read: io.poolToken (poolCredential), else the injected credential/router.
+  const poolToken = io.poolToken ?? legacyPoolToken(io.credential ?? (() => null));
+  const agentsOf = async () => { try { return (await io.agents?.(exec?.endpoint ?? router?.endpoint, poolToken(exec, router)?.token ?? null)) ?? null; } catch { return null; } };
   return Promise.all([
-    safe(C.PREFLIGHT_POOL_AUTH, "remote", () => checkPoolAuth({ exec, router, credential: io.credential, ping })),
+    safe(C.PREFLIGHT_POOL_AUTH, "remote", () => checkPoolAuth({ exec, router, poolToken, ping })),
     safe(C.PREFLIGHT_POOL_VERSION, "remote", async () => checkPoolVersion({ exec, agents: usesPool(exec) ? await agentsOf() : null, cliVersion: cliV })),
     safe(C.PREFLIGHT_PATH_LOOP, "all", () => checkPathLoop({ env: { ...env, PATH: env.PATH ?? "" }, ...(io.loops ? { loops: io.loops } : {}) })),
     safe(C.PREFLIGHT_GH_FIELDS, "all", () => (io.ghExec ? checkGhFields({ exec: io.ghExec }) : pass(C.PREFLIGHT_GH_FIELDS, "skipped: no gh", "all"))),
@@ -113,7 +144,7 @@ export const formatLaneChecks = (checks) => checks.map((c) => `${c.ok ? "PASS" :
 
 /** Real-host io for the daemon, the batch and `doctor --lanes`. gh output is cached per process (it cannot change under a running engine). */
 export async function hostLaneIo({ env = process.env } = {}) {
-  const { poolRouterConfig } = await import("./execution.mjs");
+  const { poolCredential, poolRouterConfig } = await import("./execution.mjs");
   const { resolveCredential } = await import("./credentials.mjs");
   const { execFile } = await import("node:child_process");
   const call = (url, token, timeoutMs = 5000) => fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(timeoutMs) });
@@ -122,6 +153,7 @@ export async function hostLaneIo({ env = process.env } = {}) {
   return {
     router: () => poolRouterConfig({ env }),
     credential: (n) => resolveCredential(n, { env }),
+    poolToken: (exec, router) => poolCredential(exec, { env, router }), // #5131: the dispatch resolver on the dispatch env
     ping: async (endpoint, token) => ({ status: (await call(`${endpoint}/status`, token)).status }),
     agents: async (endpoint, token) => { const r = await call(`${endpoint}/agents`, token); return r.ok ? (await r.json())?.agents ?? null : null; },
     ghExec: (args) => { const k = args.join(" "); if (!memo.has(k)) memo.set(k, run(args)); return memo.get(k); },

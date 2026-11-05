@@ -76,6 +76,10 @@ await d.closed;
     return child;
   };
   h.client = { scheddDir: h.sched, spawnDaemon: null };
+  // A forge.yaml with host admission off, so a test that needs N live lanes does not depend on this host's free memory/cores
+  // (liveLaneCap derives the cap from them). Run the clients from h.work via h.inWork to use it.
+  writeFileSync(join(work, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+  h.inWork = async (fn) => { const prev = process.cwd(); process.chdir(work); try { return await fn(); } finally { process.chdir(prev); } };
   h.launched = () => readFileSync(h.launches, "utf8").trim().split("\n").filter(Boolean).map(Number).sort();
   h.lanePids = () => listBatches(h.root).flatMap((id) => Object.values(openBatch(h.root, id).store.load()?.running ?? {}).map((r) => r.pid).filter(Boolean));
   h.stubPids = () => (existsSync(h.lanePidFile) ? readFileSync(h.lanePidFile, "utf8").trim().split("\n").filter(Boolean).map(Number) : []);
@@ -119,7 +123,7 @@ describe("schedd host scheduler (#4192)", () => {
       const d = await h.daemon();
       const submit = (issues) => orchestrateFromCli([...issues, "--parallel", "2", "--repo", "o/r", "--no-prefilter"], h.client);
       // One capture for the three concurrent clients (console.log is process-wide).
-      const all = capture(() => Promise.all([submit(["1", "2"]), submit(["4"]), submit(["5"])]));
+      const all = capture(() => h.inWork(() => Promise.all([submit(["1", "2"]), submit(["4"]), submit(["5"])])));
       await until(() => h.launched().length === 4 && h.lanePids().length === 4);
       const reg = JSON.parse(readFileSync(join(h.sched, "registry.json"), "utf8"));
       assert.equal(Object.keys(reg.slots).length, 4);
@@ -197,7 +201,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     try {
       await h.daemon();
       const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: a[2] === "9" ? "CLOSED" : "OPEN" }) : "o/r\n") } };
-      const { res } = await withRoot(h, () => capture(async () => {
+      const { res } = await withRoot(h, () => h.inWork(() => capture(async () => {
         const first = orchestrateFromCli(["1", "--parallel", "3", "--repo", "o/r", "--no-prefilter"], h.client);
         await until(() => h.launched().length === 1 && h.lanePids().length === 1);
         const [id] = listBatches(h.root);
@@ -217,7 +221,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         const again = await orchestrateFromCli(["--resume", id], client);
         assert.deepEqual(again.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [4, "merged"], [6, "merged"]]);
         return done;
-      }));
+      })));
       assert.equal(res.rows.length, 3);
       assert.deepEqual(h.launched(), [1, 2, 4, 6], "each issue launched once");
     } finally { await h.cleanup(); }
@@ -642,6 +646,18 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.ok(SECRET_ENV.test("AWS_ACCESS_KEY") && SECRET_ENV.test("COMPUTESHARE_TOKEN") && !SECRET_ENV.test("KEYBOARD"));
     const env = mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok", PATH: "/d" }, { PATH: "/" });
     assert.equal(env.COMPUTESHARE_TOKEN, "daemon-tok");
+  });
+
+  it("5131: a daemon secret wins over an empty or stale pin, the pin fills one the daemon lacks, batchEnv pins no empty value", () => {
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "" }).COMPUTESHARE_TOKEN, "daemon-tok");
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok" }, { COMPUTESHARE_TOKEN: "stale" }).COMPUTESHARE_TOKEN, "daemon-tok");
+    assert.equal(mergeEnv({ PATH: "/d" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok");
+    assert.equal(mergeEnv({ COMPUTESHARE_TOKEN: "" }, { COMPUTESHARE_TOKEN: "client-tok" }).COMPUTESHARE_TOKEN, "client-tok");
+    assert.equal(mergeEnv({}, { COMPUTESHARE_TOKEN: "" }).COMPUTESHARE_TOKEN, undefined, "an empty pin never overrides");
+    assert.equal(mergeEnv({ CLAUDE_CONFIG_DIR: "/d" }, { CLAUDE_CONFIG_DIR: "/c" }).CLAUDE_CONFIG_DIR, "/c", "non-secret pins keep winning");
+    const kept = batchEnv({ PATH: "/", COMPUTESHARE_TOKEN: "", GH_HOST: "" }, { passthrough: ["COMPUTESHARE_TOKEN"], exists: () => true });
+    assert.deepEqual(Object.keys(kept), ["PATH"]);
+    assert.deepEqual(batchEnv({ COMPUTESHARE_TOKEN: "client-tok" }, { passthrough: ["COMPUTESHARE_TOKEN"] }), { COMPUTESHARE_TOKEN: "client-tok" });
   });
 
   it("#4734: the pin keeps non-secret provider selectors, drops secrets and session ids, and droppedEnv names what was left out", () => {

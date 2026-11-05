@@ -31,6 +31,29 @@ describe("pool_auth", () => {
   });
 });
 
+describe("pool_auth shared resolver (#5131)", () => {
+  const remote = { mode: "remote", provider: "remote", endpoint: "https://runner.example.com", tokenEnv: "COMPUTESHARE_TOKEN" };
+  const router = { endpoint: "http://127.0.0.1:7710", token: "router-tok" };
+  it("5131: FAILs remote on a non-matching endpoint although a router token exists, naming sources never the value", async () => {
+    const a = await checkPoolAuth({ exec: remote, router, credential: () => null });
+    assert.equal(a.ok, false); assert.equal(a.code, "preflight.pool_auth"); assert.equal(a.scope, "remote");
+    assert.match(a.detail, /COMPUTESHARE_TOKEN/); assert.match(a.detail, /not the local router/); assert.doesNotMatch(a.detail, /router-tok/);
+    const viaIo = await checkPoolAuth({ exec: remote, router, poolToken: () => ({ token: null, source: null }) });
+    assert.equal(viaIo.ok, false);
+    assert.equal((await checkPoolAuth({ exec: { ...remote, endpoint: "http://127.0.0.1:7710/" }, router, credential: () => null })).ok, true, "matching endpoint: router token applies");
+  });
+  it("5131: runLaneChecks uses io.poolToken for the auth check and the agents read, and FAILs a rejected token", async () => {
+    const calls = [];
+    const io = { router: () => router, poolToken: (exec, r) => { calls.push([exec.provider, r?.endpoint]); return { token: "tok", source: "token_file" }; },
+      ping: async (_e, t) => ({ status: t === "tok" ? 401 : 200 }), agents: async (_e, t) => { calls.push(["agents", t]); return []; } };
+    const checks = await runLaneChecks({ exec: remote, env: { PATH: "" }, io: { ...io, loops: () => [] } });
+    const auth = checks.find((c) => c.code === "preflight.pool_auth");
+    assert.equal(auth.ok, false); assert.match(auth.detail, /HTTP 401/); assert.match(auth.detail, /token_file/); assert.doesNotMatch(auth.detail, /\btok\b/);
+    assert.ok(calls.some((c) => c[0] === "agents" && c[1] === "tok"));
+    assert.ok(calls.some((c) => c[0] === "remote" && c[1] === router.endpoint));
+  });
+});
+
 describe("pool_version", () => {
   it("reports the agent, image version, CLI version and upgrade command", () => {
     const c = checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a1", ok: true, version: "1.37.0" }, { name: "a2", ok: true, version: "1.39.0" }] });

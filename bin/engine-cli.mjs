@@ -1747,7 +1747,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
-      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env, prefetch: (n) => prefetchOf.get(n) ?? [] });
+      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env, prefetch: (n) => prefetchOf.get(n) ?? [], ...(deps.sandboxFetch ? { fetchFn: deps.sandboxFetch } : {}) });
       const { makeLedger } = await import("./lean/ledger.mjs");
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};

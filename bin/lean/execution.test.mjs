@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -903,5 +903,68 @@ describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-hum
     // without a usage-limit signature the no-result path stays engine-error
     const plain = await lanesFor(fakeProvider({ finish: () => null }), { logTail: async () => "exit 1" }).runOne(7, null);
     assert.equal(plain.terminalReason, "engine-error");
+  });
+});
+
+describe("remote/pool credential resolver (#5131)", () => {
+  /** A router config dir: router.json listening on 127.0.0.1:7710 and the sibling forgedock.token. */
+  const routerDir = () => {
+    const d = tmpDir("router-5131-");
+    writeFileSync(join(d, "router.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 7710 } }));
+    writeFileSync(join(d, "forgedock.token"), "router-tok\n");
+    return d;
+  };
+  const recorder = () => {
+    const seen = [];
+    const fetchFn = async (url, init = {}) => { seen.push({ url: String(url), auth: init.headers?.authorization ?? null }); return new Response("{}", { status: 200 }); };
+    return { seen, fetchFn };
+  };
+  const remoteVia = (exec, { fetchFn, dir }) => providerByName("remote", { batch: { id: "b5131" }, repo: "o/r", exec: parseExecution({ mode: "remote", max_remote: "1", provider: "remote", ...exec }),
+    env: {}, poolConfigPath: join(dir, "router.json"), fetchFn });
+
+  it("5131: providerByName remote with no env/keychain token sends the router token file's bearer only to the router's endpoint", async () => {
+    const dir = routerDir();
+    const hit = recorder();
+    await remoteVia({ endpoint: "http://127.0.0.1:7710/" }, { fetchFn: hit.fetchFn, dir }).capacity();
+    assert.ok(hit.seen.length >= 1);
+    assert.equal(hit.seen[0].auth, "Bearer router-tok");
+    const miss = recorder();
+    await remoteVia({ endpoint: "https://runner.example.com" }, { fetchFn: miss.fetchFn, dir }).capacity();
+    assert.ok(miss.seen.length >= 1);
+    assert.equal(miss.seen[0].auth, null, "the local router token never goes to another endpoint");
+  });
+
+  it("5131: poolCredential order is token_env (env, keychain), token_file, then the matching router token; source never holds the value", () => {
+    const dir = routerDir();
+    const file = join(dir, "explicit.token");
+    writeFileSync(file, "  file-tok \n");
+    const router = { endpoint: "http://127.0.0.1:7710", token: "router-tok" };
+    const keychain = () => null;
+    assert.deepEqual(poolCredential({ provider: "remote", tokenEnv: "COMPUTESHARE_TOKEN", endpoint: "http://127.0.0.1:7710" }, { env: { COMPUTESHARE_TOKEN: "env-tok" }, router, keychain }), { token: "env-tok", source: "COMPUTESHARE_TOKEN" });
+    assert.deepEqual(poolCredential({ provider: "remote", tokenEnv: "COMPUTESHARE_TOKEN", endpoint: "http://127.0.0.1:7710" }, { env: {}, router, keychain: () => "kc-tok" }), { token: "kc-tok", source: "COMPUTESHARE_TOKEN" });
+    assert.deepEqual(poolCredential({ provider: "remote", tokenEnv: "COMPUTESHARE_TOKEN", endpoint: "http://127.0.0.1:7710/" }, { env: {}, router, keychain }), { token: "router-tok", source: "forgedock_token_file" });
+    assert.deepEqual(poolCredential({ provider: "remote", tokenEnv: "COMPUTESHARE_TOKEN", tokenFile: file, endpoint: "https://x.example" }, { env: {}, router, keychain }), { token: "file-tok", source: "token_file" });
+    assert.deepEqual(poolCredential({ provider: "remote", tokenEnv: "COMPUTESHARE_TOKEN", endpoint: "https://x.example" }, { env: {}, router, keychain }), { token: null, source: null });
+    assert.deepEqual(poolCredential({ provider: "pool", endpoint: "https://x.example" }, { env: {}, router, keychain }), { token: "router-tok", source: "forgedock_token_file" });
+    assert.deepEqual(poolCredential({ provider: "remote", tokenFile: join(dir, "missing.token") }, { env: {}, router: null }), { token: null, source: null });
+  });
+
+  it("5131: execution.token_file is parsed and sent as the bearer to any endpoint", async () => {
+    const dir = routerDir();
+    const file = join(dir, "explicit.token");
+    writeFileSync(file, "file-tok\n");
+    assert.equal(parseExecution({ token_file: file }).tokenFile, file);
+    assert.equal(parseExecution({ token_file: "" }).tokenFile, undefined);
+    const hit = recorder();
+    await remoteVia({ endpoint: "https://runner.example.com", token_file: file }, { fetchFn: hit.fetchFn, dir }).capacity();
+    assert.equal(hit.seen[0].auth, "Bearer file-tok");
+  });
+
+  it("5131: remoteTransportFor's default credentials (gc) fall back to the matching router token", async () => {
+    const hit = recorder();
+    const t = remoteTransportFor({ endpoint: "http://127.0.0.1:7710" }, { env: {}, router: { endpoint: "http://127.0.0.1:7710", token: "router-tok" }, fetchFn: hit.fetchFn });
+    await t.capacity();
+    assert.equal(hit.seen[0].auth, "Bearer router-tok");
+    assert.throws(() => remoteTransportFor({}, { env: {}, router: null }), (e) => e.code === "execution.provider.misconfigured");
   });
 });
