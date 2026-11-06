@@ -4,7 +4,7 @@
  * Host overload signal (#5174). Remote lanes already run every heavy step inside their sandbox (sandbox-remote.mjs runs
  * `forgedock run-issue` there). What loads a small dispatcher are the lanes that run on it: local placements and fallbacks.
  * - `hostOverload` is the snapshot: overloaded when the 1-min load average divided by cores is above
- *   `engine.overload_load_per_core` (default 2; 0 disables). An unreadable probe never counts as overloaded.
+ *   `engine.overload_load_per_core` (default 2; 0 disables; env FORGEDOCK_OVERLOAD_LOAD_PER_CORE overrides). An unreadable probe never counts as overloaded.
  * - orchestrate `grant()` holds new local admissions while it is overloaded (remote placements are never held).
  * - `forgedock status` and `forgedock schedd status` print `formatOverload`.
  * - `lowerPriority` runs a local heavy step at nice 10 (plus `ionice -c3` on Linux when available), so test runners and
@@ -35,9 +35,13 @@ export function hostOverload({ threshold = OVERLOAD_DEFAULTS.load_per_core, host
   return { overloaded: perCore !== null && t !== null && perCore > t, load1, cores, perCore, threshold: t };
 }
 
-/** A `() => snapshot` probe with the threshold read from an admission cfg (engine-cli `readAdmission`). */
-export function liveOverload(cfg = {}, { host } = {}) {
-  const threshold = overloadThreshold(cfg);
+/**
+ * A `() => snapshot` probe with the threshold read from an admission cfg (engine-cli `readAdmission`). The env
+ * `FORGEDOCK_OVERLOAD_LOAD_PER_CORE` (same values; 0 disables) overrides forge.yaml host-wide; the test helper sets it to 0.
+ */
+export function liveOverload(cfg = {}, { host, env = process.env } = {}) {
+  const e = env?.FORGEDOCK_OVERLOAD_LOAD_PER_CORE;
+  const threshold = overloadThreshold(e !== undefined && String(e).trim() !== "" ? { overload_load_per_core: e } : cfg);
   return () => hostOverload({ threshold, ...(host ? { host } : {}) });
 }
 

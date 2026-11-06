@@ -30,8 +30,11 @@ describe("#5174 hostload", () => {
     assert.equal(hostOverload({ threshold: 2, host: { loadAvg1: () => { throw new Error("no /proc"); }, cores: () => 4 } }).overloaded, false);
     assert.equal(hostOverload({ threshold: 2, host: host(NaN, 4) }).overloaded, false);
     assert.equal(hostOverload({ threshold: 2, host: host(18, 0) }).overloaded, false);
-    assert.equal(liveOverload({ overload_load_per_core: 1 }, { host: host(18, 4) })().overloaded, true);
-    assert.equal(liveOverload({ overload_load_per_core: 0 }, { host: host(18, 4) })().overloaded, false);
+    assert.equal(liveOverload({ overload_load_per_core: 1 }, { host: host(18, 4), env: {} })().overloaded, true);
+    assert.equal(liveOverload({ overload_load_per_core: 0 }, { host: host(18, 4), env: {} })().overloaded, false);
+    assert.equal(liveOverload({ overload_load_per_core: 1 }, { host: host(18, 4), env: { FORGEDOCK_OVERLOAD_LOAD_PER_CORE: "0" } })().overloaded, false, "env 0 disables");
+    assert.equal(liveOverload({}, { host: host(6, 4), env: { FORGEDOCK_OVERLOAD_LOAD_PER_CORE: "1" } })().threshold, 1, "env overrides forge.yaml");
+    assert.equal(liveOverload({}, { host: host(6, 4), env: {} })().threshold, 2);
     const live = liveOverload({})();
     assert.equal(typeof live.overloaded, "boolean");
   });
