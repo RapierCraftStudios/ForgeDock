@@ -26,6 +26,7 @@ import { writeAtomic } from "./batch.mjs";
 import { schedDir, pidAlive, DEFAULT_PRIORITY } from "./sched.mjs";
 import { which } from "./toolchain.mjs";
 import { hostParallelism } from "./admission.mjs";
+import { lowerPriority } from "./hostload.mjs";
 
 export const HEAVY_DEFAULTS = Object.freeze({ enabled: true, max: null, step_mem_mb: 2048, reserve_mb: 1024, ramp_s: 60, max_wait_s: 1800 });
 export const HEAVY_POLL_MS = 2000;
@@ -388,13 +389,15 @@ export async function runWrapped(argv, { env: env0 = process.env, open = openHea
   let cores = 1; try { cores = hostP.cores() || 1; } catch { /* 1 */ }
   const childEnv = { ...env, FORGE_HEAVY_HELD: "1",
     ...(env.FORGE_HEAVY_PARALLELISM_PINNED === "1" ? {} : { FORGE_HOST_PARALLELISM: String(hostParallelism({ cores, lanes: g.holders })) }) };
-  try { return await run(cmd, args, childEnv); } finally { g.release(); }
+  // #5174: a gated step runs at nice 10 / ionice idle so local test runners and installs do not starve the schedd event loop.
+  try { return await run(cmd, args, childEnv, (child) => lowerPriority(child?.pid)); } finally { g.release(); }
 }
 
-/** Spawn with inherited stdio; resolves {code, signal}; forwards termination signals to the child. */
-export function spawnInherit(cmd, args, env) {
+/** Spawn with inherited stdio; resolves {code, signal}; forwards termination signals to the child. `onSpawn(child)` runs once it has a pid. */
+export function spawnInherit(cmd, args, env, onSpawn = null) {
   return new Promise((done) => {
     const child = spawn(cmd, args, { stdio: "inherit", env });
+    if (onSpawn && child.pid) { try { onSpawn(child); } catch { /* best effort */ } }
     const fwd = (sig) => { try { child.kill(sig); } catch { /* gone */ } };
     const sigs = ["SIGTERM", "SIGINT", "SIGHUP"];
     for (const s of sigs) process.on(s, fwd);
