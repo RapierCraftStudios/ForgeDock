@@ -14,7 +14,7 @@ import { memAvailableMb } from "./lean/heavy.mjs";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
-import { isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
+import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
@@ -1984,7 +1984,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
-      issueState: async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"])); return v.state === "CLOSED" && String(v.stateReason ?? "COMPLETED").toUpperCase() !== "COMPLETED" ? "CLOSED_NOT_PLANNED" : v.state; },
+      // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
+      issueState: async (n) => {
+        const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels"]));
+        if (v.state !== "CLOSED" || String(v.stateReason ?? "COMPLETED").toUpperCase() === "COMPLETED") return v.state;
+        return ["merged", "moved"].includes(await closedScope({ gh: (a) => leanIo.gh(a), repo, issue: n, labels: v.labels })) ? "CLOSED" : "CLOSED_NOT_PLANNED";
+      },
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
@@ -2059,6 +2064,30 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
 }
 
 /**
+ * #5152: how a CLOSED issue's scope ended, read from its labels rather than its `stateReason` (a NOT_PLANNED close of
+ * delivered work, legacy or not, is never dropped scope): "merged" (`workflow:merged`), "moved" (`workflow:decomposed`
+ * whose trusted FORGE:DECOMPOSED sub-issues are all closed), "moving" (decomposed, a sub-issue open or unreadable), or null
+ * (no delivery label: `stateReason` decides). `labels` is a `gh --json labels` or REST label list. Never throws.
+ */
+export async function closedScope({ gh, repo, issue, labels }) {
+  const names = (Array.isArray(labels) ? labels : []).map((l) => String(l?.name ?? l));
+  if (names.includes("workflow:merged")) return "merged";
+  if (!isDecomposedRecord({ labels })) return null;
+  // decomposedSubissues reads `repos/{owner}/{repo}/...`: pin the placeholder to this batch's repo
+  const io = { gh: (a) => gh(a.map((x) => String(x).replace("{owner}/{repo}", repo))) };
+  let subs = null;
+  try { subs = await decomposedSubissues(issue, io); } catch { subs = null; }
+  if (!subs) return "moving";
+  for (const s of subs) {
+    try {
+      const v = JSON.parse(String(await gh(["issue", "view", String(s), "-R", repo, "--json", "state"])));
+      if (String(v?.state ?? "").toUpperCase() !== "CLOSED") return "moving";
+    } catch { return "moving"; }
+  }
+  return "moved";
+}
+
+/**
  * #4481: the dispatch-time "already done" check: `{outcome:"merged", pr}` when the issue's own lane PR
  * (`feat/issue-N-lean`) merged, `{outcome:"invalid"}` when the issue is closed without one, else null. Anything
  * unreadable (no state, non-JSON, a non-array PR list, a gh error) is null: the lane runs.
@@ -2075,7 +2104,7 @@ export function makeDispatchCheck({ gh, repo }) {
     } catch { return null; }
   };
   return async (n) => {
-    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"]);
+    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels"]);
     const state = typeof iss?.state === "string" ? iss.state.toUpperCase() : null;
     const notPlanned = String(iss?.stateReason ?? "").toUpperCase().replace(/\s/g, "_") === "NOT_PLANNED";
     const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number,mergedAt", "--limit", "1"]);
@@ -2086,7 +2115,15 @@ export function makeDispatchCheck({ gh, repo }) {
       if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
-    if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
+    if (state === "CLOSED") {
+      // #5152: workflow:merged / a fully closed decomposition is delivered whatever the stateReason; a decomposition still
+      // moving is a completed close (its dependents' lanes wait on the sub-issues); only an unlabelled NOT_PLANNED is dropped scope
+      const scope = await closedScope({ gh, repo, issue: n, labels: iss?.labels });
+      if (scope === "merged") return { outcome: "merged", detail: "issue closed, workflow:merged" };
+      if (scope === "moved") return { outcome: "merged", detail: "issue decomposed; all sub-issues closed" };
+      if (scope === "moving") return { outcome: "invalid", detail: "issue closed: decomposed, sub-issues still open" };
+      return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
+    }
     // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
     // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
     // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.

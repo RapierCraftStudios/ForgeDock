@@ -794,7 +794,7 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     const mk = (issue, prs, events = "", { body = "{}", open = "[]" } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
       if (a[0] === "issue" && a[a.length - 1] === "body") return body; // #4920: the lease lookup
       if (a[0] === "pr" && a.includes("open")) return open; // #4920: the open lane PR lookup
-      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason"]); if (issue instanceof Error) throw issue; return issue; }
+      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason,labels"]); if (issue instanceof Error) throw issue; return issue; }
       if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
       if (prs instanceof Error) throw prs;
@@ -812,6 +812,42 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.equal(await mk('{"state":"OPEN"}', "[]")(9), null);
     assert.equal(await mk('{"body":"","labels":[]}', '{"body":""}')(9), null, "a stub without state or a list: run");
     assert.equal(await mk(new Error("x"), new Error("y"))(9), null);
+  });
+  it("#5152 makeDispatchCheck: a merged investigation closed as partial (NOT_PLANNED + workflow:merged) satisfies its dependents", async () => {
+    // the blocker's lane PR is not on feat/issue-9-lean (legacy or renamed branch): only its labels say it was delivered
+    let closed = false;
+    const gh = async (a) => {
+      if (a[0] === "issue" && a[2] === "9" && a.includes("state,stateReason,labels")) {
+        return JSON.stringify(closed ? { state: "CLOSED", stateReason: "NOT_PLANNED", labels: [{ name: "workflow:merged" }] } : { state: "OPEN", labels: [] });
+      }
+      if (a[0] === "issue" && a[a.length - 1] === "body") return "{}";
+      if (a[0] === "pr") return "[]";
+      return "";
+    };
+    const dispatchCheck = makeDispatchCheck({ repo: "o/r", gh });
+    closed = true;
+    assert.deepEqual(await dispatchCheck(9), { outcome: "merged", detail: "issue closed, workflow:merged" }, "never final: delivered scope");
+    closed = false;
+    const ran = [];
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""), dispatchCheck,
+      runOne: async (n) => { ran.push(n); if (n === 9) { closed = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 101 }; } });
+    assert.ok(ran.includes(1), "the dependent runs instead of being skipped");
+    assert.deepEqual(rows.find((r) => r.issue === 1)?.outcome, "merged");
+  });
+  it("#5152 makeDispatchCheck: decomposed parents are satisfied once every sub-issue closed; only an unlabelled NOT_PLANNED is final", async () => {
+    const dec = '<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #21 a\n- #22 b';
+    const mk = (labels, subs, { decomposed = dec } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[2] === "9") return JSON.stringify({ state: "CLOSED", stateReason: "NOT_PLANNED", labels });
+      if (a[0] === "issue" && ["21", "22"].includes(a[2])) return JSON.stringify({ state: subs[a[2]] });
+      if (a[0] === "api") { assert.equal(a.find((x) => String(x).includes("/issues/9/comments")), "repos/o/r/issues/9/comments", "pinned to the batch repo"); return JSON.stringify({ body: decomposed, author_association: "NONE", user: { type: "Bot", login: "forgedock[bot]" } }); }
+      if (a[0] === "pr") return "[]";
+      return "";
+    } });
+    const d = [{ name: "workflow:decomposed" }];
+    assert.deepEqual(await mk(d, { 21: "CLOSED", 22: "CLOSED" })(9), { outcome: "merged", detail: "issue decomposed; all sub-issues closed" });
+    assert.deepEqual(await mk(d, { 21: "CLOSED", 22: "OPEN" })(9), { outcome: "invalid", detail: "issue closed: decomposed, sub-issues still open" }, "moving: not final");
+    assert.deepEqual(await mk(d, {}, { decomposed: "no trail" })(9), { outcome: "invalid", detail: "issue closed: decomposed, sub-issues still open" }, "no trail: not final");
+    assert.deepEqual(await mk([{ name: "workflow:invalid" }], {})(9), { outcome: "invalid", detail: "issue closed (not planned)", final: true }, "#4687 kept: dropped scope is final");
   });
 });
 
