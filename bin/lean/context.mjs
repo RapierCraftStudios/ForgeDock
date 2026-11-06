@@ -212,9 +212,15 @@ const failuresOf = (st) => (Array.isArray(st?.failureClasses) ? [...new Set(st.f
 const recordLine = (body) => oneLine(noComments(body).split("\n").map((l) => l.trim()).find((l) => l && !/^#+\s/.test(l)) ?? "");
 const markerOf = (body) => /^\s*<!--\s*FORGE:([A-Z_]+)\s*-->/.exec(String(body ?? ""))?.[1] ?? null;
 
+/**
+ * #5152: a closed record's result for the builder context. Delivered (`workflow:merged`) or moved (`workflow:decomposed`)
+ * scope reads `completed` whatever its `stateReason`, so a legacy NOT_PLANNED close of delivered work never reads as dropped.
+ */
+export const closedResult = (rec) => (["workflow:merged", "workflow:decomposed"].some((l) => (rec?.labels ?? []).includes(l)) ? "completed" : rec?.stateReason ?? "closed");
 async function readIssue(gh, repo, n) {
   const j = JSON.parse(String(await gh(["api", `repos/${repo}/issues/${n}`])));
-  return { number: Number(j.number ?? n), title: oneLine(j.title, 120), state: String(j.state ?? "").toUpperCase() || null, stateReason: j.state_reason ?? null, body: String(j.body ?? ""), pr: Boolean(j.pull_request) };
+  return { number: Number(j.number ?? n), title: oneLine(j.title, 120), state: String(j.state ?? "").toUpperCase() || null, stateReason: j.state_reason ?? null, body: String(j.body ?? ""), pr: Boolean(j.pull_request),
+    labels: (Array.isArray(j.labels) ? j.labels : []).map((l) => String(l?.name ?? l)) };
 }
 async function readComments(gh, repo, n) {
   return parseLines(await gh(["api", "--paginate", `repos/${repo}/issues/${n}/comments`, "--jq", ".[] | {id, body, author_association, user: {type: .user.type, login: .user.login}} | @json"]));
@@ -324,7 +330,7 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
       const st = stateOf(rec.body);
       const reason = codeOf(st?.terminalReason), fails = failuresOf(st);
       facts.links.push({ number: n, rel: r, kind: rec.pr ? "pr" : "issue", title: rec.title, state: rec.state, code: outcomeOf(st),
-        result: reason ?? (rec.state === "CLOSED" ? rec.stateReason ?? "closed" : null), ...(fails.length ? { failures: fails } : {}), ...(r === "parent" || r === "depends-on" ? { body: stripComments(rec.body) } : {}) });
+        result: reason ?? (rec.state === "CLOSED" ? closedResult(rec) : null), ...(fails.length ? { failures: fails } : {}), ...(r === "parent" || r === "depends-on" ? { body: stripComments(rec.body) } : {}) });
     }
   });
 
