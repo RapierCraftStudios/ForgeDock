@@ -20,8 +20,8 @@
  * A seam calls `onLive()` before it waits on a live lane (#4504); an adopt that resolves first is settled (or requeued on null)
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
- * limit holds admissions for that account until its reset, and deferrals other than a wait (`host.busy`,
- * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784) stop after `maxDeferrals`.
+ * limit (and #5168 a claude login failure, `backend.auth`) holds admissions for that account until its reset, and deferrals other than a wait (`host.busy`,
+ * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784; `backend.auth`, #5168) stop after `maxDeferrals`.
  * #5161: an engine-error whose detail is a transport/gateway failure (`isTransientEngineError`) is requeued with backoff
  * (`transientRetryDelayMs`) up to `transientRetries` times, not counted against `ENGINE_ERROR_RELAUNCHES`; then it ends engine-error.
  * #5112: with `remote.offlineFallback` (`execution.fallback_local`), an issue deferred `remote.capacityFallbackAfter` times (default
@@ -215,6 +215,8 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
     const at = posNum(r?.resetAtEpochMs) && r.resetAtEpochMs > now ? r.resetAtEpochMs : now + (posNum(r?.retryInSeconds) ?? RATE_LIMIT_FALLBACK_S) * 1000;
     return { delayMs: at - now, hold: true };
   }
+  // #5168: a failed claude login is an account condition, not an engine fault: held like a usage limit, never capped.
+  if (code === "backend.auth") return { delayMs: (posNum(r?.retryInSeconds) ?? RATE_LIMIT_FALLBACK_S) * 1000, hold: true };
   const k = deferrals + 1;
   if (k > maxDeferrals) return { capped: true };
   if (posNum(r?.retryInSeconds)) return { delayMs: r.retryInSeconds * 1000 };
@@ -769,7 +771,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             resumeAt, rotations: (q.rotations ?? 0) + (rq?.rotated ? 1 : 0) });
           requeue(n, delayMs); done(); save();
           const iso = new Date(resumeAt).toISOString();
-          update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (quota) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+          update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (${r?.code === "backend.auth" ? "backend.auth" : "quota"}) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
           return;
         }
         requeue(n, capGated ? 0 : delayMs); done(); save();

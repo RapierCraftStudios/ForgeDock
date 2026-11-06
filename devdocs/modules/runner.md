@@ -128,3 +128,7 @@ Cite: #3778 / PR #3782.
 `auto` no longer falls back to the paid API backend. `isApiBackendApproved({cwd, env})` gates every `auto`→`api` path (`resolveBackend`, `checkExecutionBackend`, the readiness upgrade and the vanished-binary branch in `runCommand`): it needs forge.yaml `execution.agent_backend: api` AND `FORGEDOCK_ALLOW_API_BACKEND=1`. Unapproved, `auto` resolves to `cli` and `runCommand` throws `CLI_BACKEND_UNAVAILABLE` (engine fail-fast, `engine.error`). Explicit `--backend api` is unchanged. The engine records the runner's `backend` on `PHASE_ATTEMPT_USAGE`/`PHASE_COMMIT` and in `phase_attempt` telemetry.
 Key gotcha recorded: tests that need a deterministic `auto` result pass `isCliAvailableFn` to `resolveBackend` and `apiApproved` to `checkExecutionBackend`.
 Cite: #4257; ADR devdocs/decisions/4257-api-backend-opt-in.md.
+
+## Entry 2026-11-07 — `detectAuthFailure`: a failed claude login is flagged `err.authFailure` (#5168)
+
+On a non-zero CLI exit (`CLI_BACKEND_FAILED`), `detectAuthFailure(stdout, output)` checks the stdout envelope (`is_error: true` plus a `result` naming "Failed to authenticate", `authentication_error`, an expired OAuth token, a login that "reached its time limit", "Invalid API key" or "Please run /login"; without an envelope, the combined output) and sets `err.authFailure = true`. A usage limit takes precedence: `authFailure` is set only when `detectUsageLimit` did not match. `codeForRunnerError` maps it to `backend.auth`. Tests: `runner.test.mjs` "#5168".

@@ -1223,7 +1223,7 @@ decomposition:
 
 **With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
 
-The lean (core) path reads the same key (#4337): with `close_parent: true` it closes the parent at decomposition as `not planned`, keeps `workflow:decomposed` and lists the sub-issues in the closing comment; dependents still wait on the sub-issues, and a trusted `FORGE:DECOMPOSED:REVOKED` reopens it. With the default `false` the lean parent stays open.
+The lean (core) path reads the same key (#4337): with `close_parent: true` it closes the parent at decomposition as `completed` (#5152; scope moved to the sub-issues, not dropped), keeps `workflow:decomposed` and lists the sub-issues in the closing comment; dependents still wait on the sub-issues, and a trusted `FORGE:DECOMPOSED:REVOKED` reopens it. With the default `false` the lean parent stays open.
 
 **Limitation**: `--retry` and engine resume refuse closed issues, so a closed decomposed parent cannot be re-run. It has nothing left to run; work on its open children instead.
 

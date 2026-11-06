@@ -444,3 +444,80 @@ test("router logs rejected requests and tags the hop that answered 401 (#5053)",
   assert.deepEqual([viaAgent.body.hop, viaAgent.body.agent], ["agent", "a1"]);
   assert.match(viaAgent.body.reason, /^agent auth/);
 });
+
+// #5165: the router picks the Claude login with the lowest tokenbaton usage, not the longest validity.
+function usageRouter(accounts, { usage = true, ceiling } = {}) {
+  const dir = tmpDir("cs-usage-"), src = join(dir, "tokenbaton"), dirs = [], logs = { info: [], warn: [] };
+  if (usage) mkdirSync(src);
+  for (const [n, a] of Object.entries(accounts)) {
+    const d = join(dir, `.claude-${n}`); mkdirSync(d); dirs.push(d);
+    writeFileSync(join(d, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: `tok-${n}`, refreshToken: "refresh-SECRET", expiresAt: Date.now() + a.validH * 3600000 } }));
+    if (usage && a.live) writeFileSync(join(src, `live.${n}`), a.live);
+  }
+  const log = { info: (m) => logs.info.push(String(m)), warn: (m) => logs.warn.push(String(m)), error() {} };
+  const r = createRouter({ state_dir: dir, enroll_token: "enroll", forgedock_token: "fd", claude_config_dirs: dirs, usage_source: src, ...(ceiling ? { usage_ceiling_pct: ceiling } : {}) }, { fetchFn: async () => new Response("{}"), log });
+  r.store.data.agents.a1 = { url: "http://a1:7711", token: "agent-secret" };
+  const get = () => new Promise((resolve) => {
+    r.handle({ method: "GET", url: "/agent/creds/claude", headers: { authorization: "Bearer agent-secret" }, socket: {} }, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader(k, v) { (this.h ??= {})[k.toLowerCase()] = v; }, end(b) { resolve({ status: this.s, headers: this.h ?? {}, body: JSON.parse(String(b)) }); } });
+  });
+  return { get, logs };
+}
+const inS = (s) => Math.floor((Date.now() + s * 1000) / 1000);
+
+test("router hands out the lowest-usage Claude login, not the longest-valid one (#5165)", async () => {
+  const { get, logs } = usageRouter({ 1: { validH: 6, live: `97 ${inS(3600)} 40 ${inS(86400)} 0` }, 2: { validH: 2, live: `20 ${inS(3600)} 10 ${inS(86400)} 0` } });
+  const r = await get();
+  assert.equal(r.status, 200);
+  assert.equal(r.body.token, "tok-2");
+  const sel = logs.info.find((m) => /claude login selected/.test(m));
+  assert.match(sel, /account=2 usage=20%/);
+  assert.ok(!logs.info.concat(logs.warn).join("\n").includes("tok-"), "the token is never logged");
+});
+
+test("router answers a typed 429 with the earliest reset when every Claude login is at the usage ceiling (#5165)", async () => {
+  const early = inS(1800), late = inS(7200);
+  const { get } = usageRouter({ 1: { validH: 6, live: `97 ${late} 40 ${inS(86400)} 0` }, 2: { validH: 2, live: `95 ${early} 10 ${inS(86400)} 0` } });
+  const r = await get();
+  assert.equal(r.status, 429);
+  assert.equal(r.body.code, "rate_limited");
+  assert.equal(r.body.reset_at, new Date(early * 1000).toISOString());
+  assert.match(r.body.reason, /^usage limit hit; resets at /);
+  assert.ok(Number(r.headers["retry-after"]) > 0);
+  assert.ok(!JSON.stringify(r.body).includes("tok-"));
+});
+
+test("router without a usage source falls back to the longest-valid Claude login and warns (#5165)", async () => {
+  const { get, logs } = usageRouter({ 1: { validH: 6 }, 2: { validH: 2 } }, { usage: false });
+  const r = await get();
+  assert.equal(r.status, 200);
+  assert.equal(r.body.token, "tok-1");
+  assert.ok(logs.warn.some((m) => /no usage source/.test(m)));
+});
+
+test("equal Claude login usage is broken by validity; a passed reset counts as 0; a custom ceiling applies (#5165)", async () => {
+  const tie = usageRouter({ 1: { validH: 2, live: `30 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 5, live: `30 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await tie.get()).body.token, "tok-2");
+  const reset = usageRouter({ 1: { validH: 2, live: `99 ${inS(-60)} 0 ${inS(86400)} 0` }, 2: { validH: 5, live: `50 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await reset.get()).body.token, "tok-1");
+  const ceil = usageRouter({ 1: { validH: 2, live: `60 ${inS(3600)} 0 ${inS(86400)} 0` } }, { ceiling: 50 });
+  assert.equal((await ceil.get()).status, 429);
+  const weekly = usageRouter({ 1: { validH: 2, live: `10 ${inS(3600)} 100 ${inS(86400)} 0` }, 2: { validH: 5, live: `80 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await weekly.get()).body.token, "tok-2");
+});
+
+test("agent passes a router usage-limit 429 for Claude credentials through to the sandbox (#5165)", async () => {
+  const { agent } = agentFixture();
+  await agent.launch({ spec: spec("cr1"), cpus: 2, mem_gb: 3 });
+  const rec = Object.values(agent.store.data.sandboxes ?? {}).find((x) => x.id === "cr1") ?? agent.store.data.sandboxes?.cr1;
+  const reason = "usage limit hit; resets at 2026-11-07T12:00:00.000Z";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "usage limit", code: "rate_limited", reason, reset_at: "2026-11-07T12:00:00.000Z" }), { status: 429, headers: { "retry-after": "120" } });
+  try {
+    const r = await new Promise((resolve) => {
+      agent.handle({ method: "GET", url: "/sandboxes/cr1/creds/claude", headers: { authorization: `Bearer ${rec.credToken}` }, socket: {} }, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, headers: this.h, body: JSON.parse(String(b)) }); } });
+    });
+    assert.equal(r.status, 429);
+    assert.equal(r.body.reason, reason);
+    assert.equal(r.headers["retry-after"], "120");
+  } finally { globalThis.fetch = realFetch; }
+});
