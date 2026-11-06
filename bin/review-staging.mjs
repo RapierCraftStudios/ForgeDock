@@ -385,6 +385,8 @@ async function finalize(a, io) {
   // Incomplete-panel guard + 6.75 delivery
   const d = await bash(io, "review-staging-post.sh", ["delivery", ...common], env);
   relay(io, d);
+  // Exit 2 = the comments could not be listed on any attempt (forge#5166): rerun, never re-dispatch reviewers that may have posted.
+  if (d.code === 2) throw new Stop(1, ["REVIEW_RESULT: status: BLOCKED, blocker: reviewer delivery could not be verified (GitHub comment listing failed); rerun --finalize, do not re-dispatch reviewers", BLOCK_DEPLOY]);
   if (d.code !== 0) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: reviewer delivery incomplete (exit ${d.code}); re-dispatch each missing reviewer once with the note "structured findings block required", else the panel is degraded`, BLOCK_DEPLOY]);
 
   // 6.5 verdict handling (override, posture, test-gate markers)

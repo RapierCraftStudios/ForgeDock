@@ -10,12 +10,15 @@
 #   delivery   counts trusted, current-head FORGE:REVIEW-AGENT comments (findings block required) for every domain listed in
 #              DIR/<N>_launched_review_agents. A shortfall labels the PR review-degraded + needs-human and posts
 #              FORGE:GATE_FAILURE:TYPE=review-panel-integrity; an empty/unreadable list or a missing domain is a delivery failure.
-#              Exit 0 = every launched reviewer delivered, 1 = not.
+#              The comments are listed once per attempt; a missing domain or an API error re-lists after each
+#              FORGE_REVIEW_DELIVERY_RETRY_DELAYS wait (seconds, default "5 15 45"). An API error on the last attempt is
+#              REVIEW DELIVERY UNVERIFIED (exit 2, nothing labelled or posted), never "missing" (forge#5166).
+#              Exit 0 = every launched reviewer delivered, 1 = not, 2 = could not be verified.
 #   test-gate  reads the saved /test-gate output FILE (the last FORGE:TEST_GATE:RESULT= marker; an absent marker stays empty and
 #              fails closed as BLOCK, never SKIP), applies the trusted override, the posture and the FORGE:GATE_PASS /
 #              FORGE:GATE_FAILURE test-gate comments, and persists DIR/<N>_test_gate_verdict and _reason.
 #              Exit 0 = continue, 1 = RESULT: BLOCK DEPLOY.
-# Exit: 2 on a usage error.
+# Exit: 2 on a usage error (and delivery UNVERIFIED).
 #
 # The `# BEGIN <name>` ... `# END <name>` blocks below are the spec's former fences, copied without their forge_resolve locator
 # stubs (this script resolves helpers once, below). Helpers (trusted-comments.sh) resolve through forge_resolve from trusted
@@ -59,24 +62,77 @@ type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; _S
 
 if [ "$CMD" = delivery ]; then
 echo "=== Incomplete-panel guard and Phase 6.75: verify agent delivery ==="
+# BEGIN delivery-fetch
+# The PR's comments are listed ONCE per attempt into a cache file; the panel guard and the per-domain check both read it (forge#5166).
+# An attempt is an API error unless gh exits 0 and every page is a JSON array: an error is never evidence that a comment is absent.
+DELIVERY_CACHE="$_SD/${PR_NUMBER}_delivery_comments.json"
+delivery_fetch() {
+  rm -f "$DELIVERY_CACHE" "$DELIVERY_CACHE.tmp"
+  gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" > "$DELIVERY_CACHE.tmp" 2>/dev/null || { rm -f "$DELIVERY_CACHE.tmp"; return 1; }
+  jq -se 'length > 0 and all(.[]; type == "array")' "$DELIVERY_CACHE.tmp" >/dev/null 2>&1 || { rm -f "$DELIVERY_CACHE.tmp"; return 1; }
+  mv -f "$DELIVERY_CACHE.tmp" "$DELIVERY_CACHE"
+}
+# Unique trusted current-head reviewer domains in the cached listing (findings block not required), one per line.
+delivery_domains() {
+  bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" < "$DELIVERY_CACHE" 2>/dev/null \
+    | jq -r 'scan("^<!-- FORGE:REVIEW-AGENT:([a-z0-9-]+) -->") | .[0]' 2>/dev/null | sort -u
+}
+# Trusted current-head comments for one domain that carry a findings block, in the cached listing.
+delivery_count() {
+  local AGENT_DOMAIN="$1" n
+  n=$(bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" < "$DELIVERY_CACHE" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac   # fail closed: counts as missing
+  printf '%s\n' "$n"
+}
+# END delivery-fetch
 # BEGIN panel-guard
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
 [ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
 case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
-ACTUAL_AGENT_COUNT=0
-if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
-  # Only TRUSTED, current-head reviewer comments count, over every page of comments. Unique domains, so a duplicate does not inflate the count.
-  ACTUAL_AGENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null \
-    | jq -r 'scan("^<!-- FORGE:REVIEW-AGENT:([a-z0-9-]+) -->") | .[0]' 2>/dev/null | sort -u | grep -c . || echo 0)
-fi
-case "$ACTUAL_AGENT_COUNT" in ''|*[!0-9]*) ACTUAL_AGENT_COUNT=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
 # Fresh shell: SELECTED_AGENT_COUNT is not carried over. Reload it from the PR-keyed launched-agent file, then fail closed when it is empty, non-integer or zero (a staging review always selects at least one reviewer).
 [ -n "${SELECTED_AGENT_COUNT:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_launched_review_agents" ] && SELECTED_AGENT_COUNT=$(grep -E '^[a-z0-9-]+$' "$_SD/${PR_NUMBER}_launched_review_agents" | sort -u | grep -c .); }
 SELECTED_COUNT_INVALID=false
 case "${SELECTED_AGENT_COUNT:-}" in ''|*[!0-9]*|0) SELECTED_COUNT_INVALID=true; SELECTED_AGENT_COUNT=0 ;; esac
+# Reload the launched-agent list persisted at dispatch (validated: lowercase marker domains only).
+[ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] || { [ -r "$_SD/${PR_NUMBER}_launched_review_agents" ] && LAUNCHED_REVIEW_AGENTS=$(grep -E '^[a-z0-9-]+$' "$_SD/${PR_NUMBER}_launched_review_agents" | sort -u | tr '\n' ' '); }
+ACTUAL_AGENT_COUNT=0
+DELIVERY_LAST=skipped     # ok = the last attempt was a successful listing, error = it was an API error
+DELIVERY_FOUND=" "        # launched domains with a findings block, found on any attempt (found stays found)
+DELIVERY_SEEN=""          # union of trusted current-head reviewer domains over the successful listings
+if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ] && [ "${DISPATCH_FAILED:-}" != "true" ]; then
+  if [ "$SELECTED_COUNT_INVALID" = "true" ] || [ -z "${LAUNCHED_REVIEW_AGENTS:-}" ]; then
+    # Nothing to wait for: one listing for the report only, no retry.
+    if delivery_fetch; then DELIVERY_LAST=ok; DELIVERY_SEEN=$(delivery_domains); else DELIVERY_LAST=error; fi
+  else
+    # Retry on listing lag or an API error, after each FORGE_REVIEW_DELIVERY_RETRY_DELAYS wait (seconds; non-integers ignored).
+    _ATTEMPT=0
+    for _DELAY in 0 ${FORGE_REVIEW_DELIVERY_RETRY_DELAYS-5 15 45}; do
+      case "$_DELAY" in ''|*[!0-9]*) continue ;; esac
+      _ATTEMPT=$((_ATTEMPT + 1))
+      [ "$_ATTEMPT" -gt 1 ] && [ "$_DELAY" -gt 0 ] && sleep "$_DELAY"
+      if ! delivery_fetch; then DELIVERY_LAST=error; echo "DELIVERY: attempt ${_ATTEMPT}: API error listing PR comments"; continue; fi
+      DELIVERY_LAST=ok
+      DELIVERY_SEEN=$(printf '%s\n%s\n' "$DELIVERY_SEEN" "$(delivery_domains)" | grep -E '^[a-z0-9-]+$' | sort -u)
+      _PENDING=""
+      for _D in $LAUNCHED_REVIEW_AGENTS; do
+        case "$DELIVERY_FOUND" in *" $_D "*) continue ;; esac
+        if [ "$(delivery_count "$_D")" -ge 1 ]; then DELIVERY_FOUND="${DELIVERY_FOUND}${_D} "; echo "DELIVERY: ${_D} found on attempt ${_ATTEMPT}"; else _PENDING="${_PENDING} ${_D}"; fi
+      done
+      [ -z "$_PENDING" ] && break
+      echo "DELIVERY: attempt ${_ATTEMPT}: missing:${_PENDING}"
+    done
+  fi
+  ACTUAL_AGENT_COUNT=$(printf '%s\n' "$DELIVERY_SEEN" | grep -c . || true)
+fi
+case "$ACTUAL_AGENT_COUNT" in ''|*[!0-9]*) ACTUAL_AGENT_COUNT=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
+if [ "${DISPATCH_FAILED:-}" != "true" ] && [ "$SELECTED_COUNT_INVALID" != "true" ] && [ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] && [ "$DELIVERY_LAST" = error ]; then
+  # Never "missing": the comments could not be listed, so nothing is labelled or posted (forge#5166).
+  echo "REVIEW DELIVERY UNVERIFIED: could not list PR comments after ${_ATTEMPT:-1} attempt(s) (GitHub API error); found so far:${DELIVERY_FOUND% }"
+  echo "Do not re-dispatch reviewers: rerun the finalize step once GitHub answers."
+  exit 2
+fi
 if [ "${DISPATCH_FAILED:-}" = "true" ] || [ "$SELECTED_COUNT_INVALID" = "true" ] || [ "$ACTUAL_AGENT_COUNT" -lt "$SELECTED_AGENT_COUNT" ]; then
   gh label create "review-degraded" --color "E4E669" --description "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null || true
   gh pr edit "$PR_NUMBER" -R "$GH_REPO" --add-label "review-degraded" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
@@ -91,7 +147,7 @@ Re-run the full staging review in a fresh session before deployment."
 fi
 # END panel-guard
 # BEGIN delivery-check
-# Reload the launched-agent list persisted at dispatch (validated: lowercase marker domains only).
+# Reload the launched-agent list persisted at dispatch (validated: lowercase marker domains only); a no-op when the panel guard loaded it.
 [ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] || { [ -r "$_SD/${PR_NUMBER}_launched_review_agents" ] && LAUNCHED_REVIEW_AGENTS=$(grep -E '^[a-z0-9-]+$' "$_SD/${PR_NUMBER}_launched_review_agents" | sort -u | tr '\n' ' '); }
 # Fail closed: a staging review always launches at least the Phase 2 material-change agent, so an empty list means lost state or skipped bookkeeping, never "nothing to verify".
 if [ -z "${PR_NUMBER:-}" ] || [ -z "${LAUNCHED_REVIEW_AGENTS:-}" ]; then
@@ -100,21 +156,9 @@ if [ -z "${PR_NUMBER:-}" ] || [ -z "${LAUNCHED_REVIEW_AGENTS:-}" ]; then
   exit 1
 fi
 MISSING_AGENT_COMMENTS=""
-# Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
-# (an empty SHA would make the Reviewed-SHA match accept any head).
-[ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
-case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
-TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+# Counted once per attempt from the cached listing above (delivery_count); a domain not found on any attempt is missing.
 for AGENT_DOMAIN in $LAUNCHED_REVIEW_AGENTS; do
-  AGENT_COMMENT_COUNT=0
-  if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
-    AGENT_COMMENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-      | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null || echo 0)
-  fi
-  case "$AGENT_COMMENT_COUNT" in ''|*[!0-9]*) AGENT_COMMENT_COUNT=0 ;; esac   # fail closed: counts as missing
-  if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
-    MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"
-  fi
+  case "$DELIVERY_FOUND" in *" ${AGENT_DOMAIN} "*) ;; *) MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}" ;; esac
 done
 
 if [ -n "$MISSING_AGENT_COMMENTS" ]; then
@@ -123,6 +167,7 @@ if [ -n "$MISSING_AGENT_COMMENTS" ]; then
   exit 1
 fi
 # END delivery-check
+rm -f "$DELIVERY_CACHE"
 echo "DELIVERY: OK (${ACTUAL_AGENT_COUNT}/${SELECTED_AGENT_COUNT} launched reviewers posted a findings block for head ${REVIEW_SHA_FULL})"
 exit 0
 fi

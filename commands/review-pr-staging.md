@@ -401,14 +401,14 @@ node "$FD_ROOT/bin/forgedock.mjs" review-staging "$PR_NUMBER" --finalize --test-
 ```
 
 The call runs these steps in order:
-1. The incomplete-panel guard and Phase 6.75 delivery verification. A launched reviewer without a trusted current-head comment that carries a findings block is a delivery failure. An empty or unreadable launched-agent list also fails, and is never evidence that nothing needed verifying.
+1. The incomplete-panel guard and Phase 6.75 delivery verification. A launched reviewer without a trusted current-head comment that carries a findings block is a delivery failure. An empty or unreadable launched-agent list also fails, and is never evidence that nothing needed verifying. The PR comments are listed once per attempt. A missing reviewer or a GitHub API error is re-listed with backoff (5 s, 15 s, 45 s) before any verdict, and each domain is reported with the attempt it was found on.
 2. The Phase 6.5 verdict handling.
 3. `scripts/review-finalize.sh`:
    - `extract`: trusted comments only, dedup, and the `commands/review-pr.md` §6B.4 provenance and concreteness gates. **CRITICAL/HIGH are never routed as pre-existing**, whatever their confidence.
    - `classify --dry-run`, then `classify` for real. This passes `--scope-files` (the 0B.1 scoped set when `SCOPE_MODE=scoped`) and `--prior-prs` (the bundle members), and posts `FORGE:NOTE_DISPOSITION`.
    - `file-prepare`.
 
-Findings come only from `FINDING:` markers, never from free text. **Exit 1 is a stop**: a `REVIEW DELIVERY FAILURE`, `RESULT: BLOCK DEPLOY` or `REVIEW_RESULT: status: BLOCKED` line names the cause. File nothing and emit no deploy approval. On a delivery failure, re-dispatch each missing reviewer once with the note "structured findings block required". A second miss is a degraded panel. Then rerun 7A.
+Findings come only from `FINDING:` markers, never from free text. **Exit 1 is a stop**: a `REVIEW DELIVERY FAILURE`, `RESULT: BLOCK DEPLOY` or `REVIEW_RESULT: status: BLOCKED` line names the cause. File nothing and emit no deploy approval. On a delivery failure, re-dispatch each missing reviewer once with the note "structured findings block required". A second miss is a degraded panel. Then rerun 7A. `REVIEW DELIVERY UNVERIFIED` means GitHub could not list the comments on the last attempt. It stops the run, but nothing is labelled or posted. Do not re-dispatch anyone: rerun 7A once GitHub answers.
 
 Exit 0 prints the following:
 - `TEST_GATE:`, `SCOPE_MODE=`.
