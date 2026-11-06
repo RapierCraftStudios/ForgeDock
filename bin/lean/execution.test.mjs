@@ -1025,6 +1025,34 @@ describe("remote/pool credential resolver (#5131)", () => {
     assert.equal(hit.seen.at(-1).auth, "Bearer env-late-2");
   });
 
+  it("5159: a token_env absent from the env runs the keychain once, not on every request; the token_file bearer and a later env token still apply", async () => {
+    const dir = tmpDir("kc-5159-");
+    const file = join(dir, "explicit.token");
+    writeFileSync(file, "file-tok\n");
+    const hit = recorder();
+    let calls = 0;
+    const keychain = () => { calls++; return null; };
+    const env = {};
+    const p = providerByName("remote", { batch: { id: "b5159" }, repo: "o/r", exec: parseExecution({ mode: "remote", max_remote: "1", provider: "remote", endpoint: "https://runner.example.com", token_env: "COMPUTESHARE_TOKEN", token_file: file }),
+      env, poolConfigPath: join(dir, "none.json"), fetchFn: hit.fetchFn, keychain });
+    for (let i = 0; i < 4; i++) await p.capacity();
+    assert.ok(hit.seen.length >= 4);
+    assert.ok(hit.seen.every((x) => x.auth === "Bearer file-tok"), "every request carries the token_file bearer");
+    assert.ok(calls <= 1, `keychain ran ${calls} times`);
+    env.COMPUTESHARE_TOKEN = "env-late";
+    await p.capacity();
+    assert.equal(hit.seen.at(-1).auth, "Bearer env-late");
+    let tcalls = 0;
+    const tenv = {};
+    const t = remoteTransportFor({ endpoint: "https://runner.example.com", tokenEnv: "COMPUTESHARE_TOKEN", tokenFile: file }, { env: tenv, router: null, fetchFn: hit.fetchFn, keychain: () => { tcalls++; return null; } });
+    for (let i = 0; i < 4; i++) await t.capacity();
+    assert.equal(hit.seen.at(-1).auth, "Bearer file-tok");
+    assert.equal(tcalls, 1, "remoteTransportFor: one keychain lookup across requests");
+    tenv.COMPUTESHARE_TOKEN = "env-late-2";
+    await t.capacity();
+    assert.equal(hit.seen.at(-1).auth, "Bearer env-late-2");
+  });
+
   it("5131: remoteTransportFor's default credentials (gc) fall back to the matching router token", async () => {
     const hit = recorder();
     const t = remoteTransportFor({ endpoint: "http://127.0.0.1:7710" }, { env: {}, router: { endpoint: "http://127.0.0.1:7710", token: "router-tok" }, fetchFn: hit.fetchFn });

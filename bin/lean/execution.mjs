@@ -58,7 +58,7 @@ import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
 import { dockerLabels, safeSegment } from "./ledger.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
-import { resolveCredential } from "./credentials.mjs";
+import { resolveCredential, memoKeychain, defaultKeychain } from "./credentials.mjs";
 import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
@@ -515,10 +515,11 @@ export function poolCredential(exec = {}, { env = process.env, router = null, ke
 /**
  * The remote transport for forge.yaml `execution` settings: `opts.transport` when injected, else `httpTransport` on
  * `exec.endpoint` with the credential `exec.tokenEnv` from `credentials`, or by default poolCredential (#5131: env,
- * keychain, `token_file`, the matching local router's token). `fetchFn` is a test seam. Throws `execution.provider.misconfigured`
+ * keychain, `token_file`, the matching local router's token; #5159: the keychain lookup is memoised per transport, `keychain`
+ * is its seam). `fetchFn` is a test seam. Throws `execution.provider.misconfigured`
  * without an endpoint, `execution.provider.actions_refused` for a GitHub Actions endpoint without `allow_actions`.
  */
-export function remoteTransportFor(exec = {}, { transport = null, env = process.env, credentials = null, router, fetchFn } = {}) {
+export function remoteTransportFor(exec = {}, { transport = null, env = process.env, credentials = null, router, fetchFn, keychain } = {}) {
   if (transport) return transport;
   if (!exec?.endpoint) throw typedError("execution.provider.misconfigured", "execution.provider remote needs execution.endpoint");
   if (isActionsEndpoint(exec.endpoint) && exec.allowActions !== true) {
@@ -526,8 +527,10 @@ export function remoteTransportFor(exec = {}, { transport = null, env = process.
   }
   // #5144: a getter, so the bearer is resolved on every request (a token fixed or rotated mid-batch is picked up), not once here.
   const rt = credentials ? null : (router !== undefined ? router : poolRouterConfig({ env }));
+  // #5159: the env and token files are re-read per request; the sync keychain lookup is memoised (misses too) for its TTL.
+  const kc = credentials ? null : memoKeychain({ keychain: keychain ?? defaultKeychain });
   const token = credentials ? () => (exec.tokenEnv ? credentials(exec.tokenEnv) : null)
-    : () => poolCredential({ provider: "remote", ...exec }, { env, router: rt }).token;
+    : () => poolCredential({ provider: "remote", ...exec }, { env, router: rt, keychain: kc }).token;
   return httpTransport({ endpoint: exec.endpoint, token, ...(fetchFn ? { fetchFn } : {}) });
 }
 
@@ -565,13 +568,15 @@ export function providerByName(name, opts) {
       const c = poolRouterConfig({ env, ...(opts?.poolConfigPath ? { path: opts.poolConfigPath } : {}) });
       return c ? { endpoint: router?.endpoint ?? c.endpoint, token: c.token } : router;
     };
-    const resolve = () => poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router: routerNow() });
+    // #5159: one memoised keychain per provider, so a `token_env` absent from the env does not spawn the keychain per request.
+    const keychain = memoKeychain({ keychain: opts?.keychain ?? defaultKeychain });
+    const resolve = () => poolCredential({ ...exec, provider: name, ...(endpoint ? { endpoint } : {}) }, { env, router: routerNow(), keychain });
     // A token read from a file is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
     // #5144: set even when no token exists yet, so one that appears later is still resolved per call (and redacted).
     const fixed = pool ? "FORGEDOCK_POOL_TOKEN" : "FORGEDOCK_REMOTE_TOKEN";
     const tokenEnv = exec.tokenEnv ?? fixed;
     // #4685/#5131: an empty env/keychain lookup of `token_env` falls back to `token_file`, then the (matching) router's token file.
-    const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env })); // per call, like resolveCredential
+    const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env, keychain })); // per call, keychain memoised (#5159)
     const settings = { ...exec, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
       ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, ...(pool ? { name: "pool" } : {}), env, credentials,

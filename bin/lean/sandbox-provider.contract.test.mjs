@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { containerProvider, parseExecution, providerByName, providerLanes, remoteTransportFor } from "./execution.mjs";
 import { remoteProvider, httpTransport, isActionsEndpoint, redact } from "./sandbox-remote.mjs";
-import { resolveCredential } from "./credentials.mjs";
+import { memoKeychain, resolveCredential } from "./credentials.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate } from "./orchestrate.mjs";
@@ -285,6 +285,20 @@ describe("remote config and the Actions constraint (#4254)", () => {
     assert.equal(resolveCredential("FD_T", { env: { FD_T: "" }, keychain: (n) => (n === "FD_T" ? "k" : null) }), "k");
     assert.equal(resolveCredential("FD_T", { env: {}, keychain: () => { throw new Error("locked"); } }), null);
     assert.equal(resolveCredential("bad name", { env: { "bad name": "x" } }), null);
+  });
+
+  it("5159 memoKeychain: one lookup per name per TTL, misses and failures cached as null", () => {
+    let t = 0;
+    const calls = [];
+    const kc = memoKeychain({ keychain: (n) => { calls.push(n); if (n === "BAD") throw new Error("locked"); return n === "HIT" ? "v" : null; }, ttlMs: 1000, now: () => t });
+    assert.equal(kc("HIT"), "v"); assert.equal(kc("HIT"), "v");
+    assert.equal(kc("MISS"), null); assert.equal(kc("MISS"), null);
+    assert.equal(kc("BAD"), null); assert.equal(kc("BAD"), null);
+    assert.deepEqual(calls, ["HIT", "MISS", "BAD"]);
+    t = 1000;
+    assert.equal(kc("MISS"), null);
+    assert.deepEqual(calls, ["HIT", "MISS", "BAD", "MISS"], "re-read after the TTL");
+    assert.equal(resolveCredential("MISS", { env: { MISS: "e" }, keychain: kc }), "e", "the env still wins");
   });
 });
 

@@ -188,7 +188,7 @@ function world(o = {}) {
     fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
-      if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
+      if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
 }
@@ -1013,6 +1013,9 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const note = w.comments.find((c) => c.includes("FORGE:FOLLOWUP_PENDING"));
     assert.match(note, /R2 \(defer\): Existing callers of foo keep working\..*`FORGE:DEFERRED_FROM: #7`/);
     assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")));
+    assert.ok(!w.comments.some((c) => /Closed as/.test(c)), "#5159: no note says the kept-open issue was closed");
+    assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/, "#5159: the trajectory Close row says left open");
+    assert.doesNotMatch(traj(w).join("\n"), /issue closed \(/);
   });
 
   it("#5141 a follow-up that keeps failing before the PR is filed by the close step after the merge", async () => {
@@ -1066,6 +1069,21 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const w2 = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupError: "Command failed", followupStdout: "DEFERRED_TSV=INVALID\n" });
     const r2 = await run(w2);
     assert.equal(r2.code, "followup.unavailable"); assert.equal(w2.followups.length, 1); assert.equal(w2.prs.length, 0);
+  });
+
+  it("#5159 one follow-up tracked, another still pending: FORGE:TRACKED says left open, never 'Closed as', and the trajectory says left open", async () => {
+    const k0 = two("defer", { why: "w" });
+    const k = { ...k0, requirements: [...k0.requirements, { id: "R3", quote: "foo crashes on null input.", disposition: "defer", bucket: "post-deploy", why: "w" }] };
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupSkip: ["foo crashes on null input."] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual((r.pendingFollowups ?? []).map((p) => p.id), ["R3"]);
+    assert.equal(w.closed.length, 0);
+    const tracked = w.comments.find((c) => c.includes("FORGE:TRACKED"));
+    assert.ok(tracked, "the tracked item is still recorded");
+    assert.match(tracked, /Left open: follow-up pending/); assert.match(tracked, /#900/);
+    assert.ok(!w.comments.some((c) => /Closed as/.test(c)));
+    assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/);
   });
 
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
