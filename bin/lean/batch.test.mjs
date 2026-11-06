@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
-import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER } from "./orchestrate.mjs";
+import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
@@ -265,9 +265,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
-    writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n  transient_retries: 2\n");
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -1411,5 +1411,75 @@ describe("#5138: live max_remote and placement of a running batch", () => {
     b.setExecution({ provider: true });
     await quiet(() => orchestrateFromCli(["--set-placement", "b1", "hybrid"], { batchRoot: root }));
     assert.equal(b.readExecution().mode, "hybrid");
+  });
+});
+
+describe("#5161 transient engine-error retries", () => {
+  const CURL_502 = 'claude CLI exited with status 1. Output: curl: (22) The requested URL returned error: 502 {"duration_api_ms":0}';
+  // Launch times per issue under the fake clock.
+  const launches = () => { const at = new Map(); return { at, note: (n, t) => at.set(n, [...(at.get(n) ?? []), t]) }; };
+  const gaps = (ts) => ts.slice(1).map((t, i) => t - ts[i]);
+
+  it("#5161 the classifier: curl 502, HTTP/1.1 5xx, Bad Gateway, Service Unavailable, overloaded and resets are transient; code failures are not", () => {
+    for (const d of [CURL_502, "HTTP/1.1 503 Service Unavailable", "HTTP/2 504", "502 Bad Gateway", "Service Unavailable", "API overloaded", "read ECONNRESET", "sandbox launch: fetch failed"])
+      assert.equal(isTransientEngineError(d), true, d);
+    for (const d of ["boom", "TypeError: x is undefined", "", null, undefined]) assert.equal(isTransientEngineError(d), false, String(d));
+    assert.deepEqual([1, 2, 3, 4, 5].map(transientRetryDelayMs), [30_000, 120_000, 480_000, 900_000, 900_000]);
+    assert.equal(DEFAULT_TRANSIENT_RETRIES, 4);
+  });
+
+  it("#5161 a curl 502 engine-error is retried with growing backoff and merges, not ended after one immediate relaunch", async () => {
+    const { c, now, sleep } = fakeClock();
+    const l = launches(), updates = [];
+    let tries = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, onUpdate: (r) => updates.push(r),
+      runOne: async (n) => { l.note(n, c.t); if (++tries <= 3) throw new Error(CURL_502); return { terminalReason: "merged", pr: 7 }; } });
+    assert.equal(rows[0].outcome, "merged");
+    const g = gaps(l.at.get(1));
+    assert.equal(g.length, 3);
+    assert.ok(g[0] >= 30_000 && g[1] >= 120_000 && g[2] >= 480_000, `gaps ${g}`);
+    assert.ok(!updates.some((u) => /relaunching once/.test(u.detail ?? "")));
+  });
+
+  it("#5161 an always-502 issue is retried up to transientRetries with growing delays, then ends engine-error; one decided row per retry", async () => {
+    const { c, now, sleep } = fakeClock();
+    const l = launches(), decisions = [];
+    const [row] = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, transientRetries: 2, decide: (d) => decisions.push(d),
+      runOne: async (n) => { l.note(n, c.t); throw new Error(CURL_502); } });
+    assert.equal(row.outcome, "engine-error");
+    assert.match(row.detail, /gave up after 2 transient retries/);
+    const g = gaps(l.at.get(1));
+    assert.equal(g.length, 2);
+    assert.ok(g[0] > 0 && g[1] > g[0], `gaps ${g}`);
+    assert.equal(decisions.length, 2);
+    assert.ok(decisions.every((d) => d.issue === 1 && /^transient: /.test(d.why) && /retry after transient engine-error \(\d\/2\)/.test(d.what)));
+  });
+
+  it("#5161 a dependent stays pending while its root's transient retries are pending and runs after it merges", async () => {
+    const { now, sleep } = fakeClock();
+    const started = [], updates = [];
+    let tries = 0;
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, readBody: async (n) => (n === 2 ? "Depends on #1" : ""), now, sleep, onUpdate: (r) => updates.push(r),
+      runOne: async (n) => { started.push(n); if (n === 1 && ++tries <= 2) throw new Error(CURL_502); return { terminalReason: "merged", pr: 10 + n }; } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.ok(!updates.some((u) => u.issue === 2 && u.outcome === "skipped"));
+    assert.deepEqual(started, [1, 1, 1, 2]);
+  });
+
+  it("#5161 a non-transient engine-error keeps the single immediate relaunch", async () => {
+    const { c, now, sleep } = fakeClock();
+    const l = launches();
+    const [row] = await orchestrate({ issues: [9], readBody: async () => "", now, sleep, runOne: async (n) => { l.note(n, c.t); throw new Error("boom"); } });
+    assert.equal(row.outcome, "engine-error");
+    assert.deepEqual(gaps(l.at.get(9)), [0]);
+  });
+
+  it("#5161 the breaker still counts transient engine-errors as transport errors (#4685)", async () => {
+    const { now, sleep } = fakeClock();
+    const saves = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, readBody: async () => "", now, sleep, breaker: { errors: 2, window_min: 30 },
+      store: { load: () => null, save: (st) => saves.push(st) }, runOne: async () => { throw new Error(CURL_502); } });
+    assert.equal(saves.map((st) => st.breaker).find(Boolean)?.transport, true);
+    assert.ok(rows.some((r) => r.outcome === "held"));
   });
 });

@@ -597,6 +597,15 @@ Terminal reasons: `merged`, `ci-pending`, `deferred`, `decomposed`, `invalid`,
 `orchestrate.mjs` treats `deferred` as a scheduling fact (requeue with
 retry-at, `MAX_REQUEUES`, `DEFAULT_MAX_DEFERRALS`), relaunches one
 `engine-error`, and persists batches (`batch.mjs`) so a restart resumes.
+#5161: an `engine-error` whose detail is a transport/gateway failure
+(`isTransientEngineError`, `TRANSPORT_TEXT`: curl `returned error: 5xx`,
+`HTTP/1.1 5xx`, `Bad Gateway`, `Service Unavailable`, `overloaded`, resets)
+is requeued with backoff (`transientRetryDelayMs`: 30s, 2m, 8m, cap 15m) up
+to forge.yaml `orchestration.transient_retries` (default 4) times, persisted
+as `transientRetries`, with one `decided` row per retry; dependents stay
+pending. These retries never use the single relaunch, which is kept for
+non-transient errors. Once spent, the row ends `engine-error`. The breaker
+still counts every one of them (#4685).
 
 Maintenance budget (#4197, off unless forge.yaml `maintenance.enabled: true`,
 read by `engine-cli.mjs` `readMaintenance`): the CLI pulls open
