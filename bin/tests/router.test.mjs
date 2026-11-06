@@ -1668,6 +1668,8 @@ describe("status — re-entry mini-dashboard (#1945)", () => {
     // engine/last-run rows must render some value, not throw past statusScreen.
     assert.match(res.stdout, /engine\s+(unknown|none in-flight|\d+ in-flight)/i);
     assert.match(res.stdout, /last run\s+(none|#\d+)/i);
+    // #5174: the host row is the overload line or the load summary, never a crash
+    assert.match(res.stdout, /host\s+(unknown|load \d+\.\d\/core|host_overloaded \(load \d+\.\d\/core > [\d.]+\))/i);
   });
 
   it("does not render dashboard rows for an unconfigured directory (no forge.yaml)", () => {

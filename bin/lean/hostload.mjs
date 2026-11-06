@@ -55,16 +55,20 @@ export function formatHostLoad(snap) {
   return `load ${snap.perCore.toFixed(1)}/core${snap.threshold ? ` (threshold ${snap.threshold})` : " (overload hold off)"}`;
 }
 
-/** Lower a heavy step's CPU (nice) and IO (ionice idle class) priority; returns whether nice was applied. Never throws. */
-export function lowerPriority(pid, { setPriority = osSetPriority, platform = process.platform, find = (n) => which(n, process.env.PATH ?? ""), run = spawn, level = HEAVY_NICE } = {}) {
+/** Default `spawnIonice`: `ionice -c3 -p <pid>` detached and unref'd when ionice is on PATH; returns whether it was started. */
+export function spawnIoniceIdle(pid, { find = (n) => which(n, process.env.PATH ?? ""), run = spawn } = {}) {
+  const ionice = find("ionice");
+  if (!ionice) return false;
+  const c = run(ionice, ["-c3", "-p", String(pid)], { stdio: "ignore", detached: true });
+  c?.on?.("error", () => {}); c?.unref?.();
+  return true;
+}
+
+/** Lower a heavy step's CPU (nice 10) and, on Linux, IO (ionice idle class) priority; returns whether nice was applied. Never throws. */
+export function lowerPriority(pid, { setPriority = osSetPriority, spawnIonice = spawnIoniceIdle, platform = process.platform, level = HEAVY_NICE } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   let ok = false;
   try { setPriority(pid, level); ok = true; } catch { ok = false; }
-  if (platform === "linux") {
-    try {
-      const ionice = find("ionice");
-      if (ionice) { const c = run(ionice, ["-c3", "-p", String(pid)], { stdio: "ignore", detached: true }); c?.on?.("error", () => {}); c?.unref?.(); }
-    } catch { /* best effort */ }
-  }
+  if (platform === "linux") { try { spawnIonice(pid); } catch { /* best effort */ } }
   return ok;
 }
