@@ -933,7 +933,7 @@ describe("#4550: forgedock orchestrate --requeue", () => {
         if (n === 1 && started.filter((x) => x === 1).length === 1) return { terminalReason: "needs-human", detail: "builder.blocked: product-decision" };
         return { terminalReason: "merged" };
       } });
-    await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
+    await until(() => log.some((r) => r.issue === 2 && ["skipped", "held"].includes(r.outcome)));
     entries = [{ issue: 1, reason: "decided in scope", by: "operator", at: "2026-10-24T00:00:00Z" }];
     await until(() => started.filter((x) => x === 2).length === 1, 3000);
     g3.open();
@@ -1105,7 +1105,7 @@ describe("#5112: late dependents of a decomposed issue, edge re-read on --requeu
         if (n === 3) { await g3.p; return { terminalReason: "merged" }; }
         return n === 1 ? { terminalReason: "needs-human", detail: "builder.blocked: product-decision" } : { terminalReason: "merged" };
       } });
-    await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
+    await until(() => log.some((r) => r.issue === 2 && ["skipped", "held"].includes(r.outcome)));
     bodies[2] = ""; // the operator dropped the wrong edge
     entries = [{ issue: 2, reason: "edge dropped", by: "operator", at: "2026-11-05T00:00:00Z" }];
     await until(() => started.includes(2), 3000);

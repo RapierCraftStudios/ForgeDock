@@ -669,7 +669,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // #5162: a dependent of a failed root ends held (trigger = the root, not the parent) and is released with the root.
   const holdBehind = (n, root, rootOutcome) => {
-    results.set(n, { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: `blocked by #${root} (${rootOutcome})`, root });
+    results.set(n, { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: `blocked by #${root} (${rootOutcome})`, root, ...(dispatchCheck ? { waiting: true } : {}) });
     update({ ...results.get(n), trigger: root });
   };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
@@ -1251,7 +1251,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const watchHeldRoots = async () => {
     for (const root of new Set([...results.values()].filter((r) => r?.outcome === "held" && Number.isInteger(r.root)).map((r) => r.root))) {
       const ro = results.get(root)?.outcome;
-      if (ro === undefined || running.has(root)) continue;
+      if (ro === undefined || running.has(root) || settled.has(root)) continue;
       if (restoredHeld.has(root) && ["needs-human", "budget-exceeded"].includes(ro) && typeof issueLabels === "function") { // label removed: requeue the root, its subtree follows
         let names = null;
         try { names = await issueLabels(root); } catch { names = null; }
@@ -1260,6 +1260,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (!dispatchCheck) continue;
       let g = null;
       try { g = (await dispatchCheck(root)) ?? null; } catch { g = null; }
+      if (g?.final) { // closed as not planned: terminal for its held dependents
+        settled.add(root);
+        for (const [m, r] of [...results]) if (r?.outcome === "held" && r.root === root && r.waiting) { const { waiting, ...rest } = r; results.set(m, rest); update({ ...rest, trigger: root }); }
+        continue;
+      }
       if (g && SATISFIED.has(g.outcome)) { // merged or closed outside the batch
         results.set(root, { ...results.get(root), outcome: g.outcome, pr: Number.isInteger(g.pr) ? g.pr : results.get(root).pr, detail: g.detail ?? results.get(root).detail });
         update(results.get(root)); releaseHeld(root, false, "merged or closed");
