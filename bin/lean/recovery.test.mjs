@@ -65,9 +65,9 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal(calls.filter((c) => c.n === 1).length, 2, "the first run plus exactly one recovery");
     assert.equal(r[1].outcome, "needs-human");
     assert.deepEqual(r[1].recovery, { code: "ci.red", attempts: 1, outcome: "needs-human", result_code: "ci.red", detail: "CI verification failed again" });
-    assert.equal(r[2].outcome, "skipped"); assert.ok(!calls.some((c) => c.n === 2));
+    assert.equal(r[2].outcome, "held"); assert.ok(!calls.some((c) => c.n === 2));
     const lines = formatOutcomeLists(rows);
-    assert.equal(lines.length, 1); assert.match(lines[0], /^unrecovered: #1 \(ci\.red: recovery ci\.red ended needs-human: CI verification failed again\)$/);
+    assert.equal(lines.length, 2); assert.match(lines[0], /^held subtree: #1 \(needs-human\) holds #2; release: forgedock orchestrate --requeue <batch> 1$/); assert.match(lines[1], /^unrecovered: #1 \(ci\.red: recovery ci\.red ended needs-human: CI verification failed again\)$/);
   });
 
   it("#4505 budget-exceeded: one recovery lane from the checkpoint at the next size; dependents stay queued; no relabel while it recovers", async () => {
@@ -92,7 +92,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal(calls.filter((c) => c.n === 1).length, 1);
     assert.equal(r[1].outcome, "budget-exceeded");
     assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1); assert.match(relabels[0].evidence, /budget\.exceeded[\s\S]*size S/);
-    assert.equal(r[2].outcome, "skipped"); assert.ok(!calls.some((c) => c.n === 2));
+    assert.equal(r[2].outcome, "held"); assert.ok(!calls.some((c) => c.n === 2));
     assert.ok(formatOutcomeLists(rows).some((l) => /^unrecovered: #1 \(budget\.exceeded: Implement turn budget spent/.test(l)));
   });
 
@@ -124,7 +124,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal(calls.filter((c) => c.n === 1).length, 1); assert.equal(calls.filter((c) => c.n === 3).length, 1);
     assert.equal(calls.filter((c) => c.n === 4).length, 1, "terminal mechanical codes are not recovered either");
     assert.ok(!decisions.some((d) => [1, 3].includes(d.issue)));
-    assert.equal(r[2].outcome, "skipped"); assert.equal(r[5].outcome, "merged");
+    assert.equal(r[2].outcome, "held"); assert.equal(r[5].outcome, "merged");
     const lines = formatOutcomeLists(rows);
     assert.equal(lines.filter((l) => l.startsWith("escalations")).length, 1, "one escalation list");
     const esc = lines.find((l) => l.startsWith("escalations"));
@@ -187,7 +187,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     const calls = [];
     const rows = await orchestrate({ issues: [1, 2], readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),
       runOne: async (n) => { calls.push(n); return NH("ci.red"); } });
-    assert.deepEqual(calls, [1]); assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "skipped"]);
+    assert.deepEqual(calls, [1]); assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "held"]);
   });
 
   it("the attempt count survives a resume: a persisted recovery lane is launched with ctx.recover and is not retried again", async () => {

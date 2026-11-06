@@ -2685,10 +2685,10 @@ describe("orchestrate", () => {
     assert.ok(h.log.ends.indexOf(1) < h.log.starts.indexOf(2), JSON.stringify(h.log));
   });
 
-  it("a dependent is skipped, without running, when its dependency ends needs-human (transitively)", async () => {
+  it("a dependent is held, without running, when its dependency ends needs-human (transitively)", async () => {
     const h = harness({ 2: "**Depends on**: #1", 3: "**Depends on**: #2" }, { 1: "needs-human" });
     const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 3, ...h });
-    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "skipped", "skipped", "merged"]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "held", "held", "merged"]);
     assert.ok(!h.log.starts.includes(2) && !h.log.starts.includes(3));
     assert.match(rows[1].detail, /#1/);
   });
@@ -2769,7 +2769,7 @@ describe("orchestrate", () => {
       const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""), ...(dispatchCheck ? { dispatchCheck } : {}),
         runOne: async (n) => { log.push(n); return { terminalReason: "needs-human", detail: "ci.red" }; } });
       assert.deepEqual(log, [9]);
-      assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "skipped"]]);
+      assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "held"]]);
     }
   });
 
@@ -2780,7 +2780,7 @@ describe("orchestrate", () => {
       onUpdate: (r) => rowsSeen.push(r),
       dispatchCheck: async (n) => (n === 9 && merged ? { outcome: "merged", pr: 90, detail: "PR #90 already merged" } : null),
       runOne: async (n) => { if (n === 9) { merged = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 101 }; } });
-    const skipRow = rowsSeen.find((r) => r.issue === 1 && r.outcome === "skipped");
+    const skipRow = rowsSeen.find((r) => r.issue === 1 && r.outcome === "held");
     assert.equal(skipRow.waiting, true);
     assert.equal(skipRow.trigger, 9);
     assert.ok(rowsSeen.some((r) => r.issue === 1 && r.outcome === "readmitted" && r.trigger === 9));
@@ -2792,7 +2792,7 @@ describe("orchestrate", () => {
     const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""),
       dispatchCheck: async (n) => { if (n === 9 && ran) { checks++; return { outcome: "invalid", detail: "issue closed (not planned)", final: true }; } return null; },
       runOne: async () => { ran = true; return { terminalReason: "needs-human", detail: "ci.red" }; } });
-    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "needs-human", undefined], [1, "skipped", undefined]]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "needs-human", undefined], [1, "held", undefined]]);
     assert.equal(checks, 1, "a final blocker is not re-checked");
   });
 

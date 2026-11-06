@@ -130,6 +130,27 @@ import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_PO
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+// #5162: a dependent of a root that ended like this is held (resumable), not skipped.
+const HOLD_ROOT = new Set(["needs-human", "engine-error", "deferred", "budget-exceeded"]);
+/** #5162: members of a real dependency cycle (a nontrivial SCC or a self-loop) among `nodes`; `edgesOf(n)` lists n's dependencies. */
+export function cyclicNodes(nodes, edgesOf) {
+  const inSet = new Set(nodes), idx = new Map(), low = new Map(), stack = [], on = new Set(), out = new Set();
+  let i = 0;
+  const visit = (v) => {
+    idx.set(v, i); low.set(v, i); i++; stack.push(v); on.add(v);
+    for (const w of edgesOf(v).filter((d) => inSet.has(d))) {
+      if (w === v) out.add(v);
+      if (!idx.has(w)) { visit(w); low.set(v, Math.min(low.get(v), low.get(w))); } else if (on.has(w)) low.set(v, Math.min(low.get(v), idx.get(w)));
+    }
+    if (low.get(v) === idx.get(v)) {
+      const comp = [];
+      for (let w; w !== v;) { w = stack.pop(); on.delete(w); comp.push(w); }
+      if (comp.length > 1) for (const c of comp) out.add(c);
+    }
+  };
+  for (const n of nodes) if (!idx.has(n)) visit(n);
+  return out;
+}
 const WATCH_EVERY_MS = 60_000; // #4595
 // Times one issue may be requeued behind a dependency before its dependency-open row is final.
 export const MAX_REQUEUES = 2;
@@ -648,6 +669,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail, ...(trigger !== null && dispatchCheck ? { waiting: true } : {}) });
     update({ ...results.get(n), ...(trigger !== null ? { trigger } : {}) });
   };
+  // #5162: a dependent of a failed root ends held (trigger = the root, not the parent) and is released with the root.
+  const holdBehind = (n, root, rootOutcome) => {
+    results.set(n, { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: `blocked by #${root} (${rootOutcome})`, root, ...(dispatchCheck ? { waiting: true } : {}) });
+    update({ ...results.get(n), trigger: root });
+  };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
   const TRANSPORT_COOLDOWN_MS = 5 * 60000;
   let transportErrors = 0; // #4685: engine-errors in the current window that were link failures
@@ -1066,7 +1092,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       results.delete(e.issue);
       for (let i = 0; i < moved.length; i++) { // dependents skipped behind a requeued issue (fixpoint)
         for (const [m, r] of [...results]) {
-          if (r?.outcome !== "skipped" || Number(/^dependency #(\d+)/.exec(r.detail ?? "")?.[1]) !== moved[i]) continue;
+          const heldBehind = r?.outcome === "held" && r.root === moved[i]; // #5162
+          if (!heldBehind && (r?.outcome !== "skipped" || Number(/^dependency #(\d+)/.exec(r.detail ?? "")?.[1]) !== moved[i])) continue;
           priors.set(m, r); results.delete(m); moved.push(m);
         }
       }
@@ -1209,7 +1236,45 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const readmitted = new Set(); // "n:b": re-admit n on blocker b once; a lane that re-skips on b stays skipped
   const blockerOf = (n) => { const r = results.get(n); const m = r?.outcome === "skipped" ? /^dependency #(\d+) /.exec(r.detail ?? "") : null; return m ? Number(m[1]) : null; };
   const watchable = () => !!dispatchCheck && [...results.keys()].some((n) => blockerOf(n) !== null);
+  // #5162: held rows behind `root` return to pending (and the root too when `withRoot`: requeued, counters reset), parents first via the edges.
+  const releaseHeld = (root, withRoot, why) => {
+    const moved = withRoot && results.has(root) ? [root] : [];
+    if (moved.length) results.delete(root);
+    for (const [m, r] of [...results]) if (r?.outcome === "held" && r.root === root) { results.delete(m); moved.push(m); }
+    for (const m of moved) {
+      for (const x of [requeues, deferrals, capDefers, engineErrors, transients, recoveries, recovering]) x.delete(m);
+      relabelled.delete(m);
+      if (!pending.includes(m)) requeue(m, 0);
+      update({ issue: m, outcome: "readmitted", detail: m === root ? why : `dependency #${root} ${why}`, trigger: root });
+    }
+    if (moved.length) { save(); decided({ issue: root, what: `released held subtree of #${root}: ${moved.filter((m) => m !== root).map((m) => `#${m}`).join(", ") || "none"}`, why, alternative: "leave it held until a --requeue" }); }
+  };
+  const restoredHeld = new Set([...results.values()].filter((r) => r?.outcome === "held" && Number.isInteger(r.root)).map((r) => r.root)); // roots held by an earlier run of this batch
+  const watchHeldRoots = async () => {
+    for (const root of new Set([...results.values()].filter((r) => r?.outcome === "held" && Number.isInteger(r.root)).map((r) => r.root))) {
+      const ro = results.get(root)?.outcome;
+      if (ro === undefined || running.has(root) || settled.has(root)) continue;
+      if (restoredHeld.has(root) && ["needs-human", "budget-exceeded"].includes(ro) && typeof issueLabels === "function") { // label removed: requeue the root, its subtree follows
+        let names = null;
+        try { names = await issueLabels(root); } catch { names = null; }
+        if (Array.isArray(names) && !names.includes("needs-human")) { releaseHeld(root, true, "needs-human label removed"); continue; }
+      }
+      if (!dispatchCheck) continue;
+      let g = null;
+      try { g = (await dispatchCheck(root)) ?? null; } catch { g = null; }
+      if (g?.final) { // closed as not planned: terminal for its held dependents
+        settled.add(root);
+        for (const [m, r] of [...results]) if (r?.outcome === "held" && r.root === root && r.waiting) { const { waiting, ...rest } = r; results.set(m, rest); update({ ...rest, trigger: root }); }
+        continue;
+      }
+      if (g && SATISFIED.has(g.outcome)) { // merged or closed outside the batch
+        results.set(root, { ...results.get(root), outcome: g.outcome, pr: Number.isInteger(g.pr) ? g.pr : results.get(root).pr, detail: g.detail ?? results.get(root).detail });
+        update(results.get(root)); releaseHeld(root, false, "merged or closed");
+      }
+    }
+  };
   const watchBlockers = async (final) => {
+    if (!cancelled && !tripped && (final || lastWatch === null || now() - lastWatch >= WATCH_EVERY_MS) && [...results.values()].some((r) => r?.outcome === "held" && Number.isInteger(r.root))) await watchHeldRoots();
     if (!watchable() || cancelled || tripped) return;
     const t0 = now();
     if (!final && lastWatch !== null && t0 - lastWatch < WATCH_EVERY_MS) return;
@@ -1267,7 +1332,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           const n = pending[i];
           if (results.has(n)) { pending.splice(i, 1); continue; }
           const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
-          if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`, bad); again = true; }
+          if (bad !== undefined) {
+            pending.splice(i, 1); again = true;
+            const br = results.get(bad), root = br.root ?? bad, ro = results.get(root)?.outcome ?? br.outcome;
+            if (HOLD_ROOT.has(ro)) holdBehind(n, root, ro); // #5162
+            else skip(n, `dependency #${bad} ended ${br.outcome}`, bad);
+          }
         }
       }
       const t = now();
@@ -1400,7 +1470,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch
       else if (pending.some((n) => remoteCapped.has(n))) await nap(wake ?? pollMs); // #5138: live max_remote 0: wait for a raise or another placement
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
-        for (const n of pending.splice(0)) skip(n, "dependency cycle");
+        // #5162: only real cycles are labelled so; the rest name the cycle member (or failed root) that blocks them
+        const cyc = cyclicNodes(pending, edges), inP = new Set(pending);
+        const blocker = (n, seen = new Set()) => {
+          for (const d of edges(n)) {
+            if (cyc.has(d)) return d;
+            if (inP.has(d) && !seen.has(d)) { seen.add(d); const b = blocker(d, seen); if (b !== null) return b; }
+          }
+          return null;
+        };
+        for (const n of pending.splice(0)) {
+          const b = cyc.has(n) ? null : blocker(n);
+          skip(n, cyc.has(n) ? "dependency cycle" : b !== null ? `blocked by #${b} (dependency cycle)` : "blocked: no dependency path is runnable");
+        }
         save();
       }
     }
@@ -1471,6 +1553,9 @@ export function formatOutcomeLists(rows) {
   const one = (x) => String(x ?? "").split("\n")[0].slice(0, OUTCOME_LINE_MAX);
   const requeued = (rows ?? []).filter((r) => r?.requeued); // #4550: operator --requeue after a decision; the row is the latest outcome
   if (requeued.length) out.push(`requeued: ${requeued.map((r) => `#${r.issue} (${one(r.requeued.reason)})`).join(" ")}`);
+  const heldBy = new Map(); // #5162: held subtrees by root, one --requeue command each
+  for (const r of rows ?? []) if (r?.outcome === "held" && Number.isInteger(r.root)) heldBy.set(r.root, [...(heldBy.get(r.root) ?? []), r.issue]);
+  for (const [root, xs] of heldBy) { const ro = (rows ?? []).find((r) => r?.issue === root)?.outcome ?? "failed"; out.push(`held subtree: #${root} (${ro}) holds ${xs.map((x) => `#${x}`).join(" ")}; release: forgedock orchestrate --requeue <batch> ${root}`); }
   const rec = (rows ?? []).filter((r) => r?.recovered);
   if (rec.length) out.push(`recovered: ${rec.map((r) => `#${r.issue} (${r.recovered})`).join(" ")}`);
   for (const r of rows ?? []) {
