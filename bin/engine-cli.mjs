@@ -2581,6 +2581,12 @@ export async function milestoneSyncFromCli(argv, deps = {}) {
   return run(argv, deps);
 }
 
+/** `forgedock fix-close-reasons <owner/repo> [--milestone m] [--apply]` (#5177): re-close delivered `not planned` issues as completed (lean/fixclosereasons.mjs). Resolves the exit code. */
+export async function fixCloseReasonsFromCli(argv, deps = {}) {
+  const { runFixCloseReasonsCli: run } = await import("./lean/fixclosereasons.mjs");
+  return run(argv, deps);
+}
+
 /**
  * `forgedock milestone train` (#4658): lean/train.mjs over `orchestrateFromCli` (one batch per milestone) and the #4657 lifecycle.
  * The train reads forge.yaml (`orchestration.global_parallel`, `milestones.close_on`) and never writes it.
