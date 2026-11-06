@@ -25,12 +25,11 @@ describe("#5167 evaluateHealth", () => {
     assert.deepEqual(h.causes.map((c) => c.code), ["root-failed", "terminal-share"]);
     assert.deepEqual(h.causes[0].issues, [1, 3]);
     assert.match(h.causes[1].detail, /4\/4 rows ended non-merged \(2 engine-error, 2 skipped\), 0 merged/);
-    assert.ok(h.recovery.includes(`forgedock orchestrate --requeue b1 2 4 --reason "batch unhealthy"`), h.recovery.join("\n"));
-    assert.ok(h.recovery.some((r) => r.startsWith("forgedock orchestrate 1 3 --repo o/r")));
+    assert.ok(h.recovery.includes(`forgedock orchestrate --requeue b1 1 3 2 4 --reason "batch unhealthy"`), h.recovery.join("\n"));
     assert.ok(h.recovery.includes("forgedock orchestrate --cancel b1") && h.recovery.includes("forgedock status --batch b1"));
     const text = formatAlert({ batchId: "b1", checkpoint: "T+15", health: h });
     assert.match(text, /^BATCH UNHEALTHY b1 \(T\+15\)\n {2}cause: root-failed: root #1 engine-error, #3 engine-error \[#1, #3\]/);
-    assert.match(text, /\n {2}recovery:\n {4}forgedock orchestrate --requeue b1 2 4/);
+    assert.match(text, /\n {2}recovery:\n {4}forgedock orchestrate --requeue b1 1 3 2 4/);
   });
 
   it("a healthy batch (running, merged, or a requeued row waiting again) has no cause", () => {
