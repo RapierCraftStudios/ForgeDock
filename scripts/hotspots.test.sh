@@ -143,6 +143,8 @@ if [ "$HAVE_YQ" = 1 ]; then
 fi
 new_repo; lines a.py 5; commit base
 OUT="$(bash "$S" -- a.py)"; eq "no config: config_source null" "$(q '.config_source')" 'null'
+eq "no config: key present" "$(q 'has("config_source")')" 'true'
+OUT="$(bash "$S" --config "$TMP/none.yaml" -- a.py)"; eq "bad --config: not exit 2, source null" "$(q '[has("config_source"),.config_source]')" '[true,null]'
 eq "no config: defaults" "$(q '[.enabled,.file_lines]')" '[true,2000]'
 
 echo "hotspots.test.sh: $PASS passed, $FAILN failed"
