@@ -22,6 +22,8 @@
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and deferrals other than a wait (`host.busy`,
  * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784) stop after `maxDeferrals`.
+ * #5161: an engine-error whose detail is a transport/gateway failure (`isTransientEngineError`) is requeued with backoff
+ * (`transientRetryDelayMs`) up to `transientRetries` times, not counted against `ENGINE_ERROR_RELAUNCHES`; then it ends engine-error.
  * #5112: with `remote.offlineFallback` (`execution.fallback_local`), an issue deferred `remote.capacityFallbackAfter` times (default
  * `CAPACITY_FALLBACK_AFTER`) for `sandbox.capacity` runs on the host when `remote.headroom()` (host-busy guard) allows it.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
@@ -146,6 +148,15 @@ export const CAPACITY_FALLBACK_AFTER = 3;
 export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
+// #4685 + #5161: an engine-error detail that names a link or gateway failure (curl's "returned error: 502", HTTP/1.1 503, ...).
+export const TRANSPORT_TEXT = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]|returned error: 5\d\d|HTTP\/\d(\.\d)? 5\d\d|Bad Gateway|Service Unavailable|overloaded/i;
+/** #5161: a transient engine failure (model gateway 5xx, connection reset): retried with backoff, not the single relaunch. */
+export const isTransientEngineError = (detail) => TRANSPORT_TEXT.test(String(detail ?? ""));
+// #5161: transient engine-error retries per issue (forge.yaml `orchestration.transient_retries`) and their backoff: 30s, 2m, 8m, then 15m.
+export const DEFAULT_TRANSIENT_RETRIES = 4;
+export const TRANSIENT_BACKOFF_S = 30;
+export const TRANSIENT_BACKOFF_MAX_S = 15 * 60;
+export const transientRetryDelayMs = (k) => Math.min(TRANSIENT_BACKOFF_S * 4 ** (Math.max(1, k) - 1), TRANSIENT_BACKOFF_MAX_S) * 1000;
 // A dependency-open whose dependencies already finished satisfied (GitHub not yet closed): wait before relaunching.
 export const DEP_REQUEUE_DELAY_S = 60;
 
@@ -267,7 +278,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -284,6 +295,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const capDefers = toMap(saved?.capDeferrals); // #5112: issue -> `sandbox.capacity` deferrals (uncapped, so not in `deferrals`)
   const capFellBack = new Set(); // #5112: issues already reported as a capacity fallback (one decision each)
   const engineErrors = toMap(saved?.engineErrors);
+  const transients = toMap(saved?.transientRetries); // #5161: issue -> transient engine-error retries taken
+  const transientMax = Number.isInteger(transientRetries) && transientRetries >= 0 ? transientRetries : DEFAULT_TRANSIENT_RETRIES;
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
   const estimates = toMap(saved?.estimates); // #4409: issue -> estimated lane minutes; only with `estimate`
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
@@ -369,7 +382,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const save = () => {
     if (!store || halted) return;
     store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(quota.size ? { quota: toObj(quota) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
@@ -634,14 +647,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     update({ ...results.get(n), ...(trigger !== null ? { trigger } : {}) });
   };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
-  const TRANSPORT_TEXT = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]/i;
   const TRANSPORT_COOLDOWN_MS = 5 * 60000;
   let transportErrors = 0; // #4685: engine-errors in the current window that were link failures
   const noteEngineError = (detail = "") => {
     if (!breaker) return;
     const t = now(), windowMs = breaker.window_min * 60000;
     errorTimes = [...errorTimes.filter((x) => t - x < windowMs), t];
-    transportErrors = TRANSPORT_TEXT.test(String(detail)) ? Math.min(transportErrors + 1, errorTimes.length) : 0;
+    transportErrors = isTransientEngineError(detail) ? Math.min(transportErrors + 1, errorTimes.length) : 0;
     if (!tripped && errorTimes.length >= breaker.errors) {
       tripped = { at: t, ...(transportErrors >= errorTimes.length ? { transport: true } : {}), detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
       update({ issue: null, outcome: "breaker", detail: tripped.detail });
@@ -768,7 +780,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (row.outcome === "engine-error") {
       noteEngineError(r?.detail);
-      if ((engineErrors.get(n) ?? 0) < ENGINE_ERROR_RELAUNCHES) {
+      // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
+      if (transientMax > 0 && isTransientEngineError(row.detail)) {
+        const k = (transients.get(n) ?? 0) + 1;
+        if (k <= transientMax) {
+          const delayMs = transientRetryDelayMs(k), secs = Math.round(delayMs / 1000);
+          transients.set(n, k);
+          requeue(n, delayMs); done(); save();
+          decided({ issue: n, what: `retry after transient engine-error (${k}/${transientMax}) in ${secs}s`, why: `transient: ${firstLine(row.detail) || "engine-error"}`,
+            alternative: "end the issue engine-error and skip its dependents" });
+          update({ ...row, detail: `transient retry ${k}/${transientMax} in ${secs}s: ${row.detail ?? ""}` });
+          return;
+        }
+        row.detail = `gave up after ${transientMax} transient retries: ${row.detail ?? ""}`;
+      } else if ((engineErrors.get(n) ?? 0) < ENGINE_ERROR_RELAUNCHES) {
         engineErrors.set(n, (engineErrors.get(n) ?? 0) + 1);
         requeue(n, 0); done(); save();
         decided({ issue: n, what: "relaunch once after engine-error", why: firstLine(row.detail) || "engine-error", alternative: "end the issue engine-error and skip its dependents" });
@@ -1044,7 +1069,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       for (const m of moved) {
-        for (const x of [requeues, deferrals, capDefers, engineErrors, recoveries, recovering]) x.delete(m);
+        for (const x of [requeues, deferrals, capDefers, engineErrors, transients, recoveries, recovering]) x.delete(m);
         relabelled.delete(m);
         if (m === e.issue) requeuedInfo.set(m, { reason: e.reason, by: e.by, at: e.at, prior: [...(requeuedInfo.get(m)?.prior ?? []), priors.get(m)] });
         if (!pending.includes(m)) requeue(m, 0);
