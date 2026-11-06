@@ -2625,6 +2625,10 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): `MOCKED_TERM` now matches `unittest`/`unittests`/`unit-testing` and "units" only as the named substitute ("use/using/via/by units"); bare "units", "United" and "Unity" stay unflagged. A bare negator (no/not/without/never) in `DROP_BEFORE_RE` cannot reach the e2e term across a preposition, so "no new fixtures needed for e2e" is not a weakening; the verb weakeners keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5145".
 
+## Entry 2026-11-06 — e2e-weakening check: negated verbs keep reaching e2e (#5157)
+
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): #5145 stopped every bare negator at a preposition, so "do not need to run e2e; mocked tests cover it", "not with e2e" and "not for e2e" slipped through. Now only the determiner `no` + noun phrase stops at a preposition (`no new fixtures needed for e2e` stays unflagged); `not`/`without`/`never` and `no need/reason/point/requirement` keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5157".
+
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 
 - `review-trigger.mjs` `pathDomains(files)` runs the bundled `scripts/review-roster.sh` (`--files-file -`). It maps its path triggers to review domains: frontend-path → frontend, auth-path → auth, infra-path/route-handler → infra, migration-path → database, sdk-path → api. The roster stays the single source of domain path rules. A script failure is `null`: the reviewer runs without domain checks, with an anomaly and `REVIEW_DOMAINS {error: "roster.failed"}`, and the lane is never failed.
