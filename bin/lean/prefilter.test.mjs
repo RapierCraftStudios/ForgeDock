@@ -73,7 +73,7 @@ describe("pre-filter (#4123)", () => {
     const call = w.runner[0];
     assert.equal(call.model, DEFAULT_PREFILTER_MODEL); assert.equal(call.readOnly, true); assert.equal(call.resume, null); assert.equal(call.cwd, "/repo");
     assert.match(call.prompt, /merged PR #90/); assert.doesNotMatch(call.prompt, /PR #91/);
-    assert.deepEqual(w.closed, [[12, "not planned"]]);
+    assert.deepEqual(w.closed, [[12, "completed"]]); // #5152: ALREADY-FIXED is delivered
     assert.deepEqual(w.labels, [[12, "invalid"]]);
     assert.match(w.comments[0][1], /FORGE:PREFILTER/); assert.match(w.comments[0][1], /src\/foo\.js:3 null guard/); assert.match(w.comments[0][1], /PR #90/);
   });
@@ -120,7 +120,7 @@ describe("pre-filter (#4123)", () => {
     assert.equal(r.closed, true); assert.equal(r.kind, "ci-green");
     assert.equal(w.runner.length, 0);
     assert.match(w.comments[0][1], /actions\/runs\/600/); assert.match(w.comments[0][1], /actions\/runs\/500/);
-    assert.deepEqual(w.closed, [[34, "not planned"]]);
+    assert.deepEqual(w.closed, [[34, "completed"]]); // #5152: CI green again is delivered
   });
 
   it("#4305 the CI-green shortcut is skipped for intermittent, reopened and same-SHA-flaky CI failures", async () => {
@@ -204,7 +204,7 @@ describe("pre-filter (#4123)", () => {
     assert.equal(r2.closed, true); assert.equal(tiny.comments.length, 1); assert.match(tiny.comments[0][1], /^<!-- FORGE:PREFILTER -->/);
     assert.match(flakyReason({ comments: [{ body: tiny.comments[0][1], author: { login: "forgedock-app[bot]" }, authorAssociation: "NONE" }] }, ["forgedock-app"])?.reason ?? "", /reopened/);
     const dead = flaky(99); const r3 = await pf(dead, 34);
-    assert.equal(r3.closed, true); assert.equal(dead.runner.length, 0); assert.deepEqual(dead.closed, [[34, "not planned"]]); assert.match(r3.detail, /no marker comment/);
+    assert.equal(r3.closed, true); assert.equal(dead.runner.length, 0); assert.deepEqual(dead.closed, [[34, "completed"]]); assert.match(r3.detail, /no marker comment/);
   });
 
   it("a CI-failure issue whose workflow is still red (or whose latest run is the failing one) goes to a lane", async () => {
@@ -224,6 +224,7 @@ describe("pre-filter (#4123)", () => {
     assert.deepEqual(namedPaths("fix lib/a.js <!-- x/hidden.js --!> visible/e.js and <!-- unclosed c/d.js"), ["lib/a.js", "visible/e.js"]);
     const gone = world({ issues: { 5: { body: "crash in src/old/foo.js:12" } }, verdict: { verdict: "INVALID", evidence: ["src/old/foo.js removed in abc123"] } });
     assert.equal((await pf(gone, 5)).closed, true);
+    assert.deepEqual(gone.closed, [[5, "not planned"]], "#5152: only an INVALID verdict closes not planned");
     assert.match(gone.runner[0].prompt, /do not exist on origin\/staging: src\/old\/foo\.js/);
     const kept = world({ issues: { 5: { body: "crash in src/old/foo.js:12 and src/new.js/x.ts" } }, paths: ["src/old/foo.js"] });
     const r = await pf(kept, 5);
@@ -300,7 +301,7 @@ describe("orchestrate with the pre-filter (#4123)", () => {
     assert.deepEqual(res.lanes, [13]);
     assert.equal(logs.at(-1), "lanes: #13");
     assert.ok(logs.some((s) => /^pre-filter: 2 checked, 1 candidate\(s\), 1 closed/.test(s)));
-    assert.deepEqual(w.closed, [[12, "not planned"]]);
+    assert.deepEqual(w.closed, [[12, "completed"]]); // #5152: ALREADY-FIXED is delivered
     await assert.rejects(triageFromCli([], {}), /usage/);
   });
 

@@ -1002,9 +1002,10 @@ export async function runCore(o) {
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
       if (await label("decomposed") && marked && closeParent) {
         try {
-          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned", "--comment",
+          // #5152: the scope moved to the sub-issues, it was not dropped: `completed`, never `not planned`
+          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed", "--comment",
             `Decomposed into ${refs(filed)}; this tracker is closed and its dependents wait on the sub-issues. A trusted \`FORGE:DECOMPOSED:REVOKED\` reopens it.`]);
-          T.decisions.push(`Closed the decomposed parent (not planned); tracked by ${refs(filed)}`);
+          T.decisions.push(`Closed the decomposed parent (completed; scope moved to sub-issues); tracked by ${refs(filed)}`);
         } catch { /* best effort: the parent stays open, as before #4337 */ }
       }
       return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed, decomposition: b.rationale });
@@ -1721,9 +1722,10 @@ export async function runCore(o) {
         if (closes) {
           T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
           T.decisions.push(`Builder verdict: ${result.status}`);
-          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
+          // #5152: already-fixed is delivered behaviour (`completed`); only invalid is dropped scope (`not planned`)
+          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]);
           await label("invalid");
-          return await finish("invalid", result.summary ?? result.status);
+          return await finish("invalid", result.summary ?? result.status, result.status === "already-fixed" ? { close: "already-fixed" } : {});
         }
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
@@ -3062,11 +3064,12 @@ export async function runCore(o) {
       }
     }
     const partial = closing.reason === "partial";
-    if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
+    // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
+    if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is
       if (partial || closing.tracked.length) try { await post("FORGE:TRACKED", `## Left open: follow-up pending\nMerged by PR #${pr}; the issue stays open until the pending follow-up is filed (FORGE:FOLLOWUP_PENDING).${partial ? " The investigation's stated question is not answered in this change." : ""}${closing.tracked.length ? ` Already tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body links them too */ }
     } else if (partial) {
-      try { await post("FORGE:TRACKED", `## Closed as partial\nThe investigation's stated question is not answered in this change (PR #${pr}); carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
+      try { await post("FORGE:TRACKED", `## Closed as partial\nClosed as completed by PR #${pr}; the investigation's stated question is not answered in this change and is carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
     } else if (closing.tracked.length) {
       try { await post("FORGE:TRACKED", `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
     }

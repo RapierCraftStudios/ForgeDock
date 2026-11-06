@@ -455,11 +455,12 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       return { ...out, detail: "acceptance probe failed after promotion (FORGE:PROBE): no already-fixed close; lane" };
     }
     const sig = await collectSignals({ iss, repo, lane, io, cwd, selfLogins });
-    const close = async (kind, body, detail) => {
+    // #5152: `completed` for a delivered outcome (CI green again, ALREADY-FIXED); only an INVALID verdict is dropped scope
+    const close = async (kind, body, detail, reason = "completed") => {
       let note = "";
       if (!dryRun) {
         // #4315: close first: the marker is posted only on an issue that was closed, so it always means "reopened" later
-        await io.gh(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
+        await io.gh(["issue", "close", String(issue), "-R", repo, "--reason", reason]);
         // #4314: the issue IS closed from here on: the result is closed:true whatever the comment does, so no lane starts on it.
         // The comment is retried once, then a marker-only comment (a second, tiny payload) keeps the #4305 reopen guard working.
         const comment = (text) => io.gh(["issue", "comment", String(issue), "-R", repo, "--body", text]);
@@ -498,7 +499,7 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
     if (!v || v.verdict === "CONFIRMED" || !v.evidence.length) return keep(`candidate (${why}) ${v ? (v.verdict === "CONFIRMED" ? "confirmed" : "without evidence") : "unparseable verdict"}: lane`);
     const ev = v.evidence.map((x) => `- ${sanitizeMd(x).replace(/\s+/g, " ").slice(0, 400)}`).join("\n");
     return await close("validated", `## Pre-filter: ${v.verdict}\n**Signal:** ${why}\n**Summary:** ${sanitizeMd(v.summary).replace(/\s+/g, " ").slice(0, 600) || "not reported"}\n\n**Evidence:**\n${ev}\n\nValidated by a single read-only check (${model}), without a lane. Reopen if this is wrong.`,
-      `${v.verdict.toLowerCase()} (${why})`);
+      `${v.verdict.toLowerCase()} (${why})`, v.verdict === "INVALID" ? "not planned" : "completed");
   } catch (e) {
     return { ...out, detail: `pre-filter error (${String(e?.message ?? e).slice(0, 120)}): lane` };
   }
