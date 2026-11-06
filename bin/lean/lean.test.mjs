@@ -1992,7 +1992,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.ok(!builders(w)[0][4].includes("src/bar.js: 300 lines"), "under-threshold files get no line");
     assert.match(builders(w)[1][4], /Don't grow a file over 2000 lines by more than 150 lines\. Put new code next to it\./);
     assert.equal(w.hotCalls[0].cwd, "/wt/lean-7"); assert.ok(Array.isArray(w.hotCalls[0].paths)); assert.equal(w.hotCalls[0].base, undefined);
-    assert.deepEqual(w.hotCalls[1], { cwd: "/wt/lean-7", base: "origin/staging", paths: ["src/foo.js", "test/foo.test.js"] });
+    assert.deepEqual(w.hotCalls[1], { cwd: "/wt/lean-7", config: null, base: "origin/staging", paths: ["src/foo.js", "test/foo.test.js"] });
     const plain = world(); await run(plain);
     assert.equal(plain.calls.filter((c) => c[0] === "runner").length, w.calls.filter((c) => c[0] === "runner").length, "no extra LLM calls");
   });
@@ -2020,6 +2020,16 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
       assert.equal((await run(wn)).terminalReason, "merged"); assert.equal(builders(wn).length, 2);
       assert.equal(builders(wn)[0][4], builders(plain)[0][4], "no plan note"); assert.equal(builders(wn)[1][4], builders(plain)[1][4], "no build rule");
     }
+  });
+
+  it("#5163: io.hotspots gets the host forge.yaml; a null config_source records one hotspot_config_missing anomaly", async () => {
+    const w = hworld({ enabled: true, file_lines: 2000, growth_lines: 150, generated_paths: [], config_source: null, files: [] }, [{ enabled: true, file_lines: 2000, growth_lines: 150, generated_paths: [], config_source: null, files: [] }]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(w.hotCalls.length >= 2);
+    assert.ok(w.hotCalls.every((c) => c.config === null || /forge\.yaml$/.test(c.config)));
+    assert.equal(w.comments.join("\n").split("hotspot_config_missing").length - 1, 1);
+    const ok = hworld({ enabled: true, files: [], config_source: "/h/forge.yaml" }, [{ enabled: true, files: [], config_source: "/h/forge.yaml" }]);
+    await run(ok); assert.ok(!ok.comments.join("\n").includes("hotspot_config_missing"));
   });
 });
 
