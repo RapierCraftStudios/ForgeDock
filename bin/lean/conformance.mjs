@@ -73,6 +73,32 @@ export function inIssue(quote, issueText) {
   if (q.length < 3) return false;
   return String(issueText ?? "").split("\n").some((l) => norm(l.replace(ITEM_PREFIX_RE, "")) === q);
 }
+/** #5164: the issue's list or checklist item lines (item marker stripped), or every non-empty line when it has none. */
+export function criterionLines(issueText) {
+  const lines = String(noComments(String(issueText ?? ""))).split("\n");
+  const items = lines.filter((l) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(l)).map((l) => l.replace(ITEM_PREFIX_RE, "").trim()).filter((l) => norm(l));
+  return items.length ? items : lines.map((l) => l.trim()).filter((l) => norm(l));
+}
+/** #5164: norm() plus what a reviewer retyping a criterion slips on: `#N` reference digits, trailing punctuation, a plural `s`. */
+const loose = (s) => norm(String(s ?? "").replace(/#\d+/g, "#")).replace(/[\s.,;:!?)\]]+$/, "").replace(/\b([a-z]{3,})s\b/g, "$1");
+const MATCH_MIN = 0.8;
+/**
+ * #5164: the issue's exact criterion line a near-verbatim quote stands for, or null. After loose normalisation the quote is a
+ * prefix covering at least 80% of exactly one line, or else at least 80% of its words are in exactly one line (no ties).
+ */
+export function matchCriterion(quote, issueText) {
+  const q = loose(quote);
+  if (q.length < MIN_QUOTE_CHARS) return null;
+  const lines = criterionLines(issueText).map((raw) => ({ raw, l: loose(raw) }));
+  const prefix = lines.filter(({ l }) => l.startsWith(q) && q.length >= MATCH_MIN * l.length);
+  if (prefix.length === 1) return prefix[0].raw;
+  if (prefix.length > 1) return null;
+  const qw = [...new Set(q.match(WORD_RE) ?? [])];
+  if (qw.length < 3) return null;
+  const hits = lines.filter(({ l }) => { const lw = new Set(l.match(WORD_RE) ?? []); return qw.filter((w) => lw.has(w)).length / qw.length >= MATCH_MIN; });
+  return hits.length === 1 ? hits[0].raw : null;
+}
+const MISQUOTE_PREFIX = "issue_coverage quote is not verbatim from the issue";
 // Scan-based (not a one-pass regex), so nested or unclosed markers cannot survive into the scope hash.
 const stripHtmlComments = (s) => noComments(s).replace(/\r\n/g, "\n").trim();
 /**
@@ -1002,6 +1028,13 @@ const MISSING_PATH_RE = /^[^:]+: evidence path .+ does not exist$/;
 export function evidencePathOnly(problems = []) {
   return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)));
 }
+/**
+ * #5164: true when every problem of an incomplete review is a reviewer slip a targeted re-ask can fix: an evidence path that
+ * did not resolve (#4327) or an issue_coverage misquote. A real coverage gap is never one, so it keeps the two-run limit.
+ */
+export function reaskable(problems = []) {
+  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX));
+}
 const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)));
 
 /**
@@ -1009,7 +1042,7 @@ const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !igno
  * contract's own authorization ("none" when unauthorized, still scope creep), a preserve row per id as "unverified"
  * (still preserve_violated), and implemented evidence rewritten to `path:line` with the repo path. Returns a new object.
  */
-export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = [], ignore = [] }) {
+export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = [], ignore = [], issueText = null }) {
   if (!rv || typeof rv !== "object") return rv;
   const out = { ...rv };
   const scope = Array.isArray(rv.scope) ? [...rv.scope] : [];
@@ -1018,6 +1051,14 @@ export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = []
   const pres = Array.isArray(rv.preserve) ? [...rv.preserve] : [];
   for (const c of contract.preserve ?? []) if (!pres.some((x) => x?.id === c.id)) pres.push({ id: c.id, status: "unverified", note: "no row from the reviewer", filled: true });
   out.preserve = pres;
+  // #5164: a near-verbatim coverage quote is replaced by the issue's exact criterion line; the original stays as `requoted`
+  if (Array.isArray(rv.issue_coverage) && issueText != null) {
+    out.issue_coverage = rv.issue_coverage.map((c) => {
+      if (!c || typeof c !== "object" || typeof c.quote !== "string" || inIssue(c.quote, issueText)) return c;
+      const line = matchCriterion(c.quote, issueText);
+      return line ? { ...c, quote: line, requoted: c.quote } : c;
+    });
+  }
   if (Array.isArray(rv.requirements)) {
     out.requirements = rv.requirements.map((r) => {
       if (r?.status !== "implemented" && r?.instrumented !== true) return r;
@@ -1038,7 +1079,10 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
   if (!cov?.length) miss("issue_coverage", "issue_coverage is missing or empty");
   for (const c of cov ?? []) {
     if (!COVER_STATUS.includes(c?.status)) miss("issue_coverage", `issue_coverage status invalid: ${c?.status}`);
-    if (!inIssue(c?.quote, issueText)) miss("issue_coverage", `issue_coverage quote is not verbatim from the issue: "${String(c?.quote ?? "").slice(0, 60)}"`);
+    if (!inIssue(c?.quote, issueText)) {
+      const near = nearestSpan(c?.quote, criterionLines(issueText).join("\n"));
+      miss("issue_coverage", `${MISQUOTE_PREFIX}: "${String(c?.quote ?? "").slice(0, 60)}"${near ? `; nearest criterion line: "${near}"` : ""}`);
+    }
   }
   const reqs = arr("requirements");
   if (!reqs) p.push("requirements rows are missing");

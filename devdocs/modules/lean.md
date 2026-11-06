@@ -1282,6 +1282,15 @@ targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomp
 (`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
 repo-relative `path:line`.
 
+**#5164 (review-row misquotes):** `fillEngineRows` now also repairs `issue_coverage` quotes. A quote that fails `inIssue`
+but `matchCriterion` (`conformance.mjs`) maps to exactly one criterion line (`criterionLines`: the issue's list/checklist
+items) is replaced by that exact line, the original kept as `requoted` in the posted review. Matching is loose: `norm()`
+plus `#N` digits ignored, trailing punctuation and a plural `s` dropped; a prefix covering ≥80% of one line, else ≥80% of
+the quote's words in exactly one line (ties and paraphrases match nothing and stay `review.incomplete`, with the nearest
+criterion line in the problem). `reaskable` (evidence-path misses or coverage misquotes only) replaces `evidencePathOnly`
+as the third-run condition in `reviewOnce`, so a misquote never spends the second strike reserved for real gaps; the
+repair prompt carries the criterion lines verbatim (`<issue_criteria>`) whenever `issue_coverage` is missing.
+
 ## Entry 2026-10-20 — Engine-run commands get the builder's lane env; no $TMPDIR inputs at freeze (#4325)
 
 `runCore` `laneEnv()` builds one env for every command the engine runs itself: `io.deps.env()` stores, then the run

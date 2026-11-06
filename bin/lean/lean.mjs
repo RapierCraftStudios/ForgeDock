@@ -15,7 +15,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -2236,16 +2236,16 @@ export async function runCore(o) {
       const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE, e2e: { checks: vcfg.e2e?.checks ?? [], isSpec: (x) => e2eSpecs([x], vcfg.e2e).length > 0 } };
       let d = null, first = null;
       for (let t = 0; t < 3; t++) {
-        // #4327: a third run only when the repaired reply is incomplete solely by evidence paths that did not resolve.
+        // #4327/#5164: a third run only when the repaired reply is incomplete solely by reviewer slips (unresolved evidence paths, coverage misquotes).
         if (t === 2) {
-          if (d.state !== "review.incomplete" || !evidencePathOnly(d.failures.map((f) => f.detail))) break;
-          T.decisions.push(`Review incomplete only by unresolved evidence paths (${(d.missing ?? []).join(", ")}); reviewer re-asked once more`);
+          if (d.state !== "review.incomplete" || !reaskable(d.failures.map((f) => f.detail))) break;
+          T.decisions.push(`Review incomplete only by unresolved evidence paths or coverage misquotes (${(d.missing ?? []).join(", ")}); reviewer re-asked once more`);
         }
         // #4160: a reply with rows missing is re-asked for those ids only; an unparseable one gets the full prompt again.
         const repair = first && (d.state === "review.incomplete" || d.state === "review.inconsistent");
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first })
+          prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] })
             : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
