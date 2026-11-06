@@ -7,6 +7,13 @@ kind="${1:?kind}"; ttl=240; [ "$kind" = claude ] && ttl=600
 cache="/tmp/.cs-cred-$kind"
 if [ -s "$cache" ] && [ $(( $(date +%s) - $(stat -c %Y "$cache") )) -lt $ttl ]; then cat "$cache"; exit 0; fi
 [ -n "${CS_CRED_BASE:-}" ] || { echo "no credential relay (CS_CRED_BASE)" >&2; exit 1; }
-tok=$(curl -fsS --max-time 30 -H "authorization: Bearer ${CS_CRED_TOKEN}" "$CS_CRED_BASE/$kind" | jq -r .token)
+body=$(mktemp); trap 'rm -f "$body"' EXIT
+code=$(curl -sS --max-time 30 -o "$body" -w '%{http_code}' -H "authorization: Bearer ${CS_CRED_TOKEN}" "$CS_CRED_BASE/$kind") || code=000
+if [ "$code" = 429 ]; then
+  # #5165: every router login is at its usage ceiling; this line is what the lane's log tail defers on.
+  why=$(jq -r '.reason // empty' "$body" 2>/dev/null || true)
+  echo "${why:-usage limit hit; resets at unknown}" >&2; exit 1
+fi
+tok=""; [ "$code" = 200 ] && tok=$(jq -r .token "$body" 2>/dev/null || true)
 [ -n "$tok" ] && [ "$tok" != null ] || { echo "credential fetch failed ($kind)" >&2; exit 1; }
 umask 077; printf '%s' "$tok" > "$cache"; printf '%s' "$tok"

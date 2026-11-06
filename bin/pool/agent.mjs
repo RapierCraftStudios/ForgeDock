@@ -245,6 +245,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const c = credCache[kind];
     if (!c || now() - c.at > CRED_TTL[kind]) {
       const x = await call(cfg.router_url, "GET", `/agent/creds/${kind}`, { token: cfg.token, timeoutMs: 20000 });
+      // #5165: every router login at its usage ceiling -> pass the typed 429 (reason, reset) through, uncached, so the lane defers.
+      if (x.status === 429 && x.data && typeof x.data === "object") return { status: 429, body: x.data, retryAfter: x.retryAfter };
       if (!x.ok || !x.data?.token) return { status: 502, body: { error: `router credentials (${kind}): HTTP ${x.status}` } };
       credCache[kind] = { token: x.data.token, at: now() };
     }
@@ -397,7 +399,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const url = new URL(req.url, "http://agent");
     try {
       const cred = req.method === "GET" && /^\/sandboxes\/([^/]+)\/creds\/([a-z]+)$/.exec(url.pathname);
-      if (cred) { const r = await sandboxCred(decodeURIComponent(cred[1]), cred[2], req); return send(res, r.status, r.body); }
+      if (cred) { const r = await sandboxCred(decodeURIComponent(cred[1]), cred[2], req); return send(res, r.status, r.body, r.retryAfter ? { "retry-after": String(r.retryAfter) } : {}); }
       const relay = (req.method === "POST" && /^\/sandboxes\/([^/]+)\/relay$/.exec(url.pathname)) || (req.method === "GET" && /^\/sandboxes\/([^/]+)\/relay\/([^/]+)$/.exec(url.pathname));
       if (relay) { const r = await sandboxRelay(decodeURIComponent(relay[1]), relay[2] ? decodeURIComponent(relay[2]) : null, req); return send(res, r.status, r.body ?? {}); }
       if (url.pathname !== "/health" && !bearerOk(req, cfg.token)) return send(res, 401, { error: "unauthorized", hop: "agent", reason: "agent auth: router token rejected by agent" });

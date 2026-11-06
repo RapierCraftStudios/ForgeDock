@@ -281,13 +281,16 @@ describe("core work-on", () => {
     const t = traj(w)[0];
     for (const needle of ["| Validate | INVALID |", "| Plan | skipped |", "| Implement | skipped |", "| Review | skipped |", "| PR | none |", "| Close | issue closed (not planned) |"]) assert.ok(t.includes(needle), needle);
     assert.equal(w.closed.length, 1);
+    assert.equal(w.closed[0][w.closed[0].indexOf("--reason") + 1], "not planned", "#5152: invalid keeps not planned");
     assert.equal(w.prs.length, 0);
     assert.equal(reviewers(w).length, 0);
   });
 
-  it("already-fixed with evidence also closes", async () => {
+  it("already-fixed with evidence also closes, as completed (#5152)", async () => {
     const w = world({ changed: [], result: { status: "already-fixed", summary: "done upstream", evidence: ["a.js:1"], tests: [] } });
     assert.equal((await run(w)).terminalReason, "invalid");
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"], "#5152: already-fixed is delivered, never not planned");
+    assert.ok(traj(w)[0].includes("| Close | issue closed (completed) |"));
   });
 
   it("a failed needs-human comment is recorded as an anomaly and the lane still ends needs-human (#4905)", async () => {
@@ -704,13 +707,13 @@ describe("core work-on", () => {
     assert.ok(w.labels.includes("decomposed"));
   });
 
-  it("#4337 with decomposition.close_parent a split closes the parent not planned after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
+  it("#4337 #5152 with decomposition.close_parent a split closes the parent completed after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
     const w = depWorld({ changed: [], result: splitBlock }, {});
     const r = await run(w, { closeParent: true });
     assert.equal(r.terminalReason, "decomposed");
     assert.equal(w.closed.length, 1);
     const c = w.closed[0];
-    assert.equal(c[c.indexOf("--reason") + 1], "not planned");
+    assert.equal(c[c.indexOf("--reason") + 1], "completed", "#5152: the scope moved to the sub-issues, it was not dropped");
     const note = c[c.indexOf("--comment") + 1];
     assert.match(note, /#201/); assert.match(note, /#202/);
     assert.ok(w.labels.includes("decomposed"));
@@ -1745,13 +1748,13 @@ describe("conformance shadow mode (the default)", () => {
     assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
   });
 
-  it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
+  it("#4398 #5152 an investigation whose question is deferred closes partial (completed), carried forward in the tracking issue", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     const r = await runShadow(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
-    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
-    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && /Closed as partial[\s\S]*carried forward in #900/.test(c)));
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"], "#5152: merged with a tracked remainder is completed");
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && /Closed as partial[\s\S]*Closed as completed by PR #[\s\S]*carried forward in #900/.test(c)));
     assert.ok(traj(w)[0].includes("| Close | issue closed (partial) |"));
   });
 
@@ -1780,7 +1783,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
     assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R1: /); assert.match(w.followups[0].items[0].why, /investigation question not answered/);
     assert.match(w.prs[0].join(" "), /#900/);
-    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"]);
   });
 
   it("#4398 an answered investigation and a non-investigation with a deferral both close completed", async () => {
@@ -3441,6 +3444,31 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(traj(w).length, 0, "no trajectory comment for a deferral");
     assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
     assert.equal(w.merges.length, 0);
+  });
+
+  it("#5168 a claude login failure ends the lane deferred/backend.auth with the account, not engine-error", async () => {
+    const w = world(); projector(w, null); const sleeps = [];
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const authErr = Object.assign(new Error("claude CLI exited with status 1. Failed to authenticate. API Error: 401"), { code: "CLI_BACKEND_FAILED", authFailure: true });
+    let tries = 0; const orig = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") { tries++; throw authErr; } return orig(c); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "backend.auth");
+    assert.equal(r.retryInSeconds, 900);
+    assert.equal(r.backendId, laneBackendId(process.env), "the hold names the account whose login failed");
+    assert.match(r.detail, /claude CLI authentication failed/);
+    assert.equal(tries, 1, "no in-lane retry or pause on a dead login");
+    assert.equal(sleeps.length, 0);
+    assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+    assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+  });
+
+  it("#5168 an error that is both a usage limit and auth-like stays rate_limited", async () => {
+    const w = world();
+    failFirstBuilder(w, limitErr({ authFailure: true, resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "rate_limited");
   });
 
   it("#4101 unknown reset pauses a bounded number of times, then defers", async () => {

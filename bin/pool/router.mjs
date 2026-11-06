@@ -93,19 +93,28 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
     return gh.token;
   }
-  // Claude access token for sandboxes: the logged-in account on this host with the most validity left. Only the
-  // short-lived access token is shared; refresh tokens stay here, so this host keeps refreshing its own sessions.
+  // Claude access token for sandboxes (#5165): among the logins with 30+ minutes left, the one with the lowest tokenbaton
+  // usage (validity breaks ties). Only the short-lived access token is shared; refresh tokens stay here, so this host
+  // keeps refreshing its own sessions.
   function claudeToken() {
     const dirs = cfg.claude_config_dirs ?? readdirSync(homedir()).filter((d) => /^\.claude(-\d+)?$/.test(d)).map((d) => join(homedir(), d));
-    let best = null;
+    const logins = [];
     for (const d of dirs) {
       try {
         const o = JSON.parse(readFileSync(join(d, ".credentials.json"), "utf8")).claudeAiOauth;
-        if (o?.accessToken && o.expiresAt > now() + 30 * 60000 && (!best || o.expiresAt > best.expiresAt)) best = o;
+        const n = /\.claude-(\d+)$/.exec(d)?.[1];
+        if (o?.accessToken) logins.push({ n: n ? Number(n) : null, accessToken: o.accessToken, expiresAt: o.expiresAt });
       } catch { /* no login in this dir */ }
     }
-    if (!best) throw Object.assign(new Error("no Claude login on the router host with 30+ minutes left"), { status: 503 });
-    return { token: best.accessToken, expires_at: new Date(best.expiresAt).toISOString() };
+    const src = usageSource(cfg);
+    const usage = readUsage(src, logins.map((l) => l.n).filter((n) => n !== null));
+    const pick = pickClaudeLogin({ logins, usage, ceilingPct: cfg.usage_ceiling_pct ?? 95, now: now() });
+    if (pick.status === 503) throw Object.assign(new Error("no Claude login on the router host with 30+ minutes left"), { status: 503 });
+    if (pick.status === 429) { log.warn?.(`claude login: every account at or above the usage ceiling; ${pick.body.reason}`); return pick; }
+    if (pick.fallback) log.warn?.(`claude login: no usage source (${src}), falling back to longest validity`);
+    const { login, pct } = pick;
+    log.info?.(`claude login selected: account=${login.n ?? "default"} usage=${pct ?? "unknown"}% expires_at=${new Date(login.expiresAt).toISOString()}`);
+    return { status: 200, body: { token: login.accessToken, expires_at: new Date(login.expiresAt).toISOString() } };
   }
   const agentCall = (a, method, path, body, timeoutMs) => call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
 
@@ -285,7 +294,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
-    [route("GET", "/agent/creds/claude"), { fn: async () => ({ status: 200, body: claudeToken() }), auth: "agent" }],
+    [route("GET", "/agent/creds/claude"), { fn: async () => claudeToken(), auth: "agent" }],
     [route("POST", "/agent/relay/:id"), { fn: async (p, body, _u, req) => relayPost(req, p, body), auth: "agent" }], // #4778
     [route("GET", "/agent/relay/:id/:rid"), { fn: async (p, _b, _u, req) => relayPoll(req, p), auth: "agent" }],
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
@@ -353,6 +362,62 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   return { handle, launch, claim, tick, enroll, issueCode, capacities, status, store };
+}
+
+/** tokenbaton's usage dir (#5165): router.json `usage_source`, else `$TOKENBATON_HOME`, else `~/.tokenbaton`. */
+export function usageSource(cfg, env = process.env) {
+  return cfg.usage_source ?? env.TOKENBATON_HOME ?? join(homedir(), ".tokenbaton");
+}
+
+/** One tokenbaton `live.<n>` line (`<5h %> <5h reset s> <weekly %> <weekly reset s> [updated s]`), or null; the format of bin/lean/rotator.mjs parseLive. */
+export function parseLiveUsage(text) {
+  const f = String(text ?? "").trim().split(/\s+/).map(Number);
+  if (f.length < 4 || !f.slice(0, 4).every(Number.isFinite)) return null;
+  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000 };
+}
+
+/** Map account n -> parsed `live.<n>` for the given accounts; unreadable or malformed files are left out. */
+export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8")) {
+  const out = new Map();
+  for (const n of ns) { try { const u = parseLiveUsage(readFile(join(dir, `live.${n}`))); if (u) out.set(n, u); } catch { /* no usage for n */ } }
+  return out;
+}
+
+/**
+ * Pick the Claude login to hand out (#5165). Candidates have 30+ minutes of validity. A login with known usage is
+ * excluded at or above `ceilingPct` 5-hour use or 100% weekly use (a passed reset counts as 0, like the local rotator);
+ * the rest rank by 5-hour use, then validity. Logins with unknown usage follow. No usage at all: longest validity,
+ * `fallback: true`. Every candidate excluded: a typed 429 carrying the earliest reset.
+ * @returns {{status: 200, login, pct, fallback} | {status: 429, retryAfter, body} | {status: 503}}
+ */
+export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now }) {
+  const valid = logins.filter((l) => l.accessToken && l.expiresAt > now + 30 * 60000);
+  if (!valid.length) return { status: 503 };
+  const used = (pct, resetMs) => (resetMs <= now ? 0 : pct);
+  const byValidity = (a, b) => b.expiresAt - a.expiresAt;
+  const known = [], unknown = [], blocked = [];
+  for (const l of valid) {
+    const u = l.n !== null && l.n !== undefined ? usage.get(l.n) : undefined;
+    if (!u) { unknown.push(l); continue; }
+    const five = used(u.fiveHourPct, u.fiveHourResetMs), week = used(u.weeklyPct, u.weeklyResetMs);
+    if (five >= ceilingPct || week >= 100) {
+      const r = [];
+      if (five >= ceilingPct) r.push(u.fiveHourResetMs);
+      if (week >= 100) r.push(u.weeklyResetMs);
+      blocked.push(Math.max(...r));
+    } else known.push({ l, pct: five });
+  }
+  if (known.length) {
+    known.sort((a, b) => a.pct - b.pct || byValidity(a.l, b.l));
+    return { status: 200, login: known[0].l, pct: known[0].pct, fallback: false };
+  }
+  if (unknown.length) {
+    unknown.sort(byValidity);
+    return { status: 200, login: unknown[0], pct: null, fallback: !blocked.length };
+  }
+  const resetMs = Math.min(...blocked), at = new Date(resetMs).toISOString();
+  return { status: 429, retryAfter: Math.max(1, Math.ceil((resetMs - now) / 1000)),
+    body: { error: "usage limit", code: "rate_limited", reason: `usage limit hit; resets at ${at}`, reset_at: at } };
 }
 
 export function startRouter(cfg, deps) {

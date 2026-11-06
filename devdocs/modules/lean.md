@@ -118,7 +118,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (barrel, union type, shared fixture, index doc) merge one after another instead
    of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
    The gate runs first; `serializeShared` orders only an admitted split.
-   A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
+   A `split` closes the parent `completed` (#5152: scope moved, not dropped) once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
    decomposed dependency, open or closed, gates through its sub-issues in
@@ -1416,7 +1416,7 @@ precheck, review, resume, base-sync re-review, no degraded merge), logs `CONFORM
 decision line, and `RUN_TERMINAL.conformance_mode` reports `enforce`. `closePlan(contract, {title, review})`: an
 `investigate(`/`investigate:` issue (`isInvestigation`) with a defer/post-deploy requirement, or a deliver requirement
 whose review row is not `implemented`, is `partial`. The untracked ones are filed with `track()` before the PR, the issue
-closes `not planned` with a FORGE:TRACKED "Closed as partial" note, and the Close row and lane result say partial.
+closes `completed` (#5152; was `not planned`) with a FORGE:TRACKED "Closed as partial" note naming the follow-ups, and the Close row and lane result say partial.
 The lane result carries `conformance {mode, would, risk}`. Orchestrate's row copies it, and the batch report prints
 `formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
 or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
@@ -2141,7 +2141,7 @@ A dependency skip (`dependency #X ended <outcome>`) keeps outcome `skipped` but 
 `dispatchCheck` can still re-admit it (cleared when the batch ends, so the report ends `skipped` only if X never resolved). The
 table and console show `waiting on #X`. The #4595 blocker re-check re-admits the dependent when X merges or closes; each skip,
 re-admit and requeue row carries `trigger:<issue>` in the `decide` log. `makeDispatchCheck` returns `final: true` for an issue
-closed as NOT_PLANNED: `watchBlockers` stops re-checking it and its dependents stay `skipped`. `batch.addIssues` now re-queues an
+closed as NOT_PLANNED without `workflow:merged` / a fully closed decomposition (#5152): `watchBlockers` stops re-checking it and its dependents stay `skipped`. `batch.addIssues` now re-queues an
 in-batch issue whose result is `skipped` through the `--requeue` file (returned as `requeued`); merged/needs-human/other rows still
 report `already in batch`. The schedd `add` op reopens a finished, unhosted batch like `requeue`; without a daemon `addToBatch`
 clears the report so the next `--resume` reruns it. Cost: 0 LLM calls; one extra `dispatchCheck` per blocker per watch interval.
@@ -2665,3 +2665,17 @@ rows name a cycle member. `--requeue <root>` (`REQUEUABLE` now includes
 `needs-human` label on a resumed batch (`watchHeldRoots`) returns the root and
 its held subtree to pending in dependency order. The report prints one
 `held subtree: #<root> (...) holds ...; release: forgedock orchestrate --requeue <batch> <root>` line per root.
+
+## Entry 2026-11-07 — delivered work is closed `completed`; dropped scope is read from labels (#5152)
+
+- Close reasons: a merged change closes `completed` even when `closePlan` says `partial` (the FORGE:TRACKED note names the follow-ups); a builder `already-fixed` verdict closes `completed` (label and terminal `invalid` kept, Close row `issue closed (completed)`); a `decomposition.close_parent` parent closes `completed`. Only `invalid` and the duplicate owner ask close `not planned`. The pre-filter closes `ci-green` and ALREADY-FIXED `completed`, INVALID `not planned`.
+- `closedScope` (`engine-cli.mjs`): a CLOSED issue labelled `workflow:merged` is `merged`; `workflow:decomposed` whose trusted FORGE:DECOMPOSED sub-issues are all closed is `moved`; a decomposition with an open or unreadable sub-issue is `moving`; else null. `makeDispatchCheck` reads `state,stateReason,labels`: merged/moved → `{outcome:"merged"}` (satisfied, never final), moving → non-final `invalid` (dependents' lanes wait on the sub-issues), and only an unlabelled NOT_PLANNED keeps `final: true` (#4687). `issueState` (#4725) returns `CLOSED` for merged/moved. Legacy NOT_PLANNED closes are covered because labels decide.
+- Builder context (`context.mjs`): `closedResult` reports a closed `workflow:merged` / `workflow:decomposed` link as `completed` instead of its `stateReason`.
+
+## Entry 2026-11-07 — claude login failure ends the lane `deferred` `backend.auth` (#5168)
+
+`callRunner` turns a runner error with `authFailure` (and no usage limit) into `deferCode: backend.auth`, `retryInSeconds: AUTH_RETRY_SECONDS` (900) and `backendId: laneBackendId(...)`; the verifier catch rethrows it rather than recording a verifier failure, and the final `deferCode` finish passes `backendId` so the batch holds that account. Before, the lane ended `engine-error`, used its one relaunch and counted toward the breaker. Tests: `lean.test.mjs` "#5168".
+
+## Entry 2026-11-07 — `forgedock fix-close-reasons` migration helper (#5177)
+
+`fixclosereasons.mjs` `runFixCloseReasonsCli` (wrapper `engine-cli.mjs` `fixCloseReasonsFromCli`, command `fix-close-reasons <owner/repo> [--milestone <m>] [--apply]`): lists closed issues labelled `workflow:merged` / `workflow:decomposed` (`findMisclosed`) and keeps those whose close reason is `NOT_PLANNED`, never one also labelled `workflow:invalid`. With `--apply` each gets one `gh api -X PATCH ... state=closed state_reason=completed` (no reopen window) plus a comment saying the scope was delivered or moved to sub-issues; without it only the would-change list is printed. Idempotent (a `completed` issue is not selected); a failed write is counted and the exit code is 1. The lean lane's own close sites and the #4687 gate are untouched. Tests: `fixclosereasons.test.mjs`. Cost: 0 LLM calls.

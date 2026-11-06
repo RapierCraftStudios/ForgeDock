@@ -86,7 +86,7 @@ const readAdded = (file) => {
   return Array.isArray(v) ? [...new Set(v.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b) : [];
 };
 
-/** `outcome`s `--requeue` may move back to pending (#4550). */
+/** `outcome`s `--requeue` may move back to pending (#4550); #5168: a final `engine-error` too (the runner clears its engine-error count); #5162: `held` rows too. */
 export const REQUEUABLE = (outcome) => ["needs-human", "engine-error", "held", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
@@ -177,7 +177,7 @@ export function openBatch(root, id) {
     },
     /**
      * `--requeue` (#4550): record that each issue returns to pending. Refused: not a positive integer, not in the batch's
-     * `order`, no terminal result yet (`not terminal`), or already requeued and not yet applied. The needs-human label and
+     * `order`, no terminal result yet (`not terminal`; a final `engine-error` is terminal, #5168), or already requeued and not yet applied. The needs-human label and
      * closed checks need GitHub and live in the CLI. @returns {{requeued:number[], refused:Array<{issue, reason}>}}
      */
     requeue: (list, { reason = "operator decision", by = "operator" } = {}) => {
