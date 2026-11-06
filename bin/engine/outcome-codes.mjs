@@ -36,6 +36,7 @@ export const OUTCOME_CODES = Object.freeze({
   CI_TIMEOUT: "ci.timeout",
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
+  BACKEND_AUTH: "backend.auth", // forge#5168: the claude CLI login failed ("Failed to authenticate"); deferred under the account hold, never engine-error, never the breaker
   HOST_BUSY: "host.busy",
   GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
   GH_AUTH: "gh.auth", // forge#4662: gh answered HTTP 401 and one token refresh did not fix it; run deferred, a rerun resumes
@@ -149,6 +150,7 @@ export function codeForRunnerError(err) {
   if (isDiskQuotaError(err)) return OUTCOME_CODES.INFRA_DISK_QUOTA;
   if (err.usageLimit === true || (typeof err.resetAtEpochMs === "number" && Number.isFinite(err.resetAtEpochMs)))
     return OUTCOME_CODES.RATE_LIMITED;
+  if (err.authFailure === true) return OUTCOME_CODES.BACKEND_AUTH; // forge#5168
   switch (err.code) {
     case "CLI_SPAWN_TRANSIENT":
       return OUTCOME_CODES.INFRA_CLI_SPAWN_TRANSIENT;
