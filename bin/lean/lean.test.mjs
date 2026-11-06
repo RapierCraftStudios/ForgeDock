@@ -3446,6 +3446,31 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(w.merges.length, 0);
   });
 
+  it("#5168 a claude login failure ends the lane deferred/backend.auth with the account, not engine-error", async () => {
+    const w = world(); projector(w, null); const sleeps = [];
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const authErr = Object.assign(new Error("claude CLI exited with status 1. Failed to authenticate. API Error: 401"), { code: "CLI_BACKEND_FAILED", authFailure: true });
+    let tries = 0; const orig = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") { tries++; throw authErr; } return orig(c); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "backend.auth");
+    assert.equal(r.retryInSeconds, 900);
+    assert.equal(r.backendId, laneBackendId(process.env), "the hold names the account whose login failed");
+    assert.match(r.detail, /claude CLI authentication failed/);
+    assert.equal(tries, 1, "no in-lane retry or pause on a dead login");
+    assert.equal(sleeps.length, 0);
+    assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+    assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+  });
+
+  it("#5168 an error that is both a usage limit and auth-like stays rate_limited", async () => {
+    const w = world();
+    failFirstBuilder(w, limitErr({ authFailure: true, resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "rate_limited");
+  });
+
   it("#4101 unknown reset pauses a bounded number of times, then defers", async () => {
     const w = world(); let sleeps = 0;
     const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps++; return s0(ms); };

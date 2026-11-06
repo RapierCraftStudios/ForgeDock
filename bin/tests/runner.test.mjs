@@ -76,6 +76,7 @@ import {
   extractSessionLimitResetTime,
   parseSessionLimitResetEpochMs,
   detectUsageLimit,
+  detectAuthFailure,
   VALID_BACKENDS,
   readScopeLimitEvents,
 } from "../runner.mjs";
@@ -4013,6 +4014,45 @@ describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
     const e = run(JSON.stringify({ is_error: false, result: "You've hit your session limit \u00b7 resets 3pm (UTC)" }));
     assert.equal(e.resetAtEpochMs, undefined);
     assert.equal(e.usageLimit, undefined);
+  });
+});
+
+describe("#5168 detectAuthFailure and err.authFailure", () => {
+  const run = (stdout, stderr = "") => {
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 5168", args: ["5168"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude",
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr, error: undefined }),
+      });
+    } catch (err) { thrown = err; }
+    return thrown;
+  };
+  it("#5168 matches the CLI's login failure texts in an is_error envelope or plain output", () => {
+    assert.equal(detectAuthFailure(JSON.stringify({ is_error: true, result: "Failed to authenticate. API Error: 401 {\"type\":\"authentication_error\"}" })), true);
+    assert.equal(detectAuthFailure(JSON.stringify({ is_error: true, result: "OAuth token has expired. Please run /login" })), true);
+    assert.equal(detectAuthFailure(JSON.stringify({ is_error: true, result: "Invalid API key · Please run /login" })), true);
+    assert.equal(detectAuthFailure("", "Failed to authenticate"), true);
+  });
+  it("#5168 is false for ordinary failures and non-error envelopes", () => {
+    assert.equal(detectAuthFailure(JSON.stringify({ is_error: true, result: "boom" })), false);
+    assert.equal(detectAuthFailure(JSON.stringify({ is_error: false, result: "fixed the Failed to authenticate message" })), false);
+    assert.equal(detectAuthFailure("", "TypeError: boom"), false);
+  });
+  it("#5168 runCliBackend sets authFailure on a failed login, not usageLimit", () => {
+    const e = run(JSON.stringify({ is_error: true, result: "Failed to authenticate. API Error: 401" }));
+    assert.equal(e.code, "CLI_BACKEND_FAILED");
+    assert.equal(e.authFailure, true);
+    assert.equal(e.usageLimit, undefined);
+  });
+  it("#5168 a usage limit keeps precedence over an auth-like text", () => {
+    const e = run(JSON.stringify({ is_error: true, api_error: "usage_limit_reached", result: "Failed to authenticate" }));
+    assert.equal(e.usageLimit, true);
+    assert.equal(e.authFailure, undefined);
+  });
+  it("#5168 an ordinary failure sets no authFailure", () => {
+    assert.equal(run(JSON.stringify({ is_error: true, result: "boom" })).authFailure, undefined);
   });
 });
 

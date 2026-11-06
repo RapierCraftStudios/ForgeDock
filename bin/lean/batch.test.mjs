@@ -1519,3 +1519,56 @@ describe("#5161 transient engine-error retries", () => {
     assert.ok(rows.some((r) => r.outcome === "held"));
   });
 });
+
+describe("#5168: --requeue accepts engine-error; a claude login failure is held, not an engine-error", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  it("#5168 --requeue accepts a final engine-error outcome and resets its engine-error count", async () => {
+    const b = openBatch(tmpDir("batch-requeue-5168-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2], results: { 1: { outcome: "engine-error" }, 2: { outcome: "merged" } } });
+    const r = b.requeue([1, 2], { reason: "login fixed", by: "operator" });
+    assert.deepEqual(r.requeued, [1]);
+    assert.deepEqual(r.refused, [{ issue: 2, reason: "not terminal" }]);
+
+    // The runner applies it: the issue returns to pending with a fresh relaunch (its engine-error count reset).
+    let entries = [];
+    const started = [], g2 = gate(), log = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", getRequeued: () => entries, onUpdate: (u) => log.push(u),
+      runOne: async (n) => {
+        started.push(n);
+        if (n === 2) { await g2.p; return { terminalReason: "merged" }; }
+        return started.filter((x) => x === 1).length <= 3 ? { terminalReason: "engine-error", detail: "Failed to authenticate" } : { terminalReason: "merged" };
+      } });
+    await until(() => log.some((u) => u.issue === 1 && u.outcome === "engine-error" && !/relaunching/.test(u.detail ?? "")));
+    entries = [{ issue: 1, reason: "login fixed", by: "operator", at: "2026-11-07T00:00:00Z" }];
+    try { await until(() => started.filter((x) => x === 1).length >= 4, 3000); } catch { /* asserted below */ }
+    g2.open();
+    const rows = await done;
+    assert.equal(started.filter((x) => x === 1).length, 4, "two runs before the requeue, then a fresh run and its relaunch");
+    assert.equal(rows.find((x) => x.issue === 1).outcome, "merged");
+    assert.equal(rows.find((x) => x.issue === 1).requeued.prior[0].outcome, "engine-error");
+  });
+
+  it("#5168 deferPolicy holds backend.auth like a usage limit: never capped, never counted", () => {
+    assert.deepEqual(deferPolicy({ code: "backend.auth", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900_000, hold: true });
+    assert.equal(deferPolicy({ code: "backend.auth" }, { now: 0 }).hold, true);
+  });
+
+  it("#5168 a backend.auth lane stays pending under the account hold: no relaunch used, no breaker, no engine-error", async () => {
+    const { now, sleep, c } = fakeClock();
+    const t0 = c.t, updates = [], starts = {};
+    let calls = 0;
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", breaker: { errors: 1, window_min: 30 }, maxDeferrals: 1,
+      onUpdate: (u) => updates.push(u),
+      runOne: async (n) => {
+        (starts[n] ??= []).push(now());
+        if (n === 1 && ++calls <= 3) return { terminalReason: "deferred", code: "backend.auth", retryInSeconds: 900, backendId: "default", detail: "claude CLI authentication failed" };
+        return { terminalReason: "merged", pr: 5 };
+      } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.equal(starts[1].length, 4, "deferred past maxDeferrals: the hold is uncapped");
+    assert.ok(starts[2][0] >= t0 + 900_000, "the held account admits nothing until the hold ends");
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+    assert.ok(updates.some((u) => u.outcome === "paused" && /paused \(backend\.auth\)/.test(u.detail ?? "")));
+  });
+});
