@@ -977,6 +977,18 @@ async function gatherDashboardData(cwd) {
   return result;
 }
 
+/**
+ * #5167: unhealthy batches and recent launch refusals (or one batch's health with `--batch <id>`) under
+ * `forgedock status`, read from the batch root. Any read failure prints nothing.
+ */
+async function batchHealthSection(c, batchId) {
+  try {
+    const [{ batchRoot }, { statusLines }] = await Promise.all([import("./lean/batch.mjs"), import("./lean/batch-health.mjs")]);
+    const lines = statusLines(batchRoot(), batchId ? { batch: batchId } : {});
+    if (lines.length) c.stdout.write(`  batch health\n${lines.map((l) => (batchId ? `  ${l}` : l)).join("\n")}\n\n`);
+  } catch { /* status never fails on batch health */ }
+}
+
 /** Compact status screen for configured/managed directories. */
 async function statusScreen(c) {
   const state = resolveState(c.cwd);
@@ -4063,8 +4075,12 @@ switch (command) {
   }
   case "status": {
     const c = ctx();
-    if (positional[1]) c.cwd = resolve(positional[1]);
+    // #5167: `--batch <id>` is not the status directory
+    const statusArgs = positional.slice(1), bi = statusArgs.indexOf("--batch");
+    const statusDir = statusArgs.find((a, i) => !(bi !== -1 && (i === bi || i === bi + 1)));
+    if (statusDir) c.cwd = resolve(statusDir);
     await statusScreen(c);
+    await batchHealthSection(c, bi === -1 ? null : statusArgs[bi + 1] ?? null);
     break;
   }
   case "uninstall":

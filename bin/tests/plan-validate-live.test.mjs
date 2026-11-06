@@ -196,6 +196,22 @@ describe("orchestrate parallel milestone start", async () => {
     assert.deepEqual(seen, []);
   });
 
+  it("#5167 a refusal is recorded for `forgedock status` and alerted, with no batch dir and the same error", async () => {
+    const { deps, seen } = mk();
+    const lines = [], notes = [];
+    deps.notify = async (cmd, p) => { notes.push(p); return { ok: true }; };
+    deps.healthConfig = { rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: [15, 60], issue: null, notifyCommand: "n" };
+    const l = console.log; console.log = (...a) => lines.push(a.join(" "));
+    try { await assert.rejects(orchestrateFromCli(["7", "--repo", "o/r", "--no-prefilter"], deps), /^Error: parallel milestone start refused: #7 depends on #9/); } finally { console.log = l; }
+    assert.deepEqual(seen, []);
+    const { readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(deps.batchRoot), ["refusals.json"], "no batch dir");
+    const { statusLines } = await import("../lean/batch-health.mjs");
+    assert.match(statusLines(deps.batchRoot).join("\n"), /LAUNCH REFUSED .*parallel milestone start refused: #7 depends on #9/);
+    assert.ok(lines.some((x) => /^BATCH UNHEALTHY \(refused launch\) \(launch\)\n {2}cause: refused/.test(x)), lines.join("\n"));
+    assert.equal(notes.length, 1);
+  });
+
   it("--force with a reason proceeds and records the reason", async () => {
     const { deps, seen } = mk();
     await quiet(() => orchestrateFromCli(["7", "--repo", "o/r", "--no-prefilter", "--force", "9 lands tomorrow"], deps));

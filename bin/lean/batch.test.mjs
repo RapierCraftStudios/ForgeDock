@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
@@ -1520,6 +1520,73 @@ describe("#5161 transient engine-error retries", () => {
   });
 });
 
+describe("#5167 early batch health in runBatch", () => {
+  // #1 and #3 are roots, #2 depends on #1. #3 runs until `release`; the captured T+15 timer fires while it runs.
+  const mk = ({ fail }) => {
+    const timers = [], comments = [], notes = [], gate = { open: null };
+    const released = new Promise((r) => { gate.open = r; });
+    const bodies = { 1: "", 2: "Depends on #1", 3: "" };
+    const leanIo = { gh: async (a) => {
+      if (a[0] === "issue" && a[1] === "comment") { if (/FORGE:BATCH-HEALTH/.test(a.at(-1))) comments.push(a); return ""; }
+      if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "", milestone: { title: "M Two" }, comments: [], author: { login: "x" } });
+      return a[0] === "repo" ? "main\n" : "[]";
+    }, git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
+    const deps = { dir: tmpDir("bh-run-"), batchRoot: tmpDir("bh-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, leanIo, pollMs: 5, preflight: null,
+      io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ body: bodies[a[2]] ?? "", state: "OPEN" }) : "o/r\n"), git: async () => "" },
+      healthConfig: { rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: [15, 60], issue: 77, notifyCommand: "notify-me" },
+      healthTimer: { set: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clear: () => {} },
+      notify: async (cmd, payload) => { notes.push([cmd, payload]); return { ok: true }; },
+      leanModule: { runCore: async (o) => {
+        if (o.issue === 3) { await released; return { terminalReason: "merged", pr: 3, cost_usd: 0, wall_ms: 1 }; }
+        return fail ? { terminalReason: "engine-error", detail: "lane crashed: boom", cost_usd: 0, wall_ms: 1 } : { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 };
+      } } };
+    return { deps, timers, comments, notes, gate };
+  };
+  const capture = async (fn) => { const lines = [], l = console.log; console.log = (...a) => lines.push(a.join(" ")); try { await fn(); } finally { console.log = l; } return lines; };
+
+  it("#5167 roots ending engine-error raise one BATCH UNHEALTHY at T+15 with recovery commands, on every channel", async () => {
+    const { deps, timers, comments, notes, gate } = mk({ fail: true });
+    let id = null;
+    const lines = await capture(async () => {
+      const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
+      try {
+        await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
+        assert.deepEqual(timers.map((t) => t.ms > 14 * 60000 && t.ms <= 15 * 60000 ? 15 : t.ms > 59 * 60000 ? 60 : t.ms), [15, 60], "T+15 and T+60 armed");
+        await timers[0].fn();
+        await until(() => existsSync(join(deps.batchRoot, id, "health.json")) && JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, 5000);
+        await until(() => notes.length === 1, 5000);
+      } finally { gate.open(); await run; }
+    });
+    assert.ok(lines.some((l) => /^health checks: T\+15 \d\d:\d\dZ, T\+60 \d\d:\d\dZ, and at batch end; forgedock status --batch /.test(l)), lines.join("\n"));
+    const alerts = lines.filter((l) => /^BATCH UNHEALTHY /.test(l));
+    assert.equal(alerts.length, 1, "alerted once (T+15), not again at batch end");
+    assert.match(alerts[0], /\(T\+15\)/);
+    assert.match(alerts[0], /cause: root-failed: root #1 engine-error/);
+    assert.match(alerts[0], /recovery:\n {4}forgedock orchestrate --requeue \S+ 1 2 --reason/);
+    assert.match(alerts[0], new RegExp(`forgedock orchestrate --cancel ${id}`));
+    assert.equal(comments.length, 1);
+    assert.deepEqual(comments[0].slice(0, 5), ["issue", "comment", "77", "-R", "o/r"]);
+    assert.equal(notes[0][0], "notify-me");
+    assert.equal(notes[0][1].batch, id);
+    const h = JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8"));
+    assert.deepEqual(Object.keys(h.checks).sort(), ["T+15", "end"]);
+  });
+
+  it("#5167 a healthy batch emits no alert", async () => {
+    const { deps, timers, comments, notes, gate } = mk({ fail: false });
+    gate.open();
+    const lines = await capture(() => orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter"], deps));
+    for (const t of timers) await t.fn(); // a late timer after the end still finds the batch healthy
+    assert.ok(!lines.some((l) => /BATCH UNHEALTHY/.test(l)), lines.join("\n"));
+    assert.equal(comments.length + notes.length, 0);
+    const [id] = readdirSyncSafe(deps.batchRoot);
+    const h = JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8"));
+    assert.equal(h.last.healthy, true);
+    assert.equal(h.alertedAt, undefined);
+  });
+});
+
+
 describe("#5168: --requeue accepts engine-error; a claude login failure is held, not an engine-error", () => {
   const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
   it("#5168 --requeue accepts a final engine-error outcome and resets its engine-error count", async () => {
@@ -1572,3 +1639,5 @@ describe("#5168: --requeue accepts engine-error; a claude login failure is held,
     assert.ok(updates.some((u) => u.outcome === "paused" && /paused \(backend\.auth\)/.test(u.detail ?? "")));
   });
 });
+
+function readdirSyncSafe(d) { try { return readdirSync(d).filter((n) => !n.endsWith(".json")); } catch { return []; } }
