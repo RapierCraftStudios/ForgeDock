@@ -2663,3 +2663,7 @@ Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.te
 ## Entry 2026-11-07 — claude login failure ends the lane `deferred` `backend.auth` (#5168)
 
 `callRunner` turns a runner error with `authFailure` (and no usage limit) into `deferCode: backend.auth`, `retryInSeconds: AUTH_RETRY_SECONDS` (900) and `backendId: laneBackendId(...)`; the verifier catch rethrows it rather than recording a verifier failure, and the final `deferCode` finish passes `backendId` so the batch holds that account. Before, the lane ended `engine-error`, used its one relaunch and counted toward the breaker. Tests: `lean.test.mjs` "#5168".
+
+## Entry 2026-11-07 — `forgedock fix-close-reasons` migration helper (#5177)
+
+`fixclosereasons.mjs` `runFixCloseReasonsCli` (wrapper `engine-cli.mjs` `fixCloseReasonsFromCli`, command `fix-close-reasons <owner/repo> [--milestone <m>] [--apply]`): lists closed issues labelled `workflow:merged` / `workflow:decomposed` (`findMisclosed`) and keeps those whose close reason is `NOT_PLANNED`, never one also labelled `workflow:invalid`. With `--apply` each gets one `gh api -X PATCH ... state=closed state_reason=completed` (no reopen window) plus a comment saying the scope was delivered or moved to sub-issues; without it only the would-change list is printed. Idempotent (a `completed` issue is not selected); a failed write is counted and the exit code is 1. The lean lane's own close sites and the #4687 gate are untouched. Tests: `fixclosereasons.test.mjs`. Cost: 0 LLM calls.
