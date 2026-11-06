@@ -2661,6 +2661,18 @@ Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.te
 - `forgedock status` (`bin/forgedock.mjs` `batchHealthSection`) always appends the batch-health lines. `--batch <id>` and its value are not taken as the status directory.
 - Tests: `batch-health.test.mjs`, `batch.test.mjs` "#5167" (roots engine-error alert once at T+15 on every channel; a healthy batch emits no alert), `plan-validate-live.test.mjs` "#5167" (refusal record), `router.test.mjs` "#5167" (status lines, `--batch`).
 
+## Held subtrees behind a failed root (#5162)
+
+A dependent of a root that ends `needs-human`, `engine-error`, `deferred` or
+`budget-exceeded` ends `held` (`blocked by #<root> (<outcome>)`, `root` and
+`trigger` = the root, persisted), not `skipped`. The "dependency cycle" label is
+reserved for real cycles (`cyclicNodes`, SCC over the pending deps); other stuck
+rows name a cycle member. `--requeue <root>` (`REQUEUABLE` now includes
+`engine-error` and `held`), a watched root merging, or removal of its
+`needs-human` label on a resumed batch (`watchHeldRoots`) returns the root and
+its held subtree to pending in dependency order. The report prints one
+`held subtree: #<root> (...) holds ...; release: forgedock orchestrate --requeue <batch> <root>` line per root.
+
 ## Entry 2026-11-07 — delivered work is closed `completed`; dropped scope is read from labels (#5152)
 
 - Close reasons: a merged change closes `completed` even when `closePlan` says `partial` (the FORGE:TRACKED note names the follow-ups); a builder `already-fixed` verdict closes `completed` (label and terminal `invalid` kept, Close row `issue closed (completed)`); a `decomposition.close_parent` parent closes `completed`. Only `invalid` and the duplicate owner ask close `not planned`. The pre-filter closes `ci-green` and ALREADY-FIXED `completed`, INVALID `not planned`.

@@ -86,8 +86,8 @@ const readAdded = (file) => {
   return Array.isArray(v) ? [...new Set(v.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b) : [];
 };
 
-/** `outcome`s `--requeue` may move back to pending (#4550); #5168: a final `engine-error` too (the runner clears its engine-error count). */
-export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused", "deferred", "engine-error"].includes(outcome) || /^dependency-/.test(String(outcome));
+/** `outcome`s `--requeue` may move back to pending (#4550); #5168: a final `engine-error` too (the runner clears its engine-error count); #5162: `held` rows too. */
+export const REQUEUABLE = (outcome) => ["needs-human", "engine-error", "held", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
 
