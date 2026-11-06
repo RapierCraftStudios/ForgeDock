@@ -383,6 +383,21 @@ describe("core work-on", () => {
     assert.equal(r2.code, "review.incomplete"); assert.equal(reviewers(w2).length, 3, "at most three reviewer runs"); assert.equal(w2.merges.length, 0);
   });
 
+  it("#5164 a coverage misquote gets one more targeted re-ask with the issue's criterion lines; a near-verbatim one is requoted without a re-ask", async () => {
+    const mis = () => conf({ issue_coverage: [{ quote: "foo copes when nothing at all is passed", contract_ids: ["R1"], status: "covered" }] });
+    const w = world({ reviews: [mis(), mis(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const rv = reviewers(w);
+    assert.equal(rv.length, 3); assert.equal(builders(w).length, 2, "never charged to the builder");
+    for (const i of [1, 2]) { assert.match(rv[i][4], /<issue_criteria>/); assert.match(rv[i][4], /- foo must handle a null argument without throwing\./); }
+    assert.match(rv[1][4], /answer ONLY for these ids or sections: issue_coverage/);
+    const w2 = world({ reviews: [mis(), mis(), mis(), ok()] });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "review.incomplete"); assert.equal(reviewers(w2).length, 3, "at most three reviewer runs"); assert.equal(w2.merges.length, 0);
+    const w3 = world({ reviews: [conf({ issue_coverage: [{ quote: "foo must handle null arguments without throwing", contract_ids: ["R1"], status: "covered" }] })] });
+    assert.equal((await run(w3)).terminalReason, "merged"); assert.equal(reviewers(w3).length, 1);
+  });
+
   it("a CONFORMS verdict whose rows fail is not conforming (the engine computes the verdict)", async () => {
     const w = world({ reviews: [bad("half done", "CONFORMS"), ok()] });
     assert.equal((await run(w)).terminalReason, "merged");
