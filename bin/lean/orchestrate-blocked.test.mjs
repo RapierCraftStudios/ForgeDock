@@ -120,3 +120,50 @@ describe("#5048: the pool is unreachable only after a failed capacity probe", ()
     assert.deepEqual(notes, ["down", "clear"]);
   });
 });
+
+describe("#5162: failed roots hold their subtree; only real cycles are cycles", () => {
+  const memStore = () => { let st = null; return { load: () => st, save: (s) => { st = JSON.parse(JSON.stringify(s)); }, get: () => st }; };
+  const chain = { 1: "", 2: "**Depends on**: #1", 3: "**Depends on**: #2", 4: "**Depends on**: #1, #3" };
+  const outcome = (rows, n) => rows.find((r) => r.issue === n);
+
+  it("a DAG whose engine-error root ends marks no row dependency cycle; every dependent is held and names the root", async () => {
+    const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 2, pollMs: 5, readBody: async (n) => chain[n], engineErrorRetries: 0, transientRetries: 0,
+      runOne: async () => ({ terminalReason: "engine-error", detail: "boom" }) });
+    assert.ok(!rows.some((r) => /dependency cycle/.test(r.detail ?? "")), JSON.stringify(rows));
+    for (const n of [2, 3, 4]) { assert.equal(outcome(rows, n).outcome, "held"); assert.match(outcome(rows, n).detail, /^blocked by #1 \(engine-error\)$/); }
+  });
+
+  it("a genuine cycle is still labelled dependency cycle; its downstream names a member", async () => {
+    const bodies = { 1: "**Depends on**: #2", 2: "**Depends on**: #1", 3: "**Depends on**: #2" };
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 2, pollMs: 5, readBody: async (n) => bodies[n], runOne: async () => merged });
+    assert.deepEqual(rows.map((r) => r.outcome), ["skipped", "skipped", "skipped"]);
+    assert.equal(outcome(rows, 1).detail, "dependency cycle");
+    assert.equal(outcome(rows, 2).detail, "dependency cycle");
+    assert.match(outcome(rows, 3).detail, /^blocked by #[12] \(dependency cycle\)$/);
+  });
+
+  it("dependents of a needs-human root end held; after the label is removed a resume admits root then dependents in order", async () => {
+    const store = memStore();
+    const first = await orchestrate({ issues: [1, 2, 3, 4], parallel: 2, pollMs: 5, store, readBody: async (n) => chain[n], runOne: async () => ({ terminalReason: "needs-human", code: "ci.red", detail: "red" }) });
+    assert.equal(outcome(first, 1).outcome, "needs-human");
+    for (const n of [2, 3, 4]) assert.deepEqual([outcome(first, n).outcome, outcome(first, n).detail], ["held", "blocked by #1 (needs-human)"]);
+    const started = [];
+    const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 3, pollMs: 5, store, readBody: async (n) => chain[n], issueLabels: async () => [],
+      runOne: async (n) => { started.push(n); await new Promise((r) => setTimeout(r, 5)); return merged; } });
+    assert.deepEqual(started, [1, 2, 3, 4]);
+    assert.ok(rows.every((r) => r.outcome === "merged"), JSON.stringify(rows));
+  });
+
+  it("a resume with the needs-human label still on the root keeps the subtree held", async () => {
+    const store = memStore();
+    await orchestrate({ issues: [1, 2], parallel: 1, pollMs: 5, store, readBody: async (n) => chain[n], runOne: async () => ({ terminalReason: "needs-human", detail: "x" }) });
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, pollMs: 5, store, readBody: async (n) => chain[n], issueLabels: async () => ["needs-human"], runOne: async () => merged });
+    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "held"]);
+  });
+
+  it("the report lists a held subtree with its root and one --requeue command", async () => {
+    const { formatOutcomeLists } = await import("./orchestrate.mjs");
+    const lines = formatOutcomeLists([{ issue: 1, outcome: "engine-error" }, { issue: 2, outcome: "held", root: 1 }, { issue: 3, outcome: "held", root: 1 }]);
+    assert.ok(lines.some((l) => /held subtree: #1 \(engine-error\) holds #2 #3; release: forgedock orchestrate --requeue <batch> 1/.test(l)), lines.join("\n"));
+  });
+});
