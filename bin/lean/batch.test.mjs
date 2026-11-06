@@ -1513,13 +1513,13 @@ describe("#5167 early batch health in runBatch", () => {
     let id = null;
     const lines = await capture(async () => {
       const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
-      await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
-      assert.deepEqual(timers.map((t) => t.ms > 14 * 60000 && t.ms <= 15 * 60000 ? 15 : t.ms > 59 * 60000 ? 60 : t.ms), [15, 60], "T+15 and T+60 armed");
-      await timers[0].fn();
-      await until(() => existsSync(join(deps.batchRoot, id, "health.json")) && JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt);
-      await until(() => notes.length === 1);
-      gate.open();
-      await run;
+      try {
+        await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
+        assert.deepEqual(timers.map((t) => t.ms > 14 * 60000 && t.ms <= 15 * 60000 ? 15 : t.ms > 59 * 60000 ? 60 : t.ms), [15, 60], "T+15 and T+60 armed");
+        await timers[0].fn();
+        await until(() => existsSync(join(deps.batchRoot, id, "health.json")) && JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, 5000);
+        await until(() => notes.length === 1, 5000);
+      } finally { gate.open(); await run; }
     });
     assert.ok(lines.some((l) => /^health checks: T\+15 \d\d:\d\dZ, T\+60 \d\d:\d\dZ, and at batch end; forgedock status --batch /.test(l)), lines.join("\n"));
     const alerts = lines.filter((l) => /^BATCH UNHEALTHY /.test(l));
