@@ -34,6 +34,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import * as batchHealth from "./lean/batch-health.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
@@ -1675,7 +1676,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       }
       for (const [n, l] of baseWaits) sink.line(`held: #${n} waits for ${l.map((w) => `#${w.dep} (${w.sha.slice(0, 10)}) on ${w.base}`).join(", ")}; admitted once the commit lands`);
       unmet = unmet.filter((x) => x.kind !== "commit");
-      if (unmet.length) throw new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
+      if (unmet.length) {
+        const refusal = new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
+        await alertRefusal({ root, issues, repo, cwd, argv, message: refusal.message, unmet, sink, gh: gateIo.gh, deps }); // #5167: recorded for `forgedock status`
+        throw refusal;
+      }
     }
     const base = deps.batchId ?? batchMod.newBatchId();
     batch = batchMod.openBatch(root, base);
@@ -1693,6 +1698,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
+  // #5167: early batch health at T+15/T+60 after plan.created and at batch end; the first unhealthy result alerts once
+  const healthConf = deps.healthConfig ?? readHealthConfig(cwd), healthNow = deps.healthNow ?? (() => Date.now());
+  const healthCreated = Number.isFinite(Date.parse(plan?.created ?? "")) ? Date.parse(plan.created) : healthNow();
+  sink.line(batchHealth.scheduleLine(batch.id, healthCreated, healthConf.checksMin));
   const dir = deps.dir ?? runDir();
   migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
@@ -1836,7 +1845,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
   const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
   const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
-    epics: argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : [])) };
+    epics: epicsOf(argv) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
@@ -1957,6 +1966,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
+  const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
+    alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
+  let healthTimers = { cancel: () => {} };
+  try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -2012,7 +2025,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
-  } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
+  } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); healthTimers.cancel(); }
   try { await integration?.settle?.(); } catch { /* best effort: the state block is the record */ }
   const report = ["\n" + formatTable(rows), ...formatOutcomeLists(rows)];
   const pfLine = formatPrefilterSummary(rows);
@@ -2055,6 +2068,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   let unfinished = false;
   try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
 
@@ -2445,6 +2459,29 @@ export function readOrchestration(cwd = process.cwd()) {
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
       unionGlobs: String(o.base_sync_union_globs ?? o.union_globs ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean) } };
+}
+
+/** `--epic N` operands of an orchestrate argv (#4965, #5167). */
+const epicsOf = (argv) => argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : []));
+
+/**
+ * #5167: a refused milestone start leaves no batch dir: record it under the batch root for `forgedock status` and send
+ * the BATCH UNHEALTHY channels. Best effort: the caller rethrows the refusal unchanged.
+ */
+async function alertRefusal({ root, issues, repo, cwd, argv, message, unmet, sink, gh, deps }) {
+  try {
+    const rec = { at: new Date((deps.healthNow ?? Date.now)()).toISOString(), issues, repo, cwd, message, unmet: unmet.map(({ issue, dep, base }) => ({ issue, dep, base })) };
+    try { batchHealth.recordRefusal(root, rec); } catch { /* the stderr line still reports it */ }
+    const config = deps.healthConfig ?? readHealthConfig(cwd);
+    const health = batchHealth.evaluateHealth(null, { refused: rec, config, repo });
+    const text = batchHealth.formatAlert({ batchId: "(refused launch)", checkpoint: "launch", health });
+    await batchHealth.deliverAlert({ text, batchId: null, health, sink, gh: gh ? (a) => gh(a) : null, repo, config, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) });
+  } catch { /* never mask the refusal */ }
+}
+
+/** forge.yaml `orchestrate.health.*` (flattened to `orchestrate.*`) and `notify.command` (#5167); defaults when unset. */
+export function readHealthConfig(cwd = process.cwd()) {
+  try { return batchHealth.parseHealthConfig(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))); } catch { return batchHealth.parseHealthConfig(null); }
 }
 
 /**

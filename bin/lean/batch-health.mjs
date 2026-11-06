@@ -199,8 +199,12 @@ export function batchStatusLines(root, id, { now = Date.now() } = {}) {
   return out;
 }
 
-/** `forgedock status` lines: unhealthy batches still unresolved (no report, or alerted within a day) and recent refusals. */
-export function statusLines(root, { now = Date.now() } = {}) {
+/**
+ * `forgedock status` lines: unhealthy batches still unresolved (no report, or alerted within a day) and recent refusals;
+ * with `batch`, that one batch's health.
+ */
+export function statusLines(root, { now = Date.now(), batch = null } = {}) {
+  if (batch) return batchStatusLines(root, batch, { now });
   const out = [];
   for (const id of listBatches(root)) {
     try {

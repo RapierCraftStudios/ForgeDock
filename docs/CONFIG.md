@@ -471,6 +471,43 @@ orchestration:
 
 ---
 
+## `orchestrate.health` and `notify` (OPTIONAL)
+
+Early batch health (#5167). `forgedock orchestrate` checks each batch at T+15 and T+60 minutes after it was created (`plan.json` `created`), and once more when the batch ends. When the batch starts, it prints the schedule: `health checks: T+15 14:05Z, T+60 14:50Z, and at batch end; forgedock status --batch <id>`. The first unhealthy check raises one `BATCH UNHEALTHY <id>` alert, which lists the top causes and the exact recovery commands (`--requeue`, a relaunch, `--resume`, `--cancel`). `health.json` in the batch dir records the checkpoints already done and the alert, so a daemon restart arms only the remaining checks and a batch never alerts twice. Checks and alerts never fail, delay or change the batch.
+
+Causes: `root-failed` (a root issue, meaning one with no dependency inside the batch, ended non-merged); `terminal-share` (the share of rows ended `skipped`/`held`/`engine-error`/`needs-human` or another non-merged outcome except `invalid`/`decomposed` is at or above the threshold, with nothing merged); `stalled` (0 lanes running while issues are pending, operator-held issues excepted); `refused` (the launch was refused).
+
+```yaml
+orchestrate:
+  health:
+    root_failed: true      # any root ended non-merged is unhealthy (default true)
+    terminal_share: 0.5    # 0..1, terminal-non-merged share with 0 merged (default 0.5)
+    stalled: true          # 0 running while pending > 0 (default true)
+    issue: 123             # comment target; default: the batch's --epic issue(s); a milestone gets no comment
+    checks_min: [15, 60]   # minutes after launch (default [15, 60])
+notify:
+  command: "curl -fsS -H 'content-type: application/json' -d @- https://hooks.example/forge"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `orchestrate.health.root_failed` | `true` | Raise `root-failed`. |
+| `orchestrate.health.terminal_share` | `0.5` | Threshold for `terminal-share`. |
+| `orchestrate.health.stalled` | `true` | Raise `stalled`. |
+| `orchestrate.health.issue` | none | Issue to comment on. When unset, the alert comments on each `--epic` issue. |
+| `orchestrate.health.checks_min` | `[15, 60]` | Timed checkpoints, in minutes after launch. |
+| `notify.command` | none | Shell command run once per alert. It gets the alert JSON (`{alert, batch, repo, text, causes, recovery}`) on stdin and `FORGEDOCK_ALERT=BATCH_UNHEALTHY`, `FORGEDOCK_ALERT_BATCH` and `FORGEDOCK_ALERT_TEXT` in its env. It is killed after 30 s. A failure only prints a `health: notify.command failed` line. |
+
+The keys are flattened one level by the parser, the same as `orchestrate.drift.*`. Health keys alone do not turn drift on.
+
+Every channel is best effort: the runner line, the GitHub comment (marker `FORGE:BATCH-HEALTH`), `notify.command`, and the `forgedock status` line. `forgedock status` lists the unhealthy batches that are unresolved (no report yet, or alerted within the last day) and the launch refusals from the last day. `forgedock status --batch <id>` shows that batch's health (healthy, or unhealthy with causes and recovery) and its pending checkpoints.
+
+A refused milestone start (#4659, `parallel milestone start refused: …`) still exits 1 with the error on stderr and creates no batch dir. It is also recorded in `<batch root>/refusals.json` (the newest 20 are kept) and sends the same alert, with the merge-the-dependency or `--force "<reason>"` relaunch.
+
+**Commands that use this section**: `forgedock orchestrate`, `forgedock status`
+
+---
+
 ## `decisions` (OPTIONAL)
 
 Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). The issue-watch stage (#4793) calls `settle` for the open `needs-human` issues a watch selects: it runs when `mode: live` (a repo setting: every watch of the repo runs the stage), or when the watch sets `sweep_needs_human: true`; `policy` and `human_only` are also read by prodwatch (`loadPolicy`). The parser has one nesting level and no arrays, so lists are comma-separated.
