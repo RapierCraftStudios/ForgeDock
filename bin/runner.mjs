@@ -1352,6 +1352,27 @@ export function detectUsageLimit(stdout, output = "") {
   return hasUsageLimitResetClause(output || "");
 }
 
+// forge#5168: the claude CLI's own login/authentication failure texts. Literal
+// alternatives only (linear on untrusted input).
+const AUTH_FAILURE_RE = /Failed to authenticate|authentication_error|OAuth token (?:has )?expired|reached its time limit and cannot be renewed|Invalid API key|Please run \/login/i;
+
+/**
+ * Detects whether a failed CLI run was an authentication failure of the claude
+ * login (forge#5168): an expired or invalid login is an account condition, not
+ * a transient engine error. With an envelope on stdout, it must be
+ * `is_error: true` with a `result` naming the failure; without one, the plain
+ * combined output must. `stdout` is parsed ALONE (forge#2422); never throws.
+ *
+ * @param {string} stdout - raw stdout of the CLI run
+ * @param {string} [output] - combined stdout+stderr, for the plain-text fallback
+ * @returns {boolean}
+ */
+export function detectAuthFailure(stdout, output = "") {
+  const env = parseCliEnvelope(stdout);
+  if (env) return env.is_error === true && typeof env.result === "string" && AUTH_FAILURE_RE.test(env.result);
+  return typeof output === "string" && AUTH_FAILURE_RE.test(output);
+}
+
 /**
  * Best-effort extraction of a Claude CLI session-limit reset time from
  * captured stdout/stderr (forge#2241). The CLI's own session-limit message
@@ -1844,6 +1865,9 @@ export function runCliBackend({
       // default when the reset time itself is missing or unparseable. The
       // engine, not the runner, owns that default — no epoch is fabricated here.
       if (isUsageLimit) err.usageLimit = true;
+      // forge#5168: a failed login (never when the usage limit already matched,
+      // which keeps precedence) lets the lane defer as `backend.auth`.
+      else if (detectAuthFailure(stdout, output)) err.authFailure = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so
