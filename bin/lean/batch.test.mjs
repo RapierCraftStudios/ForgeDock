@@ -1485,6 +1485,7 @@ describe("#5161 transient engine-error retries", () => {
 });
 
 describe("#5168: --requeue accepts engine-error; a claude login failure is held, not an engine-error", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
   it("#5168 --requeue accepts a final engine-error outcome and resets its engine-error count", async () => {
     const b = openBatch(tmpDir("batch-requeue-5168-"), "b1");
     b.writePlan({ argv: ["1"], repo: "o/r" });

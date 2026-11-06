@@ -1092,7 +1092,7 @@ export async function runCore(o) {
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) {
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}) }, e.deferCode); // #4662
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}) }, e.deferCode); // #4662; #5168 backendId
     return finish("engine-error", `cannot read issue: ${e.message}`);
   }
   const priorState = stateOf(iss.body); // #4400: the last run's end (the lease write keeps its terminal fields), read before this run ends
