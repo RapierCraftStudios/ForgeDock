@@ -488,7 +488,7 @@ export async function runCore(o) {
     }
     if (["merged", "invalid", "needs-human", "budget-exceeded"].includes(reason)) {
       if (reason === "budget-exceeded") T.close = ["left open", "recoverable budget.exceeded"]; // #4505: not a human escalation
-      else if (reason === "merged") T.close = [extra.close === "partial" ? "issue closed (partial)" : "issue closed (completed)", "label workflow:merged"];
+      else if (reason === "merged") T.close = [extra.keptOpen ? "left open (follow-up pending)" : extra.close === "partial" ? "issue closed (partial)" : "issue closed (completed)", "label workflow:merged"]; // #5159
       else if (reason === "invalid" && extra.close === "already-fixed") T.close = ["issue closed (completed)", "already fixed on the base"]; // #5080
       else if (reason === "invalid") T.close = ["issue closed (not planned)", "label workflow:invalid"];
       else { T.close = ["left open", "label needs-human"]; T.anomalies.push(`needs-human: ${String(detail).split("\n")[0].slice(0, 300)}`); }
@@ -3063,7 +3063,9 @@ export async function runCore(o) {
     }
     const partial = closing.reason === "partial";
     if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
-    if (partial) {
+    if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is
+      if (partial || closing.tracked.length) try { await post("FORGE:TRACKED", `## Left open: follow-up pending\nMerged by PR #${pr}; the issue stays open until the pending follow-up is filed (FORGE:FOLLOWUP_PENDING).${partial ? " The investigation's stated question is not answered in this change." : ""}${closing.tracked.length ? ` Already tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body links them too */ }
+    } else if (partial) {
       try { await post("FORGE:TRACKED", `## Closed as partial\nThe investigation's stated question is not answered in this change (PR #${pr}); carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
     } else if (closing.tracked.length) {
       try { await post("FORGE:TRACKED", `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
@@ -3089,7 +3091,7 @@ export async function runCore(o) {
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
     let mergedTo = null; // #4711: FORGE:STATE records the lane and merge commit, so a dependent's check needs no PR search
     if (lane) try { const sha = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeCommit"])) || "{}").mergeCommit?.oid; if (typeof sha === "string" && sha) mergedTo = { lane, pr, sha }; } catch { /* the PR-ancestry rule still applies */ }
-    return await finish("merged", `PR #${pr}`, { pr, ...(mergedTo ? { mergedTo } : {}), ...(partial ? { close: "partial" } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
+    return await finish("merged", `PR #${pr}`, { pr, ...(mergedTo ? { mergedTo } : {}), ...(partial ? { close: "partial" } : {}), ...(keepOpen ? { keptOpen: true } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
   } catch (e) {
     if (e?.deferUsageLimit) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");

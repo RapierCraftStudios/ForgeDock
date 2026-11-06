@@ -27,3 +27,21 @@ export function resolveCredential(name, { env = process.env, keychain = defaultK
   if (v !== undefined && v !== null && String(v) !== "") return String(v);
   try { const k = keychain(String(name), platform); return k === undefined || k === null || String(k) === "" ? null : String(k); } catch { return null; }
 }
+
+/**
+ * #5159: a keychain lookup memoised per name for `ttlMs` (a miss or a failure is cached as null too), so a resolver run
+ * on every request (#5144) spawns `secret-tool`/`security` at most once per TTL instead of on every HTTP call.
+ */
+export function memoKeychain({ keychain = defaultKeychain, ttlMs = 60000, now = Date.now } = {}) {
+  const cache = new Map();
+  return (name, platform) => {
+    const key = `${platform ?? ""}\u0000${name}`;
+    const hit = cache.get(key);
+    const t = now();
+    if (hit && t - hit.at < ttlMs) return hit.value;
+    let value = null;
+    try { const k = keychain(name, platform); value = k === undefined || k === null || String(k) === "" ? null : String(k); } catch { value = null; }
+    cache.set(key, { at: t, value });
+    return value;
+  };
+}
