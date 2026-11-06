@@ -2028,8 +2028,10 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.ok(w.hotCalls.length >= 2);
     assert.ok(w.hotCalls.every((c) => c.config === null || /forge\.yaml$/.test(c.config)));
     assert.equal(w.comments.join("\n").split("hotspot_config_missing").length - 1, 1);
-    const ok = hworld({ enabled: true, files: [], config_source: "/h/forge.yaml" }, [{ enabled: true, files: [], config_source: "/h/forge.yaml" }]);
-    await run(ok); assert.ok(!ok.comments.join("\n").includes("hotspot_config_missing"));
+    const host = tmpDir("host-"); writeFileSync(join(host, "forge.yaml"), "maintenance: {}\n");
+    const ok = hworld({ enabled: true, files: [], config_source: join(host, "forge.yaml") }, [{ enabled: true, files: [], config_source: join(host, "forge.yaml") }]);
+    await run(ok, { cwd: host }); assert.ok(!ok.comments.join("\n").includes("hotspot_config_missing"));
+    assert.ok(ok.hotCalls.length >= 2 && ok.hotCalls.every((c) => c.config === join(host, "forge.yaml") && c.cwd === "/wt/lean-7"), "the host checkout's forge.yaml, run in the worktree");
   });
 });
 

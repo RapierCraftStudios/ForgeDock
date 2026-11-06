@@ -408,7 +408,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     contextFacts: (args) => gatherContextFacts({ ...args, io: { gh: run("gh"), git: run("git"), exists: async (p) => existsSync(p) } }),
     /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given; config = the host forge.yaml, #5163); null on any failure. */
     async hotspots({ cwd, base = null, paths = [], config = null }) {
-      const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), ...(config ? ["--config", config] : []), "--", ...paths];
+      const args = [script("hotspots.sh"), ...(config ? ["--config", config] : []), ...(base ? ["--base", base] : []), "--", ...paths];
       try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
     /** #4322: tests enumerating the members of the given paths, and new members those tests miss (bin/lean/enumerating.mjs); [] on failure. */
