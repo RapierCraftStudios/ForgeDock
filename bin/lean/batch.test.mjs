@@ -1526,7 +1526,7 @@ describe("#5167 early batch health in runBatch", () => {
     assert.equal(alerts.length, 1, "alerted once (T+15), not again at batch end");
     assert.match(alerts[0], /\(T\+15\)/);
     assert.match(alerts[0], /cause: root-failed: root #1 engine-error/);
-    assert.match(alerts[0], /recovery:\n {4}forgedock orchestrate 1 --repo o\/r/);
+    assert.match(alerts[0], /recovery:\n {4}forgedock orchestrate 1 2 --repo o\/r/);
     assert.match(alerts[0], new RegExp(`forgedock orchestrate --cancel ${id}`));
     assert.equal(comments.length, 1);
     assert.deepEqual(comments[0].slice(0, 5), ["issue", "comment", "77", "-R", "o/r"]);
