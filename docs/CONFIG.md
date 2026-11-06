@@ -438,6 +438,7 @@ orchestration:
 | `max_concurrent` | integer | No | Max concurrent top-level `/work-on` dispatches. It does not bound cascade growth; under `policy: all` it raises drain and spawn throughput together. Default: 12. |
 | `breaker.errors` / `breaker.window_min` | integer | No | `forgedock orchestrate` circuit breaker (#4121): after `errors` engine-errors within `window_min` minutes the batch stops admitting lanes, lets running lanes finish, and keeps the rest pending for `--resume`. `errors: 0` turns it off. Default: 3 in 30 |
 | `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held, gh unavailable) before its row is final. `host.busy` and `sandbox.capacity` (sandbox pool full) deferrals are not capped. Default: 3 |
+| `transient_retries` | integer | No | `forgedock orchestrate` (#5161): backoff retries of an issue whose lane ended `engine-error` with a transport or gateway failure in its detail (curl `returned error: 5xx`, `HTTP/1.1 5xx`, `Bad Gateway`, `Service Unavailable`, `overloaded`, connection reset/refused/timeout). Delays 30s, 2m, 8m, then 15m each; dependents stay pending meanwhile. Not counted against the single engine-error relaunch; once spent, the row ends `engine-error`. Every such error still counts toward the breaker. `0` turns transient retries off. Default: 4 |
 | `blocked_label` | string | No | `forgedock orchestrate` (#4773): an open issue carrying this label is admitted to the batch but not dispatched; removing the label releases it on the next scheduler pass. A `Blocked by #N` / `Depends on #N` line in the body of a trusted author (OWNER, MEMBER, COLLABORATOR or a bot) is a DAG edge to #N, and `--add` prints the edges it created. Empty turns the label off. Default: `blocked` |
 | `auto_add_children` | string | No | `forgedock orchestrate` (#4965): which children a running batch adds by itself. `off` (no auto-adds; a decomposed lane's sub-issues stay out too), `decomposed` (a decomposed lane's sub-issues join, as before), `epic` (also the open children of every batch issue and of each `--epic N`, found by a `**Parent**: #P` line, the `parent` field or GitHub sub-issues, including children filed after the batch started) or `all`. Only children whose author is trusted (an owner, member or collaborator, or a bot, the `Blocked by` rule) are auto-added; any other is skipped with a logged row. Children labelled `needs-human` and children another live batch of the repo still holds are not added. Each pass that adds posts one batch decision and one `added` row listing the children and edges. `forgedock orchestrate --auto-children <mode>` overrides it per batch and `--resume` keeps it. Default: `decomposed` |
 | `auto_add_children_poll_s` | integer | No | Seconds between child scans for `epic`/`all` (one `gh issue list` per scan). Default: `120` |
@@ -467,6 +468,43 @@ orchestration:
 **CLI overrides**: `--policy`, `--max-generation`, `--token-budget` on `/orchestrate` take precedence over these keys for a single invocation — see `commands/orchestrate/config.md` → "Cascade Policy CLI Flags".
 
 **Commands that use this section**: `orchestrate`
+
+---
+
+## `orchestrate.health` and `notify` (OPTIONAL)
+
+Early batch health (#5167). `forgedock orchestrate` checks each batch at T+15 and T+60 minutes after it was created (`plan.json` `created`), and once more when the batch ends. When the batch starts, it prints the schedule: `health checks: T+15 14:05Z, T+60 14:50Z, and at batch end; forgedock status --batch <id>`. The first unhealthy check raises one `BATCH UNHEALTHY <id>` alert, which lists the top causes and the exact recovery commands (`--requeue`, a relaunch, `--resume`, `--cancel`). `health.json` in the batch dir records the checkpoints already done and the alert, so a daemon restart arms only the remaining checks and a batch never alerts twice. Checks and alerts never fail, delay or change the batch.
+
+Causes: `root-failed` (a root issue, meaning one with no dependency inside the batch, ended non-merged); `terminal-share` (the share of rows ended `skipped`/`held`/`engine-error`/`needs-human` or another non-merged outcome except `invalid`/`decomposed` is at or above the threshold, with nothing merged); `stalled` (0 lanes running while issues are pending, operator-held issues excepted); `refused` (the launch was refused).
+
+```yaml
+orchestrate:
+  health:
+    root_failed: true      # any root ended non-merged is unhealthy (default true)
+    terminal_share: 0.5    # 0..1, terminal-non-merged share with 0 merged (default 0.5)
+    stalled: true          # 0 running while pending > 0 (default true)
+    issue: 123             # comment target; default: the batch's --epic issue(s); a milestone gets no comment
+    checks_min: [15, 60]   # minutes after launch (default [15, 60])
+notify:
+  command: "curl -fsS -H 'content-type: application/json' -d @- https://hooks.example/forge"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `orchestrate.health.root_failed` | `true` | Raise `root-failed`. |
+| `orchestrate.health.terminal_share` | `0.5` | Threshold for `terminal-share`. |
+| `orchestrate.health.stalled` | `true` | Raise `stalled`. |
+| `orchestrate.health.issue` | none | Issue to comment on. When unset, the alert comments on each `--epic` issue. |
+| `orchestrate.health.checks_min` | `[15, 60]` | Timed checkpoints, in minutes after launch. |
+| `notify.command` | none | Shell command run once per alert. It gets the alert JSON (`{alert, batch, repo, text, causes, recovery}`) on stdin and `FORGEDOCK_ALERT=BATCH_UNHEALTHY`, `FORGEDOCK_ALERT_BATCH` and `FORGEDOCK_ALERT_TEXT` in its env. It is killed after 30 s. A failure only prints a `health: notify.command failed` line. |
+
+The keys are flattened one level by the parser, the same as `orchestrate.drift.*`. Health keys alone do not turn drift on.
+
+Every channel is best effort: the runner line, the GitHub comment (marker `FORGE:BATCH-HEALTH`), `notify.command`, and the `forgedock status` line. `forgedock status` lists the unhealthy batches that are unresolved (no report yet, or alerted within the last day) and the launch refusals from the last day. `forgedock status --batch <id>` shows that batch's health (healthy, or unhealthy with causes and recovery) and its pending checkpoints.
+
+A refused milestone start (#4659, `parallel milestone start refused: …`) still exits 1 with the error on stderr and creates no batch dir. It is also recorded in `<batch root>/refusals.json` (the newest 20 are kept) and sends the same alert, with the merge-the-dependency or `--force "<reason>"` relaunch.
+
+**Commands that use this section**: `forgedock orchestrate`, `forgedock status`
 
 ---
 
@@ -1185,7 +1223,7 @@ decomposition:
 
 **With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
 
-The lean (core) path reads the same key (#4337): with `close_parent: true` it closes the parent at decomposition as `not planned`, keeps `workflow:decomposed` and lists the sub-issues in the closing comment; dependents still wait on the sub-issues, and a trusted `FORGE:DECOMPOSED:REVOKED` reopens it. With the default `false` the lean parent stays open.
+The lean (core) path reads the same key (#4337): with `close_parent: true` it closes the parent at decomposition as `completed` (#5152; scope moved to the sub-issues, not dropped), keeps `workflow:decomposed` and lists the sub-issues in the closing comment; dependents still wait on the sub-issues, and a trusted `FORGE:DECOMPOSED:REVOKED` reopens it. With the default `false` the lean parent stays open.
 
 **Limitation**: `--retry` and engine resume refuse closed issues, so a closed decomposed parent cannot be re-run. It has nothing left to run; work on its open children instead.
 

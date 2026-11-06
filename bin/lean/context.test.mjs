@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
-import { gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments, subjectTerms, subjectHistory, MAX_SUBJECT_ITEMS, MAX_SUBJECT_QUERIES } from "./context.mjs";
+import { closedResult, gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments, subjectTerms, subjectHistory, MAX_SUBJECT_ITEMS, MAX_SUBJECT_QUERIES } from "./context.mjs";
 
 const REPO = "o/r";
 const BOT = { author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
@@ -568,5 +568,15 @@ describe("#5085: subject history and recall status", () => {
     assert.deepEqual(ok.recall, { present: true, reason: "" });
     assert.ok(!renderContextRecord(compileContextPack(ok), { mode: "on", laneType: "first" }).includes("Recall index"));
     assert.equal(compileContextPack({ issue: 1, links: [], attempts: [], ledger: [], facts: [], recall: absent.recall }).recall.present, false, "the empty pack carries it too");
+  });
+});
+
+describe("#5152 builder context: delivered or moved scope never reads as dropped", () => {
+  it("a closed workflow:merged or workflow:decomposed dependency is completed whatever its stateReason (legacy not_planned too)", () => {
+    assert.equal(closedResult({ stateReason: "not_planned", labels: ["workflow:merged"] }), "completed");
+    assert.equal(closedResult({ stateReason: "not_planned", labels: ["bug", "workflow:decomposed"] }), "completed");
+    assert.equal(closedResult({ stateReason: "not_planned", labels: ["workflow:invalid"] }), "not_planned", "dropped scope keeps its reason");
+    assert.equal(closedResult({ stateReason: "completed", labels: [] }), "completed");
+    assert.equal(closedResult({ stateReason: null }), "closed");
   });
 });

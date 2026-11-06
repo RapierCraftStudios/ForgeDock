@@ -159,6 +159,31 @@ describe("router", () => {
     assert.match(res.stdout, /unmanaged|not active/i);
   });
 
+  it("#5167 status shows unhealthy batches and refusals; --batch <id> shows one batch's health, not a directory", () => {
+    const home = tmpDir("fd-bh-"), root = tmpDir("fd-bh-root-"), cwd = tmpDir("fd-bh-cwd-");
+    const id = "b20260101-000000-1", dir = join(root, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "plan.json"), JSON.stringify({ v: 1, id, argv: ["1"], created: new Date().toISOString() }));
+    const at = new Date().toISOString();
+    writeFileSync(join(dir, "health.json"), JSON.stringify({ checks: { "T+15": at }, alertedAt: at, alert: `BATCH UNHEALTHY ${id} (T+15)\n  cause: root-failed: root #1 engine-error [#1]\n  recovery:\n    forgedock orchestrate --cancel ${id}`,
+      last: { at, checkpoint: "T+15", healthy: false, causes: [{ code: "root-failed", issues: [1], detail: "root #1 engine-error" }], recovery: [] } }));
+    writeFileSync(join(root, "refusals.json"), JSON.stringify([{ at, issues: [7], message: "parallel milestone start refused: #7 depends on #9" }]));
+    const extraEnv = { FORGEDOCK_BATCH_DIR: root };
+    const all = runCli(["status"], { home, cwd, extraEnv });
+    assert.equal(all.status, 0, all.stderr);
+    assert.match(all.stdout, new RegExp(`BATCH UNHEALTHY ${id} \\(since .*\\): root #1 engine-error — forgedock status --batch ${id}`));
+    assert.match(all.stdout, /LAUNCH REFUSED .*: parallel milestone start refused: #7 depends on #9/);
+    writeFileSync(join(cwd, "forge.yaml"), "project:\n", "utf-8");
+    assert.equal(runCli(["disable"], { home, cwd }).status, 0);
+    const one = runCli(["status", "--batch", id, cwd], { home, extraEnv });
+    assert.equal(one.status, 0, one.stderr);
+    assert.match(one.stdout, new RegExp(`batch ${id}: UNHEALTHY since`));
+    assert.match(one.stdout, /cause: root-failed: root #1 engine-error/);
+    assert.match(one.stdout, /next checks: T\+60/);
+    assert.match(one.stdout, /directory +managed-optedout/, "the positional dir, not the --batch value, is the status directory");
+    assert.doesNotMatch(one.stdout, new RegExp(`LAUNCH REFUSED`));
+  });
+
   it("install restores commands in an already managed directory", () => {
     const home = tmpDir("fd-managed-install-home-");
     const cwd = tmpDir("fd-managed-install-cwd-");

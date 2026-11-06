@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -493,6 +493,38 @@ describe("conformance review: the engine computes the verdict from complete rows
   });
   it("incomplete: a coverage quote paraphrased instead of verbatim", () => {
     assert.equal(decide({ ...good, issue_coverage: [{ quote: "scrape should release money on rate limits", status: "covered" }] }, ctx).state, "review.incomplete");
+  });
+  it("#5164 a near-verbatim coverage misquote is requoted to the criterion line and the review completes", () => {
+    const issue = "## Acceptance Criteria\n- [ ] Every manifest step kind from #38826 compiles to engine nodes, with a test per kind.\n- [ ] The scrape route must release the spend reservation on 429.";
+    const k = { ...C, requirements: [{ id: "R1", quote: "The scrape route must release the spend reservation on 429.", disposition: "deliver" }, { id: "R2", quote: Q2, disposition: "deliver" }] };
+    const quote = "Every manifest step kind from #38829 compiles to engine node";
+    const rv = { ...good, issue_coverage: [{ quote, contract_ids: ["R1"], status: "covered" }, { quote: "The scrape route must release the spend reservation on 429.", status: "covered" }] };
+    const d = decide(rv, { ...ctx, contract: k, issueText: `${issue}\n${ISSUE}` });
+    assert.equal(d.state, "conforms");
+    assert.equal(d.review.issue_coverage[0].quote, "Every manifest step kind from #38826 compiles to engine nodes, with a test per kind.");
+    assert.equal(d.review.issue_coverage[0].requoted, quote, "the substitution is recorded in the review");
+  });
+  it("#5164 matchCriterion: loose prefix or a unique token match; a paraphrase, an ambiguous or a short quote matches nothing", () => {
+    const t = "- [ ] Every manifest step kind from #38826 compiles to engine nodes, with a test per kind.\n- The scrape route must release the spend reservation on 429.\n- The search route must release the spend reservation on 429.";
+    assert.deepEqual(criterionLines(t)[0], "Every manifest step kind from #38826 compiles to engine nodes, with a test per kind.");
+    assert.equal(matchCriterion("every manifest step kind from #1 compiles to engine node with a test per kinds", t), criterionLines(t)[0], "prefix tier");
+    assert.equal(matchCriterion("The scrape route must release the spend reservations on 429", t), "The scrape route must release the spend reservation on 429.");
+    assert.equal(matchCriterion("route must release the spend reservation", t), null, "two lines tie");
+    assert.equal(matchCriterion("scrape should release money on rate limits", t), null);
+    assert.equal(matchCriterion("engine node", t), null);
+  });
+  it("#5164 a quote that matches no criterion still fails as incomplete, naming the nearest criterion line; it is re-askable, a real gap is not", () => {
+    const d = decide({ ...good, issue_coverage: [{ quote: "scrape should release money on rate limits", status: "covered" }] }, ctx);
+    assert.equal(d.state, "review.incomplete");
+    assert.equal(d.review.issue_coverage[0].requoted, undefined);
+    const problems = d.failures.map((f) => f.detail);
+    assert.match(problems[0], /nearest criterion line: "The scrape route must release/);
+    assert.ok(reaskable(problems));
+    assert.ok(reaskable(["R1: evidence path /layout.tsx does not exist"]), "#4327 evidence paths stay re-askable");
+    assert.ok(!reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]));
+    assert.ok(!reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(!reaskable([]));
+    assert.deepEqual(fillEngineRows(good, ctx).issue_coverage, good.issue_coverage, "verbatim rows are untouched");
   });
   it("omission: an issue requirement missing from or narrowed by the contract", () => {
     const d = decide({ ...good, issue_coverage: [...good.issue_coverage.slice(0, 2), { quote: "Billing pricing is unchanged.", status: "missing" }] }, ctx);
@@ -1366,6 +1398,12 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
     for (const choice of ["Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)"]) {
       assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
     }
+  });
+  it("#5157 negated verbs and bare negators before a preposition still weaken e2e", () => {
+    for (const choice of ["We do not need to run e2e; mocked route tests cover it", "will not rely on e2e, mock the API", "not with e2e: unit tests used", "not for e2e, unit tests used", "no need to run e2e; mocks cover it", "no need for e2e, mocks cover it"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)", source: "doc" }] }), []);
   });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);

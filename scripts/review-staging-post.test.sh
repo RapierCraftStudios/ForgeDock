@@ -19,12 +19,12 @@ OTHER=fedcba9876543210fedcba9876543210fedcba98
 blk() { awk -v n="$1" '$0 == "# BEGIN " n {f=1; next} $0 == "# END " n {f=0} f' "$POST"; }
 
 # (1) the fences now live only in the script: the blocks exist, the spec no longer carries them
-for b in panel-guard delivery-check test-gate-extract test-gate-verdict; do
+for b in delivery-fetch panel-guard delivery-check test-gate-extract test-gate-verdict; do
   [ -n "$(blk "$b")" ] && ok || bad "block $b missing from review-staging-post.sh"
 done
 if grep -qE 'ACTUAL_AGENT_COUNT=\$\(gh api|MISSING_AGENT_COMMENTS=""|GATE_VERDICT_INVALID=0' "$SPEC"; then bad "the spec must not carry a copy of the panel-guard, delivery or verdict-handling fence"; else ok; fi
-# 6.75 carries the findings-block lookahead; the 6.75 empty-list guard precedes the per-domain loop
-blk delivery-check | grep -qF 'count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->' && ok || bad "6.75 count must require the findings block"
+# 6.75 carries the findings-block lookahead (in the shared cached-listing counter); the 6.75 empty-list guard precedes the per-domain loop
+blk delivery-fetch | grep -qF 'count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->' && ok || bad "6.75 count must require the findings block"
 G=$(blk delivery-check | grep -n 'launched-agent list is empty or unreadable' | head -1 | cut -d: -f1); L=$(blk delivery-check | grep -n '^for AGENT_DOMAIN in' | head -1 | cut -d: -f1)
 [ -n "$G" ] && [ -n "$L" ] && [ "$G" -lt "$L" ] && ok || bad "6.75 empty-list guard must precede the for AGENT_DOMAIN loop"
 # the producer never coerces an absent marker to SKIP; the catch-all arm never sets SKIP
@@ -38,7 +38,8 @@ bash "$POST" delivery --repo o/r --pr 1 >/dev/null 2>&1; [ $? -eq 2 ] && ok || b
 bash "$POST" test-gate --repo o/r --pr 1 --sd "$TMP/u" --output x --prs-file "$TMP/none" >/dev/null 2>&1; [ $? -eq 2 ] && ok || bad "unreadable --prs-file must exit 2"
 bash "$POST" test-gate --repo o/r --pr 1 --sd "$TMP/u" --output x --prs-file /dev/null --posture lax >/dev/null 2>&1; [ $? -eq 2 ] && ok || bad "unknown --posture must exit 2"
 
-# gh stub: $FIX/comments.json is the PR's comment list; posted bodies and edits go to $FIX/posted / $FIX/edits
+# gh stub: $FIX/comments.json is the PR's comment list ($FIX/comments.<k>.json, when present, answers the k-th listing; no file = API error);
+# each listing is logged to $FIX/api_calls; posted bodies and edits go to $FIX/posted / $FIX/edits
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -49,17 +50,21 @@ case "$1 $2" in
   "label create") exit 0 ;;
   "pr view") [ -f "$F/head" ] && { cat "$F/head"; exit 0; }; exit 1 ;;
 esac
-if [ "$1" = api ]; then case "$a" in *"/comments"*) cat "$F/comments.json" 2>/dev/null || exit 1; exit 0 ;; esac; fi
+if [ "$1" = api ]; then case "$a" in *"/comments"*)
+  echo x >> "$F/api_calls"; k=$(wc -l < "$F/api_calls" | tr -d ' ')
+  if [ -f "$F/comments.$k.json" ]; then cat "$F/comments.$k.json"; else cat "$F/comments.json" 2>/dev/null || exit 1; fi; exit 0 ;; esac; fi
 echo "gh stub: unhandled: $a" >&2; exit 1
 STUB
 printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/yq"   # no yq: defaults apply
 chmod +x "$TMP/bin/gh" "$TMP/bin/yq"
 export PATH="$TMP/bin:$PATH"
+export FORGE_REVIEW_DELIVERY_RETRY_DELAYS="0 0 0"   # retries without waiting (4 attempts)
 newfix() { FIX="$TMP/fix.$1"; rm -rf "$FIX"; mkdir -p "$FIX/sd"; export FIX; }
 FB=$'<!-- REVIEW-FINDINGS-START -->\n<!-- REVIEW-FINDINGS-END -->'
 cm() { jq -n --arg b "$1" --arg t "${2:-Bot}" '{body:$b, author_association:"NONE", user:{type:$t, login:"x"}}'; }
 agent() { printf '<!-- FORGE:REVIEW-AGENT:%s -->\nReviewed-SHA: %s\n\n%s' "$1" "${2:-$HEAD}" "${3-$FB}"; }
-comments() { jq -s '.' > "$FIX/comments.json"; }
+comments() { jq -s '.' > "$FIX/comments${1:+.$1}.json"; }
+calls() { [ -f "$FIX/api_calls" ] && wc -l < "$FIX/api_calls" | tr -d ' ' || echo 0; }
 deliver() { bash "$POST" delivery --repo o/r --pr 42 --sd "$FIX/sd" --head "${1:-$HEAD}" 2>&1; echo "rc=$?"; }
 
 # (3) delivery: a complete panel passes and posts nothing
@@ -67,6 +72,7 @@ newfix full; printf 'security\nmaterial-change\n' > "$FIX/sd/42_launched_review_
 { cm "$(agent security)"; cm "$(agent material-change)"; } | comments
 OUT=$(deliver); case "$OUT" in *"DELIVERY: OK (2/2"*"rc=0") ok ;; *) bad "complete panel must pass (got: $OUT)" ;; esac
 [ ! -s "$FIX/posted" ] && ok || bad "a complete panel must post nothing"
+[ "$(calls)" = 1 ] && ok || bad "delivery: complete panel lists comments once (got $(calls) listings)"
 # a duplicate domain line does not inflate the selected count
 printf 'security\nsecurity\nmaterial-change\n' > "$FIX/sd/42_launched_review_agents"
 OUT=$(deliver); case "$OUT" in *"rc=0") ok ;; *) bad "duplicate launched lines must count once (got: $OUT)" ;; esac
@@ -94,9 +100,35 @@ newfix empty; : > "$FIX/sd/42_launched_review_agents"; cm "$(agent security)" | 
 OUT=$(deliver); case "$OUT" in *"rc=1") ok ;; *) bad "empty launched list must fail (got: $OUT)" ;; esac
 newfix none; cm "$(agent security)" | comments
 OUT=$(deliver); case "$OUT" in *"rc=1") ok ;; *) bad "absent launched list must fail (got: $OUT)" ;; esac
-# unreadable comments count as 0 delivered
+# unreadable comments (an API error on every attempt) fail closed as UNVERIFIED, never as missing (forge#5166)
 newfix unreadable; printf 'security\n' > "$FIX/sd/42_launched_review_agents"
-OUT=$(deliver); case "$OUT" in *"rc=1") ok ;; *) bad "unreadable comments must fail closed (got: $OUT)" ;; esac
+OUT=$(deliver); case "$OUT" in *"REVIEW DELIVERY UNVERIFIED"*"rc=2") ok ;; *) bad "delivery: API error on every attempt is UNVERIFIED (got: $OUT)" ;; esac
+case "$OUT" in *"REVIEW DELIVERY FAILURE"*) bad "an API error must not be reported as missing" ;; *) ok ;; esac
+[ ! -s "$FIX/posted" ] && [ ! -s "$FIX/edits" ] && ok || bad "UNVERIFIED must post no GATE_FAILURE and add no label"
+[ "$(calls)" = 4 ] && ok || bad "UNVERIFIED must come after every retry (got $(calls) listings)"
+# delivery: lagging listing passes on retry -- the first listing lacks a comment, the second shows it
+newfix lag; printf 'security\nmaterial-change\n' > "$FIX/sd/42_launched_review_agents"
+cm "$(agent security)" | comments 1
+{ cm "$(agent security)"; cm "$(agent material-change)"; } | comments
+OUT=$(deliver); case "$OUT" in *"DELIVERY: OK (2/2"*"rc=0") ok ;; *) bad "delivery: lagging listing passes on retry (got: $OUT)" ;; esac
+case "$OUT" in *"material-change found on attempt 2"*) ok ;; *) bad "lag: must print the attempt a domain was found on (got: $OUT)" ;; esac
+case "$OUT" in *"security found on attempt 1"*) ok ;; *) bad "lag: security must be found on attempt 1 (got: $OUT)" ;; esac
+[ ! -s "$FIX/posted" ] && [ ! -s "$FIX/edits" ] && ok || bad "lag: a panel delivered on retry must post and label nothing"
+[ "$(calls)" = 2 ] && ok || bad "lag: retries stop once every domain is found (got $(calls) listings)"
+# a transient API error, then a full listing, passes
+newfix transient; printf 'security\n' > "$FIX/sd/42_launched_review_agents"
+echo 'not json' > "$FIX/comments.1.json"; cm "$(agent security)" | comments
+OUT=$(deliver); case "$OUT" in *"attempt 1: API error"*"security found on attempt 2"*"rc=0") ok ;; *) bad "a transient API error must be retried (got: $OUT)" ;; esac
+# a real absence after every retry is still missing (listed and absent), with the panel-integrity failure
+newfix absent; printf 'security\nmaterial-change\n' > "$FIX/sd/42_launched_review_agents"; cm "$(agent security)" | comments
+OUT=$(deliver); case "$OUT" in *"rc=1") ok ;; *) bad "absent after retries must fail as missing (got: $OUT)" ;; esac
+case "$OUT" in *UNVERIFIED*) bad "a listed absence is not UNVERIFIED" ;; *) ok ;; esac
+grep -qF 'review-panel-integrity' "$FIX/posted" 2>/dev/null && ok || bad "absent: must post GATE_FAILURE:TYPE=review-panel-integrity"
+[ "$(calls)" = 4 ] && ok || bad "absent: must retry before declaring missing (got $(calls) listings)"
+# an API error on the LAST attempt after a lacking listing is UNVERIFIED, not missing
+newfix lasterr; printf 'security\nmaterial-change\n' > "$FIX/sd/42_launched_review_agents"
+cm "$(agent security)" | comments 1; cm "$(agent security)" | comments 2; cm "$(agent security)" | comments 3; echo '{}' > "$FIX/comments.4.json"
+OUT=$(deliver); case "$OUT" in *"REVIEW DELIVERY UNVERIFIED"*"rc=2") ok ;; *) bad "an error on the last attempt must be UNVERIFIED (got: $OUT)" ;; esac
 # a malformed --head with no resolvable head refuses
 newfix badhead; printf 'security\n' > "$FIX/sd/42_launched_review_agents"; cm "$(agent security)" | comments
 OUT=$(deliver "n/a"); case "$OUT" in *"rc=1") ok ;; *) bad "an unresolvable head must fail closed (got: $OUT)" ;; esac

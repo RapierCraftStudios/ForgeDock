@@ -977,6 +977,18 @@ async function gatherDashboardData(cwd) {
   return result;
 }
 
+/**
+ * #5167: unhealthy batches and recent launch refusals (or one batch's health with `--batch <id>`) under
+ * `forgedock status`, read from the batch root. Any read failure prints nothing.
+ */
+async function batchHealthSection(c, batchId) {
+  try {
+    const [{ batchRoot }, { statusLines }] = await Promise.all([import("./lean/batch.mjs"), import("./lean/batch-health.mjs")]);
+    const lines = statusLines(batchRoot(), batchId ? { batch: batchId } : {});
+    if (lines.length) c.stdout.write(`  batch health\n${lines.map((l) => (batchId ? `  ${l}` : l)).join("\n")}\n\n`);
+  } catch { /* status never fails on batch health */ }
+}
+
 /** Compact status screen for configured/managed directories. */
 async function statusScreen(c) {
   const state = resolveState(c.cwd);
@@ -3375,6 +3387,7 @@ function help() {
     ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
     ["npx forgedock enable [dir]", "Activate ForgeDock in a directory"],
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
+    ["npx forgedock fix-close-reasons <owner/repo> [--milestone <m>] [--apply]", "Re-close issues that were closed not planned but carry workflow:merged or workflow:decomposed (delivered, not dropped) as completed, with a comment; dry run unless --apply; workflow:invalid issues are never touched"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
     ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
@@ -3980,7 +3993,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4062,8 +4075,12 @@ switch (command) {
   }
   case "status": {
     const c = ctx();
-    if (positional[1]) c.cwd = resolve(positional[1]);
+    // #5167: `--batch <id>` is not the status directory
+    const statusArgs = positional.slice(1), bi = statusArgs.indexOf("--batch");
+    const statusDir = statusArgs.find((a, i) => !(bi !== -1 && (i === bi || i === bi + 1)));
+    if (statusDir) c.cwd = resolve(statusDir);
     await statusScreen(c);
+    await batchHealthSection(c, bi === -1 ? null : statusArgs[bi + 1] ?? null);
     break;
   }
   case "uninstall":
@@ -4328,6 +4345,17 @@ switch (command) {
     const { milestoneSyncFromCli } = await import("./engine-cli.mjs");
     try {
       exitCode = await milestoneSyncFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "fix-close-reasons": {
+    // Migration helper (#5177): delivered issues closed `not planned` are re-closed `completed`; dry run unless --apply.
+    const { fixCloseReasonsFromCli } = await import("./engine-cli.mjs");
+    try {
+      exitCode = await fixCloseReasonsFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

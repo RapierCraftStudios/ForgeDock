@@ -118,7 +118,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (barrel, union type, shared fixture, index doc) merge one after another instead
    of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
    The gate runs first; `serializeShared` orders only an admitted split.
-   A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
+   A `split` closes the parent `completed` (#5152: scope moved, not dropped) once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
    decomposed dependency, open or closed, gates through its sub-issues in
@@ -380,6 +380,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    idempotent). Anything still unfiled is posted as `FORGE:FOLLOWUP_PENDING` on
    the issue, and the issue is left open, not closed (#5156). Nothing re-files
    a pending item automatically, so the open issue is the durable record.
+   While it stays open, FORGE:TRACKED says "Left open: follow-up pending"
+   (never "Closed as …"), and the trajectory Close row says
+   `left open (follow-up pending)` (#5159).
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its
@@ -594,6 +597,15 @@ Terminal reasons: `merged`, `ci-pending`, `deferred`, `decomposed`, `invalid`,
 `orchestrate.mjs` treats `deferred` as a scheduling fact (requeue with
 retry-at, `MAX_REQUEUES`, `DEFAULT_MAX_DEFERRALS`), relaunches one
 `engine-error`, and persists batches (`batch.mjs`) so a restart resumes.
+#5161: an `engine-error` whose detail is a transport/gateway failure
+(`isTransientEngineError`, `TRANSPORT_TEXT`: curl `returned error: 5xx`,
+`HTTP/1.1 5xx`, `Bad Gateway`, `Service Unavailable`, `overloaded`, resets)
+is requeued with backoff (`transientRetryDelayMs`: 30s, 2m, 8m, cap 15m) up
+to forge.yaml `orchestration.transient_retries` (default 4) times, persisted
+as `transientRetries`, with one `decided` row per retry; dependents stay
+pending. These retries never use the single relaunch, which is kept for
+non-transient errors. Once spent, the row ends `engine-error`. The breaker
+still counts every one of them (#4685).
 
 Maintenance budget (#4197, off unless forge.yaml `maintenance.enabled: true`,
 read by `engine-cli.mjs` `readMaintenance`): the CLI pulls open
@@ -944,7 +956,7 @@ keychain service `forgedock`) and the `run-issue` argv. The env also carries the
 lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
-Actions endpoint without `allow_actions: true`. The bearer is resolved per request (#5144): `httpTransport`'s `token` may be a function, `remoteTransportFor` passes a getter over `poolCredential`, and `providerByName` always names the token (`FORGEDOCK_POOL_TOKEN`/`FORGEDOCK_REMOTE_TOKEN`) and re-reads the router's token file per call, so a token fixed or rotated mid-batch is the next request's bearer (and is redacted). `providerLanes` maps a throwing
+Actions endpoint without `allow_actions: true`. The bearer is resolved per request (#5144): `httpTransport`'s `token` may be a function, `remoteTransportFor` passes a getter over `poolCredential`, and `providerByName` always names the token (`FORGEDOCK_POOL_TOKEN`/`FORGEDOCK_REMOTE_TOKEN`) and re-reads the router's token file per call, so a token fixed or rotated mid-batch is the next request's bearer (and is redacted). #5159: the synchronous keychain lookup of `token_env` (`secret-tool`/`security`, 10s timeout) is memoised per provider or transport by `credentials.mjs` `memoKeychain` for 60s, misses included, so a `token_env` missing from the env (when the bearer comes from the token_file or router fallback) no longer spawns the keychain on every request. The env and the token files are still read on every request. `providerByName` takes `opts.keychain` and `remoteTransportFor` takes `keychain` as test seams. `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` for a 4xx config error (not 401/403/429) or a non-HTTP throw (or `deferred` `sandbox.capacity`
 for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528; `deferred` `sandbox.transient` for any other 5xx,
 retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) instead of engine-error. A sandbox that exits without a result while its
@@ -1282,6 +1294,15 @@ targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomp
 (`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
 repo-relative `path:line`.
 
+**#5164 (review-row misquotes):** `fillEngineRows` now also repairs `issue_coverage` quotes. A quote that fails `inIssue`
+but `matchCriterion` (`conformance.mjs`) maps to exactly one criterion line (`criterionLines`: the issue's list/checklist
+items) is replaced by that exact line, the original kept as `requoted` in the posted review. Matching is loose: `norm()`
+plus `#N` digits ignored, trailing punctuation and a plural `s` dropped; a prefix covering ≥80% of one line, else ≥80% of
+the quote's words in exactly one line (ties and paraphrases match nothing and stay `review.incomplete`, with the nearest
+criterion line in the problem). `reaskable` (evidence-path misses or coverage misquotes only) replaces `evidencePathOnly`
+as the third-run condition in `reviewOnce`, so a misquote never spends the second strike reserved for real gaps; the
+repair prompt carries the criterion lines verbatim (`<issue_criteria>`) whenever `issue_coverage` is missing.
+
 ## Entry 2026-10-20 — Engine-run commands get the builder's lane env; no $TMPDIR inputs at freeze (#4325)
 
 `runCore` `laneEnv()` builds one env for every command the engine runs itself: `io.deps.env()` stores, then the run
@@ -1395,7 +1416,7 @@ precheck, review, resume, base-sync re-review, no degraded merge), logs `CONFORM
 decision line, and `RUN_TERMINAL.conformance_mode` reports `enforce`. `closePlan(contract, {title, review})`: an
 `investigate(`/`investigate:` issue (`isInvestigation`) with a defer/post-deploy requirement, or a deliver requirement
 whose review row is not `implemented`, is `partial`. The untracked ones are filed with `track()` before the PR, the issue
-closes `not planned` with a FORGE:TRACKED "Closed as partial" note, and the Close row and lane result say partial.
+closes `completed` (#5152; was `not planned`) with a FORGE:TRACKED "Closed as partial" note naming the follow-ups, and the Close row and lane result say partial.
 The lane result carries `conformance {mode, would, risk}`. Orchestrate's row copies it, and the batch report prints
 `formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
 or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
@@ -2120,7 +2141,7 @@ A dependency skip (`dependency #X ended <outcome>`) keeps outcome `skipped` but 
 `dispatchCheck` can still re-admit it (cleared when the batch ends, so the report ends `skipped` only if X never resolved). The
 table and console show `waiting on #X`. The #4595 blocker re-check re-admits the dependent when X merges or closes; each skip,
 re-admit and requeue row carries `trigger:<issue>` in the `decide` log. `makeDispatchCheck` returns `final: true` for an issue
-closed as NOT_PLANNED: `watchBlockers` stops re-checking it and its dependents stay `skipped`. `batch.addIssues` now re-queues an
+closed as NOT_PLANNED without `workflow:merged` / a fully closed decomposition (#5152): `watchBlockers` stops re-checking it and its dependents stay `skipped`. `batch.addIssues` now re-queues an
 in-batch issue whose result is `skipped` through the `--requeue` file (returned as `requeued`); merged/needs-human/other rows still
 report `already in batch`. The schedd `add` op reopens a finished, unhosted batch like `requeue`; without a daemon `addToBatch`
 clears the report so the next `--resume` reruns it. Cost: 0 LLM calls; one extra `dispatchCheck` per blocker per watch interval.
@@ -2616,6 +2637,10 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): `MOCKED_TERM` now matches `unittest`/`unittests`/`unit-testing` and "units" only as the named substitute ("use/using/via/by units"); bare "units", "United" and "Unity" stay unflagged. A bare negator (no/not/without/never) in `DROP_BEFORE_RE` cannot reach the e2e term across a preposition, so "no new fixtures needed for e2e" is not a weakening; the verb weakeners keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5145".
 
+## Entry 2026-11-06 — e2e-weakening check: negated verbs keep reaching e2e (#5157)
+
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): #5145 stopped every bare negator at a preposition, so "do not need to run e2e; mocked tests cover it", "not with e2e" and "not for e2e" slipped through. Now only the determiner `no` + noun phrase stops at a preposition (`no new fixtures needed for e2e` stays unflagged); `not`/`without`/`never` and `no need/reason/point/requirement` keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5157".
+
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 
 - `review-trigger.mjs` `pathDomains(files)` runs the bundled `scripts/review-roster.sh` (`--files-file -`). It maps its path triggers to review domains: frontend-path → frontend, auth-path → auth, infra-path/route-handler → infra, migration-path → database, sdk-path → api. The roster stays the single source of domain path rules. A script failure is `null`: the reviewer runs without domain checks, with an anomaly and `REVIEW_DOMAINS {error: "roster.failed"}`, and the lane is never failed.
@@ -2628,3 +2653,36 @@ Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.te
 - `orchestrate` resolves every `deps` write through `throughDecomposed` (`readDeps`, the `drainAdds` / `drainChildren` pending re-reads, the dependency-open union): a dependency that ended `decomposed` with sub-issues is replaced by them (fixpoint), so an issue added (`--add`, resume, body re-read) after its dependency decomposed waits on the sub-issues instead of ending `skipped`. With autoChildren mode `off` nothing is resolved and the dependent is still skipped.
 - `drainRequeues` re-reads each moved issue's body and REPLACES its edges (`declared` then `throughDecomposed`); an unreadable body keeps the old edges, an unchanged body leaves them unchanged. The decision text lists changed edges (`edges re-read: #N -> ...`). `--add` of a skipped issue routes through `batch.requeue`, so it gets the same re-read. No `--refresh-deps` flag.
 - Capacity fallback: with `execution.fallback_local` (`remote.offlineFallback`), an issue deferred `remote.capacityFallbackAfter` times (`execution.capacity_fallback_after`, default `CAPACITY_FALLBACK_AFTER` = 3) for `sandbox.capacity` is placed local in `grant()` when `remote.headroom()` (engine-cli passes `execMod.hostHeadroom`, now hoisted out of the hybrid `place`) allows it; `ok: false` or a throw keeps it remote. The count is the persisted state key `capDeferrals` (separate from `deferrals`, so `sandbox.capacity` stays uncapped), reset on requeue. One decision per issue on the first fallback. Tests: `batch.test.mjs` "#5112".
+
+## Entry 2026-11-07 — early batch health: BATCH UNHEALTHY alert, refusal record, status lines (#5167)
+
+- `bin/lean/batch-health.mjs` (new): `evaluateHealth(state, {held, refused, config, batchId, repo})` is pure over `state.json`. Its causes are `root-failed` (roots are the issues with no in-batch dependency edge), `terminal-share` (non-merged terminal rows; `merged`/`invalid`/`decomposed` are good ends; `held` counts although it stays pending, at or above `terminalShare` with 0 merged), `stalled` (0 running, pending minus operator-held, not in `setup` and not cancelled) and `refused`. It also returns the exact recovery commands. `runCheck` persists `health.json` (`checks`, `last`, `alertedAt`, `alert`) and alerts only when no `alertedAt` is recorded yet. `scheduleChecks` arms unref'd timers from `plan.created`, skipping checkpoints already recorded. `deliverAlert` sends a sink line, a `gh issue comment` on `orchestrate.health.issue` (else on each `--epic` issue), and `runNotify` (`notify.command` through the shell, JSON on stdin, `FORGEDOCK_ALERT*` env, 30 s timeout, never throws). `recordRefusal`/`readRefusals` read and write `<batch root>/refusals.json` (keeps the newest 20, shown for 24 h). `statusLines(root, {batch})` returns the lines for `forgedock status`.
+- `runBatch` (`bin/engine-cli.mjs`) prints `health checks: …` after the `batch:` line, arms the timers before `orchestrate()`, clears them in its `finally`, and runs the `end` check after the report is written. The return value, the report and `report.json` are unchanged. Test seams: `deps.healthConfig`, `deps.healthNow`, `deps.healthTimer {set, clear}` and `deps.notify`. The #4659 refusal goes through `alertRefusal` (record plus channels, best effort) before the same error is rethrown. `readHealthConfig(cwd)` reads the flattened `orchestrate.*` keys and `notify.command`. `readDrift` ignores them.
+- `forgedock status` (`bin/forgedock.mjs` `batchHealthSection`) always appends the batch-health lines. `--batch <id>` and its value are not taken as the status directory.
+- Tests: `batch-health.test.mjs`, `batch.test.mjs` "#5167" (roots engine-error alert once at T+15 on every channel; a healthy batch emits no alert), `plan-validate-live.test.mjs` "#5167" (refusal record), `router.test.mjs` "#5167" (status lines, `--batch`).
+
+## Held subtrees behind a failed root (#5162)
+
+A dependent of a root that ends `needs-human`, `engine-error`, `deferred` or
+`budget-exceeded` ends `held` (`blocked by #<root> (<outcome>)`, `root` and
+`trigger` = the root, persisted), not `skipped`. The "dependency cycle" label is
+reserved for real cycles (`cyclicNodes`, SCC over the pending deps); other stuck
+rows name a cycle member. `--requeue <root>` (`REQUEUABLE` now includes
+`engine-error` and `held`), a watched root merging, or removal of its
+`needs-human` label on a resumed batch (`watchHeldRoots`) returns the root and
+its held subtree to pending in dependency order. The report prints one
+`held subtree: #<root> (...) holds ...; release: forgedock orchestrate --requeue <batch> <root>` line per root.
+
+## Entry 2026-11-07 — delivered work is closed `completed`; dropped scope is read from labels (#5152)
+
+- Close reasons: a merged change closes `completed` even when `closePlan` says `partial` (the FORGE:TRACKED note names the follow-ups); a builder `already-fixed` verdict closes `completed` (label and terminal `invalid` kept, Close row `issue closed (completed)`); a `decomposition.close_parent` parent closes `completed`. Only `invalid` and the duplicate owner ask close `not planned`. The pre-filter closes `ci-green` and ALREADY-FIXED `completed`, INVALID `not planned`.
+- `closedScope` (`engine-cli.mjs`): a CLOSED issue labelled `workflow:merged` is `merged`; `workflow:decomposed` whose trusted FORGE:DECOMPOSED sub-issues are all closed is `moved`; a decomposition with an open or unreadable sub-issue is `moving`; else null. `makeDispatchCheck` reads `state,stateReason,labels`: merged/moved → `{outcome:"merged"}` (satisfied, never final), moving → non-final `invalid` (dependents' lanes wait on the sub-issues), and only an unlabelled NOT_PLANNED keeps `final: true` (#4687). `issueState` (#4725) returns `CLOSED` for merged/moved. Legacy NOT_PLANNED closes are covered because labels decide.
+- Builder context (`context.mjs`): `closedResult` reports a closed `workflow:merged` / `workflow:decomposed` link as `completed` instead of its `stateReason`.
+
+## Entry 2026-11-07 — claude login failure ends the lane `deferred` `backend.auth` (#5168)
+
+`callRunner` turns a runner error with `authFailure` (and no usage limit) into `deferCode: backend.auth`, `retryInSeconds: AUTH_RETRY_SECONDS` (900) and `backendId: laneBackendId(...)`; the verifier catch rethrows it rather than recording a verifier failure, and the final `deferCode` finish passes `backendId` so the batch holds that account. Before, the lane ended `engine-error`, used its one relaunch and counted toward the breaker. Tests: `lean.test.mjs` "#5168".
+
+## Entry 2026-11-07 — `forgedock fix-close-reasons` migration helper (#5177)
+
+`fixclosereasons.mjs` `runFixCloseReasonsCli` (wrapper `engine-cli.mjs` `fixCloseReasonsFromCli`, command `fix-close-reasons <owner/repo> [--milestone <m>] [--apply]`): lists closed issues labelled `workflow:merged` / `workflow:decomposed` (`findMisclosed`) and keeps those whose close reason is `NOT_PLANNED`, never one also labelled `workflow:invalid`. With `--apply` each gets one `gh api -X PATCH ... state=closed state_reason=completed` (no reopen window) plus a comment saying the scope was delivered or moved to sub-issues; without it only the would-change list is printed. Idempotent (a `completed` issue is not selected); a failed write is counted and the exit code is 1. The lean lane's own close sites and the #4687 gate are untouched. Tests: `fixclosereasons.test.mjs`. Cost: 0 LLM calls.

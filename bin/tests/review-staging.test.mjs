@@ -390,6 +390,16 @@ describe("review-staging --finalize", () => {
     assert.match(w.err.join("\n"), /missing findings comment[\s\S]*RESULT: BLOCK DEPLOY/);
   });
 
+  it("an unverifiable delivery (exit 2) stops with a rerun hint, not a re-dispatch", async () => {
+    const w = postWorld({ delivery: { code: 2, stdout: "REVIEW DELIVERY UNVERIFIED: could not list PR comments after 4 attempt(s) (GitHub API error)", stderr: "" } });
+    assert.equal(await reviewStagingFromCli(FIN, w.io), 1);
+    assert.equal(w.scripts.length, 1);
+    const err = w.err.join("\n");
+    assert.match(err, /could not be verified[\s\S]*rerun --finalize[\s\S]*RESULT: BLOCK DEPLOY/);
+    const blocked = err.split("\n").find((l) => l.startsWith("REVIEW_RESULT: status: BLOCKED"));
+    assert.ok(blocked && !/re-dispatch each missing/.test(blocked), blocked);
+  });
+
   it("a blocking test gate stops before triage", async () => {
     const w = postWorld({ testGate: { code: 1, verdict: "BLOCK", reason: "BLOCK (blocking posture, no override)" } });
     assert.equal(await reviewStagingFromCli(FIN, w.io), 1);

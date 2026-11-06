@@ -188,7 +188,7 @@ function world(o = {}) {
     fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
-      if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
+      if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
 }
@@ -281,13 +281,16 @@ describe("core work-on", () => {
     const t = traj(w)[0];
     for (const needle of ["| Validate | INVALID |", "| Plan | skipped |", "| Implement | skipped |", "| Review | skipped |", "| PR | none |", "| Close | issue closed (not planned) |"]) assert.ok(t.includes(needle), needle);
     assert.equal(w.closed.length, 1);
+    assert.equal(w.closed[0][w.closed[0].indexOf("--reason") + 1], "not planned", "#5152: invalid keeps not planned");
     assert.equal(w.prs.length, 0);
     assert.equal(reviewers(w).length, 0);
   });
 
-  it("already-fixed with evidence also closes", async () => {
+  it("already-fixed with evidence also closes, as completed (#5152)", async () => {
     const w = world({ changed: [], result: { status: "already-fixed", summary: "done upstream", evidence: ["a.js:1"], tests: [] } });
     assert.equal((await run(w)).terminalReason, "invalid");
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"], "#5152: already-fixed is delivered, never not planned");
+    assert.ok(traj(w)[0].includes("| Close | issue closed (completed) |"));
   });
 
   it("a failed needs-human comment is recorded as an anomaly and the lane still ends needs-human (#4905)", async () => {
@@ -381,6 +384,21 @@ describe("core work-on", () => {
     const w2 = world({ reviews: [lost(), lost(), lost(), ok()] });
     const r2 = await run(w2);
     assert.equal(r2.code, "review.incomplete"); assert.equal(reviewers(w2).length, 3, "at most three reviewer runs"); assert.equal(w2.merges.length, 0);
+  });
+
+  it("#5164 a coverage misquote gets one more targeted re-ask with the issue's criterion lines; a near-verbatim one is requoted without a re-ask", async () => {
+    const mis = () => conf({ issue_coverage: [{ quote: "foo copes when nothing at all is passed", contract_ids: ["R1"], status: "covered" }] });
+    const w = world({ reviews: [mis(), mis(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const rv = reviewers(w);
+    assert.equal(rv.length, 3); assert.equal(builders(w).length, 2, "never charged to the builder");
+    for (const i of [1, 2]) { assert.match(rv[i][4], /<issue_criteria>/); assert.match(rv[i][4], /- foo must handle a null argument without throwing\./); }
+    assert.match(rv[1][4], /answer ONLY for these ids or sections: issue_coverage/);
+    const w2 = world({ reviews: [mis(), mis(), mis(), ok()] });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "review.incomplete"); assert.equal(reviewers(w2).length, 3, "at most three reviewer runs"); assert.equal(w2.merges.length, 0);
+    const w3 = world({ reviews: [conf({ issue_coverage: [{ quote: "foo must handle null arguments without throwing", contract_ids: ["R1"], status: "covered" }] })] });
+    assert.equal((await run(w3)).terminalReason, "merged"); assert.equal(reviewers(w3).length, 1);
   });
 
   it("a CONFORMS verdict whose rows fail is not conforming (the engine computes the verdict)", async () => {
@@ -689,13 +707,13 @@ describe("core work-on", () => {
     assert.ok(w.labels.includes("decomposed"));
   });
 
-  it("#4337 with decomposition.close_parent a split closes the parent not planned after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
+  it("#4337 #5152 with decomposition.close_parent a split closes the parent completed after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
     const w = depWorld({ changed: [], result: splitBlock }, {});
     const r = await run(w, { closeParent: true });
     assert.equal(r.terminalReason, "decomposed");
     assert.equal(w.closed.length, 1);
     const c = w.closed[0];
-    assert.equal(c[c.indexOf("--reason") + 1], "not planned");
+    assert.equal(c[c.indexOf("--reason") + 1], "completed", "#5152: the scope moved to the sub-issues, it was not dropped");
     const note = c[c.indexOf("--comment") + 1];
     assert.match(note, /#201/); assert.match(note, /#202/);
     assert.ok(w.labels.includes("decomposed"));
@@ -998,6 +1016,9 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const note = w.comments.find((c) => c.includes("FORGE:FOLLOWUP_PENDING"));
     assert.match(note, /R2 \(defer\): Existing callers of foo keep working\..*`FORGE:DEFERRED_FROM: #7`/);
     assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")));
+    assert.ok(!w.comments.some((c) => /Closed as/.test(c)), "#5159: no note says the kept-open issue was closed");
+    assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/, "#5159: the trajectory Close row says left open");
+    assert.doesNotMatch(traj(w).join("\n"), /issue closed \(/);
   });
 
   it("#5141 a follow-up that keeps failing before the PR is filed by the close step after the merge", async () => {
@@ -1051,6 +1072,21 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const w2 = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupError: "Command failed", followupStdout: "DEFERRED_TSV=INVALID\n" });
     const r2 = await run(w2);
     assert.equal(r2.code, "followup.unavailable"); assert.equal(w2.followups.length, 1); assert.equal(w2.prs.length, 0);
+  });
+
+  it("#5159 one follow-up tracked, another still pending: FORGE:TRACKED says left open, never 'Closed as', and the trajectory says left open", async () => {
+    const k0 = two("defer", { why: "w" });
+    const k = { ...k0, requirements: [...k0.requirements, { id: "R3", quote: "foo crashes on null input.", disposition: "defer", bucket: "post-deploy", why: "w" }] };
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], followupSkip: ["foo crashes on null input."] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual((r.pendingFollowups ?? []).map((p) => p.id), ["R3"]);
+    assert.equal(w.closed.length, 0);
+    const tracked = w.comments.find((c) => c.includes("FORGE:TRACKED"));
+    assert.ok(tracked, "the tracked item is still recorded");
+    assert.match(tracked, /Left open: follow-up pending/); assert.match(tracked, /#900/);
+    assert.ok(!w.comments.some((c) => /Closed as/.test(c)));
+    assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/);
   });
 
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
@@ -1712,13 +1748,13 @@ describe("conformance shadow mode (the default)", () => {
     assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
   });
 
-  it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
+  it("#4398 #5152 an investigation whose question is deferred closes partial (completed), carried forward in the tracking issue", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     const r = await runShadow(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
-    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
-    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && /Closed as partial[\s\S]*carried forward in #900/.test(c)));
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"], "#5152: merged with a tracked remainder is completed");
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && /Closed as partial[\s\S]*Closed as completed by PR #[\s\S]*carried forward in #900/.test(c)));
     assert.ok(traj(w)[0].includes("| Close | issue closed (partial) |"));
   });
 
@@ -1747,7 +1783,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
     assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R1: /); assert.match(w.followups[0].items[0].why, /investigation question not answered/);
     assert.match(w.prs[0].join(" "), /#900/);
-    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"]);
   });
 
   it("#4398 an answered investigation and a non-investigation with a deferral both close completed", async () => {
@@ -2649,10 +2685,10 @@ describe("orchestrate", () => {
     assert.ok(h.log.ends.indexOf(1) < h.log.starts.indexOf(2), JSON.stringify(h.log));
   });
 
-  it("a dependent is skipped, without running, when its dependency ends needs-human (transitively)", async () => {
+  it("a dependent is held, without running, when its dependency ends needs-human (transitively)", async () => {
     const h = harness({ 2: "**Depends on**: #1", 3: "**Depends on**: #2" }, { 1: "needs-human" });
     const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 3, ...h });
-    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "skipped", "skipped", "merged"]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "held", "held", "merged"]);
     assert.ok(!h.log.starts.includes(2) && !h.log.starts.includes(3));
     assert.match(rows[1].detail, /#1/);
   });
@@ -2733,7 +2769,7 @@ describe("orchestrate", () => {
       const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""), ...(dispatchCheck ? { dispatchCheck } : {}),
         runOne: async (n) => { log.push(n); return { terminalReason: "needs-human", detail: "ci.red" }; } });
       assert.deepEqual(log, [9]);
-      assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "skipped"]]);
+      assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "held"]]);
     }
   });
 
@@ -2744,7 +2780,7 @@ describe("orchestrate", () => {
       onUpdate: (r) => rowsSeen.push(r),
       dispatchCheck: async (n) => (n === 9 && merged ? { outcome: "merged", pr: 90, detail: "PR #90 already merged" } : null),
       runOne: async (n) => { if (n === 9) { merged = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 101 }; } });
-    const skipRow = rowsSeen.find((r) => r.issue === 1 && r.outcome === "skipped");
+    const skipRow = rowsSeen.find((r) => r.issue === 1 && r.outcome === "held");
     assert.equal(skipRow.waiting, true);
     assert.equal(skipRow.trigger, 9);
     assert.ok(rowsSeen.some((r) => r.issue === 1 && r.outcome === "readmitted" && r.trigger === 9));
@@ -2756,7 +2792,7 @@ describe("orchestrate", () => {
     const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""),
       dispatchCheck: async (n) => { if (n === 9 && ran) { checks++; return { outcome: "invalid", detail: "issue closed (not planned)", final: true }; } return null; },
       runOne: async () => { ran = true; return { terminalReason: "needs-human", detail: "ci.red" }; } });
-    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "needs-human", undefined], [1, "skipped", undefined]]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "needs-human", undefined], [1, "held", undefined]]);
     assert.equal(checks, 1, "a final blocker is not re-checked");
   });
 
@@ -3408,6 +3444,31 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(traj(w).length, 0, "no trajectory comment for a deferral");
     assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
     assert.equal(w.merges.length, 0);
+  });
+
+  it("#5168 a claude login failure ends the lane deferred/backend.auth with the account, not engine-error", async () => {
+    const w = world(); projector(w, null); const sleeps = [];
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const authErr = Object.assign(new Error("claude CLI exited with status 1. Failed to authenticate. API Error: 401"), { code: "CLI_BACKEND_FAILED", authFailure: true });
+    let tries = 0; const orig = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") { tries++; throw authErr; } return orig(c); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "backend.auth");
+    assert.equal(r.retryInSeconds, 900);
+    assert.equal(r.backendId, laneBackendId(process.env), "the hold names the account whose login failed");
+    assert.match(r.detail, /claude CLI authentication failed/);
+    assert.equal(tries, 1, "no in-lane retry or pause on a dead login");
+    assert.equal(sleeps.length, 0);
+    assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+    assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+  });
+
+  it("#5168 an error that is both a usage limit and auth-like stays rate_limited", async () => {
+    const w = world();
+    failFirstBuilder(w, limitErr({ authFailure: true, resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "rate_limited");
   });
 
   it("#4101 unknown reset pauses a bounded number of times, then defers", async () => {

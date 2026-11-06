@@ -14,7 +14,7 @@ import { memAvailableMb } from "./lean/heavy.mjs";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
-import { isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
+import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
@@ -34,6 +34,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import * as batchHealth from "./lean/batch-health.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
@@ -1675,7 +1676,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       }
       for (const [n, l] of baseWaits) sink.line(`held: #${n} waits for ${l.map((w) => `#${w.dep} (${w.sha.slice(0, 10)}) on ${w.base}`).join(", ")}; admitted once the commit lands`);
       unmet = unmet.filter((x) => x.kind !== "commit");
-      if (unmet.length) throw new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
+      if (unmet.length) {
+        const refusal = new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
+        await alertRefusal({ root, issues, repo, cwd, argv, message: refusal.message, unmet, sink, gh: gateIo.gh, deps }); // #5167: recorded for `forgedock status`
+        throw refusal;
+      }
     }
     const base = deps.batchId ?? batchMod.newBatchId();
     batch = batchMod.openBatch(root, base);
@@ -1693,6 +1698,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
+  // #5167: early batch health at T+15/T+60 after plan.created and at batch end; the first unhealthy result alerts once
+  const healthConf = deps.healthConfig ?? readHealthConfig(cwd), healthNow = deps.healthNow ?? (() => Date.now());
+  const healthCreated = Number.isFinite(Date.parse(plan?.created ?? "")) ? Date.parse(plan.created) : healthNow();
+  sink.line(batchHealth.scheduleLine(batch.id, healthCreated, healthConf.checksMin));
   const dir = deps.dir ?? runDir();
   migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
@@ -1836,7 +1845,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
   const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
   const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
-    epics: argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : [])) };
+    epics: epicsOf(argv) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
@@ -1957,6 +1966,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
+  const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
+    alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
+  let healthTimers = { cancel: () => {} };
+  try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -1967,7 +1980,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
-      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
+      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
@@ -1984,7 +1997,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
-      issueState: async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"])); return v.state === "CLOSED" && String(v.stateReason ?? "COMPLETED").toUpperCase() !== "COMPLETED" ? "CLOSED_NOT_PLANNED" : v.state; },
+      // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
+      issueState: async (n) => {
+        const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels"]));
+        if (v.state !== "CLOSED" || String(v.stateReason ?? "COMPLETED").toUpperCase() === "COMPLETED") return v.state;
+        return ["merged", "moved"].includes(await closedScope({ gh: (a) => leanIo.gh(a), repo, issue: n, labels: v.labels })) ? "CLOSED" : "CLOSED_NOT_PLANNED";
+      },
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
@@ -2012,7 +2030,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
-  } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
+  } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); healthTimers.cancel(); }
   try { await integration?.settle?.(); } catch { /* best effort: the state block is the record */ }
   const report = ["\n" + formatTable(rows), ...formatOutcomeLists(rows)];
   const pfLine = formatPrefilterSummary(rows);
@@ -2055,7 +2073,32 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   let unfinished = false;
   try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
+}
+
+/**
+ * #5152: how a CLOSED issue's scope ended, read from its labels rather than its `stateReason` (a NOT_PLANNED close of
+ * delivered work, legacy or not, is never dropped scope): "merged" (`workflow:merged`), "moved" (`workflow:decomposed`
+ * whose trusted FORGE:DECOMPOSED sub-issues are all closed), "moving" (decomposed, a sub-issue open or unreadable), or null
+ * (no delivery label: `stateReason` decides). `labels` is a `gh --json labels` or REST label list. Never throws.
+ */
+export async function closedScope({ gh, repo, issue, labels }) {
+  const names = (Array.isArray(labels) ? labels : []).map((l) => String(l?.name ?? l));
+  if (names.includes("workflow:merged")) return "merged";
+  if (!isDecomposedRecord({ labels })) return null;
+  // decomposedSubissues reads `repos/{owner}/{repo}/...`: pin the placeholder to this batch's repo
+  const io = { gh: (a) => gh(a.map((x) => String(x).replace("{owner}/{repo}", repo))) };
+  let subs = null;
+  try { subs = await decomposedSubissues(issue, io); } catch { subs = null; }
+  if (!subs) return "moving";
+  for (const s of subs) {
+    try {
+      const v = JSON.parse(String(await gh(["issue", "view", String(s), "-R", repo, "--json", "state"])));
+      if (String(v?.state ?? "").toUpperCase() !== "CLOSED") return "moving";
+    } catch { return "moving"; }
+  }
+  return "moved";
 }
 
 /**
@@ -2075,7 +2118,7 @@ export function makeDispatchCheck({ gh, repo }) {
     } catch { return null; }
   };
   return async (n) => {
-    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"]);
+    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels"]);
     const state = typeof iss?.state === "string" ? iss.state.toUpperCase() : null;
     const notPlanned = String(iss?.stateReason ?? "").toUpperCase().replace(/\s/g, "_") === "NOT_PLANNED";
     const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number,mergedAt", "--limit", "1"]);
@@ -2086,7 +2129,15 @@ export function makeDispatchCheck({ gh, repo }) {
       if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
-    if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
+    if (state === "CLOSED") {
+      // #5152: workflow:merged / a fully closed decomposition is delivered whatever the stateReason; a decomposition still
+      // moving is a completed close (its dependents' lanes wait on the sub-issues); only an unlabelled NOT_PLANNED is dropped scope
+      const scope = await closedScope({ gh, repo, issue: n, labels: iss?.labels });
+      if (scope === "merged") return { outcome: "merged", detail: "issue closed, workflow:merged" };
+      if (scope === "moved") return { outcome: "merged", detail: "issue decomposed; all sub-issues closed" };
+      if (scope === "moving") return { outcome: "invalid", detail: "issue closed: decomposed, sub-issues still open" };
+      return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
+    }
     // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
     // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
     // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.
@@ -2430,6 +2481,7 @@ export function readAutoChildren(cwd = process.cwd()) {
  * `mechanical_max_attempts`): the separate budget of env.*, base.conflict and conflicting-PR rows, default 2, never below `max_attempts`.
  * `orchestration.base_sync.enabled` (#4525; default true, false opts out) and `base_sync.union_globs` (comma list of globs of
  * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
+ * `orchestration.transient_retries` (#5161; default 4, 0 off): backoff retries of a transient (gateway 5xx) engine-error.
  * `orchestration.blocked_label` (#4773; default `blocked`, empty turns it off): an open issue carrying it is admitted but not dispatched.
  */
 export function readOrchestration(cwd = process.cwd()) {
@@ -2439,11 +2491,34 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
       unionGlobs: String(o.base_sync_union_globs ?? o.union_globs ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean) } };
+}
+
+/** `--epic N` operands of an orchestrate argv (#4965, #5167). */
+const epicsOf = (argv) => argv.flatMap((a, i) => (a === "--epic" && /^#?\d+$/.test(argv[i + 1] ?? "") ? [parseInt(argv[i + 1].replace("#", ""), 10)] : []));
+
+/**
+ * #5167: a refused milestone start leaves no batch dir: record it under the batch root for `forgedock status` and send
+ * the BATCH UNHEALTHY channels. Best effort: the caller rethrows the refusal unchanged.
+ */
+async function alertRefusal({ root, issues, repo, cwd, argv, message, unmet, sink, gh, deps }) {
+  try {
+    const rec = { at: new Date((deps.healthNow ?? Date.now)()).toISOString(), issues, repo, cwd, message, unmet: unmet.map(({ issue, dep, base }) => ({ issue, dep, base })) };
+    try { batchHealth.recordRefusal(root, rec); } catch { /* the stderr line still reports it */ }
+    const config = deps.healthConfig ?? readHealthConfig(cwd);
+    const health = batchHealth.evaluateHealth(null, { refused: rec, config, repo });
+    const text = batchHealth.formatAlert({ batchId: "(refused launch)", checkpoint: "launch", health });
+    await batchHealth.deliverAlert({ text, batchId: null, health, sink, gh: gh ? (a) => gh(a) : null, repo, config, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) });
+  } catch { /* never mask the refusal */ }
+}
+
+/** forge.yaml `orchestrate.health.*` (flattened to `orchestrate.*`) and `notify.command` (#5167); defaults when unset. */
+export function readHealthConfig(cwd = process.cwd()) {
+  try { return batchHealth.parseHealthConfig(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))); } catch { return batchHealth.parseHealthConfig(null); }
 }
 
 /**
@@ -2577,6 +2652,12 @@ export async function integrationFromCli(argv, deps = {}) {
 /** `forgedock milestone-sync <slug> --reason ...` (#4663): on-demand milestone branch sync (lean/milestonesync.mjs). Resolves the exit code. */
 export async function milestoneSyncFromCli(argv, deps = {}) {
   const { runMilestoneSyncCli: run } = await import("./lean/milestonesync.mjs");
+  return run(argv, deps);
+}
+
+/** `forgedock fix-close-reasons <owner/repo> [--milestone m] [--apply]` (#5177): re-close delivered `not planned` issues as completed (lean/fixclosereasons.mjs). Resolves the exit code. */
+export async function fixCloseReasonsFromCli(argv, deps = {}) {
+  const { runFixCloseReasonsCli: run } = await import("./lean/fixclosereasons.mjs");
   return run(argv, deps);
 }
 

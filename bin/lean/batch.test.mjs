@@ -3,11 +3,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
-import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER } from "./orchestrate.mjs";
+import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
@@ -265,9 +265,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
-    writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n  transient_retries: 2\n");
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -794,7 +794,7 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     const mk = (issue, prs, events = "", { body = "{}", open = "[]" } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
       if (a[0] === "issue" && a[a.length - 1] === "body") return body; // #4920: the lease lookup
       if (a[0] === "pr" && a.includes("open")) return open; // #4920: the open lane PR lookup
-      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason"]); if (issue instanceof Error) throw issue; return issue; }
+      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason,labels"]); if (issue instanceof Error) throw issue; return issue; }
       if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
       if (prs instanceof Error) throw prs;
@@ -812,6 +812,42 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.equal(await mk('{"state":"OPEN"}', "[]")(9), null);
     assert.equal(await mk('{"body":"","labels":[]}', '{"body":""}')(9), null, "a stub without state or a list: run");
     assert.equal(await mk(new Error("x"), new Error("y"))(9), null);
+  });
+  it("#5152 makeDispatchCheck: a merged investigation closed as partial (NOT_PLANNED + workflow:merged) satisfies its dependents", async () => {
+    // the blocker's lane PR is not on feat/issue-9-lean (legacy or renamed branch): only its labels say it was delivered
+    let closed = false;
+    const gh = async (a) => {
+      if (a[0] === "issue" && a[2] === "9" && a.includes("state,stateReason,labels")) {
+        return JSON.stringify(closed ? { state: "CLOSED", stateReason: "NOT_PLANNED", labels: [{ name: "workflow:merged" }] } : { state: "OPEN", labels: [] });
+      }
+      if (a[0] === "issue" && a[a.length - 1] === "body") return "{}";
+      if (a[0] === "pr") return "[]";
+      return "";
+    };
+    const dispatchCheck = makeDispatchCheck({ repo: "o/r", gh });
+    closed = true;
+    assert.deepEqual(await dispatchCheck(9), { outcome: "merged", detail: "issue closed, workflow:merged" }, "never final: delivered scope");
+    closed = false;
+    const ran = [];
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""), dispatchCheck,
+      runOne: async (n) => { ran.push(n); if (n === 9) { closed = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 101 }; } });
+    assert.ok(ran.includes(1), "the dependent runs instead of being skipped");
+    assert.deepEqual(rows.find((r) => r.issue === 1)?.outcome, "merged");
+  });
+  it("#5152 makeDispatchCheck: decomposed parents are satisfied once every sub-issue closed; only an unlabelled NOT_PLANNED is final", async () => {
+    const dec = '<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #21 a\n- #22 b';
+    const mk = (labels, subs, { decomposed = dec } = {}) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue" && a[2] === "9") return JSON.stringify({ state: "CLOSED", stateReason: "NOT_PLANNED", labels });
+      if (a[0] === "issue" && ["21", "22"].includes(a[2])) return JSON.stringify({ state: subs[a[2]] });
+      if (a[0] === "api") { assert.equal(a.find((x) => String(x).includes("/issues/9/comments")), "repos/o/r/issues/9/comments", "pinned to the batch repo"); return JSON.stringify({ body: decomposed, author_association: "NONE", user: { type: "Bot", login: "forgedock[bot]" } }); }
+      if (a[0] === "pr") return "[]";
+      return "";
+    } });
+    const d = [{ name: "workflow:decomposed" }];
+    assert.deepEqual(await mk(d, { 21: "CLOSED", 22: "CLOSED" })(9), { outcome: "merged", detail: "issue decomposed; all sub-issues closed" });
+    assert.deepEqual(await mk(d, { 21: "CLOSED", 22: "OPEN" })(9), { outcome: "invalid", detail: "issue closed: decomposed, sub-issues still open" }, "moving: not final");
+    assert.deepEqual(await mk(d, {}, { decomposed: "no trail" })(9), { outcome: "invalid", detail: "issue closed: decomposed, sub-issues still open" }, "no trail: not final");
+    assert.deepEqual(await mk([{ name: "workflow:invalid" }], {})(9), { outcome: "invalid", detail: "issue closed (not planned)", final: true }, "#4687 kept: dropped scope is final");
   });
 });
 
@@ -933,7 +969,7 @@ describe("#4550: forgedock orchestrate --requeue", () => {
         if (n === 1 && started.filter((x) => x === 1).length === 1) return { terminalReason: "needs-human", detail: "builder.blocked: product-decision" };
         return { terminalReason: "merged" };
       } });
-    await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
+    await until(() => log.some((r) => r.issue === 2 && ["skipped", "held"].includes(r.outcome)));
     entries = [{ issue: 1, reason: "decided in scope", by: "operator", at: "2026-10-24T00:00:00Z" }];
     await until(() => started.filter((x) => x === 2).length === 1, 3000);
     g3.open();
@@ -1105,7 +1141,7 @@ describe("#5112: late dependents of a decomposed issue, edge re-read on --requeu
         if (n === 3) { await g3.p; return { terminalReason: "merged" }; }
         return n === 1 ? { terminalReason: "needs-human", detail: "builder.blocked: product-decision" } : { terminalReason: "merged" };
       } });
-    await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
+    await until(() => log.some((r) => r.issue === 2 && ["skipped", "held"].includes(r.outcome)));
     bodies[2] = ""; // the operator dropped the wrong edge
     entries = [{ issue: 2, reason: "edge dropped", by: "operator", at: "2026-11-05T00:00:00Z" }];
     await until(() => started.includes(2), 3000);
@@ -1413,3 +1449,195 @@ describe("#5138: live max_remote and placement of a running batch", () => {
     assert.equal(b.readExecution().mode, "hybrid");
   });
 });
+
+describe("#5161 transient engine-error retries", () => {
+  const CURL_502 = 'claude CLI exited with status 1. Output: curl: (22) The requested URL returned error: 502 {"duration_api_ms":0}';
+  // Launch times per issue under the fake clock.
+  const launches = () => { const at = new Map(); return { at, note: (n, t) => at.set(n, [...(at.get(n) ?? []), t]) }; };
+  const gaps = (ts) => ts.slice(1).map((t, i) => t - ts[i]);
+
+  it("#5161 the classifier: curl 502, HTTP/1.1 5xx, Bad Gateway, Service Unavailable, overloaded and resets are transient; code failures are not", () => {
+    for (const d of [CURL_502, "HTTP/1.1 503 Service Unavailable", "HTTP/2 504", "502 Bad Gateway", "Service Unavailable", "API overloaded", "read ECONNRESET", "sandbox launch: fetch failed"])
+      assert.equal(isTransientEngineError(d), true, d);
+    for (const d of ["boom", "TypeError: x is undefined", "", null, undefined]) assert.equal(isTransientEngineError(d), false, String(d));
+    assert.deepEqual([1, 2, 3, 4, 5].map(transientRetryDelayMs), [30_000, 120_000, 480_000, 900_000, 900_000]);
+    assert.equal(DEFAULT_TRANSIENT_RETRIES, 4);
+  });
+
+  it("#5161 a curl 502 engine-error is retried with growing backoff and merges, not ended after one immediate relaunch", async () => {
+    const { c, now, sleep } = fakeClock();
+    const l = launches(), updates = [];
+    let tries = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, onUpdate: (r) => updates.push(r),
+      runOne: async (n) => { l.note(n, c.t); if (++tries <= 3) throw new Error(CURL_502); return { terminalReason: "merged", pr: 7 }; } });
+    assert.equal(rows[0].outcome, "merged");
+    const g = gaps(l.at.get(1));
+    assert.equal(g.length, 3);
+    assert.ok(g[0] >= 30_000 && g[1] >= 120_000 && g[2] >= 480_000, `gaps ${g}`);
+    assert.ok(!updates.some((u) => /relaunching once/.test(u.detail ?? "")));
+  });
+
+  it("#5161 an always-502 issue is retried up to transientRetries with growing delays, then ends engine-error; one decided row per retry", async () => {
+    const { c, now, sleep } = fakeClock();
+    const l = launches(), decisions = [];
+    const [row] = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, transientRetries: 2, decide: (d) => decisions.push(d),
+      runOne: async (n) => { l.note(n, c.t); throw new Error(CURL_502); } });
+    assert.equal(row.outcome, "engine-error");
+    assert.match(row.detail, /gave up after 2 transient retries/);
+    const g = gaps(l.at.get(1));
+    assert.equal(g.length, 2);
+    assert.ok(g[0] > 0 && g[1] > g[0], `gaps ${g}`);
+    assert.equal(decisions.length, 2);
+    assert.ok(decisions.every((d) => d.issue === 1 && /^transient: /.test(d.why) && /retry after transient engine-error \(\d\/2\)/.test(d.what)));
+  });
+
+  it("#5161 a dependent stays pending while its root's transient retries are pending and runs after it merges", async () => {
+    const { now, sleep } = fakeClock();
+    const started = [], updates = [];
+    let tries = 0;
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, readBody: async (n) => (n === 2 ? "Depends on #1" : ""), now, sleep, onUpdate: (r) => updates.push(r),
+      runOne: async (n) => { started.push(n); if (n === 1 && ++tries <= 2) throw new Error(CURL_502); return { terminalReason: "merged", pr: 10 + n }; } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.ok(!updates.some((u) => u.issue === 2 && u.outcome === "skipped"));
+    assert.deepEqual(started, [1, 1, 1, 2]);
+  });
+
+  it("#5161 a non-transient engine-error keeps the single immediate relaunch", async () => {
+    const { c, now, sleep } = fakeClock();
+    const l = launches();
+    const [row] = await orchestrate({ issues: [9], readBody: async () => "", now, sleep, runOne: async (n) => { l.note(n, c.t); throw new Error("boom"); } });
+    assert.equal(row.outcome, "engine-error");
+    assert.deepEqual(gaps(l.at.get(9)), [0]);
+  });
+
+  it("#5161 the breaker still counts transient engine-errors as transport errors (#4685)", async () => {
+    const { now, sleep } = fakeClock();
+    const saves = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, readBody: async () => "", now, sleep, breaker: { errors: 2, window_min: 30 },
+      store: { load: () => null, save: (st) => saves.push(st) }, runOne: async () => { throw new Error(CURL_502); } });
+    assert.equal(saves.map((st) => st.breaker).find(Boolean)?.transport, true);
+    assert.ok(rows.some((r) => r.outcome === "held"));
+  });
+});
+
+describe("#5167 early batch health in runBatch", () => {
+  // #1 and #3 are roots, #2 depends on #1. #3 runs until `release`; the captured T+15 timer fires while it runs.
+  const mk = ({ fail }) => {
+    const timers = [], comments = [], notes = [], gate = { open: null };
+    const released = new Promise((r) => { gate.open = r; });
+    const bodies = { 1: "", 2: "Depends on #1", 3: "" };
+    const leanIo = { gh: async (a) => {
+      if (a[0] === "issue" && a[1] === "comment") { if (/FORGE:BATCH-HEALTH/.test(a.at(-1))) comments.push(a); return ""; }
+      if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "", milestone: { title: "M Two" }, comments: [], author: { login: "x" } });
+      return a[0] === "repo" ? "main\n" : "[]";
+    }, git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
+    const deps = { dir: tmpDir("bh-run-"), batchRoot: tmpDir("bh-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, leanIo, pollMs: 5, preflight: null,
+      io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ body: bodies[a[2]] ?? "", state: "OPEN" }) : "o/r\n"), git: async () => "" },
+      healthConfig: { rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: [15, 60], issue: 77, notifyCommand: "notify-me" },
+      healthTimer: { set: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clear: () => {} },
+      notify: async (cmd, payload) => { notes.push([cmd, payload]); return { ok: true }; },
+      leanModule: { runCore: async (o) => {
+        if (o.issue === 3) { await released; return { terminalReason: "merged", pr: 3, cost_usd: 0, wall_ms: 1 }; }
+        return fail ? { terminalReason: "engine-error", detail: "lane crashed: boom", cost_usd: 0, wall_ms: 1 } : { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 };
+      } } };
+    return { deps, timers, comments, notes, gate };
+  };
+  const capture = async (fn) => { const lines = [], l = console.log; console.log = (...a) => lines.push(a.join(" ")); try { await fn(); } finally { console.log = l; } return lines; };
+
+  it("#5167 roots ending engine-error raise one BATCH UNHEALTHY at T+15 with recovery commands, on every channel", async () => {
+    const { deps, timers, comments, notes, gate } = mk({ fail: true });
+    let id = null;
+    const lines = await capture(async () => {
+      const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
+      try {
+        await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
+        assert.deepEqual(timers.map((t) => t.ms > 14 * 60000 && t.ms <= 15 * 60000 ? 15 : t.ms > 59 * 60000 ? 60 : t.ms), [15, 60], "T+15 and T+60 armed");
+        await timers[0].fn();
+        await until(() => existsSync(join(deps.batchRoot, id, "health.json")) && JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, 5000);
+        await until(() => notes.length === 1, 5000);
+      } finally { gate.open(); await run; }
+    });
+    assert.ok(lines.some((l) => /^health checks: T\+15 \d\d:\d\dZ, T\+60 \d\d:\d\dZ, and at batch end; forgedock status --batch /.test(l)), lines.join("\n"));
+    const alerts = lines.filter((l) => /^BATCH UNHEALTHY /.test(l));
+    assert.equal(alerts.length, 1, "alerted once (T+15), not again at batch end");
+    assert.match(alerts[0], /\(T\+15\)/);
+    assert.match(alerts[0], /cause: root-failed: root #1 engine-error/);
+    assert.match(alerts[0], /recovery:\n {4}forgedock orchestrate --requeue \S+ 1 2 --reason/);
+    assert.match(alerts[0], new RegExp(`forgedock orchestrate --cancel ${id}`));
+    assert.equal(comments.length, 1);
+    assert.deepEqual(comments[0].slice(0, 5), ["issue", "comment", "77", "-R", "o/r"]);
+    assert.equal(notes[0][0], "notify-me");
+    assert.equal(notes[0][1].batch, id);
+    const h = JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8"));
+    assert.deepEqual(Object.keys(h.checks).sort(), ["T+15", "end"]);
+  });
+
+  it("#5167 a healthy batch emits no alert", async () => {
+    const { deps, timers, comments, notes, gate } = mk({ fail: false });
+    gate.open();
+    const lines = await capture(() => orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter"], deps));
+    for (const t of timers) await t.fn(); // a late timer after the end still finds the batch healthy
+    assert.ok(!lines.some((l) => /BATCH UNHEALTHY/.test(l)), lines.join("\n"));
+    assert.equal(comments.length + notes.length, 0);
+    const [id] = readdirSyncSafe(deps.batchRoot);
+    const h = JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8"));
+    assert.equal(h.last.healthy, true);
+    assert.equal(h.alertedAt, undefined);
+  });
+});
+
+
+describe("#5168: --requeue accepts engine-error; a claude login failure is held, not an engine-error", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  it("#5168 --requeue accepts a final engine-error outcome and resets its engine-error count", async () => {
+    const b = openBatch(tmpDir("batch-requeue-5168-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2], results: { 1: { outcome: "engine-error" }, 2: { outcome: "merged" } } });
+    const r = b.requeue([1, 2], { reason: "login fixed", by: "operator" });
+    assert.deepEqual(r.requeued, [1]);
+    assert.deepEqual(r.refused, [{ issue: 2, reason: "not terminal" }]);
+
+    // The runner applies it: the issue returns to pending with a fresh relaunch (its engine-error count reset).
+    let entries = [];
+    const started = [], g2 = gate(), log = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", getRequeued: () => entries, onUpdate: (u) => log.push(u),
+      runOne: async (n) => {
+        started.push(n);
+        if (n === 2) { await g2.p; return { terminalReason: "merged" }; }
+        return started.filter((x) => x === 1).length <= 3 ? { terminalReason: "engine-error", detail: "Failed to authenticate" } : { terminalReason: "merged" };
+      } });
+    await until(() => log.some((u) => u.issue === 1 && u.outcome === "engine-error" && !/relaunching/.test(u.detail ?? "")));
+    entries = [{ issue: 1, reason: "login fixed", by: "operator", at: "2026-11-07T00:00:00Z" }];
+    try { await until(() => started.filter((x) => x === 1).length >= 4, 3000); } catch { /* asserted below */ }
+    g2.open();
+    const rows = await done;
+    assert.equal(started.filter((x) => x === 1).length, 4, "two runs before the requeue, then a fresh run and its relaunch");
+    assert.equal(rows.find((x) => x.issue === 1).outcome, "merged");
+    assert.equal(rows.find((x) => x.issue === 1).requeued.prior[0].outcome, "engine-error");
+  });
+
+  it("#5168 deferPolicy holds backend.auth like a usage limit: never capped, never counted", () => {
+    assert.deepEqual(deferPolicy({ code: "backend.auth", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900_000, hold: true });
+    assert.equal(deferPolicy({ code: "backend.auth" }, { now: 0 }).hold, true);
+  });
+
+  it("#5168 a backend.auth lane stays pending under the account hold: no relaunch used, no breaker, no engine-error", async () => {
+    const { now, sleep, c } = fakeClock();
+    const t0 = c.t, updates = [], starts = {};
+    let calls = 0;
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", breaker: { errors: 1, window_min: 30 }, maxDeferrals: 1,
+      onUpdate: (u) => updates.push(u),
+      runOne: async (n) => {
+        (starts[n] ??= []).push(now());
+        if (n === 1 && ++calls <= 3) return { terminalReason: "deferred", code: "backend.auth", retryInSeconds: 900, backendId: "default", detail: "claude CLI authentication failed" };
+        return { terminalReason: "merged", pr: 5 };
+      } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.equal(starts[1].length, 4, "deferred past maxDeferrals: the hold is uncapped");
+    assert.ok(starts[2][0] >= t0 + 900_000, "the held account admits nothing until the hold ends");
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+    assert.ok(updates.some((u) => u.outcome === "paused" && /paused \(backend\.auth\)/.test(u.detail ?? "")));
+  });
+});
+
+function readdirSyncSafe(d) { try { return readdirSync(d).filter((n) => !n.endsWith(".json")); } catch { return []; } }
