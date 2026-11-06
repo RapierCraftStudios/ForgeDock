@@ -62,8 +62,8 @@ describe("#5174 hostload", () => {
     assert.equal(lowerPriority(0), false);
     assert.equal(lowerPriority(undefined), false);
     const spawned = [];
-    assert.equal(spawnIoniceIdle(42, { find: () => "/usr/bin/ionice", run: (c, a, o) => { spawned.push([c, a, o.detached]); return { on() {}, unref() {} }; } }), true);
-    assert.deepEqual(spawned, [["/usr/bin/ionice", ["-c3", "-p", "42"], true]]);
+    assert.equal(spawnIoniceIdle(42, { find: () => "/usr/bin/ionice", run: (c, a, o) => { spawned.push([c, a, o.detached, o.windowsHide]); return { on() {}, unref() {} }; } }), true);
+    assert.deepEqual(spawned, [["/usr/bin/ionice", ["-c3", "-p", "42"], true, true]]);
     assert.equal(spawnIoniceIdle(42, { find: () => null, run: () => assert.fail("no ionice") }), false);
   });
 

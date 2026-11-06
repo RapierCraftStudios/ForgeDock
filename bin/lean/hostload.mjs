@@ -63,7 +63,7 @@ export function formatHostLoad(snap) {
 export function spawnIoniceIdle(pid, { find = (n) => which(n, process.env.PATH ?? ""), run = spawn } = {}) {
   const ionice = find("ionice");
   if (!ionice) return false;
-  const c = run(ionice, ["-c3", "-p", String(pid)], { stdio: "ignore", detached: true });
+  const c = run(ionice, ["-c3", "-p", String(pid)], { stdio: "ignore", detached: true, windowsHide: true });
   c?.on?.("error", () => {}); c?.unref?.();
   return true;
 }
