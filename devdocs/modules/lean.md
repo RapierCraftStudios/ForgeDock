@@ -2653,3 +2653,15 @@ Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.te
 - `orchestrate` resolves every `deps` write through `throughDecomposed` (`readDeps`, the `drainAdds` / `drainChildren` pending re-reads, the dependency-open union): a dependency that ended `decomposed` with sub-issues is replaced by them (fixpoint), so an issue added (`--add`, resume, body re-read) after its dependency decomposed waits on the sub-issues instead of ending `skipped`. With autoChildren mode `off` nothing is resolved and the dependent is still skipped.
 - `drainRequeues` re-reads each moved issue's body and REPLACES its edges (`declared` then `throughDecomposed`); an unreadable body keeps the old edges, an unchanged body leaves them unchanged. The decision text lists changed edges (`edges re-read: #N -> ...`). `--add` of a skipped issue routes through `batch.requeue`, so it gets the same re-read. No `--refresh-deps` flag.
 - Capacity fallback: with `execution.fallback_local` (`remote.offlineFallback`), an issue deferred `remote.capacityFallbackAfter` times (`execution.capacity_fallback_after`, default `CAPACITY_FALLBACK_AFTER` = 3) for `sandbox.capacity` is placed local in `grant()` when `remote.headroom()` (engine-cli passes `execMod.hostHeadroom`, now hoisted out of the hybrid `place`) allows it; `ok: false` or a throw keeps it remote. The count is the persisted state key `capDeferrals` (separate from `deferrals`, so `sandbox.capacity` stays uncapped), reset on requeue. One decision per issue on the first fallback. Tests: `batch.test.mjs` "#5112".
+
+## Held subtrees behind a failed root (#5162)
+
+A dependent of a root that ends `needs-human`, `engine-error`, `deferred` or
+`budget-exceeded` ends `held` (`blocked by #<root> (<outcome>)`, `root` and
+`trigger` = the root, persisted), not `skipped`. The "dependency cycle" label is
+reserved for real cycles (`cyclicNodes`, SCC over the pending deps); other stuck
+rows name a cycle member. `--requeue <root>` (`REQUEUABLE` now includes
+`engine-error` and `held`), a watched root merging, or removal of its
+`needs-human` label on a resumed batch (`watchHeldRoots`) returns the root and
+its held subtree to pending in dependency order. The report prints one
+`held subtree: #<root> (...) holds ...; release: forgedock orchestrate --requeue <batch> <root>` line per root.
