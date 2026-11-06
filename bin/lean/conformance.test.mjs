@@ -1399,6 +1399,12 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
       assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
     }
   });
+  it("#5157 negated verbs and bare negators before a preposition still weaken e2e", () => {
+    for (const choice of ["We do not need to run e2e; mocked route tests cover it", "will not rely on e2e, mock the API", "not with e2e: unit tests used", "not for e2e, unit tests used", "no need to run e2e; mocks cover it", "no need for e2e, mocks cover it"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
+    }
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)", source: "doc" }] }), []);
+  });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);

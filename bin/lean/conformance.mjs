@@ -303,9 +303,10 @@ const NEG_DROP_RE = /\b(?:do(?:es)? not|don't|never|not)\s+(?:be\s+|been\s+|bein
 const FAKE_CLOCK_RE = /\bfake[- ](?:timers?|clocks?)\b/gi;
 // A weakener governs the e2e term only within a few words and the same clause (no . or ; between them).
 const GAP = String.raw`(?:[\s,]+\w+){0,5}?[\s,]+`;
-// #5145: a bare negator ("no new fixtures needed for e2e") stops at a preposition; the verb weakeners keep the wide GAP.
-const NEG_GAP = String.raw`(?:[\s,]+(?!(?:for|to|of|in|on|at|by|with|from|via)\b)\w+){0,5}?[\s,]+`;
-const DROP_BEFORE_RE = new RegExp(String.raw`\b(?:(?:no|not|without|never)${NEG_GAP}|(?:drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|swap\w*)${GAP})${E2E_TERM}\b`, "i");
+// #5145/#5157: only the determiner "no" ("no new fixtures needed for e2e") stops at a preposition, since it negates a noun. not/without/never
+// negate the verb that governs e2e ("not need to run e2e", "not with e2e") and "no need/reason/point/requirement" negates the action; all keep the wide GAP.
+const NEG_GAP = String.raw`(?:[\s,]+(?!(?:for|of|in|on|at|by|with|from|via)\b)\w+){0,5}?[\s,]+`;
+const DROP_BEFORE_RE = new RegExp(String.raw`\b(?:no${NEG_GAP}|(?:not|without|never|no\s+(?:need|reason|point|requirement)|drop(?:ped|s|ping)?|skip(?:ped|s|ping)?|replac\w+|downgrad\w+|swap\w*)${GAP})${E2E_TERM}\b`, "i");
 const DROP_AFTER_RE = new RegExp(String.raw`\b${E2E_TERM}${GAP}(?:replaced|dropped|skipped|swapped|downgraded|unnecessary|(?:not|no longer)\s+(?:needed|required|necessary|run\w*|used|executed))\b`, "i");
 const INSTEAD_OF_RE = new RegExp(String.raw`\b${MOCKED_TERM}[^.;]{0,60}?\b(?:instead of|rather than|in lieu of)\b${GAP}${E2E_TERM}\b`, "i");
 const PROBE_RE = /forge-probe|acceptance[- ]probe/i;
