@@ -19,7 +19,7 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 
-export const STEPS = ["preflight", "release-pr", "review", "fixes", "promotion", "post-merge"];
+export const RELEASE_STEPS = ["preflight", "release-pr", "review", "fixes", "promotion", "post-merge"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -150,7 +150,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   ctx.save();
   let out;
   try {
-    for (const step of STEPS) {
+    for (const step of RELEASE_STEPS) {
       if (state.steps[step]?.done) continue;
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
@@ -169,7 +169,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
 }
 
 /** Real effects. `runningLanes`/`batches` read the batch dirs of `repo` (a plan without `repo` is taken as this repo's). */
-export function realIo({ env = process.env, exec = execFileSync, print = (l) => console.log(l) } = {}) {
+export function realReleaseIo({ env = process.env, exec = execFileSync, print = (l) => console.log(l) } = {}) {
   const gh = ghRunner(exec, print);
   const root = batchRoot(env);
   const mine = (b, repo) => { const r = b.readPlan()?.repo; return !r || r === repo; };
@@ -193,7 +193,7 @@ export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--me
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env;
-  const io = deps.io ?? realIo({ env });
+  const io = deps.io ?? realReleaseIo({ env });
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
   const root = releaseRoot(env);
