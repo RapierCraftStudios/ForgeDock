@@ -998,7 +998,7 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
     assert.equal(cls({ disposition: "defer", class: "external" }), "external");
     assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
-    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host"]);
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host", "backlog"]);
     assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
     const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
     assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
@@ -1025,7 +1025,8 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend" }), "external");
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend", class: "ops" }), "ops");
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }), "external");
-    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "engineering");
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "backlog");
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue" }), "backlog"); assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "ops" }), "ops"); // #5188
     for (const bucket of ["post-deploy", "verify-now", "date:2026-12-01"]) assert.equal(followupClass({ disposition: "defer", bucket }), "post-deploy");
     assert.equal(one({ bucket: "owner:rotate the key" }).why, "owner: rotate the key. [bucket:owner] w");
     assert.equal(one({ bucket: "verify-now" }).why, "post-deploy: [bucket:verify-now] w");

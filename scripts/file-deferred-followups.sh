@@ -23,7 +23,8 @@
 #   the parent's engineering follow-up when the run has one. External items go to ONE aggregate per batch, found by
 #   `<!-- FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID or adhoc> -->` (an older per-parent external follow-up is still appended to).
 #   The rollup may also be the lowest open trusted issue labelled FORGE_ROLLUP_LABEL (forge.yaml followups.rollup_issue_label).
-#   `new-issue` engineering, `verify-now` (the parent is already on the default branch) its own per-parent follow-up class
+#   `new-issue` engineering deferrals (class backlog, #5188) go to ONE issue per batch found by `<!-- FORGE:BACKLOG_BATCH: <batch> -->`
+#   (labels `followup:engineering` + `followup:backlog`, sections per parent, deduplicated like the rollup); `verify-now` (the parent is already on the default branch) its own per-parent follow-up class
 #   `verify-now` that the gate releases at once, and `post-deploy`/`date` go to the ONE open rollup of the release lane.
 #   The rollup (class post-deploy) is found by `<!-- FORGE:POSTDEPLOY_ROLLUP: <lane> -->`, not by parent: every lane appends
 #   its items under a `### #<root parent>` heading (a follow-up of a follow-up is filed under the root parent), deduplicated
@@ -62,7 +63,7 @@ if [ "$ITEMS" = "-" ]; then cat > "$TMP/items.raw"; else cat "$ITEMS" > "$TMP/it
 # Internal file uses a non-whitespace separator (US, \x1f): a tab IFS collapses an empty `why` and drops the known-flaw flag.
 # Fields: identity, why, flag, path (`-` when none), class.
 SEP=$(printf '\037')
-CLASSES="engineering post-deploy external ops verify-now host"
+CLASSES="engineering post-deploy external ops verify-now host backlog"
 # #5078: an owner item is external only when it needs credentials, spend, an account, a third party or a customer. A
 # post-promotion action (owner:orchestrator, owner:promote:*, after promotion/release, rollout, purge) joins the rollup and
 # read-only production data or capture (obs-psql, *-monitor, a read-only prod query) is a host task. Mirrors
@@ -113,12 +114,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   if [ -z "$c" ]; then
     case "$w" in post-deploy:*) c="post-deploy" ;; external:*) c="external" ;; ops:*) c="ops" ;; host:*) c="host" ;; *) c="engineering" ;; esac
   fi
-  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops|host)"; continue ;; esac
+  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops|host|backlog)"; continue ;; esac
   # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup, verify-now needs no release.
   case "$w" in
     *"[bucket:owner]"*) [ "$c" = "ops" ] || c=$(owner_route "$w") ;;
     *"[bucket:host]"*) c=$(host_route "$w") ;;
-    *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering" ;;
+    *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering"; [ "$c" = "engineering" ] && c="backlog" ;; # #5188: one per-batch issue
     *"[bucket:verify-now]"*) [ "$c" = "post-deploy" ] && c="verify-now" ;;
   esac
   if cut -d "$SEP" -f1 "$TMP/items" | grep -qxF -- "$id"; then continue; fi
@@ -220,7 +221,8 @@ ROLLUP_MARKER="<!-- FORGE:POSTDEPLOY_ROLLUP: ${RELEASE_LANE} -->"
 BATCH="${FORGE_BATCH_ID:-adhoc}"
 EXTERNAL_MARKER="<!-- FORGE:EXTERNAL_BATCH: ${BATCH} -->"
 ROLLUP_LABEL="${FORGE_ROLLUP_LABEL:-}"
-agg_marker() { if [ "$1" = "post-deploy" ]; then printf '%s' "$ROLLUP_MARKER"; else printf '%s' "$EXTERNAL_MARKER"; fi; }
+BACKLOG_MARKER="<!-- FORGE:BACKLOG_BATCH: ${BATCH} -->"
+agg_marker() { case "$1" in post-deploy) printf '%s' "$ROLLUP_MARKER" ;; backlog) printf '%s' "$BACKLOG_MARKER" ;; *) printf '%s' "$EXTERNAL_MARKER" ;; esac; }
 verify_rollup() { # number [marker] -> `number<TAB>open` when a trusted, open, non-PR issue carries the marker
   local out rc m="${2:-$ROLLUP_MARKER}"
   out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
@@ -237,7 +239,7 @@ verify_labelled() { # number -> `number<TAB>open` when a trusted, open, non-PR i
       select(.pull_request == null) | select(trusted) | select(.state == "open") | select(any(.labels[]?; (.name // .) == $l))
       | "\(.number)\t\(.state)"' 2>/dev/null
 }
-find_aggregate() { # kind (post-deploy|external) ; sets CANON/CSTATE to the lowest open one; non-zero only when a lookup failed
+find_aggregate() { # kind (post-deploy|external|backlog) ; sets CANON/CSTATE to the lowest open one; non-zero only when a lookup failed
   local kind="$1" m q cands n r
   CANON=""; CSTATE=""
   m=$(agg_marker "$kind"); q="${m#<!-- }"; q="${q% -->}"
@@ -306,6 +308,8 @@ file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane r
   m=$(agg_marker "$CLS")
   if [ "$CLS" = "post-deploy" ]; then
     title="post-deploy: release checklist (${RELEASE_LANE})"; what="post-deploy rollup ${RELEASE_LANE}"; lbls="followup:post-deploy"
+  elif [ "$CLS" = "backlog" ]; then
+    title="follow-up: deferred work of batch ${BATCH}"; what="backlog aggregate of batch ${BATCH}"; lbls="followup:engineering followup:backlog"
   else
     title="external: prerequisites of batch ${BATCH}"; what="external aggregate of batch ${BATCH}"; lbls="followup:external external-prerequisite needs-human"
   fi
@@ -313,6 +317,8 @@ file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane r
   {
     if [ "$CLS" = "post-deploy" ]; then
       printf '## Problem\n\nPost-deploy checklist of release lane `%s`%s. Every merged lane appends its post-deploy items under a `### #<parent>` heading (deduplicated), so one read-only verification works through this one issue per release.\n\n' "$RELEASE_LANE" "${FORGE_RELEASE_SHA:+ (deploy target at $FORGE_RELEASE_SHA)}"
+    elif [ "$CLS" = "backlog" ]; then
+      printf '## Problem\n\nDeferred engineering work of batch `%s`: items declared out of scope (`new-issue`) by the lanes of this batch. Every lane appends its items under a `### #<parent>` heading (deduplicated), so the batch has ONE backlog issue.\n\n' "$BATCH"
     else
       printf '## Problem\n\nExternal prerequisites of batch `%s`: every item below waits on something outside the repo (credentials, spend, an account, a third party or a customer). Every lane of the batch appends its items under a `### #<parent>` heading (deduplicated), so the batch has ONE external issue.' "$BATCH"
       [ -n "${FORGE_EXTERNAL_PREREQ:-}" ] && printf ' Linked prerequisite: #%s.' "${FORGE_EXTERNAL_PREREQ#\#}"
@@ -371,6 +377,7 @@ lookup_class() {
   CKIND="agg"
   case "$CLS" in
     post-deploy) find_aggregate post-deploy ;;
+    backlog) find_aggregate backlog ;;
     external)
       find_aggregate external || return 1
       [ -n "$CANON" ] && return 0
@@ -536,7 +543,7 @@ INTO=""; FILED=0
 for CLS in $CLS_LIST; do
   ITEMS_F="$TMP/items.$CLS"
   case "$CLS:$(cut -f3 "$TMP/canon.$CLS")" in
-    post-deploy:*|external:agg) file_rollup ;;
+    post-deploy:*|external:agg|backlog:agg) file_rollup ;;
     *) file_class ;;
   esac
   case " $INTO " in *" $FILED_N "*) ;; *) INTO="${INTO:+$INTO }$FILED_N" ;; esac
