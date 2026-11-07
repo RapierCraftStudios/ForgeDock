@@ -16,7 +16,7 @@ echo "$*" >> "$GH_LOG"
 case "$1 $2" in
   "api -X") [ -n "${LOOKUP_FAIL:-}" ] && exit 1; cat "$SEARCH_JSON"; exit 0 ;;
   "api --paginate") [ -n "${CLAIM_FAIL:-}" ] && exit 1; cat "$COMMENTS_JSON"; exit 0 ;;
-  "issue create") [ -n "${CREATE_FAIL:-}" ] && exit 1; N=$(( $(cat "$T_DIR/create.n" 2>/dev/null || echo 900) + 1 )); echo "$N" > "$T_DIR/create.n"; while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$T_DIR/created.$N.body"; shift; done; echo "https://github.com/o/r/issues/$N"; exit 0 ;;
+  "issue create") [ -n "${CREATE_FAIL:-}" ] && exit 1; [ -n "${CREATE_HOOK:-}" ] && eval "$CREATE_HOOK"; N=$(( $(cat "$T_DIR/create.n" 2>/dev/null || echo 900) + 1 )); echo "$N" > "$T_DIR/create.n"; while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$T_DIR/created.$N.body"; shift; done; echo "https://github.com/o/r/issues/$N"; exit 0 ;;
   "label create") exit 0 ;;
   "issue comment") [ -n "${COMMENT_FAIL:-}" ] && exit 1; exit 0 ;;
   "issue reopen") [ -n "${REOPEN_FAIL:-}" ] && exit 1; exit 0 ;;
@@ -49,187 +49,107 @@ reset() { : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited" "$T"/issue.*.json "$T"/comme
 issue_json() { printf '{"number":%s,"state":"%s",%s"author_association":"%s","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #%s -->"}\n' "$1" "$2" "${5:+\"state_reason\":\"$5\",}" "$3" "${4:-10}" > "$T/issue.$1.json"; }
 # claim_json ASSOCIATION NUMBER...: parent comments carrying claim markers
 claim_json() { local a="$1" out="" n; shift; for n in "$@"; do out="${out:+$out,}{\"author_association\":\"$a\",\"user\":{\"type\":\"User\"},\"body\":\"<!-- FORGE:DEFERRED_ISSUE: #$n -->\"}"; done; echo "[$out]" > "$COMMENTS_JSON"; }
-printf 'a/x.sh\twhy a\t\nb/y.sh\twhy b\tknown-flaw\nc/z.sh\twhy c\t\n' > "$T/items.tsv"
+# #5207: every item goes to an aggregate; the default fixture is three external items of one parent.
+printf 'a/x.sh\texternal: why a\t\nb/y.sh\texternal: why b\tknown-flaw\nc/z.sh\texternal: why c\t\n' > "$T/items.tsv"
+agg_json() { printf '{"number":%s,"state":"%s","author_association":"%s","user":{"type":"User"},"body":"%s"}\n' "$1" "$2" "$3" "$4" > "$T/issue.$1.json"; }
 
-# 1. N items -> exactly one create
+# 1. N items -> exactly one aggregate create (the batch external aggregate)
 reset
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" --folded 2); RC=$?
 check "create: rc 0" "[ $RC -eq 0 ]"
 check "create: one issue create for 3 items" "[ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ]"
 check "create: rows share issue" "[ \$(printf '%s\n' \"\$OUT\" | grep -c '901\$') -ge 3 ]"
-check "create: telemetry" "printf '%s' \"\$OUT\" | grep -q 'DEFERRED_TELEMETRY deferred_items=3 folded=2 batched_into=#901 filed=1'"
+check "create: telemetry" "printf '%s' \"\$OUT\" | grep -q 'DEFERRED_TELEMETRY deferred_items=3 folded=2 batched_into=#901 filed=1 classes=external'"
+check "create: the external aggregate marker and labels" "grep -q 'FORGE:EXTERNAL_BATCH: adhoc' '$T/created.901.body' && grep '^issue create' '$GH_LOG' | grep -q -- '--label needs-human' && grep -q 'b/y.sh. \*\*known-flaw\*\*' '$T/created.901.body'"
+check "create: claim marker posted on the parent" "grep -q '^issue comment 10 .*FORGE:DEFERRED_ISSUE: #901 class=external' '$GH_LOG'"
 
-# 2. append to existing trusted open issue; exact path match
+# 2. append to the open trusted aggregate; dedup on normalized text
 reset
-printf '## Affected Files\n- `a/x.sh`\n\n- [ ] `a/x.sh.bak` — other\n<!-- FORGE:DEFERRED_FROM: #10 -->\n' > "$ISSUE_BODY"
-echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 77 open OWNER
+echo '{"items":[{"number":77}]}' > "$SEARCH_JSON"; agg_json 77 open OWNER '<!-- FORGE:EXTERNAL_BATCH: adhoc -->'
+printf '## Acceptance Criteria\n\n### #9\n- [ ] `a/x.sh.bak` — old\n<!-- FORGE:EXTERNAL_BATCH: adhoc -->\n' > "$ISSUE_BODY"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
 check "append: rc 0, no create" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG'"
 check "append: telemetry batched into 77 filed=0" "printf '%s' \"\$OUT\" | grep -q 'batched_into=#77 filed=0'"
-check "append: all three added (substring .bak does not dedup a/x.sh)" "[ \$(grep -c '^- \[ \] \`' '$ISSUE_BODY.edited') -eq 4 ]"
+check "append: all three added under the parent heading" "[ \$(grep -c '^- \[ \] \`' '$ISSUE_BODY.edited') -eq 4 ] && grep -q '^### #10\$' '$ISSUE_BODY.edited'"
 check "append: known-flaw flagged" "grep -q 'b/y.sh. \*\*known-flaw\*\*' '$ISSUE_BODY.edited'"
-
-# 2b. empty why + known-flaw: the flag must survive (a whitespace IFS would collapse the empty field)
-reset
-printf 'd/w.sh\t\tknown-flaw\n' > "$T/emptywhy.tsv"
-bash "$S" --parent 10 --repo o/r --items "$T/emptywhy.tsv" >/dev/null; RC=$?
-rm -f "$ISSUE_BODY.edited"; printf 'x\n' > "$ISSUE_BODY"
-echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 77 open OWNER
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/emptywhy.tsv"); RC=$?
-check "empty-why: append keeps known-flaw flag" "[ $RC -eq 0 ] && grep -q 'd/w.sh. \*\*known-flaw\*\*' '$ISSUE_BODY.edited'"
-
-# 2c. missing option value -> usage exit 2
-bash "$S" --parent >/dev/null 2>&1; RC=$?
-check "missing option value: rc 2" "[ $RC -eq 2 ]"
-
-# 3. already-listed path is not duplicated; nothing to add -> no edit
-reset
-printf -- '- [ ] `a/x.sh` — w\n- [x] `b/y.sh`\n- [ ] `c/z.sh`\n' > "$ISSUE_BODY"
-echo '{"items":[{"number":77,"author_association":"MEMBER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 77 open OWNER
-bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
+# 3. nothing new -> no edit
+cp "$ISSUE_BODY.edited" "$ISSUE_BODY"; : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
 check "idempotent: no edit, no create on resume" "[ $RC -eq 0 ] && ! grep -qE '^issue (edit|create)' '$GH_LOG'"
-
-# 4. untrusted match ignored -> new issue
+# 4. an untrusted or closed aggregate is not reused
 reset
-echo '{"items":[{"number":66,"author_association":"NONE","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 66 open NONE; issue_json 77 open OWNER
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv")
-check "untrusted: ignored, create filed" "grep -q '^issue create' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'filed=1'"
-
+echo '{"items":[{"number":66},{"number":67}]}' > "$SEARCH_JSON"; agg_json 66 open NONE '<!-- FORGE:EXTERNAL_BATCH: adhoc -->'; agg_json 67 closed OWNER '<!-- FORGE:EXTERNAL_BATCH: adhoc -->'
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
+check "untrusted/closed aggregate: ignored, create filed" "grep -q '^issue create' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'filed=1' && ! grep -qE '^issue (edit|reopen) 6[67]' '$GH_LOG'"
 # 5. lookup failure -> FAILED, nothing filed
 reset; export LOOKUP_FAIL=1
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
 check "lookup failure: rc 3, DEFERRED_LOOKUP=FAILED, no create" "[ $RC -eq 3 ] && printf '%s' \"\$OUT\" | grep -q DEFERRED_LOOKUP=FAILED && ! grep -q '^issue create' '$GH_LOG'"
-
 # 6. create / edit failure not counted as success
 reset; export CREATE_FAIL=1
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
 check "create failure: rc 4, no telemetry" "[ $RC -eq 4 ] && ! printf '%s' \"\$OUT\" | grep -q DEFERRED_TELEMETRY"
 reset; export EDIT_FAIL=1
-printf 'x\n' > "$ISSUE_BODY"
-echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 77 open OWNER
+echo '{"items":[{"number":77}]}' > "$SEARCH_JSON"; agg_json 77 open OWNER '<!-- FORGE:EXTERNAL_BATCH: adhoc -->'; printf 'x\n' > "$ISSUE_BODY"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
 check "edit failure: rc 4, no telemetry" "[ $RC -eq 4 ] && ! printf '%s' \"\$OUT\" | grep -q DEFERRED_TELEMETRY"
-
-# 7. DRY_RUN
+# 7. DRY_RUN: no create, comment, close or edit
 reset; export DRY_RUN=1
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" 2>/dev/null)
-check "dry-run: no create" "! grep -q '^issue create' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'filed=1'"
-
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" 2>/dev/null); RC=$?
+check "dry-run: no create/comment/close/edit, filed=1" "[ $RC -eq 0 ] && ! grep -qE '^issue (comment|reopen|close|edit|create)' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'filed=1'"
 # 8. empty items, usage errors
 reset
-OUT=$(printf '' | bash "$S" --parent 10 --repo o/r)
-check "empty: no create, deferred_items=0" "! grep -q '^issue create' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'deferred_items=0'"
-bash "$S" --repo o/r >/dev/null 2>&1; check "usage: missing parent rc 2" "[ $? -eq 2 ]"
-
-# 9. e1: search index lags (returns nothing) but the claim marker on the parent finds the follow-up
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 open OWNER; claim_json OWNER 77
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-check "index-lag: claim found, no duplicate create" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'batched_into=#77 filed=0'"
-check "index-lag: search never needed" "! grep -q search/issues '$GH_LOG'"
-
-# 10. e2: closed follow-up (found only by a state-all search) is reused and reopened
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed
-echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-check "closed: reused, reopened, no create" "[ $RC -eq 0 ] && grep -q '^issue reopen 77' '$GH_LOG' && ! grep -q '^issue create' '$GH_LOG'"
-check "closed: search query covers all states" "grep -q 'is:issue' '$GH_LOG' && ! grep 'api -X' '$GH_LOG' | grep -q 'is:open'"
-reset; export REOPEN_FAIL=1
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
-bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
-check "closed: reopen failure is rc 4" "[ $RC -eq 4 ]"
-
-# 10b. #4924: closed trackers are reopened only when completed, unresolved by a person, and given new items
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 not_planned; claim_json OWNER 77
-bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
-check "not planned: stays closed, fresh tracker created" "[ $RC -eq 0 ] && ! grep -q '^issue reopen' '$GH_LOG' && ! grep -q '^issue edit 77' '$GH_LOG' && grep -q '^issue create' '$GH_LOG'"
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
-echo '[{"user":{"type":"User"},"body":"folded into #5"}]' > "$T/comments.77.json"
-bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
-check "folded by a person: stays closed, fresh tracker created" "[ $RC -eq 0 ] && ! grep -q '^issue reopen' '$GH_LOG' && grep -q '^issue create' '$GH_LOG'"
-reset
-printf -- '- [ ] `a/x.sh`\n- [ ] `b/y.sh`\n- [ ] `c/z.sh`\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
-bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
-check "completed, nothing new: stays closed, no create" "[ $RC -eq 0 ] && ! grep -q '^issue reopen' '$GH_LOG' && ! grep -q '^issue create' '$GH_LOG'"
-reset
-printf -- '- [ ] `a/x.sh`\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
-FORGE_RUN_ID=core_10 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
-check "completed, new items: reopened with a comment naming parent, run and items" "[ $RC -eq 0 ] && grep -q '^issue reopen 77' '$GH_LOG' && grep '^issue comment 77' '$GH_LOG' | grep -q 'FORGE:FOLLOWUP_REOPENED' && grep -q 'Reopened by the run of #10 (run .core_10.)' '$GH_LOG' && grep -q 'b/y.sh' '$GH_LOG'"
-
-# 11. create posts the claim marker on the parent
-reset
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-check "claim: posted on parent after create" "[ $RC -eq 0 ] && grep -q '^issue comment 10 .*FORGE:DEFERRED_ISSUE: #901' '$GH_LOG'"
-reset; export COMMENT_FAIL=1
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" 2>/dev/null); RC=$?
-check "claim: post failure only warns" "[ $RC -eq 0 ] && printf '%s' \"\$OUT\" | grep -q 'batched_into=#901 filed=1'"
-
-# 12. e3: a concurrent build filed #800 first; the first claim read (before our create) misses it, the post-create re-check sees it
-race_setup() { # first comments read returns [] (the other build has not claimed yet), later reads return the real listing
-  CALLS="$T/claim.calls"; : > "$CALLS"; export CALLS
-  mv "$T/bin/gh" "$T/bin/gh.real"
-  cat > "$T/bin/gh" <<'WRAP'
-#!/usr/bin/env bash
-if [ "$1 $2" = "api --paginate" ]; then
-  echo x >> "$CALLS"
-  if [ "$(wc -l < "$CALLS" | tr -d ' ')" -le 1 ]; then echo "$*" >> "$GH_LOG"; echo '[]'; exit 0; fi
-fi
-exec "$(dirname "$0")/gh.real" "$@"
-WRAP
-  chmod +x "$T/bin/gh"
-}
-race_teardown() { mv "$T/bin/gh.real" "$T/bin/gh"; }
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 800 open OWNER; claim_json OWNER 800
-race_setup
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-race_teardown
-check "race: newer duplicate closed, items moved to lowest" "[ $RC -eq 0 ] && grep -q '^issue close 901' '$GH_LOG' && grep -q '^issue edit 800' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'batched_into=#800 filed=1'"
-check "race: rows point at canonical issue" "[ \$(printf '%s\n' \"\$OUT\" | grep -c '800\$') -ge 3 ]"
-# e5: duplicate-close failure only warns
-reset; export CLOSE_FAIL=1
-printf 'x\n' > "$ISSUE_BODY"; issue_json 800 open OWNER; claim_json OWNER 800
-race_setup
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" 2>/dev/null); RC=$?
-race_teardown
-check "race: duplicate-close failure still rc 0" "[ $RC -eq 0 ] && printf '%s' \"\$OUT\" | grep -q 'batched_into=#800'"
-
-# 13. e4: claim listing failure is a failed lookup, never "none found"
-reset; export CLAIM_FAIL=1
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-check "claim-failure: rc 3, no create" "[ $RC -eq 3 ] && printf '%s' \"\$OUT\" | grep -q DEFERRED_LOOKUP=FAILED && ! grep -q '^issue create' '$GH_LOG'"
-
-# 15. e6: untrusted claim comment is ignored (falls through to create)
-reset
-issue_json 77 open OWNER; claim_json NONE 77
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" 2>/dev/null); RC=$?
-check "untrusted-claim: ignored, create filed" "[ $RC -eq 0 ] && grep -q '^issue create' '$GH_LOG'"
-
-# 16. e7: several claims, lowest valid wins; a claim to a missing issue falls through
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 80 open OWNER; issue_json 90 open OWNER; claim_json OWNER 70 90 80
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-check "multi-claim: lowest valid (80) wins, missing 70 skipped" "[ $RC -eq 0 ] && printf '%s' \"\$OUT\" | grep -q 'batched_into=#80 filed=0'"
-
-# 17. DRY_RUN: no claim, reopen or close
-reset; export DRY_RUN=1
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
-bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
-check "dry-run: no comment/reopen/close/edit" "! grep -qE '^issue (comment|reopen|close|edit|create)' '$GH_LOG'"
-
-# 18. #4626: a post-deploy why's [check:<id>] token is kept verbatim in the checklist line
+OUT=$(printf '' | bash "$S" --parent 10 --repo o/r); RC=$?
+check "empty: no create, deferred_items=0" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'deferred_items=0'"
+bash "$S" --parent >/dev/null 2>&1; RC=$?
+check "missing option value: rc 2" "[ $RC -eq 2 ]"
+bash "$S" --parent x --repo o/r </dev/null >/dev/null 2>&1; RC=$?
+check "non-numeric parent: rc 2" "[ $RC -eq 2 ]"
+# 9. a concurrent lane created a lower aggregate between our lookup and our create: ours is closed, items move there
 reset
 printf 'x\n' > "$ISSUE_BODY"
-echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"
-printf '{"number":77,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->\\n<!-- FORGE:DEFERRED_FROM: #10 -->\\n### #10\\n<!-- FORGE:DEFERRED_CLASS: post-deploy -->"}\n' > "$T/issue.77.json"
-printf -- '-\tpost-deploy: [check:login-smoke] after a day\t\t\tR3: soak\n' > "$T/check.tsv"
-bash "$S" --parent 10 --repo o/r --items "$T/check.tsv" >/dev/null 2>&1
-check "check token kept in the checklist line" "grep -q 'post-deploy: \[check:login-smoke\] after a day' '$ISSUE_BODY.edited'"
+export CREATE_HOOK="echo '{\"items\":[{\"number\":800}]}' > \"\$SEARCH_JSON\"; printf '%s\n' '{\"number\":800,\"state\":\"open\",\"author_association\":\"OWNER\",\"user\":{\"type\":\"User\"},\"body\":\"<!-- FORGE:EXTERNAL_BATCH: adhoc -->\"}' > \"\$T_DIR/issue.800.json\""
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
+unset CREATE_HOOK
+check "race: newer duplicate closed, items moved to lowest" "[ $RC -eq 0 ] && grep -q '^issue close 901' '$GH_LOG' && grep -q '^issue edit 800' '$GH_LOG' && printf '%s' \"\$OUT\" | grep -q 'batched_into=#800 filed=1'"
+check "race: rows point at canonical issue" "[ \$(printf '%s\n' \"\$OUT\" | grep -c '800\$') -ge 3 ]"
 
-# 19. #4664: milestone inheritance
+# 10. #5207 R1/R10: an engineering deferral is rejected before any gh call; nothing is filed
+for row in 'a/x.sh\twhy a\t' '-\tdefer: wire it\t\t\tR7: wire the report' '-\tdefer: [bucket:new-issue] later\t\t\tR8: later' '-\tpost-deploy: [bucket:new-issue] later\t\t\tR8: later' 'a/x.sh\twhy\t\tengineering' 'a/x.sh\twhy\t\tbacklog'; do
+  reset; printf -- "$row\n" > "$T/eng.tsv"
+  OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv" 2>"$T/eng.err"); RC=$?
+  check "#5207 engineering row ($(printf -- "$row" | cut -c1-30)): rc 2, DEFERRED_TSV=INVALID, no gh call" "[ $RC -eq 2 ] && printf '%s' \"\$OUT\" | grep -qx DEFERRED_TSV=INVALID && grep -q 'engineering deferral: build it in-lane (#5207)' '$T/eng.err' && [ ! -s '$GH_LOG' ]"
+done
+reset; printf 'a/x.sh\texternal: ok\t\n-\tdefer: parser first\t\t\tR1: add the parser\n' > "$T/eng.tsv"
+bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv" >/dev/null 2>&1; RC=$?
+check "#5207 one engineering row among valid ones files nothing" "[ $RC -eq 2 ] && [ ! -s '$GH_LOG' ]"
+# 11. #5207 R4: an existing per-parent follow-up of an older run is never read, edited, reopened or closed
+reset
+issue_json 77 open OWNER; claim_json OWNER 77
+echo '{"items":[]}' > "$SEARCH_JSON" # a search for the aggregate marker never matches a per-parent follow-up
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
+check "#5207 per-parent follow-up #77 untouched: aggregate created, #77 never fetched or changed" "[ $RC -eq 0 ] && grep -q '^issue create' '$GH_LOG' && ! grep -qE 'issues/77|^issue (edit|reopen|close|comment) 77' '$GH_LOG' && ! grep -q 'FORGE:DEFERRED_FROM' '$GH_LOG' && ! grep -q 'issues/77/comments' '$GH_LOG'"
+check "#5207 no title 'follow-up: N deferred item(s)'" "! grep -q 'deferred item(s)' '$GH_LOG'"
+# 12. #5207 R2/R8/R9: classes -> the three aggregates (ops shares the external one), never a per-parent issue
+reset; export FORGE_BATCH_ID=b7
+printf 'a/x.sh\tpost-deploy: [check:smoke] later\t\t\nc/z.sh\texternal: needs a real credential\t\t\nd/w.sh\tops drill\t\tops\n-\thost: [bucket:host] run the obs-psql report\t\t\tR6: report rows\n-\tpost-deploy: [bucket:verify-now] on default already\t\t\tR1: check it now\n' > "$T/classes.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/classes.tsv"); RC=$?
+unset FORGE_BATCH_ID
+check "aggregates: rc 0, one create per aggregate (3)" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 3 ]"
+check "aggregates: telemetry lists every issue and class" "printf '%s' \"\$OUT\" | grep -q 'batched_into=#901,#902,#903 filed=3 classes=external,host,ops,post-deploy'"
+check "aggregates: ops joins the external batch aggregate" "grep -q 'FORGE:EXTERNAL_BATCH: b7' '$T/created.901.body' && grep -q 'd/w.sh' '$T/created.901.body' && grep -q 'c/z.sh' '$T/created.901.body' && printf '%s\n' \"\$OUT\" | grep -q '^d/w.sh	901\$'"
+check "aggregates: host batch aggregate, labelled followup:host + host-task, never needs-human" "grep -q 'FORGE:HOST_BATCH: b7' '$T/created.902.body' && grep -q 'report rows' '$T/created.902.body' && grep '^issue create' '$GH_LOG' | grep 'host: tasks of batch b7' | grep -- '--label followup:host' | grep -- '--label host-task' | grep -qv needs-human"
+check "aggregates: verify-now joins the release rollup" "grep -q 'FORGE:POSTDEPLOY_ROLLUP: default' '$T/created.903.body' && grep -q 'check it now' '$T/created.903.body' && grep -q 'a/x.sh' '$T/created.903.body'"
+check "aggregates: no per-parent follow-up title" "! grep '^issue create' '$GH_LOG' | grep -q 'follow-up'"
+# a second lane of the batch appends to the host aggregate
+reset; export FORGE_BATCH_ID=b7
+echo '{"items":[{"number":902}]}' > "$SEARCH_JSON"; agg_json 902 open OWNER '<!-- FORGE:HOST_BATCH: b7 -->'; cp "$T/created.902.body" "$ISSUE_BODY"
+printf -- '-\thost: [bucket:host] capture the page in a browser on the host before promotion\t\t\tR2: browser capture\n' > "$T/hb.tsv"
+OUT=$(bash "$S" --parent 11 --repo o/r --items "$T/hb.tsv"); RC=$?
+unset FORGE_BATCH_ID
+check "host aggregate: second lane appends under its parent, no create" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 902' '$GH_LOG' && grep -q '^### #11\$' '$ISSUE_BODY.edited' && grep -q 'browser capture' '$ISSUE_BODY.edited'"
+
+# 13. #4664: milestone inheritance
 MS='[{"title":"M1","state":"open","due_on":"2026-01-01T00:00:00Z"},{"title":"M0","state":"closed","due_on":"2025-06-01T00:00:00Z"},{"title":"M2","state":"open","due_on":"2026-06-01T00:00:00Z"},{"title":"Dflt","state":"open","due_on":null}]'
 reset; echo "$MS" > "$T/milestones.json"; export FORGE_FOLLOWUP_MILESTONE=M1
 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
@@ -248,29 +168,6 @@ reset; echo '[]' > "$T/milestones.json"
 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
 check "milestone: parent without one -> none passed" "grep -q '^issue create' '$GH_LOG' && ! grep '^issue create' '$GH_LOG' | grep -q -- '--milestone'"
 
-# 20. #4664: one issue per class, class labels
-printf 'a/x.sh\twhy a\t\nb/y.sh\tpost-deploy: [check:smoke] later\t\t\nc/z.sh\texternal: needs a real credential\t\t\nd/w.sh\tops drill\t\tops\n-\tdefer: plain\t\t\tR9: plain item\n' > "$T/classes.tsv"
-reset
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/classes.tsv"); RC=$?
-check "classes: rc 0, one create per class (4)" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 4 ]"
-for c in engineering post-deploy external ops; do check "classes: label followup:$c applied" "grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:$c'"; done
-check "classes: external also labelled external-prerequisite" "grep '^issue create' '$GH_LOG' | grep -- 'followup:external' | grep -q -- '--label external-prerequisite'"
-check "classes: engineering has the old title, others carry the class" "grep '^issue create' '$GH_LOG' | grep -q 'follow-up (ops): 1 deferred' && grep '^issue create' '$GH_LOG' | grep -q 'follow-up: 2 deferred'"
-check "classes: telemetry lists every issue and class" "printf '%s' \"\$OUT\" | grep -q 'batched_into=#901,#902,#903,#904 filed=4 classes=engineering,external,ops,post-deploy'"
-check "classes: rows point at their class issue (a/x.sh and the R9 item share one)" "printf '%s\n' \"\$OUT\" | grep -q '^c/z.sh	90[0-9]\$' && [ \$(printf '%s\n' \"\$OUT\" | grep -E '^(a/x.sh|R9: plain item)	' | cut -f2 | sort -u | wc -l) -eq 1 ]"
-check "classes: claim markers carry the class" "grep '^issue comment 10' '$GH_LOG' | grep -q 'class=external'"
-# an existing engineering follow-up is not reused for another class
-reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 open OWNER; claim_json OWNER 77
-printf 'c/z.sh\texternal: needs a credential\t\n' > "$T/ext.tsv"
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/ext.tsv"); RC=$?
-check "classes: engineering follow-up #77 not reused for an external item" "[ $RC -eq 0 ] && grep -q '^issue create' '$GH_LOG' && ! grep -q '^issue edit 77' '$GH_LOG'"
-# a labelled-class follow-up is reused for its class
-reset
-printf 'x\n' > "$ISSUE_BODY"
-printf '{"number":78,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->\\n<!-- FORGE:DEFERRED_CLASS: external -->"}\n' > "$T/issue.78.json"; claim_json OWNER 78
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/ext.tsv"); RC=$?
-check "classes: external follow-up #78 reused for external items" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 78' '$GH_LOG'"
 
 # 21. #4664: requirement-text rows are rejected, nothing filed
 for row in 'R1: a saved mapping per entity\twhy\t' 'R1: R2: a saved mapping\twhy\t' 'add a saved mapping\twhy\t' 'a/x.sh\twhy\t\tbogus'; do
@@ -282,16 +179,16 @@ reset; printf 'a/x.sh\twhy\t\nR2: nope\twhy\t\n' > "$T/bad.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/bad.tsv" >/dev/null 2>&1
 check "one malformed row among valid ones files nothing" "[ $? -eq 2 ] && ! grep -q '^issue create' '$GH_LOG'"
 # `-` + label is a valid requirement-level row; a doubled R-prefix in the label collapses; Affected Files lists only paths
-reset; printf '%s\n' "$(printf -- '-\twhy\t\t\tR1: R2: a saved mapping')" "$(printf 'src/q.ts\twhy q\t')" > "$T/ok.tsv"
+reset; printf '%s\n' "$(printf -- '-\texternal: why\t\t\tR1: R2: a saved mapping')" "$(printf 'src/q.ts\texternal: why q\t')" > "$T/ok.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/ok.tsv"); RC=$?
 check "label row accepted, prefix collapsed in stdout" "[ $RC -eq 0 ] && printf '%s\n' \"\$OUT\" | grep -q '^R1: a saved mapping	901'"
 
-check "created body: Affected Files lists only paths, checklist keeps the collapsed label" "grep -q '^- \`src/q.ts\`\$' '$T/created.901.body' && ! grep -q '^- \`R1' '$T/created.901.body' && grep -q '^- \[ \] \`R1: a saved mapping\`' '$T/created.901.body' && ! grep -q 'R1: R2:' '$T/created.901.body'"
-check "created body: DEFERRED_FROM and DEFERRED_CLASS markers" "grep -q 'FORGE:DEFERRED_FROM: #10 -->' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_CLASS: engineering' '$T/created.901.body'"
+check "created body: the checklist keeps the collapsed label and the path" "grep -q '^- \[ \] \`src/q.ts\`' '$T/created.901.body' && grep -q '^- \[ \] \`R1: a saved mapping\`' '$T/created.901.body' && ! grep -q 'R1: R2:' '$T/created.901.body'"
+check "created body: parent section and DEFERRED_CLASS markers" "grep -q 'FORGE:DEFERRED_FROM: #10 -->' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_CLASS: external' '$T/created.901.body'"
 # #4739: legal path characters (parentheses, space, =, #, :) are accepted; one such row no longer aborts the batch
-reset; printf 'app/(marketing)/page.tsx\twhy\t\ndocs/My Notes.md\twhy\t\nsrc/a=b.ts\twhy\t\nsrc/#x.ts\twhy\t\nsrc/foo:bar.ts\twhy\t\n' > "$T/legal.tsv"
+reset; printf 'app/(marketing)/page.tsx\texternal: why\t\ndocs/My Notes.md\texternal: why\t\nsrc/a=b.ts\texternal: why\t\nsrc/#x.ts\texternal: why\t\nsrc/foo:bar.ts\texternal: why\t\n' > "$T/legal.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/legal.tsv" 2>/dev/null); RC=$?
-check "legal paths with ( ) space = # : are accepted and filed" "[ $RC -eq 0 ] && ! printf '%s' \"\$OUT\" | grep -q DEFERRED_TSV=INVALID && grep -q '^issue create' '$GH_LOG' && grep -qF -- '- \`app/(marketing)/page.tsx\`' '$T/created.901.body' && grep -qF -- '- \`docs/My Notes.md\`' '$T/created.901.body' && grep -qF -- '- \`src/a=b.ts\`' '$T/created.901.body' && grep -qF -- '- \`src/#x.ts\`' '$T/created.901.body' && grep -qF -- '- \`src/foo:bar.ts\`' '$T/created.901.body'"
+check "legal paths with ( ) space = # : are accepted and filed" "[ $RC -eq 0 ] && ! printf '%s' \"\$OUT\" | grep -q DEFERRED_TSV=INVALID && grep -q '^issue create' '$GH_LOG' && grep -qF -- '\`app/(marketing)/page.tsx\`' '$T/created.901.body' && grep -qF -- '\`docs/My Notes.md\`' '$T/created.901.body' && grep -qF -- '\`src/a=b.ts\`' '$T/created.901.body' && grep -qF -- '\`src/#x.ts\`' '$T/created.901.body' && grep -qF -- '\`src/foo:bar.ts\`' '$T/created.901.body'"
 reset; printf -- '-\tpost-deploy: [check:login-smoke] soon\t\t\tR3: soak\n' > "$T/pd.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/pd.tsv" >/dev/null 2>&1
 check "post-deploy rollup: created with the lane marker, [check:] kept, section for the parent" "grep -q 'FORGE:POSTDEPLOY_ROLLUP: default' '$T/created.901.body' && grep -q 'post-deploy: \[check:login-smoke\] soon' '$T/created.901.body' && grep -q '^### #10\$' '$T/created.901.body'"
@@ -320,11 +217,11 @@ printf '{"number":20,"state":"open","author_association":"OWNER","user":{"type":
 printf -- '-\tpost-deploy: [bucket:post-deploy] [check:b-smoke] chain\t\t\tR9: a chained check\n' > "$T/l3.tsv"
 bash "$S" --parent 20 --repo o/r --items "$T/l3.tsv" >/dev/null 2>&1
 check "rollup: a follow-up of a follow-up appends under its root parent, no new issue" "! grep -q '^issue create' '$GH_LOG' && grep -q 'a chained check' '$ISSUE_BODY.edited' && ! grep -q '^### #20' '$ISSUE_BODY.edited'"
-# verify-now: its own per-parent follow-up, never the rollup
+# #5207: verify-now joins the release rollup, never a per-parent issue
 reset
 printf -- '-\tpost-deploy: [bucket:verify-now] on default already\t\t\tR1: check it now\n' > "$T/vn.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/vn.tsv")
-check "verify-now: separate per-parent issue, class verify-now, no rollup marker" "grep -q 'FORGE:DEFERRED_CLASS: verify-now' '$T/created.901.body' && ! grep -q POSTDEPLOY_ROLLUP '$T/created.901.body' && printf '%s' \"\$OUT\" | grep -q 'buckets=verify-now:1'"
+check "verify-now: the rollup, class post-deploy" "grep -q 'FORGE:DEFERRED_CLASS: post-deploy' '$T/created.901.body' && grep -q 'POSTDEPLOY_ROLLUP' '$T/created.901.body' && printf '%s' \"\$OUT\" | grep -q 'buckets=verify-now:1'"
 # an owner bucket on a post-deploy class row is rerouted to external
 reset
 printf -- 'x/y.sh\towner: [bucket:owner] spend\t\tpost-deploy\n' > "$T/ow.tsv"
@@ -334,9 +231,9 @@ check "owner bucket never lands in post-deploy, even when the row says so" "grep
 # a parent that is itself an open follow-up and is the issue the lane closes: a NEW follow-up links it, its body is never edited
 reset
 printf '{"number":20,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"## Acceptance Criteria\\n\\n- [ ] `R1: old`\\n<!-- FORGE:DEFERRED_FROM: #10 -->"}\n' > "$T/issue.20.json"
-printf -- '-\tdefer: later\t\t\tR2: wire `pd.py` in\n' > "$T/fu.tsv"
+printf -- '-\texternal: later\t\t\tR2: wire `pd.py` in\n' > "$T/fu.tsv"
 OUT=$(bash "$S" --parent 20 --repo o/r --items "$T/fu.tsv"); RC=$?
-check "follow-up parent: new follow-up issue, parent body unchanged" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && ! grep -q '^issue edit 20' '$GH_LOG' && [ ! -e '$ISSUE_BODY.edited' ] && grep -q '^\*\*Parent\*\*: #20\$' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_FROM: #20' '$T/created.901.body' && printf '%s\n' \"\$OUT\" | grep -q '^R2: wire pd.py in.901\$'"
+check "follow-up parent: aggregate filed under the root parent, parent body unchanged" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && ! grep -q '^issue edit 20' '$GH_LOG' && [ ! -e '$ISSUE_BODY.edited' ] && grep -q '^### #10\$' '$T/created.901.body' && printf '%s\n' \"\$OUT\" | grep -q '^R2: wire pd.py in.901\$'"
 
 # 24. #5078: routing by kind
 # post-promotion owner deferral appends to the open rollup, creates no issue
@@ -360,12 +257,12 @@ check "routing: without the label setting an unmarked labelled issue is not the 
 reset
 printf -- '-\towner: obs-psql. [bucket:owner] capture the read-only production query counts\t\t\tR5: capture prod counts\n' > "$T/host.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/host.tsv"); RC=$?
-check "routing: read-only prod owner item -> one host follow-up labelled host-task" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && grep -q 'FORGE:DEFERRED_CLASS: host' '$T/created.901.body'"
+check "routing: read-only prod owner item -> the host aggregate labelled host-task" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && grep -q 'FORGE:DEFERRED_CLASS: host' '$T/created.901.body' && grep -q 'FORGE:HOST_BATCH: adhoc' '$T/created.901.body'"
 check "routing: host follow-up carries no needs-human or external-prerequisite" "! grep '^issue create' '$GH_LOG' | grep -qE 'needs-human|external-prerequisite'"
 reset
 printf -- '-\t[bucket:host] host: run the obs-psql report\t\t\tR6: report rows\n-\tdefer: wire it\t\t\tR7: wire the report\n' > "$T/join.tsv"
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/join.tsv"); RC=$?
-check "routing: host items join the engineering follow-up of the same run" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'report rows' '$T/created.901.body' && grep -q 'wire the report' '$T/created.901.body' && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:engineering' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && ! grep '^issue create' '$GH_LOG' | grep -q needs-human"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/join.tsv" 2>/dev/null); RC=$?
+check "#5207 routing: a host item next to an engineering row files nothing (the engineering row is rejected)" "[ $RC -eq 2 ] && [ ! -s '$GH_LOG' ]"
 # #5186: host + post-promotion text joins the rollup; the same text from two parents is listed once; pre-promotion stays host
 reset
 printf '{"number":902,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->"}\n' > "$T/issue.902.json"
@@ -379,7 +276,7 @@ check "routing: the same host item from a second parent is listed once" "[ $RC -
 reset
 printf -- '-\thost: [bucket:host] capture the page in a browser on the host before promotion\t\t\tR2: browser capture\n' > "$T/hb.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/hb.tsv"); RC=$?
-check "routing: pre-promotion host item still files follow-up (host)" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host'"
+check "routing: pre-promotion host item still files the host aggregate" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host'"
 # N external deferrals in one batch -> ONE aggregated issue carrying needs-human
 reset
 export FORGE_BATCH_ID=b42
@@ -395,30 +292,12 @@ OUT3=$(bash "$S" --parent 12 --repo o/r --items "$T/e3.tsv"); RC=$?
 check "external batch: three parents, exactly one issue create, later lanes append to it" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && [ \$(grep -c '^issue edit 901' '$GH_LOG') -eq 2 ] && printf '%s\n' \"\$OUT3\" | grep -q '^R2: customer signs the DPA.901\$'"
 check "external batch: per-parent headings, duplicate text stored once" "grep -q '^### #11\$' '$ISSUE_BODY.edited' && grep -q '^### #12\$' '$ISSUE_BODY.edited' && [ \$(grep -ci 'charge a real card' '$ISSUE_BODY.edited') -eq 1 ]"
 unset FORGE_BATCH_ID
-# engineering deferrals from one parent land in one issue
-reset
-printf -- '-\tdefer: parser first\t\t\tR1: add the parser\n-\tdefer: needs the parser\t\t\tR2: use the parser\n' > "$T/eng.tsv"
-OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv"); RC=$?
-check "engineering: dependent items of one parent in one issue" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'add the parser' '$T/created.901.body' && grep -q 'use the parser' '$T/created.901.body'"
-
-
-# 25. #5188: new-issue deferrals of one batch -> ONE backlog issue per batch; sections per parent; duplicates once
-reset
-printf -- '-\tdefer: [bucket:new-issue] wire the report\t\t\tR1: wire the report\n-\tdefer: [bucket:new-issue] add the cache\t\t\tR2: add the cache\n' > "$T/bl1.tsv"
-OUT=$(FORGE_BATCH_ID=b1 bash "$S" --parent 10 --repo o/r --items "$T/bl1.tsv"); RC=$?
-check "backlog: lane 1 creates ONE batch issue holding both items" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'FORGE:BACKLOG_BATCH: b1' '$T/created.901.body' && grep -q 'wire the report' '$T/created.901.body' && grep -q 'add the cache' '$T/created.901.body' && grep -q '^### #10\$' '$T/created.901.body'"
-check "backlog: labelled followup:engineering and followup:backlog, never needs-human" "grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:engineering' && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:backlog' && ! grep '^issue create' '$GH_LOG' | grep -q needs-human && printf '%s' \"\$OUT\" | grep -q 'classes=backlog '"
-cp "$T/created.901.body" "$ISSUE_BODY"; : > "$GH_LOG"
-echo '{"items":[{"number":901}]}' > "$SEARCH_JSON"
-printf '{"number":901,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:BACKLOG_BATCH: b1 -->"}\n' > "$T/issue.901.json"
-printf -- '-\tdefer: [bucket:new-issue] wire the report\t\t\tR9: Wire the report!\n-\tdefer: [bucket:new-issue] other\t\t\tR3: another thing\n' > "$T/bl2.tsv"
-OUT=$(FORGE_BATCH_ID=b1 bash "$S" --parent 11 --repo o/r --items "$T/bl2.tsv"); RC=$?
-check "backlog: lane 2 of the batch appends to #901, creates nothing" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 901' '$GH_LOG' && grep -q '^### #11\$' '$ISSUE_BODY.edited' && grep -q 'another thing' '$ISSUE_BODY.edited'"
-check "backlog: duplicate text from another parent stored once" "[ \$(grep -ci 'wire the report' '$ISSUE_BODY.edited') -eq 1 ] && printf '%s\n' \"\$OUT\" | grep -q '^R9: Wire the report!.901'"
-# another batch does not join it
-: > "$GH_LOG"; echo '{"items":[]}' > "$SEARCH_JSON"
-OUT=$(FORGE_BATCH_ID=b2 bash "$S" --parent 12 --repo o/r --items "$T/bl2.tsv"); RC=$?
-check "backlog: a different batch files its own issue" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'FORGE:BACKLOG_BATCH: b2' '$T/created.902.body'"
+# #5207: engineering deferrals (dependent items or new-issue backlog items) are never filed, per parent or per batch
+reset; export FORGE_BATCH_ID=b1
+printf -- '-\tdefer: parser first\t\t\tR1: add the parser\n-\tdefer: [bucket:new-issue] later\t\t\tR2: wire the report\n' > "$T/eng.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv" 2>"$T/eng.err"); RC=$?
+unset FORGE_BATCH_ID
+check "engineering/backlog: rejected (rc 2), no issue, no BACKLOG_BATCH" "[ $RC -eq 2 ] && [ ! -s '$GH_LOG' ] && [ \$(grep -c 'engineering deferral: build it in-lane (#5207)' '$T/eng.err') -eq 2 ] && ! grep -rq BACKLOG_BATCH '$T'/created.*.body 2>/dev/null"
 
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

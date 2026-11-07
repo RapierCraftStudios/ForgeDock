@@ -368,8 +368,9 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
     /**
-     * File (or append to) the parent's ONE batched follow-up issue (scripts/file-deferred-followups.sh: trusted lookup,
-     * append, create, claim marker, duplicate re-check; one issue per class, #4664). items: [{key, why, class?}]; the key is the
+     * Append the parent's deferred items to the aggregates only (scripts/file-deferred-followups.sh: trusted lookup, append,
+     * create, duplicate re-check): the release rollup, the batch external aggregate and the batch host aggregate; never a
+     * per-parent issue, and an engineering item is rejected (exit 2, #5207). items: [{key, why, class?}]; the key is the
      * item's identity (column 5, column 1 is `-`). milestone / defaultMilestone: the parent's and forge.yaml followups.default_milestone; lane: the release lane of the post-deploy rollup (#4724).
      * batchId: the external aggregate's batch (FORGE_BATCH_ID); rollupLabel: forge.yaml followups.rollup_issue_label (FORGE_ROLLUP_LABEL) (#5078).
      * Returns {key: issueNumber}; throws on exit 2/3/4.

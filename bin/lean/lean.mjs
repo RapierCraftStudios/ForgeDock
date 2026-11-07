@@ -90,7 +90,7 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.ENV_CAPABILITY_REMOTE]: "the earlier run ran in a remote sandbox that lacks a host-only capability (SOPS/age key, ops credentials, read-only prod monitor SSH); this host has it. Do the work that needed it now, with the host's own tools and credentials, and never print or commit a secret in the clear",
   [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED]: "an earlier run's conformance check found a requirement or validate command not done after one builder resume; the branch holds its work. For each named gap deliver the requirement against the frozen contract, adding any file it needs as an `add-deliverable` amendment, and re-run the validate commands",
   [OUTCOME_CODES.CONFORMANCE_OMISSION]: "an earlier run's review found a requirement the change left out or narrowed after one builder resume; the branch holds its work. For each named gap either deliver the requirement (adding any needed file as an `add-deliverable` amendment) or, when the clause is optional, unquantified or outside the issue's acceptance criteria, record an `add-requirement` / `defer` amendment with a why so the engine files a tracked follow-up instead of stopping",
-  [OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL]: "an earlier run deferred a requirement without a sufficient why after one builder resume; the branch holds its work. For each named gap either deliver the requirement (adding any needed file as an `add-deliverable` amendment) or, when the clause is optional, unquantified or outside the issue's acceptance criteria, record a `defer` amendment with a concrete why so the engine files a tracked follow-up instead of stopping",
+  [OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL]: "an earlier run deferred a requirement without a sufficient why after one builder resume; the branch holds its work. An in-lane engineering deferral (bucket new-issue or none) must be delivered, never deferred (#5207). For each other named gap either deliver the requirement (adding any needed file as an `add-deliverable` amendment) or, when the clause is optional, unquantified or outside the issue's acceptance criteria, record a `defer` amendment with a concrete why so the engine files a tracked follow-up instead of stopping",
   [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]: "the repro harness could not run the contract's repro_test on head (timeout, missing runner or dependencies); the change may already be correct. Do not edit the deliverables or stub dependencies for it and never install anything globally: run the repro command through the repo's own toolchain and installed dependencies, and when it cannot run in this checkout, fix the repro_test command (not the code) so it does",
 });
 /** #5168: retry-in for a `backend.auth` deferral; the batch holds the account for it (an operator `--set-env` fix runs under a new identity). */
@@ -104,7 +104,7 @@ export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
  * In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done, a regression
  * (precheck form: SHADOW_PRE_BLOCKS). A review without usable rows never merges either.
  */
-const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
+const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION, OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL]; // #5207: an engineering deferral is undelivered work
 /**
  * Precheck failures that block in shadow mode too (#4160): every precheck or amendment failure coded
  * conformance.unimplemented (a validate command that failed or has no recorded result, a deliver requirement reported as
@@ -2644,7 +2644,7 @@ export async function runCore(o) {
       // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
       const toFile = pendingTracking(effective);
       if (toFile.length) await track(toFile, "accepted by the conformance review");
-      degradedReq = degraded ? { id: "REVIEW", quote: `conformance review ${degraded.state}: re-run the review`, disposition: "defer", why: `${REVIEW_DEGRADED_LABEL}: rows still missing for ${degraded.missing.join(", ") || "the verdict"}` } : null;
+      degradedReq = degraded ? { id: "REVIEW", quote: `conformance review ${degraded.state}: re-run the review`, disposition: "defer", class: "ops", why: `${REVIEW_DEGRADED_LABEL}: rows still missing for ${degraded.missing.join(", ") || "the verdict"}` } : null;
       if (degradedReq) await track([degradedReq], "the conformance review stayed incomplete");
       if (triggerSkipped) {
         T.decisions.push("Conformance reviewer skipped by review.trigger enforce: no trigger reason (risk path, package edge, hotspot, failed or ambiguous gate)");
@@ -2672,7 +2672,7 @@ export async function runCore(o) {
     if (closing.reason === "partial") { // #4398: an investigation whose question is not answered carries it forward
       const untracked = closing.open.filter((r) => !r.tracked);
       if (untracked.length) {
-        const carried = untracked.map((r) => ({ ...r, disposition: "defer", why: "investigation question not answered" }));
+        const carried = untracked.map((r) => ({ ...r, disposition: "defer", class: "ops", why: "investigation question not answered" })); // #5207: the batch aggregate
         await track(carried, "the investigation's question is not answered");
         for (const [i, r] of untracked.entries()) r.tracked = carried[i].tracked;
       }

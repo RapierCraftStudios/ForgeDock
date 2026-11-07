@@ -1,39 +1,37 @@
 #!/usr/bin/env bash
-# file-deferred-followups.sh — file the deferred out-of-scope items of one build as ONE follow-up issue per class.
+# file-deferred-followups.sh — file the deferred out-of-lane items of one build into the batch AGGREGATES (never a per-parent issue).
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# The builder decides fold-vs-defer (judgment, build.md B2.0); this script does the mechanics for the items
-# that stay deferred: trusted lookup (claim marker <!-- FORGE:DEFERRED_ISSUE: #M --> on the parent, then a state-all search) of a follow-up carrying
-# <!-- FORGE:DEFERRED_FROM: #N -->, append the missing items (exact path match; a closed one is reopened only if completed, not resolved by a person, and given new items), or create ONE issue
-# with a checklist, claim it on the parent and re-check once for a concurrent lower-numbered duplicate.
-# Items are grouped by class (engineering | post-deploy | external | ops | host, #4664/#5078): one follow-up per class per parent, each
-# labelled `followup:<class>`, carrying `<!-- FORGE:DEFERRED_CLASS: <class> -->` (absent = engineering, for older issues) and the
-# parent's milestone (a shipped/closed one: the next open milestone by due date, else FORGE_FOLLOWUPS_DEFAULT_MILESTONE).
+# #5207: engineering work is never deferred. A row of class engineering or backlog (an explicit class, `[bucket:new-issue]`, or
+# a why with no class prefix) is rejected (stderr `engineering deferral: build it in-lane (#5207)`, DEFERRED_TSV=INVALID, exit 2,
+# nothing filed): the lane builds it. What remains goes to ONE of three aggregates, never to a per-parent follow-up:
+#   post-deploy (and verify-now, date, owner:orchestrator / owner:promote / post-promotion text) -> the release-lane rollup,
+#     found by `<!-- FORGE:POSTDEPLOY_ROLLUP: <lane> -->` (or the lowest open trusted issue labelled FORGE_ROLLUP_LABEL,
+#     forge.yaml followups.rollup_issue_label); env FORGE_RELEASE_LANE (default `default`), FORGE_RELEASE_SHA (informational).
+#   external and ops (credentials, spend, an account, a third party or a customer) -> ONE aggregate per batch, found by
+#     `<!-- FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID or adhoc> -->` (labels followup:external, external-prerequisite, needs-human).
+#   host (read-only production data or capture, work needed before promotion) -> ONE host aggregate per batch, found by
+#     `<!-- FORGE:HOST_BATCH: <batch> -->` (labels followup:host + host-task, never needs-human, #5078).
+# Every lane appends its items under a `### #<root parent>` heading (a follow-up of a follow-up is filed under the root parent),
+# deduplicated on normalized text across parents; the lowest open trusted aggregate is canonical (a concurrent duplicate is closed).
+# Existing per-parent follow-ups (`FORGE:DEFERRED_FROM`) of older runs are never read, edited, reopened or closed here (no migration).
 #
 # Usage: file-deferred-followups.sh --parent N --repo OWNER/REPO [--items FILE|-] [--folded N]
 #   items TSV, one per line: <path|-> TAB <why> TAB <known-flaw flag: known-flaw|1|yes|true, else empty> [TAB <class> [TAB <label>]]
 #   Column 1 must look like a path (any legal path characters; spaced values need a `/` or extension) or be `-` (a requirement-level item): requirement text or an `R<n>:` prefix there is a usage
 #   error (exit 2, DEFERRED_TSV=INVALID, nothing filed). The label (default: the path) is the item's identity in the checklist
 #   and in the stdout rows; repeated `R<n>: R<m>:` prefixes in it collapse to the first. Class: column 4, else the why's
-#   `post-deploy:|external:|ops:` prefix, else engineering.
+#   `post-deploy:|external:|ops:|host:` prefix, else engineering (rejected).
 #   #4724 buckets: a why carrying `[bucket:<kind>]` is routed by it (#5078): `owner` is class external only for credentials, spend,
 #   an account, a third party or a customer; `owner: orchestrator`, `owner: promote...` and post-promotion text join the rollup and
-#   read-only production data or capture is class host. `host` (labels `followup:host` + `host-task`, never `needs-human`) joins
-#   the parent's engineering follow-up when the run has one. External items go to ONE aggregate per batch, found by
-#   `<!-- FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID or adhoc> -->` (an older per-parent external follow-up is still appended to).
-#   The rollup may also be the lowest open trusted issue labelled FORGE_ROLLUP_LABEL (forge.yaml followups.rollup_issue_label).
-#   `new-issue` engineering deferrals (class backlog, #5188) go to ONE issue per batch found by `<!-- FORGE:BACKLOG_BATCH: <batch> -->`
-#   (labels `followup:engineering` + `followup:backlog`, sections per parent, deduplicated like the rollup); `verify-now` (the parent is already on the default branch) its own per-parent follow-up class
-#   `verify-now` that the gate releases at once, and `post-deploy`/`date` go to the ONE open rollup of the release lane.
-#   The rollup (class post-deploy) is found by `<!-- FORGE:POSTDEPLOY_ROLLUP: <lane> -->`, not by parent: every lane appends
-#   its items under a `### #<root parent>` heading (a follow-up of a follow-up is filed under the root parent), deduplicated
-#   on normalized text across parents. Env: FORGE_RELEASE_LANE (the deploy lane, default `default`), FORGE_RELEASE_SHA (informational).
+#   read-only production data or capture is class host; `host` post-promotion text joins the rollup (#5186).
 #   A post-deploy why starts `post-deploy: [check:<id>] ...` (#4626); the token is kept verbatim in the checklist line.
 # Env: DRY_RUN (non-empty: no create/edit, issue number 0), FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default
 #      OWNER,MEMBER,COLLABORATOR), FORGE_TRAIL_TRUSTED_LOGINS (default empty), FORGE_DEFERRED_RETRY_SLEEP (secs),
 #      FORGE_FOLLOWUP_MILESTONE (the parent's milestone title; default: read from the parent), FORGE_FOLLOWUPS_DEFAULT_MILESTONE
-#      (forge.yaml followups.default_milestone), FORGE_EXTERNAL_PREREQ (issue number an external follow-up links to).
+#      (forge.yaml followups.default_milestone; a shipped milestone moves to the next open one), FORGE_EXTERNAL_PREREQ (issue number
+#      the external aggregate links to), FORGE_BATCH_ID.
 # Stdout: `identity<TAB>issue` per item, then DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M[,#M2] filed=N classes=a,b buckets=kind:N,...
 # Exit: 0 ok | 2 usage or malformed TSV row | 3 lookup failed (DEFERRED_LOOKUP=FAILED) | 4 create/append failed (DEFERRED_FILE=FAILED).
 # A failed lookup is never "none found". bash 3.2 portable.
@@ -109,28 +107,24 @@ while IFS= read -r line || [ -n "$line" ]; do
   if [ -z "$c" ]; then
     case "$w" in post-deploy:*) c="post-deploy" ;; external:*) c="external" ;; ops:*) c="ops" ;; host:*) c="host" ;; *) c="engineering" ;; esac
   fi
-  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops|host|backlog)"; continue ;; esac
-  # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup, verify-now needs no release.
+  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (post-deploy|external|ops|host)"; continue ;; esac
+  # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup.
   case "$w" in
     *"[bucket:owner]"*) [ "$c" = "ops" ] || c=$(owner_route "$w") || exit 2 ;;
     *"[bucket:host]"*) c=$(host_route "$w") || exit 2 ;;
-    *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering"; [ "$c" = "engineering" ] && c="backlog" ;; # #5188: one per-batch issue
-    *"[bucket:verify-now]"*) [ "$c" = "post-deploy" ] && c="verify-now" ;;
+    *"[bucket:new-issue]"*) c="engineering" ;; # #5207: in-lane work, rejected below
+    *"[bucket:verify-now]"*) case "$c" in engineering|verify-now) c="post-deploy" ;; esac ;;
   esac
+  [ "$c" = "verify-now" ] && c="post-deploy" # #5207: verify-now joins the rollup (no per-parent issue)
+  # #5207: engineering work is built in-lane, never deferred into an issue.
+  case "$c" in engineering|backlog) bad_row "engineering deferral: build it in-lane (#5207) (\`$id\`)"; continue ;; esac
   if cut -d "$SEP" -f1 "$TMP/items" | grep -qxF -- "$id"; then continue; fi
   case "${k:-}" in known-flaw|1|yes|true) k="known-flaw" ;; *) k="" ;; esac
   printf '%s%s%s%s%s%s%s%s%s\n' "$id" "$SEP" "$w" "$SEP" "$k" "$SEP" "${p:--}" "$SEP" "$c" >> "$TMP/items"
 done < "$TMP/items.raw"
 if [ "$BAD" -gt 0 ]; then echo "DEFERRED_TSV=INVALID"; exit 2; fi
-# #5078: host items join the parent's engineering follow-up of this run (dependent items together; it gets `host-task`).
-HOST_JOIN=""
-if awk -F"$SEP" '$5 == "engineering" { e = 1 } $5 == "host" { h = 1 } END { exit !(e && h) }' "$TMP/items"; then
-  HOST_JOIN=1
-  awk -F"$SEP" -v OFS="$SEP" '$5 == "host" { $5 = "engineering" } { print }' "$TMP/items" > "$TMP/items.j" && mv "$TMP/items.j" "$TMP/items"
-fi
 TOTAL=$(wc -l < "$TMP/items" | tr -d ' ')
 
-MARKER="<!-- FORGE:DEFERRED_FROM: #${PARENT} -->"
 TRUSTED_ASSOC="${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}"
 TRUSTED_LOGINS="${FORGE_TRAIL_TRUSTED_LOGINS-}"
 
@@ -150,64 +144,11 @@ finish() { # $1 = batched_into numbers (space separated) or empty, $2 = filed co
   fi
 }
 
-# --- Trusted lookup (author predicate applied before path match), one retry ---------------------------------
-# Sources, in order: (1) claim markers `<!-- FORGE:DEFERRED_ISSUE: #M -->` on the parent's REST comments (read-after-write
-# consistent), (2) a search over ALL issue states (eventually consistent, so only a fallback). Every candidate is then
-# verified by number over REST (trusted author, DEFERRED_FROM marker, not a PR); the lowest number is canonical.
+# --- Trusted author predicate (applied before any marker match) -------------------------------------------------------
 JQ_PRE='def lst: split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0));
   def trusted: ((.author_association // "") as $x | ($assoc | lst) | index($x) != null)
     or ((.user.type // "") == "Bot")
     or ((.user.login // "") as $x | ($logins | lst) | index($x) != null);'
-CLAIM_RE='^\s*<!-- FORGE:DEFERRED_ISSUE: #(?<n>[0-9]+)(?: class=[a-z-]+)? -->'
-claim_nums() {
-  gh api --paginate "repos/${REPO}/issues/${PARENT}/comments" 2>/dev/null \
-  | jq -s -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg re "$CLAIM_RE" "$JQ_PRE"'
-      [.[][] | select(trusted) | (.body // "") | capture($re) | .n | tonumber] | unique | .[]' 2>/dev/null
-}
-search_nums() {
-  gh api -X GET search/issues -f per_page=50 \
-    -f q="\"FORGE:DEFERRED_FROM: #${PARENT}\" in:body repo:${REPO} is:issue" 2>/dev/null \
-  | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" "$JQ_PRE"'
-      [.items[] | select(trusted) | select((.body // "") | contains($m)) | .number] | sort | .[]' 2>/dev/null
-}
-verify_num() { # number -> `number<TAB>state` when a trusted, non-PR issue of class $CLS carries the marker (a closed one only if completed and not resolved by a person); empty when not (a 404 is "not it")
-  local out rc
-  out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
-  if [ "$rc" -ne 0 ]; then grep -qE '404|Not Found|410' "$TMP/verr" 2>/dev/null && return 0; return 1; fi
-  out=$(printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" --arg cls "$CLS" "$JQ_PRE"'
-      select(.pull_request == null) | select(trusted) | select((.body // "") | contains($m))
-      | select((((.body // "") | capture("FORGE:DEFERRED_CLASS: (?<c>[a-z-]+)") | .c) // "engineering") == $cls)
-      | select(.state != "closed" or .state_reason == "completed")
-      | "\(.number)\t\(.state)"' 2>/dev/null) || return 1
-  # #4924: a closed tracker was resolved on purpose when a person had the last word (fold, supersede, invalid): not reusable.
-  case "$out" in *$'\t'closed)
-    local last
-    last=$(gh api "repos/${REPO}/issues/$1/comments?per_page=100" 2>/dev/null | jq -r 'if type == "array" and length > 0 then (last | .user.type // "") else "" end' 2>/dev/null) || return 1
-    [ -z "$last" ] || [ "$last" = "Bot" ] || out="" ;;
-  esac
-  printf '%s' "$out"
-}
-CANON=""; CSTATE=""
-pick_verified() { # numbers... ; sets CANON/CSTATE from the first verified one; non-zero only when a fetch failed
-  local n r
-  for n in "$@"; do
-    r=$(verify_num "$n") || return 1
-    if [ -n "$r" ]; then CANON="${r%%$'\t'*}"; CSTATE="${r#*$'\t'}"; return 0; fi
-  done
-  return 0
-}
-find_canonical() {
-  local cands
-  CANON=""; CSTATE=""
-  cands=$(claim_nums) || return 1
-  # shellcheck disable=SC2086
-  pick_verified $cands || return 1
-  [ -n "$CANON" ] && return 0
-  cands=$(search_nums) || return 1
-  # shellcheck disable=SC2086
-  pick_verified $cands || return 1
-  return 0
-}
 # --- #4724: the post-deploy rollup: ONE open issue per release lane, found by marker (not by parent) ------------------
 # #5078: the same shape holds every external item of one batch (`FORGE:EXTERNAL_BATCH: <batch>`), and the rollup may also
 # be a repo's own open issue carrying forge.yaml `followups.rollup_issue_label` (FORGE_ROLLUP_LABEL) when no marked one is open.
@@ -216,8 +157,8 @@ ROLLUP_MARKER="<!-- FORGE:POSTDEPLOY_ROLLUP: ${RELEASE_LANE} -->"
 BATCH="${FORGE_BATCH_ID:-adhoc}"
 EXTERNAL_MARKER="<!-- FORGE:EXTERNAL_BATCH: ${BATCH} -->"
 ROLLUP_LABEL="${FORGE_ROLLUP_LABEL:-}"
-BACKLOG_MARKER="<!-- FORGE:BACKLOG_BATCH: ${BATCH} -->"
-agg_marker() { case "$1" in post-deploy) printf '%s' "$ROLLUP_MARKER" ;; backlog) printf '%s' "$BACKLOG_MARKER" ;; *) printf '%s' "$EXTERNAL_MARKER" ;; esac; }
+HOST_MARKER="<!-- FORGE:HOST_BATCH: ${BATCH} -->"
+agg_marker() { case "$1" in post-deploy) printf '%s' "$ROLLUP_MARKER" ;; host) printf '%s' "$HOST_MARKER" ;; *) printf '%s' "$EXTERNAL_MARKER" ;; esac; }
 verify_rollup() { # number [marker] -> `number<TAB>open` when a trusted, open, non-PR issue carries the marker
   local out rc m="${2:-$ROLLUP_MARKER}"
   out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
@@ -234,7 +175,7 @@ verify_labelled() { # number -> `number<TAB>open` when a trusted, open, non-PR i
       select(.pull_request == null) | select(trusted) | select(.state == "open") | select(any(.labels[]?; (.name // .) == $l))
       | "\(.number)\t\(.state)"' 2>/dev/null
 }
-find_aggregate() { # kind (post-deploy|external|backlog) ; sets CANON/CSTATE to the lowest open one; non-zero only when a lookup failed
+find_aggregate() { # kind (post-deploy|external|host) ; sets CANON/CSTATE to the lowest open one; non-zero only when a lookup failed
   local kind="$1" m q cands n r
   CANON=""; CSTATE=""
   m=$(agg_marker "$kind"); q="${m#<!-- }"; q="${q% -->}"
@@ -290,7 +231,7 @@ rollup_append() { # number ; non-zero = failure
   else gh issue edit "$num" -R "$REPO" --body-file "$TMP/newbody" >/dev/null 2>&1 || return 1; fi
   return 0
 }
-file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane rollup; external: the batch aggregate, #5078); sets FILED_N, FILED_NEW
+file_rollup() { # items in $ITEMS_F, aggregate $CLS (post-deploy: the release-lane rollup; external: the batch aggregate, #5078; host: the batch host aggregate, #5207); sets FILED_N, FILED_NEW
   local n_items; n_items=$(wc -l < "$ITEMS_F" | tr -d ' ')
   local m title what lbls
   FILED_N=""; FILED_NEW=0
@@ -303,8 +244,8 @@ file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane r
   m=$(agg_marker "$CLS")
   if [ "$CLS" = "post-deploy" ]; then
     title="post-deploy: release checklist (${RELEASE_LANE})"; what="post-deploy rollup ${RELEASE_LANE}"; lbls="followup:post-deploy"
-  elif [ "$CLS" = "backlog" ]; then
-    title="follow-up: deferred work of batch ${BATCH}"; what="backlog aggregate of batch ${BATCH}"; lbls="followup:engineering followup:backlog"
+  elif [ "$CLS" = "host" ]; then
+    title="host: tasks of batch ${BATCH}"; what="host aggregate of batch ${BATCH}"; lbls="followup:host host-task"
   else
     title="external: prerequisites of batch ${BATCH}"; what="external aggregate of batch ${BATCH}"; lbls="followup:external external-prerequisite needs-human"
   fi
@@ -312,8 +253,8 @@ file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane r
   {
     if [ "$CLS" = "post-deploy" ]; then
       printf '## Problem\n\nPost-deploy checklist of release lane `%s`%s. Every merged lane appends its post-deploy items under a `### #<parent>` heading (deduplicated), so one read-only verification works through this one issue per release.\n\n' "$RELEASE_LANE" "${FORGE_RELEASE_SHA:+ (deploy target at $FORGE_RELEASE_SHA)}"
-    elif [ "$CLS" = "backlog" ]; then
-      printf '## Problem\n\nDeferred engineering work of batch `%s`: items declared out of scope (`new-issue`) by the lanes of this batch. Every lane appends its items under a `### #<parent>` heading (deduplicated), so the batch has ONE backlog issue.\n\n' "$BATCH"
+    elif [ "$CLS" = "host" ]; then
+      printf '## Problem\n\nHost tasks of batch `%s`: every item below is work the host can run (read-only production data or capture) before promotion. Every lane of the batch appends its items under a `### #<parent>` heading (deduplicated), so the batch has ONE host issue.\n\n' "$BATCH"
     else
       printf '## Problem\n\nExternal prerequisites of batch `%s`: every item below waits on something outside the repo (credentials, spend, an account, a third party or a customer). Every lane of the batch appends its items under a `### #<parent>` heading (deduplicated), so the batch has ONE external issue.' "$BATCH"
       [ -n "${FORGE_EXTERNAL_PREREQ:-}" ] && printf ' Linked prerequisite: #%s.' "${FORGE_EXTERNAL_PREREQ#\#}"
@@ -334,6 +275,7 @@ file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane r
       case "$l" in
         needs-human) gh label create "$l" -R "$REPO" --color D93F0B --description "Needs a human decision or action." >/dev/null 2>&1 || true ;; # never --force: the repo's own label wins
         external-prerequisite) gh label create "$l" -R "$REPO" --force --color E99695 --description "External prerequisite. Managed by ForgeDock." >/dev/null 2>&1 || true ;;
+        host-task) gh label create "$l" -R "$REPO" --color 0E8A16 --description "Work the host can run (read-only production access)." >/dev/null 2>&1 || true ;;
         *) gh label create "$l" -R "$REPO" --force --color BFD4F2 --description "Deferred follow-up (${CLS}). Managed by ForgeDock." >/dev/null 2>&1 || true ;;
       esac
       args+=(--label "$l")
@@ -364,37 +306,23 @@ file_rollup() { # items in $ITEMS_F, class $CLS (post-deploy: the release-lane r
   FILED_N="$NUM"; FILED_NEW=1
 }
 
-CLS_LIST=$(cut -d "$SEP" -f5 "$TMP/items" | sort -u)
-CLS=""; CKIND=""
-# #5078: post-deploy -> the release-lane rollup; external -> the batch aggregate, else (older runs) the parent's own external
-# follow-up; every other class -> the parent's follow-up of that class. Sets CANON/CSTATE/CKIND (agg|legacy|class).
-lookup_class() {
-  CKIND="agg"
-  case "$CLS" in
-    post-deploy) find_aggregate post-deploy ;;
-    backlog) find_aggregate backlog ;;
-    external)
-      find_aggregate external || return 1
-      [ -n "$CANON" ] && return 0
-      find_canonical || return 1
-      [ -n "$CANON" ] && CKIND="legacy"
-      return 0 ;;
-    *) CKIND="class"; find_canonical ;;
-  esac
-}
-# Phase 1: look up the canonical follow-up of every class before filing anything (a failed lookup files nothing).
+# #5207: the aggregate of each class: ops shares the external batch aggregate.
+agg_of() { case "$1" in ops) echo external ;; *) echo "$1" ;; esac; }
+CLS_LIST=$(cut -d "$SEP" -f5 "$TMP/items" | while IFS= read -r c; do agg_of "$c"; done | sort -u)
+CLS=""
+# Phase 1: look up the canonical aggregate of every kind before filing anything (a failed lookup files nothing).
 for CLS in $CLS_LIST; do
   LOOKUP_OK=""
   for attempt in 1 2; do
-    if lookup_class; then LOOKUP_OK=1; break; fi
+    if find_aggregate "$CLS"; then LOOKUP_OK=1; break; fi
     [ "$attempt" = 1 ] && sleep "${FORGE_DEFERRED_RETRY_SLEEP:-2}"
   done
   if [ -z "$LOOKUP_OK" ]; then
     echo "DEFERRED_LOOKUP=FAILED"
     exit 3
   fi
-  printf '%s\t%s\t%s\n' "$CANON" "$CSTATE" "$CKIND" > "$TMP/canon.$CLS"
-  awk -F"$SEP" -v c="$CLS" '$5 == c' "$TMP/items" > "$TMP/items.$CLS"
+  printf '%s\t%s\n' "$CANON" "$CSTATE" > "$TMP/canon.$CLS"
+  awk -F"$SEP" -v c="$CLS" '$5 == c || (c == "external" && $5 == "ops")' "$TMP/items" > "$TMP/items.$CLS"
 done
 
 # Checklist line for one item. Path always backticked so review-pr 6B.5 `contains` verification holds.
@@ -404,41 +332,6 @@ entry() { # path why flag
   [ -n "$2" ] && l="$l — $2"
   printf '%s\n' "$l"
 }
-has_entry() { # body-file path : exact checklist-line match, not substring
-  grep -qE '^- \[[ xX]\] `' "$1" 2>/dev/null || return 1
-  grep -F -- "\`$2\`" "$1" | grep -qE "^- \[[ xX]\] \`$(printf '%s' "$2" | sed 's/[][\.*^$+?(){}|]/\\&/g')\`( |\$)"
-}
-
-# Append the missing items to follow-up $1 (state $2), then reopen it when closed (review-finalize needs it open).
-append_items() { # number state ; non-zero = failure
-  local num="$1" state="$2" note=""
-  # Re-read the body immediately before editing (parallel builds of the same parent), then append what is missing.
-  gh api "repos/${REPO}/issues/${num}" --jq '.body // ""' > "$TMP/body" 2>/dev/null || return 1
-  : > "$TMP/add"
-  while IFS="$SEP" read -r p w k fp cl; do
-    has_entry "$TMP/body" "$p" || entry "$p" "$w" "$k" >> "$TMP/add"
-  done < "$ITEMS_F"
-  [ "$state" = "closed" ] && note=" (follow-up was closed; reopened)"
-  if [ -s "$TMP/add" ]; then
-    { cat "$TMP/body"; printf '\n### Added by a later build of #%s%s\n\n' "$PARENT" "$note"; cat "$TMP/add"; } > "$TMP/newbody"
-    if [ -n "${DRY_RUN:-}" ]; then
-      echo "DRY_RUN: gh issue edit $num (append $(wc -l < "$TMP/add" | tr -d ' ') item(s))" >&2
-    else
-      gh issue edit "$num" -R "$REPO" --body-file "$TMP/newbody" >/dev/null 2>&1 || return 1
-    fi
-    # #4924: reopen only for new items, and say why.
-    if [ "$state" = "closed" ]; then
-      if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue reopen $num" >&2
-      else
-        gh issue reopen "$num" -R "$REPO" >/dev/null 2>&1 || return 1
-        gh issue comment "$num" -R "$REPO" --body "$(printf '<!-- FORGE:FOLLOWUP_REOPENED -->\nReopened by the run of #%s%s: it deferred new items not yet tracked here:\n\n%s' "$PARENT" "${FORGE_RUN_ID:+ (run \`$FORGE_RUN_ID\`)}" "$(cat "$TMP/add")")" >/dev/null 2>&1 \
-          || echo "file-deferred-followups: warning: could not post reopen comment on #${num}" >&2
-      fi
-    fi
-  fi
-  return 0
-}
-
 MS_DONE=""; MS_TITLE=""
 resolve_milestone() { # sets MS_TITLE (empty = none): the parent's milestone, or for a shipped one the next open milestone, else the configured default
   [ -n "$MS_DONE" ] && return 0
@@ -454,93 +347,13 @@ resolve_milestone() { # sets MS_TITLE (empty = none): the parent's milestone, or
             | if $next != "" then $next elif ($d != "" and ($all | map(select(.title == $d and .state == "open")) | length) > 0) then $d else "" end) end' 2>/dev/null) || MS_TITLE="$t"
 }
 
-# File one class ($CLS, items in $ITEMS_F): append to its canonical follow-up, or create one. Sets FILED_N, FILED_NEW.
-file_class() {
-  local n_items; n_items=$(wc -l < "$ITEMS_F" | tr -d ' ')
-  FILED_N=""; FILED_NEW=0
-  CANON=$(cut -f1 "$TMP/canon.$CLS"); CSTATE=$(cut -f2 "$TMP/canon.$CLS")
-  if [ -n "$CANON" ]; then
-    append_items "$CANON" "$CSTATE" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
-    if [ "$CLS" = "engineering" ] && [ -n "$HOST_JOIN" ]; then
-      if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue edit $CANON (add label host-task)" >&2
-      else gh issue edit "$CANON" -R "$REPO" --add-label host-task >/dev/null 2>&1 || echo "file-deferred-followups: warning: could not label #${CANON} host-task" >&2; fi
-    fi
-    FILED_N="$CANON"; return 0
-  fi
-  local claim="<!-- FORGE:DEFERRED_ISSUE: #%s -->" title="follow-up: ${n_items} deferred item(s) (deferred from #${PARENT})"
-  if [ "$CLS" != "engineering" ]; then claim="<!-- FORGE:DEFERRED_ISSUE: #%s class=${CLS} -->"; title="follow-up (${CLS}): ${n_items} deferred item(s) (deferred from #${PARENT})"; fi
-  local paths; paths=$(awk -F"$SEP" '$4 != "-" { print $4 }' "$ITEMS_F" | awk '!seen[$0]++')
-  {
-    printf '## Problem\n\n'
-    printf 'Deferred from #%s: the items below were declared out of scope in its contract and are tracked here, in one issue per class (%s), instead of surfacing later as review findings.\n\n' "$PARENT" "$CLS"
-    printf '**Parent**: #%s\n\n' "$PARENT"
-    if [ "$CLS" = "external" ]; then
-      printf 'External prerequisite of #%s: these items wait on something outside the repo (credentials, an account, a third party).' "$PARENT"
-      [ -n "${FORGE_EXTERNAL_PREREQ:-}" ] && printf ' Linked prerequisite: #%s.' "${FORGE_EXTERNAL_PREREQ#\#}"
-      printf '\n\n'
-    fi
-    printf '## Affected Files\n\n'
-    if [ -n "$paths" ]; then printf '%s\n' "$paths" | while IFS= read -r fp; do printf -- '- `%s`\n' "$fp"; done
-    else printf -- '- None (requirement-level items, see the checklist)\n'; fi
-    printf '\n## Acceptance Criteria\n\n'
-    while IFS="$SEP" read -r p w k fp cl; do entry "$p" "$w" "$k"; done < "$ITEMS_F"
-    printf '\n%s\n<!-- FORGE:DEFERRED_CLASS: %s -->\n' "$MARKER" "$CLS"
-  } > "$TMP/newissue"
-  local NUM
-  if [ -n "${DRY_RUN:-}" ]; then
-    echo "DRY_RUN: gh issue create (follow-up ${CLS}: ${n_items} deferred item(s) from #${PARENT})" >&2
-    NUM=0
-  else
-    resolve_milestone
-    local lbl="followup:${CLS}" args=() URL
-    gh label create "$lbl" -R "$REPO" --force --color BFD4F2 --description "Deferred follow-up (${CLS}). Managed by ForgeDock." >/dev/null 2>&1 || true
-    args=(--label "$lbl")
-    if [ "$CLS" = "external" ]; then
-      gh label create external-prerequisite -R "$REPO" --force --color E99695 --description "External prerequisite. Managed by ForgeDock." >/dev/null 2>&1 || true
-      args+=(--label external-prerequisite)
-    fi
-    if [ "$CLS" = "host" ] || { [ "$CLS" = "engineering" ] && [ -n "$HOST_JOIN" ]; }; then # #5078: never needs-human
-      gh label create host-task -R "$REPO" --color 0E8A16 --description "Work the host can run (read-only production access)." >/dev/null 2>&1 || true
-      args+=(--label host-task)
-    fi
-    [ -n "$MS_TITLE" ] && args+=(--milestone "$MS_TITLE")
-    URL=$(gh issue create -R "$REPO" --title "$title" --body-file "$TMP/newissue" "${args[@]}" 2>/dev/null) || URL=""
-    NUM=$(printf '%s' "$URL" | grep -oE '[0-9]+$' | tail -n 1)
-    [ -n "$NUM" ] || { echo "DEFERRED_FILE=FAILED"; exit 4; }
-  fi
-  if [ -z "${DRY_RUN:-}" ]; then
-    # Claim the follow-up on the parent (REST comments are read-after-write consistent; best effort, the search still finds it).
-    # shellcheck disable=SC2059
-    gh issue comment "$PARENT" -R "$REPO" --body "$(printf "$claim" "$NUM")" >/dev/null 2>&1 \
-      || echo "file-deferred-followups: warning: could not post claim marker for #${NUM} on #${PARENT}" >&2
-    # Post-create re-check: a concurrent build may have filed first. The lowest trusted number is canonical; the newer one is closed.
-    if find_canonical; then
-      if [ -n "$CANON" ] && [ "$CANON" -lt "$NUM" ]; then
-        if append_items "$CANON" "$CSTATE"; then
-          gh issue close "$NUM" -R "$REPO" --reason "not planned" --comment "Duplicate of #${CANON}: deferred items of #${PARENT} are tracked there." >/dev/null 2>&1 \
-            || echo "file-deferred-followups: warning: could not close duplicate #${NUM}" >&2
-          NUM="$CANON"
-        else
-          echo "file-deferred-followups: warning: could not move items to #${CANON}; keeping #${NUM}" >&2
-        fi
-      fi
-    else
-      echo "file-deferred-followups: warning: post-create re-check failed; keeping #${NUM}" >&2
-    fi
-  fi
-  FILED_N="$NUM"; FILED_NEW=1
-}
-
 [ "$TOTAL" -gt 0 ] || { finish "" 0; exit 0; }
 
-# Phase 2: one issue per class.
+# Phase 2: one aggregate per kind.
 INTO=""; FILED=0
 for CLS in $CLS_LIST; do
   ITEMS_F="$TMP/items.$CLS"
-  case "$CLS:$(cut -f3 "$TMP/canon.$CLS")" in
-    post-deploy:*|external:agg|backlog:agg) file_rollup ;;
-    *) file_class ;;
-  esac
+  file_rollup
   case " $INTO " in *" $FILED_N "*) ;; *) INTO="${INTO:+$INTO }$FILED_N" ;; esac
   FILED=$((FILED + FILED_NEW))
   while IFS="$SEP" read -r p w k fp cl; do printf '%s\t%s\n' "$p" "$FILED_N"; done < "$ITEMS_F"

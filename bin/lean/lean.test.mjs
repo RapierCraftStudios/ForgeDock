@@ -411,7 +411,7 @@ describe("core work-on", () => {
   });
 
   it("a reviewer that judges a deferral unjustified gets the builder resumed to implement it; nothing is filed for it", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "new-issue" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "owner:rotate the key" }] };
     const rej = conf({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "deferred", deferral_ok: false, note: "one line in bar.js; do it now" }] }, k);
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [rej, rej] });
     const r = await run(w);
@@ -1717,7 +1717,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
     assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
@@ -1750,8 +1750,16 @@ describe("conformance shadow mode (the default)", () => {
     assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
   });
 
-  it("#4398 #5152 an investigation whose question is deferred closes partial (completed), carried forward in the tracking issue", async () => {
+  it("#5207 shadow: an in-lane engineering deferral (bucket new-issue) resumes the builder once and is never filed", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k), conf({}, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unjustified_deferral"); assert.equal(w.followups.length, 0); assert.equal(w.merges.length, 0);
+    assert.match(builders(w)[2][4], /R2 is in-lane engineering work \(bucket new-issue\): deliver it/);
+  });
+
+  it("#4398 #5152 an investigation whose question is deferred closes partial (completed), carried forward in the tracking issue", async () => {
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     const r = await runShadow(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
@@ -1793,7 +1801,7 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.terminalReason, "merged"); assert.equal(ra.close, undefined);
     assert.deepEqual(a.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const b = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     await runShadow(b);
     assert.deepEqual(b.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
