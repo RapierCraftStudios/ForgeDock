@@ -2706,3 +2706,12 @@ its held subtree to pending in dependency order. The report prints one
 - schedd `status` adds `host` (the `hostLoad` probe snapshot, null when it throws); `forgedock schedd status` prints `schedd: host_overloaded (...)` or `schedd: host load X.X/core (threshold T)`; `forgedock status` has a `host` row (`unknown` on any failure).
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
+
+## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
+
+- `light.mjs` `lightEligibility` takes `hotspots` (scripts/hotspots.sh `files` rows `{path, lines, commits_90d, over}`). A predicted non-test file with `over` (beyond `maintenance.hotspot.file_lines`) is a new hard reason `hotspot` (`<path> (<lines> lines)`).
+- It also returns `signals` (sorted like reasons), every evaluated signal whether or not it blocks: `repro`|`no_repro`, `files_named` (count of predicted non-test files), `churn_high` (commits_90d >= exported `CHURN_HIGH` = 20), `hotspot`, `risk_path`, `label_docs`/`label_config`/`label_chore` (also `type:`-prefixed), `size_S`|`size_M`|`size_L`|`size_none`. Signals never change verdict, `eligible` or `light`; mode off returns `signals: []`. `renderLiteReceipt` still reads only `reasons`.
+- `lean.mjs`: `hotspotsOf` now runs once before eligibility (`namedHot`); the `LIGHT_ELIGIBILITY` event gains `signals`. A light try still sets no `hotFacts`, so its build prompt keeps no hotspot rule (#4451); a full lane and the upgrade path reuse `namedHot`.
+- `bin/stats/depth.mjs` (`forgedock stats --depth`): joins each run-log slice's LIGHT_ELIGIBILITY with its outcome (merged/needs-human, first pass, cost, wall/model time, review findings, conformance failures) and post-merge defect signals over gh (reopen, revert, or a fix PR touching the same non-test files within 7 days; a gh failure is n/a, never false). Grouped by verdict and by every reason/signal code.
+- Promotion rule (#5052): treatment = light|upgraded lanes, control = eligible full lanes in the same size buckets; cost ratio <= 1.2, wall/model <= 1.3, defect rate <= control; any cell under `--min-n` (10) is `insufficient data`. Flipping `lean.light.mode: on` stays a config decision.
+Tests: `light.test.mjs` "#5209", `lean.test.mjs` "#4450 light lane" (#5209 cases), `bin/stats/depth.test.mjs`.
