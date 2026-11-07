@@ -79,7 +79,8 @@ function world(o = {}) {
   const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
   w.writeStages = writeStages;
   w.io = {
-    now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
+    credExec: () => ({ status: 1 }), now: () => w.clock, // #5205: never the host's real cs-cred (a sandbox sets CS_CRED_BASE)
+    sleep: async (ms) => { w.clock += ms; },
     gh: async (a, opts) => {
       const k = a.slice(0, 2).join(" ");
       if (opts?.env) (w.ghEnvs ??= []).push(opts.env);
