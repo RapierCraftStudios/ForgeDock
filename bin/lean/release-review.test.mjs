@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS } from "./release-review.mjs";
+import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam } from "./release-review.mjs";
 import { reviewStagingJson } from "../review-staging.mjs";
 
 const H1 = "a".repeat(40), H2 = "b".repeat(40);
@@ -31,6 +31,11 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [] } = {}) {
 const ctx = (seam, steps = {}) => ({ io: { review: seam }, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
 
 describe("reviewStep", () => {
+  it("realSeam exposes every effect the steps use, matching the fake seam", () => {
+    const real = Object.keys(realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp" })).sort();
+    assert.deepEqual(real, Object.keys(fakeSeam()).filter((k) => k !== "log" && k !== "agents").sort());
+  });
+
   it("runs the briefs and the spec panel in parallel, then test gate, finalize and summary in order", async () => {
     const s = fakeSeam();
     const r = await reviewStep(ctx(s));
