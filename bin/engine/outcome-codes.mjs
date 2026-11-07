@@ -47,6 +47,7 @@ export const OUTCOME_CODES = Object.freeze({
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
   ENGINE_DCO_REWRITE: "engine.dco_rewrite", // forge#4997: the DCO sign-off rewrite of unpushed commits failed (git filter-branch); mechanical engine-error (not needs-human), relaunched by the batch runner
+  ENGINE_PUSH_DIVERGED: "engine.push_diverged", // forge#5202: the lane-branch push was rejected non-fast-forward, no other lane owns the branch, and the divergence is not the lane's own reconcilable checkpoints; mechanical engine-error (not needs-human), relaunched by the batch runner
   ENGINE_VALIDATE_RESULT_LOST: "engine.validate_result_lost", // forge#4708: a validate result recorded before a CI fix round is missing after it and could not be carried forward
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",

@@ -4225,8 +4225,12 @@ describe("batch robustness (#4112-#4115)", () => {
     const r = await run(w);
     assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
   });
-  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
-    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+  it("#5202 a non-ff push no other lane owns ends engine-error engine.push_diverged, never needs-human", async () => {
+    const r = await run(ownerProbe(world({ pushErrors: [NONFF] })));
+    assert.equal([r.terminalReason, r.code].join("/"), "engine-error/engine.push_diverged");
+    assert.match(r.detail, /non-fast-forward.*no other lane owns feat\/issue-7-lean/s);
+  });
+  it("#4920 any other permanent push rejection (protected branch) stays needs-human", async () => {
     assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
   });
   it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {
@@ -7378,9 +7382,34 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const plan = w.calls.indexOf(builders(w)[1]);
     // each fake notes w.calls.length when called, i.e. the index the next call takes: <= plan means before the plan call
     assert.ok(w.over.hot.some((i) => i <= plan) && w.over.pack.some((i) => i <= plan), JSON.stringify({ plan, ...w.over }));
-    assert.ok(w.over.hot.every((i) => i > w.calls.indexOf(builders(w)[0])), "not before the light session");
+    const light = w.calls.indexOf(builders(w)[0]);
+    assert.equal(w.over.hot.filter((i) => i <= light).length, 1, "#5209: only the eligibility-signal call precedes the light session");
+    assert.ok(w.over.hot.some((i) => i > light && i <= plan), "the upgrade recomputes the plan facts after the light session");
     assert.ok(w.over.structure.length >= 1);
     assert.equal(events(dir, "RUN_TERMINAL")[0].light, false);
+  });
+  it("#5209 shadow mode: LIGHT_ELIGIBILITY carries signals and the hotspot reason; the lane keeps the full shape", async () => {
+    const w = lworld(), dir = tmpDir("light-5209-shadow-");
+    w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 2400, commits_90d: 25, over: true, excluded: false, growth: 0 }] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const e = events(dir, "LIGHT_ELIGIBILITY")[0];
+    assert.equal(e.mode, "shadow");
+    assert.equal(e.verdict, "ineligible");
+    assert.equal(e.light, false);
+    assert.ok(e.reasons.some((x) => x.code === "hotspot" && /src\/foo\.js \(2400 lines\)/.test(x.detail)), JSON.stringify(e.reasons));
+    const sig = e.signals.map((x) => x.code);
+    for (const c of ["repro", "files_named", "churn_high", "hotspot", "size_none"]) assert.ok(sig.includes(c), `${c} in ${sig}`);
+    assert.match(builders(w)[0][4], /PLANNING ONLY/, "plan call present");
+    assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+  it("#5209 mode on: an eligible light try still gets no hotspot build rule in its builder prompt", async () => {
+    const w = lworld(), dir = tmpDir("light-5209-on-");
+    w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 120, commits_90d: 3, over: false, excluded: false, growth: 0 }] });
+    await run(w, { dir, ...ON });
+    assert.equal(events(dir, "LIGHT_ELIGIBILITY")[0].verdict, "eligible");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1);
+    assert.ok(!/Don't grow a file over/.test(builders(w)[0][4]), "no hotspotBuildRule in the light prompt");
   });
   it("#4451 a full lane (light off) keeps its context-pack, structure and hotspot calls", async () => {
     const w = overhead(), dir = tmpDir("light-over-off-");
