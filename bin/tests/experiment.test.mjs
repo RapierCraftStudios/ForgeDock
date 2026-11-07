@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpDir } from "./_tmp.mjs";
 import { parseExperiment, assignArm, benchRecord, BENCH_SCHEMA, ARM_OVERRIDE_KEYS, armOverrides, applyArmOverrides, readExperiment } from "../experiment.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { parseExploreConfig } from "../lean/explore.mjs";
@@ -169,15 +169,13 @@ test("#5206 forge.yaml: dotted keys only in opted-in sections; readExperiment re
   assert.deepEqual(parseForgeYaml(raw).experiment, { id: "explore-ab", arms: "on,off" });
   assert.deepEqual(parseForgeYaml(raw, { dottedSections: ["experiment"] }).experiment, { id: "explore-ab", arms: "on,off", "on.lean.explore": "on", "off.lean.explore": "off" });
   assert.deepEqual(parseForgeYaml(raw, { dottedSections: ["experiment"] }).lean, { explore: "on" });
-  const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "exp5206-"));
-  try {
-    writeFileSync(join(dir, "forge.yaml"), raw);
-    assert.deepEqual(readExperiment(dir).overrides, { on: { "lean.explore": "on" }, off: { "lean.explore": "off" } });
-    writeFileSync(join(dir, "forge.yaml"), raw.replace("off.lean.explore: off", "off.lean.fix_model: x"));
-    const reasons = [];
-    assert.equal(readExperiment(dir, (m) => reasons.push(m)), null);
-    assert.match(reasons[0], /off\.lean\.fix_model/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const dir = tmpDir("exp5206-");
+  writeFileSync(join(dir, "forge.yaml"), raw);
+  assert.deepEqual(readExperiment(dir).overrides, { on: { "lean.explore": "on" }, off: { "lean.explore": "off" } });
+  writeFileSync(join(dir, "forge.yaml"), raw.replace("off.lean.explore: off", "off.lean.fix_model: x"));
+  const reasons = [];
+  assert.equal(readExperiment(dir, (m) => reasons.push(m)), null);
+  assert.match(reasons[0], /off\.lean\.fix_model/);
 });
 
 test("#5206 R3: the seam carries arm_overrides, stats counts per-arm applied runs", () => {
