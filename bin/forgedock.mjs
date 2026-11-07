@@ -3429,6 +3429,7 @@ function help() {
     ["npx forgedock review-staging [<PR>] --finalize --test-gate-output <file>", "Staging->main review post-dispatch: delivery, test-gate verdict, extract/classify/file-prepare; prints the findings to file"],
     ["npx forgedock review-staging [<PR>] --summary [--filed <N>]...", "Staging->main review Phase 8: verdict and summary comment with the FORGE:GATE_PASS / FORGE:GATE_FAILURE marker"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
+    ["npx forgedock stats --self-filed [--repo R] [--since D]", "Share of new issues the pipeline filed itself, by kind, against the 15% target (#5207)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
     ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],

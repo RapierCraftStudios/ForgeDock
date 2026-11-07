@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // #5197: the one routing source for scripts/file-deferred-followups.sh. Usage: followup-route.mjs owner|host <why>
 // prints post-deploy | host | external, as decided by ownerRoute / hostRoute in bin/lean/conformance.mjs.
+// #5207: post-deploy is the release rollup, external the batch external aggregate, host the per-batch host aggregate.
 import { ownerRoute, hostRoute } from "../bin/lean/conformance.mjs";
 
 const [kind, why = ""] = process.argv.slice(2);
