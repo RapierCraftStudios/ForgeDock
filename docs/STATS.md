@@ -106,6 +106,25 @@ conformance pass, and then the post − pre delta.
 the result is under `query.efficiency.compare`. Cohorts are split by batch `plan.created`, as `--window` is; a lane run
 outside a batch is in neither.
 
+## Lane depth (`--depth`, forge#5209)
+
+`forgedock stats --depth [--since <version|date>] [--min-n N] [--offline] [--repo <owner/repo>] [--json]` reads the local
+run logs (`~/.forge/runs/*.jsonl`, every RUN_START..RUN_TERMINAL slice that logged `LIGHT_ELIGIBILITY`) and uses gh only
+for post-merge defect signals; `--offline` skips that crawl (defects print n/a, as does a gh failure).
+
+Columns per cell: n, merge rate, first-pass rate, needs-human rate, median cost, median wall minutes, median wall/model
+time, review findings per lane (conformance failures + verifier findings) and the share of lanes with any, conformance
+failure rate, and the post-merge defect rate (a reopen, a revert naming the PR, or a `fix`/`bug` PR touching the same
+non-test files within 7 days) over merged lanes with known defect data.
+
+Cells are grouped by verdict (eligible, ambiguous, ineligible) and by every reason and signal code (`hotspot`,
+`churn_high`, `label_docs`, `size_S`, ...), so outcomes can be attributed to each signal.
+
+Promotion (#5052): treatment = light-shaped lanes (light or upgraded), control = full lanes the gate rated eligible, in the
+size buckets both have. Met when median cost ratio <= 1.2x, median wall/model <= 1.3x and the treatment defect rate is no
+worse than the control's; a cell under `--min-n` (default 10) is `insufficient data`, with n per cell printed. Flipping
+`lean.light.mode: on` stays a config decision.
+
 ## Pool utilisation (`--pool`, forge#4549)
 
 `forgedock stats --pool [--window 7d,30d] [--json]` reads the repo's local batch `report.json` rows and prints, per window,

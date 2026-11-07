@@ -90,7 +90,7 @@ const nonTestFiles = (fs) => fs.filter((f) => classifyPath(f) !== "test");
 
 /**
  * Post-merge defect signals of merged rows with a PR, over the injected gh: Map issue -> {reopen, revert, fixPr, defect}.
- * A gh failure leaves the map empty for the rows it could not read (rendered n/a), never false.
+ * A gh failure gives the rows it could not read null fields (rendered n/a), never false.
  */
 export async function gatherDefects({ repo, gh, rows = [], windowMs = WEEK_MS } = {}) {
   const out = new Map();
@@ -118,7 +118,9 @@ export async function gatherDefects({ repo, gh, rows = [], windowMs = WEEK_MS } 
       }
       out.set(x.issue, { reopen, revert, fixPr, defect: reopen || revert || fixPr });
     }
-  } catch { /* gh unavailable: the rows keep no defect data (n/a) */ }
+  } catch { // gh unavailable: the unread rows get null defect fields (n/a), never false
+    for (const x of merged) if (!out.has(x.issue)) out.set(x.issue, { reopen: null, revert: null, fixPr: null, defect: null });
+  }
   return out;
 }
 
@@ -126,7 +128,7 @@ export async function gatherDefects({ repo, gh, rows = [], windowMs = WEEK_MS } 
 export function depthCell(rows, defects = new Map()) {
   const n = rows.length;
   const fp = rows.filter((x) => typeof x.firstPass === "boolean");
-  const known = rows.filter((x) => x.merged && defects.has(x.issue));
+  const known = rows.filter((x) => x.merged && typeof defects.get(x.issue)?.defect === "boolean");
   const ratios = rows.filter((x) => x.wallMs != null && x.modelMs > 0).map((x) => x.wallMs / x.modelMs);
   return { n, merge_rate: r(per(rows.filter((x) => x.merged).length, n)), needs_human_rate: r(per(rows.filter((x) => x.needsHuman).length, n)),
     first_pass_rate: r(per(fp.filter((x) => x.firstPass).length, fp.length)), median_cost_usd: r(median(rows.map((x) => x.cost)), 1e4),
