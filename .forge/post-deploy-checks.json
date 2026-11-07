@@ -6,7 +6,7 @@
     "for": "7d"
   },
   "R2-remote-hotspot-config": {
-    "run": "test \"$(gh search issues 'hotspot_config_missing' --match comments --updated \">=$(date -u -d '1 day ago' +%F)\" --json number --jq length)\" -eq 0",
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%FT%TZ)&per_page=100\" --paginate --jq '.[] | select((.body | contains(\"FORGE:TRAJECTORY\")) and (.body | test(\"(^|\\n)- hotspot_config_missing:\"))) | .id' | wc -l)\" -eq 0",
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
