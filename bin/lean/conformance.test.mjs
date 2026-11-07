@@ -467,6 +467,14 @@ describe("conformance review: the engine computes the verdict from complete rows
       assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
     }
   });
+  it("#5230 tmpdirInputs counts venv, clone and worktree dirs as created", () => {
+    assert.deepEqual(tmpdirInputs('uv venv -q "$TMPDIR/pv" && uv pip install --offline -q --python "$TMPDIR/pv/bin/python" pytest && "$TMPDIR/pv/bin/python" -m pytest -q x'), []);
+    assert.deepEqual(tmpdirInputs("python3 -m venv $TMPDIR/v && $TMPDIR/v/bin/pip install x"), []);
+    assert.deepEqual(tmpdirInputs("virtualenv $TMPDIR/v && $TMPDIR/v/bin/pip install x"), []);
+    assert.deepEqual(tmpdirInputs("git clone https://x/y.git $TMPDIR/c && cat $TMPDIR/c/f"), []);
+    assert.deepEqual(tmpdirInputs("git worktree add $TMPDIR/w && cat $TMPDIR/w/f"), []);
+    assert.deepEqual(tmpdirInputs('uv pip install --python "$TMPDIR/pv/bin/python" pytest'), ["$TMPDIR/pv/bin/python"]);
+  });
   it("#4325 tmpdirInputs lists read-before-create $TMPDIR paths once, in first-use order", () => {
     assert.deepEqual(tmpdirInputs("cat ${TMPDIR:-/tmp}/a.json | jq . && cp $TMPDIR/b.txt out && cat $TMPDIR/a.json"), ["$TMPDIR/a.json", "$TMPDIR/b.txt"]);
     assert.deepEqual(tmpdirInputs("cp src.txt $TMPDIR/b.txt && cat $TMPDIR/b.txt"), []);
