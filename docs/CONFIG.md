@@ -723,20 +723,22 @@ selftest:
 
 ## `release` (OPTIONAL)
 
-Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review, fixes and post-merge are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). `--watch` is accepted and has no effect until those steps land.
+Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review and fixes are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). Post-merge is automated (#5213): it confirms a publish run for the merge commit (dispatching one when none appears), waits for `artifact_check`, then opens and merges the version-sync PR; a bound that runs out stops the job as blocked and `--resume <id>` retries. `--watch` is accepted and has no effect until the review step lands.
 
 ```yaml
 release:
   auto_merge: false
   artifact_check: ""
   version_sync: false
+  publish_workflow: publish.yml
 ```
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `auto_merge` | boolean | No | `true` merges the release PR with `--match-head-commit` once `FORGE:GATE_PASS` is posted and `forge/deploy-gate` is success, as `--merge` does. Default: `false` (the job stops at GATE_PASS and prints the merge command). |
-| `artifact_check` | string | No | Command that confirms the published artifact (read by the post-merge step, not yet automated). Default: none. |
-| `version_sync` | boolean | No | The repo opens a `chore/sync-version-X` PR after a release (read by the post-merge step, not yet automated). Default: `false`. |
+| `artifact_check` | string | No | Shell command that confirms the published artifact (e.g. `npm view pkg@1.2.3 version`). Post-merge retries it with a bounded exponential backoff (npm propagation delay) and blocks when it keeps failing. Default: none. |
+| `version_sync` | boolean | No | The repo pushes a `chore/sync-version-<VERSION>` branch after a release. Post-merge opens its PR to `branches.staging` if missing and merges it with `--match-head-commit` once its checks are green (no checks, or a red one, blocks the job). Default: `false`. |
+| `publish_workflow` | string | No | Workflow file post-merge looks for (and dispatches when no run appears) for the merge commit. Default: `publish.yml`. |
 
 **Commands that use this section**: `forgedock release`
 

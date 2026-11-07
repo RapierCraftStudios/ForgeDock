@@ -2708,7 +2708,7 @@ its held subtree to pending in dependency order. The report prints one
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
 
-`release.mjs` (#5208): `forgedock release`, the resumable staging→default release job (state `~/.forge/releases/<id>/`, steps preflight → release-pr → review → fixes → promotion → post-merge, promotion opt-in via `--merge` / `release.auto_merge`); `release-review.mjs` and `release-postmerge.mjs` are blocked stubs until #5212 / #5213. ADR `devdocs/decisions/5208-release-job.md`.
+`release.mjs` (#5208): `forgedock release`, the resumable staging→default release job (state `~/.forge/releases/<id>/`, steps preflight → release-pr → review → fixes → promotion → post-merge, promotion opt-in via `--merge` / `release.auto_merge`); `release-review.mjs` is a blocked stub until #5212. `release-postmerge.mjs` (#5213) confirms or dispatches the publish run, polls `release.artifact_check` with backoff and opens/merges the `chore/sync-version-<V>` PR (blocked, resumable, when a bound runs out). ADRs `devdocs/decisions/5208-release-job.md`, `devdocs/decisions/5208-release-postmerge.md`.
 
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
 

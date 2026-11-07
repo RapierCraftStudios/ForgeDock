@@ -42,12 +42,12 @@ export function openRelease(root, id, mounts) {
   };
 }
 
-/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync}`. */
+/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow}`. */
 export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null };
 }
 
 const json = (s) => JSON.parse(String(s || "null"));
@@ -176,6 +176,8 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
   const unfinished = (repo) => listBatches(root).map((id) => openBatch(root, id)).filter((b) => !b.readReport() && mine(b, repo));
   return {
     gh: (args) => gh(args), print, now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    run: async (cmd) => { try { exec("sh", ["-c", cmd], { stdio: "ignore", timeout: 120_000 }); return { ok: true }; } catch { return { ok: false }; } },
     runningLanes: (repo) => unfinished(repo).flatMap((b) => Object.entries(b.state.load()?.lanes ?? {})
       .filter(([n, rec]) => rec?.pid && isLaneAlive(rec.pid, b.resultFile(n)) && !existsSync(b.resultFile(n)))
       .map(([n]) => ({ batch: b.id, issue: n }))),

@@ -19,12 +19,15 @@ function fakeIo(world = {}) {
   const w = { lanes: [], openStaging: [], batches: [], releasePr: [{ number: 7, headRefOid: HEAD, url: "u" }], comments: [{ body: "FORGE:GATE_PASS" }], gate: "success", ...world };
   const io = {
     calls, par, printed, now: () => 1_700_000_000_000, print: (l) => printed.push(l),
+    sleeps: [], ran: [], sleep: async (ms) => { io.sleeps.push(ms); },
+    run: async (cmd) => { io.ran.push(cmd); return { ok: io.ran.length >= (w.artifactOkAt ?? 1) }; },
     runningLanes: async () => w.lanes,
     batches: async () => w.batches,
     setParallel: async (id, k) => { par.push([id, k]); },
     gh: async (a) => {
       calls.push(a);
       const j = a.join(" ");
+      const pm = w.pm?.(a); if (pm !== undefined) return pm;
       if (a[0] === "pr" && a[1] === "list" && a.includes("--state") && a[a.indexOf("--state") + 1] === "open") return JSON.stringify(a.includes("--head") ? w.releasePr : w.openStaging);
       if (a[0] === "pr" && a[1] === "list") return JSON.stringify([]);
       if (a[0] === "pr" && a[1] === "create") return "https://github.com/o/r/pull/9";
@@ -123,8 +126,8 @@ describe("release job (#5211)", () => {
     assert.deepEqual(ran, ["preflight", "release-pr"]); // preflight/release-pr not run again
   });
 
-  it("stubs return a blocked result that names the manual path; the job exits blocked", async () => {
-    for (const r of [await reviewStep({}), await fixStep({}), await postMergeStep({})]) { assert.equal(r.blocked, true); assert.match(r.reason, /manual path/); }
+  it("review/fixes stubs return a blocked result that names the manual path; the job exits blocked", async () => {
+    for (const r of [await reviewStep({}), await fixStep({})]) { assert.equal(r.blocked, true); assert.match(r.reason, /manual path/); }
     const io = fakeIo(), root = tmp();
     const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root, mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {} });
     assert.equal(out.status, "blocked");
@@ -140,8 +143,9 @@ describe("release job (#5211)", () => {
   });
 
   it("readReleaseConfig reads auto_merge / artifact_check / version_sync", () => {
-    assert.deepEqual(readReleaseConfig("release:\n  auto_merge: true\n  artifact_check: npm view x\n  version_sync: true\n"), { autoMerge: true, artifactCheck: "npm view x", versionSync: true });
-    assert.deepEqual(readReleaseConfig(""), { autoMerge: false, artifactCheck: null, versionSync: false });
+    assert.deepEqual(readReleaseConfig("release:\n  auto_merge: true\n  artifact_check: npm view x\n  version_sync: true\n"), { autoMerge: true, artifactCheck: "npm view x", versionSync: true, publishWorkflow: null });
+    assert.deepEqual(readReleaseConfig(""), { autoMerge: false, artifactCheck: null, versionSync: false, publishWorkflow: null });
+    assert.equal(readReleaseConfig("release:\n  publish_workflow: pub.yml\n").publishWorkflow, "pub.yml");
   });
 
   it("CLI: rejects unknown options and exits 3 on a blocked step, naming the resume command", async () => {
@@ -150,5 +154,115 @@ describe("release job (#5211)", () => {
     const code = await releaseFromCli(["--repo", REPO], { io, env: { FORGEDOCK_RELEASE_DIR: root }, cwd: root, mounts: DISK });
     assert.equal(code, 3);
     assert.ok(io.printed.some((l) => /forgedock release --resume r\d/.test(l)));
+  });
+});
+
+describe("release post-merge step (#5213)", () => {
+  const SHA = "b".repeat(40);
+  const PKG = Buffer.from(JSON.stringify({ version: "1.2.3" })).toString("base64");
+  /** gh answers for the post-merge calls; `o` tunes them. */
+  const pmWorld = (o = {}) => {
+    const st = { runs: o.runs ?? [[{ databaseId: 5, status: "completed", conclusion: "success" }]], runCalls: 0, dispatched: 0, syncPrs: o.syncPrs ?? [], created: 0 };
+    return {
+      st,
+      pm: (a) => {
+        const j = a.join(" ");
+        if (a[0] === "pr" && a[1] === "view" && j.includes("mergeCommit")) return JSON.stringify({ state: o.prState ?? "MERGED", mergeCommit: { oid: SHA } });
+        if (a[0] === "run" && a[1] === "list") { assert.ok(j.includes(`--commit ${SHA}`) && j.includes(`--workflow ${o.wf ?? "publish.yml"}`)); const r = st.runs[Math.min(st.runCalls++, st.runs.length - 1)]; return JSON.stringify(r); }
+        if (a[0] === "workflow" && a[1] === "run") { st.dispatched++; assert.ok(a.includes("main")); return ""; }
+        if (a[0] === "api" && j.includes("contents/package.json")) return PKG;
+        if (a[0] === "api" && j.includes("branches/chore/sync-version-1.2.3")) { if (o.noBranch) throw new Error("404"); return "x"; }
+        if (a[0] === "pr" && a[1] === "list" && j.includes("chore/sync-version")) return JSON.stringify(st.syncPrs);
+        if (a[0] === "pr" && a[1] === "create") { st.created++; assert.ok(a.includes("staging") && a.includes("chore/sync-version-1.2.3")); return "https://github.com/o/r/pull/30"; }
+        if (a[0] === "pr" && a[1] === "view" && j.includes("statusCheckRollup")) return JSON.stringify({ state: "OPEN", headRefOid: "c".repeat(40), statusCheckRollup: o.checks ?? [{ conclusion: "SUCCESS" }] });
+        if (a[0] === "pr" && a[1] === "merge" && Number(a[2]) >= 30) return "";
+        return undefined;
+      },
+    };
+  };
+  const run = (o = {}, config = {}) => {
+    const w = pmWorld(o), io = fakeIo({ pm: w.pm, ...o });
+    const ctx = { io, repo: REPO, def: "main", staging: "staging", config: { postMerge: { publishPolls: 2, runPolls: 2, branchPolls: 2, checkPolls: 2, artifactTries: 3 }, ...config }, state: { steps: { "release-pr": { result: { pr: 7 } } } } };
+    return postMergeStep(ctx).then((out) => ({ out, io, st: w.st }));
+  };
+
+  it("R4: a publish run for the merge commit is confirmed; nothing is dispatched", async () => {
+    const { out, st } = await run();
+    assert.equal(out.published, true);
+    assert.equal(out.run, 5);
+    assert.equal(st.dispatched, 0);
+  });
+
+  it("R4: no run appears -> one is dispatched on the default branch, then awaited", async () => {
+    const { out, st } = await run({ runs: [[], [], [{ databaseId: 8, status: "completed", conclusion: "success" }]] });
+    assert.equal(out.published, true);
+    assert.equal(out.dispatched, true);
+    assert.equal(st.dispatched, 1);
+  });
+
+  it("R4: a custom release.publish_workflow is used", async () => {
+    const { out } = await run({ wf: "pub.yml" }, { publishWorkflow: "pub.yml" });
+    assert.equal(out.published, true);
+  });
+
+  it("blocked when no run appears even after the dispatch, or the run fails or never finishes", async () => {
+    const a = await run({ runs: [[]] });
+    assert.equal(a.out.blocked, true); assert.equal(a.st.dispatched, 1);
+    const b = await run({ runs: [[{ databaseId: 1, status: "completed", conclusion: "failure" }]] });
+    assert.match(b.out.reason, /failure/);
+    const c = await run({ runs: [[{ databaseId: 1, status: "in_progress", conclusion: null }]] });
+    assert.match(c.out.reason, /did not finish/);
+  });
+
+  it("stopped (not blocked) while the release PR is not merged", async () => {
+    const { out, st } = await run({ prState: "OPEN" });
+    assert.equal(out.stopped, true);
+    assert.equal(st.runCalls, 0);
+  });
+
+  it("artifact_check is polled with exponential backoff until it passes; exhausting it blocks", async () => {
+    const a = await run({ artifactOkAt: 3 }, { artifactCheck: "npm view x@1" });
+    assert.equal(a.out.artifact, true);
+    assert.deepEqual(a.io.ran, ["npm view x@1", "npm view x@1", "npm view x@1"]);
+    assert.deepEqual(a.io.sleeps.slice(-2), [5000, 10000]);
+    const b = await run({ artifactOkAt: 99 }, { artifactCheck: "npm view x@1" });
+    assert.equal(b.out.blocked, true);
+    assert.match(b.out.reason, /artifact_check/);
+  });
+
+  it("R4: version_sync opens the sync PR to staging and merges it with --match-head-commit when green", async () => {
+    const { out, st, io } = await run({}, { versionSync: true });
+    assert.equal(st.created, 1);
+    assert.equal(out.sync.merged, true);
+    assert.ok(io.calls.some((a) => a[1] === "merge" && a.includes("30") && a.includes("--match-head-commit") && a.includes("c".repeat(40))));
+  });
+
+  it("version_sync reuses an open sync PR, skips a merged one, and never merges red or check-less PRs", async () => {
+    const open = await run({ syncPrs: [{ number: 31, state: "OPEN" }] }, { versionSync: true });
+    assert.equal(open.st.created, 0);
+    assert.ok(open.io.calls.some((a) => a[1] === "merge" && a.includes("31")));
+    const merged = await run({ syncPrs: [{ number: 32, state: "MERGED" }] }, { versionSync: true });
+    assert.equal(merged.out.sync.merged, true);
+    assert.ok(!merged.io.calls.some((a) => a[1] === "merge"));
+    for (const checks of [[], [{ conclusion: "FAILURE" }], [{ conclusion: "SUCCESS" }, { status: "IN_PROGRESS", state: "PENDING" }]]) {
+      const r = await run({ syncPrs: [{ number: 33, state: "OPEN" }], checks }, { versionSync: true });
+      assert.equal(r.out.blocked, true, JSON.stringify(checks));
+      assert.ok(!r.io.calls.some((a) => a[1] === "merge"));
+    }
+    const nb = await run({ noBranch: true }, { versionSync: true });
+    assert.equal(nb.out.blocked, true);
+  });
+
+  it("R5: through the job, a blocked post-merge is retried on resume and finishes once the run exists", async () => {
+    const mod = await import("./release.mjs");
+    const root = tmp(), id = newReleaseId();
+    const world = (runs) => pmWorld({ runs });
+    const go = async (runs) => {
+      const io = fakeIo({ pm: world(runs).pm });
+      const config = { postMerge: { publishPolls: 1, runPolls: 1 } };
+      return mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok }) });
+    };
+    assert.equal((await go([[{ databaseId: 1, status: "completed", conclusion: "failure" }]])).status, "blocked");
+    assert.equal((await go([[{ databaseId: 2, status: "completed", conclusion: "success" }]])).status, "done");
   });
 });
