@@ -64,26 +64,21 @@ if [ "$ITEMS" = "-" ]; then cat > "$TMP/items.raw"; else cat "$ITEMS" > "$TMP/it
 # Fields: identity, why, flag, path (`-` when none), class.
 SEP=$(printf '\037')
 CLASSES="engineering post-deploy external ops verify-now host backlog"
-# #5078: an owner item is external only when it needs credentials, spend, an account, a third party or a customer. A
-# post-promotion action (owner:orchestrator, owner:promote:*, after promotion/release, rollout, purge) joins the rollup and
-# read-only production data or capture (obs-psql, *-monitor, a read-only prod query) is a host task. Mirrors
-# bin/lean/conformance.mjs ownerRoute; word boundaries spelled (^|[^[:alnum:]_]) / ([^[:alnum:]_]|$), no \b, for BSD grep (bash 3.2 hosts).
-POSTPROM_ERE='(after|post)[- ]?(promotion|release|deploy)|in production after|production[- ]verif|promot(e|ion)|rollout|purge|deploy[- ]time'
-ROPROD_ERE='ssh[[:space:]]+[[:alnum:]_.-]*-monitor([^[:alnum:]_]|$)|(^|[^[:alnum:]_])obs-psql([^[:alnum:]_]|$)|(^|[^[:alnum:]_])prod(uction)?[ _-]monitor([^[:alnum:]_]|$)|(^|[^[:alnum:]_])read[- ]only[^[:alnum:]_.]([^.]{0,38}[^[:alnum:]_.])?prod(uction)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])prod(uction)?[^[:alnum:]_.]([^.]{0,28}[^[:alnum:]_.])?(query|queries|capture|telemetry|logs?)([^[:alnum:]_]|$)'
-EXTNEED_ERE='credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?([^[:alnum:]_]|$)|private[- ]key|(^|[^[:alnum:]_])login([^[:alnum:]_]|$)|(^|[^[:alnum:]_])sudo([^[:alnum:]_]|$)|spend|budget|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|(^|[^[:alnum:]_])(delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)([^[:alnum:]_]|$)'
+# #5078/#5186/#5197: routing of an owner or host item (post-deploy rollup, host task, external) has ONE source: ownerRoute and
+# hostRoute in bin/lean/conformance.mjs, reached through scripts/followup-route.mjs. No regex is mirrored here. A missing node
+# or route CLI aborts the run (exit 2) rather than guessing a route.
+ROUTE_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/followup-route.mjs"
+[ -f "$ROUTE_CLI" ] || { echo "file-deferred-followups: route helper not found: $ROUTE_CLI" >&2; exit 2; }
+command -v node >/dev/null 2>&1 || { echo "file-deferred-followups: node is required for routing" >&2; exit 2; }
+route() { # kind why -> route (aborts the run on failure)
+  local out; out=$(node "$ROUTE_CLI" "$1" "$2") || { echo "file-deferred-followups: routing failed for kind $1" >&2; exit 2; }
+  printf '%s' "$out"
+}
 owner_route() { # why -> post-deploy | host | external
   case "$1" in "owner: orchestrator"*|"owner: promote"*) echo "post-deploy"; return 0 ;; esac
-  if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "post-deploy"
-  elif printf '%s' "$1" | grep -qiE "$ROPROD_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "host"
-  else echo "external"; fi
+  route owner "$1"
 }
-# #5186: an explicit host item is post-promotion (the release rollup) when its text says so and needs nothing external; work
-# needed before promotion ("before promotion", "pre-release") stays a host task. Mirrors bin/lean/conformance.mjs hostRoute.
-PREPROM_ERE='(before|pre)[- ]?(promotion|release|deploy)'
-host_route() { # why -> post-deploy | host
-  if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$PREPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "post-deploy"
-  else echo "host"; fi
-}
+host_route() { route host "$1"; } # why -> post-deploy | host
 : > "$TMP/items"
 BAD=0; ROW=0
 bad_row() { BAD=$((BAD+1)); echo "file-deferred-followups: row $ROW: $1" >&2; }
@@ -117,8 +112,8 @@ while IFS= read -r line || [ -n "$line" ]; do
   case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops|host|backlog)"; continue ;; esac
   # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup, verify-now needs no release.
   case "$w" in
-    *"[bucket:owner]"*) [ "$c" = "ops" ] || c=$(owner_route "$w") ;;
-    *"[bucket:host]"*) c=$(host_route "$w") ;;
+    *"[bucket:owner]"*) [ "$c" = "ops" ] || c=$(owner_route "$w") || exit 2 ;;
+    *"[bucket:host]"*) c=$(host_route "$w") || exit 2 ;;
     *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering"; [ "$c" = "engineering" ] && c="backlog" ;; # #5188: one per-batch issue
     *"[bucket:verify-now]"*) [ "$c" = "post-deploy" ] && c="verify-now" ;;
   esac
