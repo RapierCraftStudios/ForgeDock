@@ -2748,3 +2748,7 @@ How to read it:
   with property checks (#4149). That decision is separate work.
 - Read only: one GraphQL search per 100 PRs plus local `git blame` (same-hunks is `null` outside a clone of the repo). No
   lane-path cost, no LLM. Definitions: `docs/STATS.md`.
+
+## Entry 2026-11-07 — experiment arm-scoped config overrides (#5206)
+
+A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allowlist is `ARM_OVERRIDE_KEYS` in `bin/experiment.mjs`: `lean.explore`, `lean.explore_model`, `lean.light_mode`, `context_pack` (not `ab`) and `review.verifier`, each with a value check. Any other dotted key or a bad value makes `parseExperiment` return null and `warn` the reason (`readExperiment` writes it to stderr), so an override is never partly applied. `parseForgeYaml(raw, { dottedSections })` keeps dotted nested keys only in the sections named, here `experiment`; every other caller is unchanged. `runCore` begins with `applyArmOverrides(o, o.issue)`, which merges the arm's overrides into `o.explore`, `o.light`, `o.contextPack` and `o.verifier` before any of them is parsed. With no experiment it returns the same `o`. `expTag` is the returned tag, `{experiment, arm, arm_overrides}`, so `RUN_TERMINAL` and `PHASE_ATTEMPT_USAGE` carry the applied overrides (the telemetry seam maps `""` to `none`). `github-source.mjs` keeps them as `run.armOverrides`. `stats --experiment` reports `arms[a].applied`, the runs whose recorded overrides equal the arm's declared ones.

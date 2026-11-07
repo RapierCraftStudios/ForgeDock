@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
+import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -6742,6 +6743,36 @@ describe("explorer subagent (#4391)", () => {
     assert.deepEqual(builders(w).map((c) => c[4]), builders(off).map((c) => c[4]));
     assert.ok(!builders(w).some((c) => c[4].includes("explorer")));
     assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").explore, "off");
+  });
+});
+
+describe("experiment arm overrides (#5206)", () => {
+  const capture = (w) => { const seen = []; const inner = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, agents: c.agents ?? null }); return inner(c); }; return seen; };
+  // issue 7 hashes to arm "on" under id x0 and to "off" under id x2 (assignArm, sha1 of id:issue)
+  const exp = (id) => parseExperiment({ id, arms: "on,off", "on.lean.explore": "on", "off.lean.explore": "off" });
+
+  it("R1/R3: the explorer runs only in the on arm; RUN_TERMINAL carries arm and the applied overrides", async () => {
+    assert.equal(assignArm(exp("x0"), 7), "on"); assert.equal(assignArm(exp("x2"), 7), "off");
+    const on = world(), seenOn = capture(on), dOn = tmpDir("core-");
+    assert.equal((await run(on, { dir: dOn, experiment: exp("x0"), explore: { model: "claude-haiku-5-5" } })).terminalReason, "merged");
+    assert.ok(seenOn.filter((s) => s.role === "builder").every((s) => s.agents?.explorer?.model === "claude-haiku-5-5"));
+    const tOn = readLog(dOn, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([tOn.experiment, tOn.arm, tOn.arm_overrides, tOn.explore], ["x0", "on", "lean.explore=on", "on"]);
+    const off = world(), seenOff = capture(off), dOff = tmpDir("core-");
+    assert.equal((await run(off, { dir: dOff, experiment: exp("x2"), explore: { mode: "on" } })).terminalReason, "merged");
+    assert.ok(seenOff.every((s) => s.agents === null));
+    const tOff = readLog(dOff, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([tOff.arm, tOff.arm_overrides, tOff.explore], ["off", "lean.explore=off", "off"]);
+    assert.ok(readLog(dOff, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE").every((e) => e.arm === "off" && e.arm_overrides === "lean.explore=off"));
+  });
+
+  it("R4: no experiment: prompts and RUN_TERMINAL carry no arm fields", async () => {
+    const w = world(), d = tmpDir("core-");
+    await run(w, { dir: d, explore: { mode: "off" } });
+    const t = readLog(d, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.ok(!("arm" in t) && !("arm_overrides" in t) && !("experiment" in t));
+    const x = world(); await run(x, { explore: { mode: "off" } });
+    assert.deepEqual(builders(w).map((c) => c[4]), builders(x).map((c) => c[4]));
   });
 });
 
