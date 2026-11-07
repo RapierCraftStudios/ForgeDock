@@ -4224,8 +4224,12 @@ describe("batch robustness (#4112-#4115)", () => {
     const r = await run(w);
     assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
   });
-  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
-    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+  it("#5202 a non-ff push no other lane owns ends engine-error engine.push_diverged, never needs-human", async () => {
+    const r = await run(ownerProbe(world({ pushErrors: [NONFF] })));
+    assert.equal([r.terminalReason, r.code].join("/"), "engine-error/engine.push_diverged");
+    assert.match(r.detail, /non-fast-forward.*no other lane owns feat\/issue-7-lean/s);
+  });
+  it("#4920 any other permanent push rejection (protected branch) stays needs-human", async () => {
     assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
   });
   it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {

@@ -69,6 +69,7 @@ import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
 import { pickSalvage } from "./salvage-resume.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
+import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -675,8 +676,18 @@ export async function runCore(o) {
       if (r.rewritten) { T.decisions.push(`Rewrote ${r.rewritten} unpushed commit(s) with the lane identity and a sign-off (placeholder author or no Signed-off-by, #4651)`); ev({ event: "DCO_SIGNOFF_REWRITE", count: r.rewritten, ...(r.dirty ? { dirty: r.dirty } : {}) }); }
     } catch (e) { throw Object.assign(e, e?.noIdentity === true ? { laneCode: OUTCOME_CODES.CI_DCO } : { engineCode: OUTCOME_CODES.ENGINE_DCO_REWRITE }); } // #4997: a failed rewrite is mechanical (engine-error, recoverable), only a missing identity is a human block
   };
+  /** #5202: the lane's own pushed checkpoints a fresh session amended are merged in (-s ours) so the push stays a fast-forward. */
+  const reconcileLaneBranch = async () => {
+    const r = await reconcileCheckpoints({ git, branch });
+    if (r.state === "reconciled") {
+      ev({ event: "CHECKPOINT_RECONCILED", count: r.commits.length, sha: r.sha });
+      T.decisions.push(`origin/${branch} held ${r.commits.length} pushed checkpoint commit(s) the lane had rewritten locally: merged in (-s ours, ${r.sha.slice(0, 10)}) so the push stays a fast-forward`);
+    } else if (r.state === "foreign" || r.state === "error") ev({ event: "CHECKPOINT_RECONCILE_SKIPPED", state: r.state, ...(r.commits ? { commits: r.commits.length } : {}), ...(r.error ? { error: r.error } : {}) });
+    return r;
+  };
   const gitPush = async (args) => {
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
+      await reconcileLaneBranch();
       try { await signOffUnpushed(); }
       catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push them as-is before reporting; #5047: to a salvage ref, never the lane branch (the sign-off range excludes origin/<branch>)
         if (!e?.noIdentity) { try { const sha = String(await git(["rev-parse", "HEAD"])).trim(), ref = salvageBranch(issue, sha); await git(["push", "origin", `${sha}:refs/heads/${ref}`]); laneHead = { branch, sha, pushedTo: ref }; ev({ event: "DCO_RESCUE_PUSH", branch: ref }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
@@ -725,7 +736,7 @@ export async function runCore(o) {
     T.anomalies.push(line);
     if (!["invalid", "needs-human", "budget-exceeded"].includes(reason)) { try { await post("FORGE:LANE_BRANCH", `## Lane branch\n${line}`); } catch { /* best effort */ } }
   }
-  const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
+  const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over. The checkpoint commit is already pushed: do not amend, reword, squash, reset or rebase existing commits; add new commits on top.";
   const recoverNote = () => (recover ? `\n\nRecovery pass (${recover.code}): ${(RECOVER_HOW[recover.code] ?? "an earlier run ended needs-human for a mechanical reason; resolve it").replaceAll("BASE", lane)}.` : "");
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
   const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
@@ -2118,6 +2129,7 @@ export async function runCore(o) {
       let fixes = 0;
       for (;;) {
         await untrackToolState({ git, base, ev, keep: await keepPaths() }); // #4621: gitPush's untrack commit would move HEAD after `head` was read; do it first so head is the pushed tip
+        await reconcileLaneBranch(); // #5202: likewise the checkpoint reconcile merge
         await signOffUnpushed(); // #4651: likewise the sign-off rewrite
         const head = String(await git(["rev-parse", "HEAD"])).trim();
         if (head === ciVerifiedHead || ciFellBack) return { fixes };
@@ -3125,6 +3137,8 @@ export async function runCore(o) {
       let owner = null;
       try { owner = await otherLaneOwner({ gh: (a) => ghc(a), repo, issue, branch, selfId: agentId, ownPr: Number(/#(\d+)/.exec(String(T.pr?.[0] ?? ""))?.[1]) || null }); } catch { /* fail-open */ }
       if (owner) return finish("deferred", `git push was rejected (non-fast-forward): ${owner.detail}; another lane owns ${branch}`, { code: OUTCOME_CODES.LEASE_HELD, branch }, OUTCOME_CODES.LEASE_HELD);
+      // #5202: the lane's own history diverged from origin/<branch> (not reconcilable checkpoints): mechanical, never needs-human
+      return finish("engine-error", `git push was rejected (non-fast-forward) and no other lane owns ${branch}: ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`, { code: OUTCOME_CODES.ENGINE_PUSH_DIVERGED, branch }, OUTCOME_CODES.ENGINE_PUSH_DIVERGED);
     }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     if (e?.engineCode) return finish("engine-error", e?.message ?? String(e), { code: e.engineCode }, e.engineCode); // #4997
