@@ -2708,6 +2708,8 @@ its held subtree to pending in dependency order. The report prints one
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
 
+`release.mjs` (#5208): `forgedock release`, the resumable staging→default release job (state `~/.forge/releases/<id>/`, steps preflight → release-pr → review → fixes → promotion → post-merge, promotion opt-in via `--merge` / `release.auto_merge`); `release-review.mjs` and `release-postmerge.mjs` are blocked stubs until #5212 / #5213. ADR `devdocs/decisions/5208-release-job.md`.
+
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
 
 - `light.mjs` `lightEligibility` takes `hotspots` (scripts/hotspots.sh `files` rows `{path, lines, commits_90d, over}`). A predicted non-test file with `over` (beyond `maintenance.hotspot.file_lines`) is a new hard reason `hotspot` (`<path> (<lines> lines)`).

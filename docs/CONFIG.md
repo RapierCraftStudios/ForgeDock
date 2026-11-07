@@ -721,6 +721,25 @@ selftest:
 
 ---
 
+## `release` (OPTIONAL)
+
+Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review, fixes and post-merge are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). `--watch` is accepted and has no effect until those steps land.
+
+```yaml
+release:
+  auto_merge: false
+  artifact_check: ""
+  version_sync: false
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `auto_merge` | boolean | No | `true` merges the release PR with `--match-head-commit` once `FORGE:GATE_PASS` is posted and `forge/deploy-gate` is success, as `--merge` does. Default: `false` (the job stops at GATE_PASS and prints the merge command). |
+| `artifact_check` | string | No | Command that confirms the published artifact (read by the post-merge step, not yet automated). Default: none. |
+| `version_sync` | boolean | No | The repo opens a `chore/sync-version-X` PR after a release (read by the post-merge step, not yet automated). Default: `false`. |
+
+**Commands that use this section**: `forgedock release`
+
 ## `issue_watch` (OPTIONAL)
 
 Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name. The release keys need `mode: release` and at least a `threshold` or `immediate`.
