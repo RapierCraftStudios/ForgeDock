@@ -83,6 +83,10 @@ describe("account rotator adapter (#5094)", () => {
     assert.deepEqual(quotaRequeue({ rotator: rot, r: {}, delayMs: 600_000 }), { delayMs: 0, rotated: true });
     assert.deepEqual(quotaRequeue({ rotator: rot, r: { backendId: "acct-1" }, prior: { rotations: 2 }, delayMs: 600_000 }), { delayMs: 600_000, rotated: false });
     assert.deepEqual(quotaRequeue({ rotator: rot, r: { backendId: "sandbox-cred" }, delayMs: 600_000 }), { delayMs: 600_000, rotated: false }, "R6: remote credential");
+    assert.deepEqual(quotaRequeue({ rotator: rot, r: { backendId: "remote:pool" }, delayMs: 600_000, poolId: "remote:pool" }), { delayMs: 0, rotated: true }, "#5203: the pool rotates");
+    assert.deepEqual(quotaRequeue({ rotator: rot, r: { backendId: "remote:pool" }, prior: { rotations: 2 }, delayMs: 600_000, poolId: "remote:pool" }), { delayMs: 600_000, rotated: false }, "#5203: capped at the account count");
+    assert.deepEqual(quotaRequeue({ rotator: rot, r: { backendId: "sandbox-cred" }, delayMs: 600_000, poolId: "remote:pool" }), { delayMs: 600_000, rotated: false });
+    assert.equal(quotaRequeue({ rotator: { ...rot, headroom: () => false }, r: { backendId: "remote:pool" }, delayMs: 1, poolId: "remote:pool" }), null);
     assert.equal(quotaRequeue({ rotator: { ...rot, headroom: () => false }, r: {}, delayMs: 1 }), null);
     assert.equal(quotaRequeue({ rotator: null, r: {}, delayMs: 1 }), null);
   });
