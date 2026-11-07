@@ -1262,7 +1262,7 @@ export function formatShadowSummary(rows) {
 }
 
 /** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724), external one aggregate per batch and host a `host-task` (#5078). */
-export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host"];
+export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host", "backlog"];
 /** #4724: the bucket every deferred row gets at contract time. `date:<YYYY-MM-DD>` and `owner:<action>` carry a value. */
 export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue", "host"]);
 const DATE_BUCKET_RE = /^date:(\d{4})-(\d{2})-(\d{2})$/;
@@ -1301,12 +1301,12 @@ export function ownerRoute(r) {
   if (POST_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text)) return "post-deploy";
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
 }
-/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
+/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> backlog (one issue per batch, #5188), other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
 export function followupClass(r) {
   const k = bucketKind(r?.bucket);
   if (k === "owner") return r?.class === "ops" ? "ops" : ownerRoute(r);
   if (k === "host") return "host";
-  if (k === "new-issue") return r?.class && r.class !== "post-deploy" && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "engineering";
+  if (k === "new-issue") return r?.class && !["post-deploy", "engineering"].includes(r.class) && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "backlog"; // #5188: the per-batch backlog issue
   if (k) return "post-deploy";
   return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
 }

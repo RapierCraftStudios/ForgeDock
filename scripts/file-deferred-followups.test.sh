@@ -363,7 +363,7 @@ OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/host.tsv"); RC=$?
 check "routing: read-only prod owner item -> one host follow-up labelled host-task" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && grep -q 'FORGE:DEFERRED_CLASS: host' '$T/created.901.body'"
 check "routing: host follow-up carries no needs-human or external-prerequisite" "! grep '^issue create' '$GH_LOG' | grep -qE 'needs-human|external-prerequisite'"
 reset
-printf -- '-\t[bucket:host] host: run the obs-psql report\t\t\tR6: report rows\n-\tdefer: [bucket:new-issue] wire it\t\t\tR7: wire the report\n' > "$T/join.tsv"
+printf -- '-\t[bucket:host] host: run the obs-psql report\t\t\tR6: report rows\n-\tdefer: wire it\t\t\tR7: wire the report\n' > "$T/join.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/join.tsv"); RC=$?
 check "routing: host items join the engineering follow-up of the same run" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'report rows' '$T/created.901.body' && grep -q 'wire the report' '$T/created.901.body' && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:engineering' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && ! grep '^issue create' '$GH_LOG' | grep -q needs-human"
 # N external deferrals in one batch -> ONE aggregated issue carrying needs-human
@@ -386,6 +386,25 @@ reset
 printf -- '-\tdefer: parser first\t\t\tR1: add the parser\n-\tdefer: needs the parser\t\t\tR2: use the parser\n' > "$T/eng.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv"); RC=$?
 check "engineering: dependent items of one parent in one issue" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'add the parser' '$T/created.901.body' && grep -q 'use the parser' '$T/created.901.body'"
+
+
+# 25. #5188: new-issue deferrals of one batch -> ONE backlog issue per batch; sections per parent; duplicates once
+reset
+printf -- '-\tdefer: [bucket:new-issue] wire the report\t\t\tR1: wire the report\n-\tdefer: [bucket:new-issue] add the cache\t\t\tR2: add the cache\n' > "$T/bl1.tsv"
+OUT=$(FORGE_BATCH_ID=b1 bash "$S" --parent 10 --repo o/r --items "$T/bl1.tsv"); RC=$?
+check "backlog: lane 1 creates ONE batch issue holding both items" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'FORGE:BACKLOG_BATCH: b1' '$T/created.901.body' && grep -q 'wire the report' '$T/created.901.body' && grep -q 'add the cache' '$T/created.901.body' && grep -q '^### #10\$' '$T/created.901.body'"
+check "backlog: labelled followup:engineering and followup:backlog, never needs-human" "grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:engineering' && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:backlog' && ! grep '^issue create' '$GH_LOG' | grep -q needs-human && printf '%s' \"\$OUT\" | grep -q 'classes=backlog '"
+cp "$T/created.901.body" "$ISSUE_BODY"; : > "$GH_LOG"
+echo '{"items":[{"number":901}]}' > "$SEARCH_JSON"
+printf '{"number":901,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:BACKLOG_BATCH: b1 -->"}\n' > "$T/issue.901.json"
+printf -- '-\tdefer: [bucket:new-issue] wire the report\t\t\tR9: Wire the report!\n-\tdefer: [bucket:new-issue] other\t\t\tR3: another thing\n' > "$T/bl2.tsv"
+OUT=$(FORGE_BATCH_ID=b1 bash "$S" --parent 11 --repo o/r --items "$T/bl2.tsv"); RC=$?
+check "backlog: lane 2 of the batch appends to #901, creates nothing" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 901' '$GH_LOG' && grep -q '^### #11\$' '$ISSUE_BODY.edited' && grep -q 'another thing' '$ISSUE_BODY.edited'"
+check "backlog: duplicate text from another parent stored once" "[ \$(grep -ci 'wire the report' '$ISSUE_BODY.edited') -eq 1 ] && printf '%s\n' \"\$OUT\" | grep -q '^R9: Wire the report!.901'"
+# another batch does not join it
+: > "$GH_LOG"; echo '{"items":[]}' > "$SEARCH_JSON"
+OUT=$(FORGE_BATCH_ID=b2 bash "$S" --parent 12 --repo o/r --items "$T/bl2.tsv"); RC=$?
+check "backlog: a different batch files its own issue" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'FORGE:BACKLOG_BATCH: b2' '$T/created.902.body'"
 
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
