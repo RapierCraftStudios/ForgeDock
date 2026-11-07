@@ -1053,7 +1053,11 @@ builder turns, cache tokens and cost per lane type and mode; the default moves t
 
 Subject history (#5085): **attempts** also carries `subject` rows after the
 issue's own runs. `subjectTerms` takes codes (dotted/underscored, UPPER_SNAKE,
-HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words.
+HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words
+(3-letter acronyms like TLS count). #5110: codes and words made only of generic
+status/label tokens (`blocked.generic`, `broad-base`) are dropped and never
+searched, so they cannot displace the subject words; words run as overlapping
+pairs and always join the git grep.
 `subjectHistory` (shared with `scripts/prior-attempts.mjs`, the `/issue`
 `## Prior Attempts` table) runs at most `MAX_SUBJECT_QUERIES`=3 closed
 `search/issues` queries plus one repo-wide `git log --grep` (no pathspec), drops
