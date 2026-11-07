@@ -2706,3 +2706,5 @@ its held subtree to pending in dependency order. The report prints one
 - schedd `status` adds `host` (the `hostLoad` probe snapshot, null when it throws); `forgedock schedd status` prints `schedd: host_overloaded (...)` or `schedd: host load X.X/core (threshold T)`; `forgedock status` has a `host` row (`unknown` on any failure).
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
+
+`release.mjs` (#5208): `forgedock release`, the resumable staging→default release job (state `~/.forge/releases/<id>/`, steps preflight → release-pr → review → fixes → promotion → post-merge, promotion opt-in via `--merge` / `release.auto_merge`); `release-review.mjs` and `release-postmerge.mjs` are blocked stubs until #5212 / #5213. ADR `devdocs/decisions/5208-release-job.md`.
