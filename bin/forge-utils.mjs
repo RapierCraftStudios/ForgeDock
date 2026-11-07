@@ -43,9 +43,11 @@
  * YAML features. Intended only for the flat key-value structure of forge.yaml.
  *
  * @param {string} raw - Raw string content of a forge.yaml file.
+ * @param {{dottedSections?: string[]}} [opts] - forge#5206: sections whose nested keys may also contain `.` and `-`
+ *   after the first character (e.g. `experiment:` arm overrides `on.lean.explore: on`); other sections are unchanged.
  * @returns {Record<string, string | Record<string, string>>}
  */
-export function parseForgeYaml(raw) {
+export function parseForgeYaml(raw, { dottedSections = [] } = {}) {
   const result = {};
   let currentSection = null;
 
@@ -78,7 +80,9 @@ export function parseForgeYaml(raw) {
     // Nested scalar under current section: `  key: value`
     if (currentSection && /^\s+/.test(line)) {
       const nestedMatch = line.match(
-        /^\s+([a-zA-Z_][a-zA-Z0-9_]*):\s+"([^"]*)"(?:\s*#.*)?$|^\s+([a-zA-Z_][a-zA-Z0-9_]*):\s+([^#\n]+?)(?:\s*#.*)?$/,
+        dottedSections.includes(currentSection)
+          ? /^\s+([a-zA-Z_][a-zA-Z0-9_.-]*):\s+"([^"]*)"(?:\s*#.*)?$|^\s+([a-zA-Z_][a-zA-Z0-9_.-]*):\s+([^#\n]+?)(?:\s*#.*)?$/
+          : /^\s+([a-zA-Z_][a-zA-Z0-9_]*):\s+"([^"]*)"(?:\s*#.*)?$|^\s+([a-zA-Z_][a-zA-Z0-9_]*):\s+([^#\n]+?)(?:\s*#.*)?$/,
       );
       if (nestedMatch) {
         const key = nestedMatch[1] ?? nestedMatch[3];

@@ -816,6 +816,29 @@ A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up it
 
 `pass` is `exit 0` (default) or a `/regex/flags` over the output; `timeout` is seconds. When the gate reports the follow-up ready, the check runs with no model call: pass closes the follow-up with a `FORGE:PROBE` record, fail reopens the parent with the output. An item with no check id, or an id the default branch does not define, gets the `awaiting-measurement` label and never a lane. A contract's check id must be on the default branch or added by the same PR.
 
+### Experiment arm overrides (#5206)
+
+An `experiment:` arm can carry config overrides that apply only to the lanes hashed to that arm, so one batch, one checkout and the normal issue flow run both arms. A key is `<arm>.<key>: <value>`, where `<arm>` is a declared arm:
+
+```yaml
+experiment:
+  id: explore-ab
+  arms: on,off
+  on.lean.explore: on
+  off.lean.explore: off
+  min_n: 20
+```
+
+| Override key | Values | Overrides |
+|---|---|---|
+| `lean.explore` | `on`, `off` | `lean.explore` |
+| `lean.explore_model` | a model id | `lean.explore_model` |
+| `lean.light_mode` | `off`, `shadow`, `on` | `lean.light_mode` |
+| `context_pack` | `shadow`, `on`, `off` (not `ab`) | `engine.context_pack` |
+| `review.verifier` | `off`, `shadow`, `enforce` | `review.verifier` |
+
+Any other dotted key, a key for an undeclared arm, or an invalid value makes the whole `experiment:` declaration invalid. The experiment is then ignored, with the reason printed to stderr, and no override is ever partly applied. The lane applies its arm's overrides before it reads any of these settings. `RUN_TERMINAL` (and `phase_attempt` telemetry) records `arm_overrides`: the applied overrides as a sorted `key=value` list, or `none`. `forgedock stats --experiment <id>` adds an `applied` column per arm: the runs whose recorded overrides match the arm's. A count below `n` means the toggle did not apply on some runs.
+
 Closing an experiment follow-up (#4634): add a check that runs `forgedock stats --experiment <id> --require-met` (exit 0 only when every target of the forge.yaml `experiment:` is met; n/a below min n is not met), and put `[check:<check id>]` in the follow-up item:
 
 ```json

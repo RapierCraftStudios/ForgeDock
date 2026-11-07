@@ -37,6 +37,8 @@ const prOf = (rec) => (Number.isSafeInteger(rec.pr) && rec.pr > 0 ? { pr: rec.pr
 /** "a:b,c:d" from [{from,to}] (forge#4165); undefined for a non-array so compact() drops it. An empty list is "". */
 const pairs = (v) => (Array.isArray(v) ? v.map((e) => `${e?.from}:${e?.to}`).join(",") : undefined);
 const nonEmpty = (v) => (v === "" ? "none" : v);
+/** forge#5206: an experiment arm's applied overrides (`k=v,...`); "" (none applied) is "none" so compact() keeps it. */
+const armOv = (v) => (typeof v === "string" ? nonEmpty(v) : undefined);
 /** Lean's forge#4165 extras of a STRUCTURE_DELTA record; {} for the implement-time counts-only shape. */
 function structureLists(rec) {
   if (!Array.isArray(rec.decisions) && !Array.isArray(rec.new_edges) && !Array.isArray(rec.deps_added)) return {};
@@ -61,7 +63,7 @@ export function mapRecord(rec, wallMs) {
       cost_usd_session: Number.isFinite(rec.cost_usd_session) ? Math.round(rec.cost_usd_session * 1e6) / 1e6 : undefined,
       input_tokens: tok(rec.usage, "input_tokens"), output_tokens: tok(rec.usage, "output_tokens"),
       cache_read_tokens: tok(rec.usage, "cache_read_input_tokens"), cache_creation_tokens: tok(rec.usage, "cache_creation_input_tokens"),
-      baseline_tokens: rec.baseline_tokens, lane_profile: rec.lane_profile, experiment: rec.experiment, arm: rec.arm, // #4629
+      baseline_tokens: rec.baseline_tokens, lane_profile: rec.lane_profile, experiment: rec.experiment, arm: rec.arm, arm_overrides: armOv(rec.arm_overrides), // #4629, #5206
     }) };
   }
   if (rec.event === "RUN_TERMINAL") {
@@ -69,7 +71,7 @@ export function mapRecord(rec, wallMs) {
       milestone: rec.milestone, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would,
       builder_tier: rec.builder_tier, builder_class: rec.builder_class, builder_model: rec.builder_model, // #4394: the model per merge
       builder_escalated: typeof rec.builder_escalated === "boolean" ? Number(rec.builder_escalated) : undefined,
-      experiment: rec.experiment, arm: rec.arm }) }; // #4629
+      experiment: rec.experiment, arm: rec.arm, arm_overrides: armOv(rec.arm_overrides) }) }; // #4629, #5206
   }
   if (rec.event === "SANDBOX_USAGE") {
     return { event: "sandbox_usage", phase: null, payload: compact({ provider: rec.provider, sandbox_id: rec.sandbox_id, minutes: rec.minutes,
