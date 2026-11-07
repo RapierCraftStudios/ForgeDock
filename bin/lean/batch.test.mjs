@@ -1616,6 +1616,16 @@ describe("#5168: --requeue accepts engine-error; a claude login failure is held,
     assert.equal(rows.find((x) => x.issue === 1).requeued.prior[0].outcome, "engine-error");
   });
 
+  it("#5203 --requeue accepts a quota-paused pending issue; other pending issues stay refused not terminal", () => {
+    const b = openBatch(tmpDir("batch-requeue-5203-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2, 3], pending: [1, 2], results: { 3: { outcome: "merged" } }, notBefore: { 1: 9e12, 2: 9e12 }, quota: { 1: { cost_usd: 0, minutes: 1, resumeAt: 9e12, rotations: 0 } } });
+    const r = b.requeue([1, 2, 3], { reason: "accounts usable", by: "operator" });
+    assert.deepEqual(r.requeued, [1]);
+    assert.deepEqual(r.refused, [{ issue: 2, reason: "not terminal" }, { issue: 3, reason: "not terminal" }]);
+    assert.deepEqual(b.readRequeued().map((e) => e.issue), [1]);
+  });
+
   it("#5168 deferPolicy holds backend.auth like a usage limit: never capped, never counted", () => {
     assert.deepEqual(deferPolicy({ code: "backend.auth", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900_000, hold: true });
     assert.equal(deferPolicy({ code: "backend.auth" }, { now: 0 }).hold, true);
