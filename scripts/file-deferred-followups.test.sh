@@ -366,6 +366,20 @@ reset
 printf -- '-\t[bucket:host] host: run the obs-psql report\t\t\tR6: report rows\n-\tdefer: wire it\t\t\tR7: wire the report\n' > "$T/join.tsv"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/join.tsv"); RC=$?
 check "routing: host items join the engineering follow-up of the same run" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep -q 'report rows' '$T/created.901.body' && grep -q 'wire the report' '$T/created.901.body' && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:engineering' && grep '^issue create' '$GH_LOG' | grep -q -- '--label host-task' && ! grep '^issue create' '$GH_LOG' | grep -q needs-human"
+# #5186: host + post-promotion text joins the rollup; the same text from two parents is listed once; pre-promotion stays host
+reset
+printf '{"number":902,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->"}\n' > "$T/issue.902.json"
+echo '{"items":[{"number":902}]}' > "$SEARCH_JSON"; printf '<!-- FORGE:POSTDEPLOY_ROLLUP: default -->\n' > "$ISSUE_BODY"
+printf -- '-\thost: [bucket:host] billed margin from billing rows in production after promotion\t\t\tR1: billed margin check\n' > "$T/hp.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/hp.tsv"); RC=$?
+check "routing: host post-promotion item appends to the rollup, no issue create" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 902' '$GH_LOG' && grep -q 'billed margin check' '$ISSUE_BODY.edited' && printf '%s' \"\$OUT\" | grep -q 'classes=post-deploy '"
+cp "$ISSUE_BODY.edited" "$ISSUE_BODY"; : > "$GH_LOG"
+OUT=$(bash "$S" --parent 11 --repo o/r --items "$T/hp.tsv"); RC=$?
+check "routing: the same host item from a second parent is listed once" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && [ \$(grep -c 'billed margin check' '$ISSUE_BODY') -eq 1 ] && { [ ! -f '$ISSUE_BODY.edited' ] || [ \$(grep -c 'billed margin check' '$ISSUE_BODY.edited') -eq 1 ]; }"
+reset
+printf -- '-\thost: [bucket:host] capture the page in a browser on the host before promotion\t\t\tR2: browser capture\n' > "$T/hb.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/hb.tsv"); RC=$?
+check "routing: pre-promotion host item still files follow-up (host)" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 1 ] && grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:host'"
 # N external deferrals in one batch -> ONE aggregated issue carrying needs-human
 reset
 export FORGE_BATCH_ID=b42

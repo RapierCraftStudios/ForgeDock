@@ -359,6 +359,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `conformance-calibrate.mjs --events <run-log>` (#4929) reports the survived-mutation
    share (from `REQUIREMENT_MUTATION_SURVIVED` events) and the false-survived rate
    (labelled `conformance.mutation_survived` cases) for promotion.
+   Host routing (#5186): a `[bucket:host]` item whose text is post-promotion (`POSTPROM_ERE`) and has no external need
+   or `before|pre-promotion` guard goes to the `post-deploy` rollup (deduped on normalized text across parents), not
+   `follow-up (host)` (`host_route` in `file-deferred-followups.sh`, mirrored by `hostRoute` in `conformance.mjs`).
+   Bare `billing` is no longer an external need (reading billing rows is read-only; writes still match).
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
@@ -1049,7 +1053,11 @@ builder turns, cache tokens and cost per lane type and mode; the default moves t
 
 Subject history (#5085): **attempts** also carries `subject` rows after the
 issue's own runs. `subjectTerms` takes codes (dotted/underscored, UPPER_SNAKE,
-HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words.
+HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words
+(3-letter acronyms like TLS count). #5110: codes and words made only of generic
+status/label tokens (`blocked.generic`, `broad-base`) are dropped and never
+searched, so they cannot displace the subject words; words run as overlapping
+pairs and always join the git grep.
 `subjectHistory` (shared with `scripts/prior-attempts.mjs`, the `/issue`
 `## Prior Attempts` table) runs at most `MAX_SUBJECT_QUERIES`=3 closed
 `search/issues` queries plus one repo-wide `git log --grep` (no pathspec), drops
@@ -2641,6 +2649,7 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-06 — e2e-weakening check: negated verbs keep reaching e2e (#5157)
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): #5145 stopped every bare negator at a preposition, so "do not need to run e2e; mocked tests cover it", "not with e2e" and "not for e2e" slipped through. Now only the determiner `no` + noun phrase stops at a preposition (`no new fixtures needed for e2e` stays unflagged); `not`/`without`/`never` and `no need/reason/point/requirement` keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5157".
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`, #5184): the wide `not`/`without`/`never` gap flagged "will not forget to add the e2e test". Negated omission verbs (forget/fail/omit/neglect, with an optional "going/planning/intending/about/trying to" lead-in, `won't` included) are now blanked by `NEG_OMIT_RE` before matching, like `NEG_DROP_RE` (which accepts the same lead-in), so the double negative keeps e2e. The #5157/#5145 cases ("do not need to run e2e; mocked route tests cover it") stay flagged. Test: `conformance.test.mjs` "#5184".
 
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 

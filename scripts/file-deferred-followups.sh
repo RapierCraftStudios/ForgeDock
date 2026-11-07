@@ -70,12 +70,19 @@ CLASSES="engineering post-deploy external ops verify-now host backlog"
 # bin/lean/conformance.mjs ownerRoute; word boundaries spelled (^|[^[:alnum:]_]) / ([^[:alnum:]_]|$), no \b, for BSD grep (bash 3.2 hosts).
 POSTPROM_ERE='(after|post)[- ]?(promotion|release|deploy)|in production after|production[- ]verif|promot(e|ion)|rollout|purge|deploy[- ]time'
 ROPROD_ERE='ssh[[:space:]]+[[:alnum:]_.-]*-monitor([^[:alnum:]_]|$)|(^|[^[:alnum:]_])obs-psql([^[:alnum:]_]|$)|(^|[^[:alnum:]_])prod(uction)?[ _-]monitor([^[:alnum:]_]|$)|(^|[^[:alnum:]_])read[- ]only[^[:alnum:]_.]([^.]{0,38}[^[:alnum:]_.])?prod(uction)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])prod(uction)?[^[:alnum:]_.]([^.]{0,28}[^[:alnum:]_.])?(query|queries|capture|telemetry|logs?)([^[:alnum:]_]|$)'
-EXTNEED_ERE='credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?([^[:alnum:]_]|$)|private[- ]key|(^|[^[:alnum:]_])login([^[:alnum:]_]|$)|(^|[^[:alnum:]_])sudo([^[:alnum:]_]|$)|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|(^|[^[:alnum:]_])(delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)([^[:alnum:]_]|$)'
+EXTNEED_ERE='credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?([^[:alnum:]_]|$)|private[- ]key|(^|[^[:alnum:]_])login([^[:alnum:]_]|$)|(^|[^[:alnum:]_])sudo([^[:alnum:]_]|$)|spend|budget|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|(^|[^[:alnum:]_])(delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)([^[:alnum:]_]|$)'
 owner_route() { # why -> post-deploy | host | external
   case "$1" in "owner: orchestrator"*|"owner: promote"*) echo "post-deploy"; return 0 ;; esac
   if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "post-deploy"
   elif printf '%s' "$1" | grep -qiE "$ROPROD_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "host"
   else echo "external"; fi
+}
+# #5186: an explicit host item is post-promotion (the release rollup) when its text says so and needs nothing external; work
+# needed before promotion ("before promotion", "pre-release") stays a host task. Mirrors bin/lean/conformance.mjs hostRoute.
+PREPROM_ERE='(before|pre)[- ]?(promotion|release|deploy)'
+host_route() { # why -> post-deploy | host
+  if printf '%s' "$1" | grep -qiE "$POSTPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$PREPROM_ERE" && ! printf '%s' "$1" | grep -qiE "$EXTNEED_ERE"; then echo "post-deploy"
+  else echo "host"; fi
 }
 : > "$TMP/items"
 BAD=0; ROW=0
@@ -111,7 +118,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup, verify-now needs no release.
   case "$w" in
     *"[bucket:owner]"*) [ "$c" = "ops" ] || c=$(owner_route "$w") ;;
-    *"[bucket:host]"*) c="host" ;;
+    *"[bucket:host]"*) c=$(host_route "$w") ;;
     *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering"; [ "$c" = "engineering" ] && c="backlog" ;; # #5188: one per-batch issue
     *"[bucket:verify-now]"*) [ "$c" = "post-deploy" ] && c="verify-now" ;;
   esac

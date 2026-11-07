@@ -1048,6 +1048,13 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(followupClass(d("owner:ops", "needs a customer account to read production data")), "external");
     assert.equal(followupClass({ ...d("owner:obs-psql", "read prod data"), class: "ops" }), "ops");
     assert.equal(followupClass(d("host")), "host");
+    // #5186: host + post-promotion text -> rollup; pre-promotion or external need stays host
+    assert.equal(followupClass(d("host", "≥95% success over 7 days by the canary after promotion")), "post-deploy");
+    assert.equal(followupClass(d("host", "billed margin from billing rows in production after promotion")), "post-deploy");
+    assert.equal(followupClass(d("owner:ops", "read billing rows after promotion")), "post-deploy");
+    assert.equal(followupClass(d("host", "capture the page in a browser on the host before promotion")), "host");
+    assert.equal(followupClass(d("host", "capture the page in a browser on the host")), "host");
+    assert.equal(followupClass(d("host", "update the rows after promotion")), "host");
     assert.deepEqual(bucketProblems(d("host")), []);
     assert.match(bucketProblems({ disposition: "post-deploy", check: "a", bucket: "host" }).join(";"), /never post-deploy/);
     assert.match(bucketProblems(d("owner:obs-psql", "capture production query counts")).join(";"), /use bucket host/);
@@ -1405,6 +1412,12 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
       assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), ["K1"], choice);
     }
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)", source: "doc" }] }), []);
+  });
+  it("#5184 a negated omission verb keeps e2e and is not flagged", () => {
+    for (const choice of ["Mocked the gateway with stubs; will not forget to add the e2e test", "Mocked the gateway with stubs; not going to forget to add the e2e test", "Mocked the gateway with stubs; never intending to skip the e2e test", "Stubs for the API; will not fail to run e2e", "Mocks used; never omit the e2e test"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
+    }
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "We do not need to run e2e; mocked route tests cover it", source: "doc" }] }), ["K1"]);
   });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);

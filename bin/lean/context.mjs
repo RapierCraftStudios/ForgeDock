@@ -119,6 +119,9 @@ const namesSymbol = (text, symbols) => symbols.some((s) => new RegExp(`(?:^|[^\\
 
 const STOPWORDS = new Set(("about after again also always another because before being between both cannot could does doing during each every from have having into issue issues just make makes more most must never only other over same should some such than that their them then there these they this those through under until very what when where which while will with within without would your " +
   "fix fixes fixed bug bugs feat chore docs test tests file files when wrong error errors fail fails failed failing add adds remove update use uses").split(" "));
+/** #5110: status/label-like tokens that match a large share of any repo's history; a code or word made only of them is not a subject. */
+const GENERIC_TERMS = new Set("blocked generic broad base status state failure failures result results page pages response default common general detection handling".split(" "));
+const isGeneric = (t) => String(t).toLowerCase().split(/[._-]+/).filter(Boolean).every((x) => GENERIC_TERMS.has(x) || STOPWORDS.has(x));
 const FILE_EXT = /\.(?:m?[jt]sx?|cjs|md|sh|json|ya?ml|py|go|rs|rb|css|html|txt|toml|lock|sql)$/i;
 /** #5085: subject terms split by kind: codes and symbols (exact, quoted searches) and distinctive title words. */
 function subjectParts({ title = "", body = "" } = {}) {
@@ -131,8 +134,9 @@ function subjectParts({ title = "", body = "" } = {}) {
   for (const s of issueSymbols(body)) if (!codes.some((c) => c.toLowerCase().endsWith(`.${s.toLowerCase()}`))) add(s);
   const head = stripComments(title).replace(/^\s*\w+(?:\([^)]*\))?!?:\s*/, "");
   const words = [];
-  for (const w of head.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []) if (!STOPWORDS.has(w) && !words.includes(w) && !codes.some((c) => c.toLowerCase() === w)) words.push(w);
-  return { codes: codes.slice(0, 3), words: words.slice(0, 3) };
+  const tokens = [...(head.match(/\b[A-Z][A-Z0-9]{2}\b/g) ?? []), ...(head.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? [])];
+  for (const raw of tokens) { const w = raw.toLowerCase(); if (!isGeneric(w) && !words.includes(w) && !codes.some((c) => c.toLowerCase() === w)) words.push(w); }
+  return { codes: codes.filter((c) => !isGeneric(c)).slice(0, 3), words: words.slice(0, 3) };
 }
 /** #5085: the issue's subject terms, codes and symbols first, then title words; deterministic, deduped, at most 6. */
 export function subjectTerms({ title = "", body = "" } = {}) {
@@ -228,7 +232,7 @@ async function readComments(gh, repo, n) {
 
 /**
  * #5085: closed issues and merged PRs on the same subject, found by term rather than by issue number or file: up to
- * MAX_SUBJECT_QUERIES GitHub searches (each code/symbol quoted, then the title words together) and one `git log --grep`
+ * MAX_SUBJECT_QUERIES GitHub searches (each non-generic code/symbol quoted, then the title words, #5110: generic codes are never searched) and one `git log --grep`
  * over the whole history of `base`. `exclude` (self, linked issues) is dropped; rows are ranked by the number of
  * matched terms, then newest first, and capped. A failed query lands in `errors`; the rest still count.
  * @returns {Promise<{terms:string[], rows:{number:number, kind:string, status:string, title:string, matched:string[]}[], errors:string[]}>}
@@ -245,7 +249,9 @@ export async function subjectHistory({ io, repo, issue = null, title = "", body 
     hits.set(n, row);
   };
   if (!terms.length) return { terms, rows: [], errors };
-  const queries = [...codes.slice(0, words.length ? MAX_SUBJECT_QUERIES - 1 : MAX_SUBJECT_QUERIES).map((c) => [c]), ...(words.length ? [words] : [])].slice(0, MAX_SUBJECT_QUERIES);
+  // #5110: words are searched whatever the codes are; three words run as overlapping pairs so an earlier attempt that names only two of them still matches (full matches rank first)
+  const groups = words.length > 2 ? [words.slice(0, 2), words.slice(1)] : words.length ? [words] : [];
+  const queries = [...codes.slice(0, MAX_SUBJECT_QUERIES - groups.length).map((c) => [c]), ...groups].slice(0, MAX_SUBJECT_QUERIES);
   for (const q of queries) {
     const text = q.length === 1 && codes.includes(q[0]) ? `"${q[0]}"` : q.join(" ");
     try {
@@ -258,19 +264,23 @@ export async function subjectHistory({ io, repo, issue = null, title = "", body 
     } catch (e) { errors.push(`attempts: subject search ${oneLine(e?.message ?? e, 80)}`); }
   }
   if (base && io.git) {
-    try {
-      const greps = codes.length ? ["-E", `--grep=${codes.map(reEscape).join("|")}`] : ["--all-match", ...words.map((w) => `--grep=${reEscape(w)}`)];
-      const out = String(await io.git(["log", "-i", ...greps, "-n", "20", "--format=%x1e%H%x1f%s%x1f%b", base]));
-      for (const rec of out.split("\x1e").filter((x) => x.trim())) {
-        const [, subject = "", msg = ""] = rec.split("\x1f");
-        const pr = Number(/Merge pull request #(\d+)/.exec(subject)?.[1] ?? /\(#(\d+)\)\s*$/.exec(subject.trim())?.[1]) || null;
-        const hay = `${subject}\n${msg}`.toLowerCase();
-        const matched = (codes.length ? codes : words).filter((t) => hay.includes(t.toLowerCase()));
-        if (!pr || !matched.length || (!codes.length && matched.length < words.length)) continue;
-        const named = /^Merge pull request/.test(subject) ? msg.split("\n").map((l) => l.trim()).find(Boolean) ?? subject : subject;
-        hit(pr, { src: "git", kind: "PR", status: "merged", title: oneLine(named, 120) }, matched);
-      }
-    } catch (e) { errors.push(`attempts: subject git log ${oneLine(e?.message ?? e, 80)}`); }
+    // one repo-wide log per kind: codes (any), words (all of a group)
+    const runs = [...(codes.length ? [{ greps: ["-E", `--grep=${codes.map(reEscape).join("|")}`], groups: codes.map((c) => [c]) }] : []),
+      ...(words.length ? [{ greps: ["--all-match", ...words.map((w) => `--grep=${reEscape(w)}`)], groups: [words] }] : [])];
+    for (const run of runs) {
+      try {
+        const out = String(await io.git(["log", "-i", ...run.greps, "-n", "20", "--format=%x1e%H%x1f%s%x1f%b", base]));
+        for (const rec of out.split("\x1e").filter((x) => x.trim())) {
+          const [, subject = "", msg = ""] = rec.split("\x1f");
+          const pr = Number(/Merge pull request #(\d+)/.exec(subject)?.[1] ?? /\(#(\d+)\)\s*$/.exec(subject.trim())?.[1]) || null;
+          const hay = `${subject}\n${msg}`.toLowerCase();
+          const matched = run.groups.filter((g) => g.every((t) => hay.includes(t.toLowerCase()))).flat();
+          if (!pr || !matched.length) continue;
+          const named = /^Merge pull request/.test(subject) ? msg.split("\n").map((l) => l.trim()).find(Boolean) ?? subject : subject;
+          hit(pr, { src: "git", kind: "PR", status: "merged", title: oneLine(named, 120) }, matched);
+        }
+      } catch (e) { errors.push(`attempts: subject git log ${oneLine(e?.message ?? e, 80)}`); }
+    }
   }
   const rows = [...hits.values()].sort((a, b) => b.matched.length - a.matched.length || b.number - a.number)
     .slice(0, max);
