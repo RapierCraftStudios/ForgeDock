@@ -15,6 +15,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// #5174: the live host-overload hold (hostload.mjs liveOverload) is off in test processes and the daemons they spawn,
+// so a busy shared host cannot hold a test batch's admissions; hostload.test.mjs injects its thresholds explicitly.
+process.env.FORGEDOCK_OVERLOAD_LOAD_PER_CORE ??= "0";
+
 const dirs = new Set();
 let hooked = false;
 

@@ -818,6 +818,27 @@ describe("schedd under load and restart (#4775)", () => {
     } finally { await d.close(); }
   });
 
+  it("#5174: status carries the host load snapshot (null when the probe throws) and `schedd status` prints host_overloaded", async () => {
+    const root = tmpDir("schedd-host-b-"), dir = tmpDir("schedd-host-");
+    const snap = { overloaded: true, load1: 18, cores: 4, perCore: 4.5, threshold: 2 };
+    let probe = () => snap;
+    const d = await startDaemon({ dir, root, runBatch: async () => ({}), resumeOnStart: false, log: () => {}, hostLoad: () => probe() });
+    try {
+      const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.deepEqual(st.host, snap);
+      assert.ok("pid" in st && "lastTick" in st && Array.isArray(st.batches) && Array.isArray(st.unhosted), "existing fields unchanged");
+      const lines = []; const l = console.log; console.log = (x) => lines.push(String(x));
+      try { await scheddFromCli(["status"], { scheddDir: dir }); } finally { console.log = l; }
+      assert.ok(lines.includes("schedd: host_overloaded (load 4.5/core > 2): new local admissions held"), lines.join("\n"));
+      probe = () => ({ ...snap, overloaded: false, load1: 2, perCore: 0.5 });
+      lines.length = 0; console.log = (x) => lines.push(String(x));
+      try { await scheddFromCli(["status"], { scheddDir: dir }); } finally { console.log = l; }
+      assert.ok(lines.includes("schedd: host load 0.5/core (threshold 2)"), lines.join("\n"));
+      probe = () => { throw new Error("no /proc"); };
+      assert.equal((await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" })).host, null);
+    } finally { await d.close(); }
+  });
+
   it("a batch whose start stalls does not block another batch's request, and the stalled request answers an error", async () => {
     const root = tmpDir("schedd-stall-b-"), dir = tmpDir("schedd-stall-");
     for (const id of ["b-hung", "b-ok"]) { mkdirSync(join(root, id), { recursive: true }); writeFileSync(join(root, id, "plan.json"), JSON.stringify({ daemon: true })); writeFileSync(join(root, id, "state.json"), JSON.stringify({ order: [1] })); }

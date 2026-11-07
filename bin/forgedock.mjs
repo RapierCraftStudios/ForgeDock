@@ -990,6 +990,15 @@ async function batchHealthSection(c, batchId) {
 }
 
 /** Compact status screen for configured/managed directories. */
+/** #5174: the status `host` row: the host_overloaded line, else `load X.X/core ...`; null (rendered `unknown`) on any failure. */
+async function hostLoadRow(cwd) {
+  try {
+    const [{ readAdmission }, { liveOverload, formatOverload, formatHostLoad }] = await Promise.all([import("./engine-cli.mjs"), import("./lean/hostload.mjs")]);
+    const snap = liveOverload(readAdmission(cwd))();
+    return formatOverload(snap) ?? formatHostLoad(snap);
+  } catch { return null; }
+}
+
 async function statusScreen(c) {
   const state = resolveState(c.cwd);
   const mark = renderMark("compact", c.mode);
@@ -1016,6 +1025,7 @@ async function statusScreen(c) {
     c.stdout.write(
       `  engine       ${data.engine === null ? dim("unknown") : (data.engine.total === 0 ? "none in-flight" : `${data.engine.inFlight} in-flight, ${data.engine.stalled} stalled`)}\n`,
     );
+    c.stdout.write(`  host         ${await hostLoadRow(c.cwd) ?? dim("unknown")}\n`); // #5174
     c.stdout.write(`  bot token    ${dim("not available — see docs/CONFIG.md (GitHub App Install)")}\n`);
     c.stdout.write(
       `  last run     ${data.lastRun === null ? dim("none") : `#${data.lastRun.issue} — ${data.lastRun.terminal ? (data.lastRun.terminalReason || "done") : "in progress"}`}\n`,

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
 import { localLaneCap } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
+import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -363,7 +364,9 @@ export function readAdmission(cwd = process.cwd()) {
     return { ...(en === "false" ? { enabled: false } : {}),
       min_free_mem_mb: num(e.min_free_mem_mb ?? e.admission_min_free_mem_mb), min_free_tmp_mb: num(e.min_free_tmp_mb ?? e.admission_min_free_tmp_mb),
       max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core),
-      lane_cpu_reservation: pos(e.lane_cpu_reservation ?? e.admission_lane_cpu_reservation), lane_mem_mb: pos(e.lane_mem_mb ?? e.admission_lane_mem_mb) };
+      lane_cpu_reservation: pos(e.lane_cpu_reservation ?? e.admission_lane_cpu_reservation), lane_mem_mb: pos(e.lane_mem_mb ?? e.admission_lane_mem_mb),
+      overload_load_per_core: num(e.overload_load_per_core ?? e.admission_overload_load_per_core) }; // #5174: hostload.mjs overload hold
+
   } catch { return {}; }
 }
 /**
@@ -1858,6 +1861,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
   const schedMod = await import("./lean/sched.mjs");
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
+  const overload = deps.overload !== undefined ? deps.overload : registry ? liveOverload(readAdmission(cwd)) : null; // #5174
   const labelNames = async (n) => {
     if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
     return labelsOf.get(n);
@@ -1982,6 +1986,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
+      ...(overload ? { overload } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
@@ -2249,6 +2255,7 @@ export async function scheddFromCli(argv, deps = {}) {
       const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
       console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
     }
+    if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }
