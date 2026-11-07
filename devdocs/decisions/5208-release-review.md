@@ -20,6 +20,6 @@
   `## Non-blocking notes` (edit, never replace), then `--summary --filed`.
 - **Fix lanes.** `fixStep` does nothing on GATE_PASS. Otherwise it runs a `run-issue` lane on the staging branch for each
   blocking filed issue (CRITICAL/HIGH), requires `terminalReason: merged`, then reviews the delta from the last reviewed head;
-  `MAX_FIX_ROUNDS` (2) bounds it. CI red with no finding to fix blocks for the manual path.
+  `MAX_FIX_ROUNDS` (2) bounds it. Red CI has no finding, so one issue naming the failing required checks is filed and gets a lane too.
 - **R1 is measured out of band.** No lane has a live repo and model sessions; the wiring is unit-tested with the seam, and the
   first real `forgedock release` is the live check.
