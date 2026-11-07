@@ -186,21 +186,21 @@ describe("release post-merge step (#5213)", () => {
     return postMergeStep(ctx).then((out) => ({ out, io, st: w.st }));
   };
 
-  it("R4: a publish run for the merge commit is confirmed; nothing is dispatched", async () => {
+  it("R1: a publish run for the merge commit is confirmed; nothing is dispatched", async () => {
     const { out, st } = await run();
     assert.equal(out.published, true);
     assert.equal(out.run, 5);
     assert.equal(st.dispatched, 0);
   });
 
-  it("R4: no run appears -> one is dispatched on the default branch, then awaited", async () => {
+  it("R2: no run appears -> one is dispatched on the default branch, then awaited", async () => {
     const { out, st } = await run({ runs: [[], [], [{ databaseId: 8, status: "completed", conclusion: "success" }]] });
     assert.equal(out.published, true);
     assert.equal(out.dispatched, true);
     assert.equal(st.dispatched, 1);
   });
 
-  it("R4: a custom release.publish_workflow is used", async () => {
+  it("R2: a custom release.publish_workflow is used", async () => {
     const { out } = await run({ wf: "pub.yml" }, { publishWorkflow: "pub.yml" });
     assert.equal(out.published, true);
   });
@@ -220,7 +220,7 @@ describe("release post-merge step (#5213)", () => {
     assert.equal(st.runCalls, 0);
   });
 
-  it("artifact_check is polled with exponential backoff until it passes; exhausting it blocks", async () => {
+  it("R3: artifact_check is polled with exponential backoff until it passes; exhausting it blocks", async () => {
     const a = await run({ artifactOkAt: 3 }, { artifactCheck: "npm view x@1" });
     assert.equal(a.out.artifact, true);
     assert.deepEqual(a.io.ran, ["npm view x@1", "npm view x@1", "npm view x@1"]);
@@ -253,7 +253,7 @@ describe("release post-merge step (#5213)", () => {
     assert.equal(nb.out.blocked, true);
   });
 
-  it("R5: through the job, a blocked post-merge is retried on resume and finishes once the run exists", async () => {
+  it("R1: through the job, a blocked post-merge is retried on resume and finishes once the run exists", async () => {
     const mod = await import("./release.mjs");
     const root = tmp(), id = newReleaseId();
     const world = (runs) => pmWorld({ runs });
