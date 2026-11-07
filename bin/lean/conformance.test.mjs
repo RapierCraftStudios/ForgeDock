@@ -1047,6 +1047,13 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(followupClass(d("owner:ops", "needs a customer account to read production data")), "external");
     assert.equal(followupClass({ ...d("owner:obs-psql", "read prod data"), class: "ops" }), "ops");
     assert.equal(followupClass(d("host")), "host");
+    // #5186: host + post-promotion text -> rollup; pre-promotion or external need stays host
+    assert.equal(followupClass(d("host", "≥95% success over 7 days by the canary after promotion")), "post-deploy");
+    assert.equal(followupClass(d("host", "billed margin from billing rows in production after promotion")), "post-deploy");
+    assert.equal(followupClass(d("owner:ops", "read billing rows after promotion")), "post-deploy");
+    assert.equal(followupClass(d("host", "capture the page in a browser on the host before promotion")), "host");
+    assert.equal(followupClass(d("host", "capture the page in a browser on the host")), "host");
+    assert.equal(followupClass(d("host", "update the rows after promotion")), "host");
     assert.deepEqual(bucketProblems(d("host")), []);
     assert.match(bucketProblems({ disposition: "post-deploy", check: "a", bucket: "host" }).join(";"), /never post-deploy/);
     assert.match(bucketProblems(d("owner:obs-psql", "capture production query counts")).join(";"), /use bucket host/);
