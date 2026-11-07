@@ -299,7 +299,10 @@ const MOCKED_RE = new RegExp(String.raw`\b${MOCKED_TERM}\b`, "i");
 // #5116: a negated mock ("do not mock", "no stubs") or a fake clock is not a substitute for the e2e check.
 const NEG_MOCK_RE = /\b(?:do(?:es)? not|don't|never|no|not|without)\s+(?:use\s+|any\s+)?(?:mock\w*|stub\w*|fake\w*)/gi;
 // #5130: a negated weakener ("do not skip the e2e suite", "e2e tests are not replaced") keeps the e2e check.
-const NEG_DROP_RE = /\b(?:do(?:es)? not|don't|never|not)\s+(?:be\s+|been\s+|being\s+)?(?:skip|drop|replac|swap|downgrad)\w*/gi;
+const NEG_LEAD = String.raw`(?:be\s+|been\s+|being\s+|(?:going|planning|intending|about|trying)\s+to\s+|intend\w*\s+to\s+)?`;
+const NEG_DROP_RE = new RegExp(String.raw`\b(?:do(?:es)? not|don't|won't|never|not)\s+${NEG_LEAD}(?:skip|drop|replac|swap|downgrad)\w*`, "gi");
+// A negated omission ("will not forget to add the e2e test") is a double negative: the e2e check stays.
+const NEG_OMIT_RE = new RegExp(String.raw`\b(?:do(?:es)? not|don't|won't|never|not)\s+${NEG_LEAD}(?:forget|fail|omit|neglect)\w*`, "gi");
 const FAKE_CLOCK_RE = /\bfake[- ](?:timers?|clocks?)\b/gi;
 // A weakener governs the e2e term only within a few words and the same clause (no . or ; between them).
 const GAP = String.raw`(?:[\s,]+\w+){0,5}?[\s,]+`;
@@ -323,7 +326,7 @@ export function weakenedE2eDecisions(c) {
   return decisions.filter((k) => {
     const choice = String(k?.choice ?? "");
     if (!E2E_WORD_RE.test(choice)) return false;
-    const mocked = choice.replace(NEG_MOCK_RE, " ").replace(FAKE_CLOCK_RE, " ").replace(NEG_DROP_RE, " ");
+    const mocked = choice.replace(NEG_MOCK_RE, " ").replace(FAKE_CLOCK_RE, " ").replace(NEG_DROP_RE, " ").replace(NEG_OMIT_RE, " ");
     if (!MOCKED_RE.test(mocked) || !(DROP_BEFORE_RE.test(mocked) || DROP_AFTER_RE.test(mocked) || INSTEAD_OF_RE.test(mocked))) return false;
     const own = `${choice} ${k?.justification ?? ""}`;
     return !((PROBE_RE.test(own) && !NEG_PROBE_RE.test(own)) || /forge-probe/i.test(elsewhere(k?.id)));
@@ -1262,7 +1265,7 @@ export function formatShadowSummary(rows) {
 }
 
 /** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724), external one aggregate per batch and host a `host-task` (#5078). */
-export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host"];
+export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host", "backlog"];
 /** #4724: the bucket every deferred row gets at contract time. `date:<YYYY-MM-DD>` and `owner:<action>` carry a value. */
 export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue", "host"]);
 const DATE_BUCKET_RE = /^date:(\d{4})-(\d{2})-(\d{2})$/;
@@ -1288,7 +1291,7 @@ export function bucketProblems(r) {
 const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
 export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor\b|\bread[- ]only\b[^.]{0,40}\bprod(?:uction)?\b|\bprod(?:uction)?\b[^.]{0,30}\b(?:query|queries|capture|telemetry|logs?)\b/i;
 /** An item that truly needs the outside world (or a write to production) stays external even when it also reads production. */
-export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)\b/i;
+export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)\b/i;
 /**
  * #5078: where an owner deferral goes. `owner:orchestrator`, `owner:promote:*` or post-promotion text -> post-deploy (the
  * rollup); read-only production data or capture (with no credential/spend/account/third-party/customer need) -> host; else external (credentials, spend, an account, a third party or a customer).
@@ -1301,12 +1304,18 @@ export function ownerRoute(r) {
   if (POST_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text)) return "post-deploy";
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
 }
-/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
+const PRE_PROMOTION_RE = /(?:before|pre)[- ]?(?:promotion|release|deploy)/i;
+/** #5186: an explicit host deferral that is post-promotion text (and needs nothing external) joins the release rollup; work needed before promotion stays host. Mirrored in scripts/file-deferred-followups.sh host_route. */
+function hostRoute(r) {
+  const text = `${r?.bucket ?? ""} ${r?.why ?? ""}`;
+  return POST_PROMOTION_RE.test(text) && !PRE_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "post-deploy" : "host";
+}
+/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> backlog (one issue per batch, #5188), other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
 export function followupClass(r) {
   const k = bucketKind(r?.bucket);
   if (k === "owner") return r?.class === "ops" ? "ops" : ownerRoute(r);
-  if (k === "host") return "host";
-  if (k === "new-issue") return r?.class && r.class !== "post-deploy" && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "engineering";
+  if (k === "host") return hostRoute(r);
+  if (k === "new-issue") return r?.class && !["post-deploy", "engineering"].includes(r.class) && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "backlog"; // #5188: the per-batch backlog issue
   if (k) return "post-deploy";
   return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
 }

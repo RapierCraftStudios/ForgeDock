@@ -21,7 +21,9 @@
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
  *   {op:"hold"|"release", id, issues} → {type:"ok", changed, hosted} (#4592): merges into / removes from the batch's `hold` file; a hosted
  *                                   runner admits no held issue from its next pass (running lanes are not stopped)
- *   {op:"status"}                 → {type:"status", pid, lastTick, batches:[{id, running, lastProgressAt, lastProgressAgeSec, pendingAdds}]} (#4775: also an unhosted batch with pending adds)
+ *   {op:"status"}                 → {type:"status", pid, lastTick, batches:[{id, running, lastProgressAt, lastProgressAgeSec, pendingAdds}], unhosted, host} (#4775: also an unhosted batch with pending adds;
+ *                                   #5174: host = hostload.mjs snapshot {overloaded, load1, cores, perCore, threshold} from the
+ *                                   `hostLoad` probe, null when it throws)
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
  * report, so live lanes are re-adopted through the batch runner's `adopt`. It exits after `idleMs` with no batch and no client.
@@ -44,6 +46,7 @@ import { schedDir, pidAlive } from "./sched.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { applySetExecution } from "./live-execution.mjs";
+import { liveOverload } from "./hostload.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
@@ -144,7 +147,8 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
+  hostLoad = liveOverload() } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -244,7 +248,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         if (hosted.has(id) || starting.has(id)) continue;
         try { const pending = openBatch(root, id).pendingIssues(); if (pending.length) unhosted.push({ id, pending }); } catch { /* advisory */ }
       }
-      return send({ type: "status", pid, lastTick, batches: statusBatches(), unhosted }, true);
+      let host = null; try { host = hostLoad?.() ?? null; } catch { host = null; } // #5174
+      return send({ type: "status", pid, lastTick, batches: statusBatches(), unhosted, host }, true);
     }
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);

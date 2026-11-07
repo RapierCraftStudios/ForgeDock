@@ -125,5 +125,27 @@ OUT="$(bash "$S" --base main -- web/package-lock.json app.py)"
 eq "lockfile excluded" "$(q '.files[0] | [.excluded,.growth]')" '[true,900]'
 eq "ordinary file not excluded" "$(q '.files[1].excluded')" 'false'
 
+# ---- #5163: gitignored forge.yaml: the config comes from --config / FORGE_CONFIG, not the worktree ----
+if [ "$HAVE_YQ" = 1 ]; then
+  new_repo
+  lines gen.json 10; lines app.py 10; commit base
+  git checkout -q -b feat3; lines more 300; cat more >> gen.json; cat more >> app.py; commit grow
+  HOSTCFG="$TMP/host.yaml"; printf 'maintenance:\n  generated_paths: ["gen.json"]\n  hotspot:\n    exclude_globs: ["app.py"]\n' > "$HOSTCFG"
+  OUT="$(bash "$S" --base main --config "$HOSTCFG" -- gen.json app.py)"
+  eq "--config: generated_paths" "$(q '.files[0] | [.generated,.excluded]')" '[true,true]'
+  eq "--config: exclude_globs" "$(q '.files[1].excluded')" 'true'
+  eq "--config: source" "$(q '.config_source')" "\"$HOSTCFG\""
+  OUT="$(FORGE_CONFIG="$HOSTCFG" bash "$S" -- app.py)"; eq "FORGE_CONFIG honoured" "$(q '.files[0].excluded')" 'true'
+  printf 'maintenance:\n  hotspot:\n    enabled: false\n' > forge.yaml
+  OUT="$(bash "$S" --config "$HOSTCFG" -- app.py)"; eq "--config beats ./forge.yaml" "$(q '.enabled')" 'true'
+  OUT="$(FORGE_CONFIG="$HOSTCFG" bash "$S" --config "$TMP/none.yaml" -- app.py)"; eq "--config beats env" "$(q '.config_source')" 'null'
+  rm -f forge.yaml
+fi
+new_repo; lines a.py 5; commit base
+OUT="$(bash "$S" -- a.py)"; eq "no config: config_source null" "$(q '.config_source')" 'null'
+eq "no config: key present" "$(q 'has("config_source")')" 'true'
+OUT="$(bash "$S" --config "$TMP/none.yaml" -- a.py)"; eq "bad --config: not exit 2, source null" "$(q '[has("config_source"),.config_source]')" '[true,null]'
+eq "no config: defaults" "$(q '[.enabled,.file_lines]')" '[true,2000]'
+
 echo "hotspots.test.sh: $PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]

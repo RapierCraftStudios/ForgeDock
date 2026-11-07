@@ -359,6 +359,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `conformance-calibrate.mjs --events <run-log>` (#4929) reports the survived-mutation
    share (from `REQUIREMENT_MUTATION_SURVIVED` events) and the false-survived rate
    (labelled `conformance.mutation_survived` cases) for promotion.
+   Host routing (#5186): a `[bucket:host]` item whose text is post-promotion (`POSTPROM_ERE`) and has no external need
+   or `before|pre-promotion` guard goes to the `post-deploy` rollup (deduped on normalized text across parents), not
+   `follow-up (host)` (`host_route` in `file-deferred-followups.sh`, mirrored by `hostRoute` in `conformance.mjs`).
+   Bare `billing` is no longer an external need (reading billing rows is read-only; writes still match).
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
@@ -1049,7 +1053,11 @@ builder turns, cache tokens and cost per lane type and mode; the default moves t
 
 Subject history (#5085): **attempts** also carries `subject` rows after the
 issue's own runs. `subjectTerms` takes codes (dotted/underscored, UPPER_SNAKE,
-HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words.
+HTTP 403/5xx), backticked symbols, then up to 3 distinctive title words
+(3-letter acronyms like TLS count). #5110: codes and words made only of generic
+status/label tokens (`blocked.generic`, `broad-base`) are dropped and never
+searched, so they cannot displace the subject words; words run as overlapping
+pairs and always join the git grep.
 `subjectHistory` (shared with `scripts/prior-attempts.mjs`, the `/issue`
 `## Prior Attempts` table) runs at most `MAX_SUBJECT_QUERIES`=3 closed
 `search/issues` queries plus one repo-wide `git log --grep` (no pathspec), drops
@@ -2105,6 +2113,7 @@ comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_m
 ## Entry 2026-10-27 — AlterLab engine gaps (#4685)
 - A remote lane's `credentials` block naming a missing tool/module (`missingToolBlock`, lean.mjs) ends `env.tool_missing` (recoverable), not `builder.blocked`.
 - `scripts/hotspots.sh` always excludes lockfiles (basename match at any depth) on top of `exclude_globs`.
+- `scripts/hotspots.sh` reads its config from `--config`, then `$FORGE_CONFIG`, then `./forge.yaml` (#5163); the lane passes the main checkout's `forge.yaml` because it is usually gitignored and absent from the worktree. Output `config_source: null` means defaults were used and the lane records a `hotspot_config_missing` anomaly.
 - Pool provider: a `token_env` credential that resolves empty falls back to `execution.token_file`, then the router token file (#5131: `remote` too, but only on an endpoint match); HTTP 401/403 at sandbox start defers `sandbox.auth` (300s), never needs-human.
 - Breaker: `orchestrate --clear-breaker <id>` clears it; a breaker tripped only by transport errors (`tripped.transport`) auto-closes after 5 min and is cleared on a daemon-restart resume. Submit-time env replay was already delivered by #4691.
 
@@ -2566,6 +2575,7 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
 - also accepts the lowest open trusted issue labelled `FORGE_ROLLUP_LABEL` (forge.yaml `followups.rollup_issue_label`, `readFollowupsRollupLabel`) as the rollup when no marked one is open;
 - adds host items to the parent's engineering follow-up of the same run (labelled `host-task`), else files one `followup:host` + `host-task` issue, never `needs-human`;
 - files class external into ONE aggregate per batch (`FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID|adhoc>`). It uses the same trusted lookup, lowest-number canonical and post-create re-check as the rollup, adds items under `### #<parent>` with normalized dedup, and is labelled `followup:external`, `external-prerequisite` and `needs-human`. An older per-parent external follow-up is still appended to.
+- files class backlog (`[bucket:new-issue]` items, #5188) into ONE issue per batch (`FORGE:BACKLOG_BATCH: <FORGE_BATCH_ID|adhoc>`) through the same aggregate path: trusted lookup, lowest-number canonical, post-create re-check, `### #<parent>` sections with normalized dedup, labels `followup:engineering` and `followup:backlog`, no `needs-human`. `followupClass` (conformance.mjs) maps new-issue to backlog.
 `fileFollowups` passes `batchId`/`rollupLabel` as `FORGE_BATCH_ID`/`FORGE_ROLLUP_LABEL`. `track()` records `followups: [{issue, class, count}]` on the lane result, and `formatOutcomeLists` prints one `follow-ups appended: #N (<class>: k item(s) from #a,#b)` line grouped by issue, naming the rollup. Decision: `devdocs/decisions/5078-followup-routing.md`.
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
@@ -2640,6 +2650,7 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-06 — e2e-weakening check: negated verbs keep reaching e2e (#5157)
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): #5145 stopped every bare negator at a preposition, so "do not need to run e2e; mocked tests cover it", "not with e2e" and "not for e2e" slipped through. Now only the determiner `no` + noun phrase stops at a preposition (`no new fixtures needed for e2e` stays unflagged); `not`/`without`/`never` and `no need/reason/point/requirement` keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5157".
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`, #5184): the wide `not`/`without`/`never` gap flagged "will not forget to add the e2e test". Negated omission verbs (forget/fail/omit/neglect, with an optional "going/planning/intending/about/trying to" lead-in, `won't` included) are now blanked by `NEG_OMIT_RE` before matching, like `NEG_DROP_RE` (which accepts the same lead-in), so the double negative keeps e2e. The #5157/#5145 cases ("do not need to run e2e; mocked route tests cover it") stay flagged. Test: `conformance.test.mjs` "#5184".
 
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 
@@ -2686,3 +2697,12 @@ its held subtree to pending in dependency order. The report prints one
 ## Entry 2026-11-07 — `forgedock fix-close-reasons` migration helper (#5177)
 
 `fixclosereasons.mjs` `runFixCloseReasonsCli` (wrapper `engine-cli.mjs` `fixCloseReasonsFromCli`, command `fix-close-reasons <owner/repo> [--milestone <m>] [--apply]`): lists closed issues labelled `workflow:merged` / `workflow:decomposed` (`findMisclosed`) and keeps those whose close reason is `NOT_PLANNED`, never one also labelled `workflow:invalid`. With `--apply` each gets one `gh api -X PATCH ... state=closed state_reason=completed` (no reopen window) plus a comment saying the scope was delivered or moved to sub-issues; without it only the would-change list is printed. Idempotent (a `completed` issue is not selected); a failed write is counted and the exit code is 1. The lean lane's own close sites and the #4687 gate are untouched. Tests: `fixclosereasons.test.mjs`. Cost: 0 LLM calls.
+
+## Entry 2026-11-07 — host overload hold, schedd status host field, heavy-step niceness (#5174)
+
+- Remote lanes already run every heavy step in their sandbox: `sandbox-remote.mjs:214` launches `forgedock run-issue` wholesale there (precheck, lane checks, red/green), and host capabilities go through placement plus `relay.mjs`. No per-step sandbox executor was built; the dispatcher load comes from local placements and fallbacks.
+- `hostload.mjs` (new): `overloadThreshold(cfg)` (forge.yaml `engine.overload_load_per_core`, default `OVERLOAD_DEFAULTS.load_per_core` = 2, 0 disables), `hostOverload` snapshot `{overloaded, load1, cores, perCore, threshold}` (an unreadable probe is never overloaded), `liveOverload(cfg)` (env `FORGEDOCK_OVERLOAD_LOAD_PER_CORE` overrides; `bin/tests/_tmp.mjs` sets it to 0 so test batches are never held on a busy host), `formatOverload` / `formatHostLoad`, `lowerPriority(pid)` (nice 10 plus detached `ionice -c3 -p` on Linux; never throws).
+- `orchestrate` option `overload`: `grant()` holds every non-remote admission while overloaded (notBefore now+pollMs, the issue stays queued), with one `host-overloaded` row per episode. Separate from `admission.mjs` `max_load_per_core` (#4169), which stays off. engine-cli passes `liveOverload(readAdmission(cwd))` when the batch uses the host registry (`deps.overload` overrides).
+- schedd `status` adds `host` (the `hostLoad` probe snapshot, null when it throws); `forgedock schedd status` prints `schedd: host_overloaded (...)` or `schedd: host load X.X/core (threshold T)`; `forgedock status` has a `host` row (`unknown` on any failure).
+- `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
+Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.

@@ -530,6 +530,21 @@ describe("#5085: subject history and recall status", () => {
     assert.ok(kinds.indexOf("subject") > kinds.lastIndexOf("salvage"), kinds.join(","));
   });
 
+  it("#5110: generic quoted codes do not replace the subject words", async () => {
+    const corpus = [item(34683, "Classify dead origins: TLS cert verify failures"), item(35204, "classify dead origins failures"), item(39485, "deploy reverts hotfixes blocked.generic broad-base"), item(32764, "release safety blocked.generic generic broad-base")].map((j) => JSON.parse(j));
+    const search = (q) => { const terms = q.replace(/^q=repo:\S+ is:closed /, "").replace(/"/g, "").toLowerCase().split(" "); return corpus.filter((c) => terms.every((t) => c.title.toLowerCase().includes(t))).map((c) => JSON.stringify(c)).join("\n"); };
+    const title = "fix(detection): ~85% of broad-base 'blocked.generic' are dead origins (cert-invalid, parked, TLS-refused) that run the full ladder";
+    const body = "Most `blocked.generic` rows on the `broad-base` crawl are dead origins.";
+    assert.ok(!subjectTerms({ title, body }).some((t) => /generic|broad/.test(t)), subjectTerms({ title, body }).join(","));
+    const f = fakes({ search });
+    const r = await subjectHistory({ io: f.io, repo: REPO, issue: 50, title, body, base: "origin/staging" });
+    assert.deepEqual(r.rows.map((x) => x.number).sort(), [34683, 35204]);
+    assert.ok(!f.calls.some((c) => c.some((x) => /generic|broad-base/.test(String(x)) && String(x).startsWith("q="))), "no search on a generic code");
+    assert.ok(r.rows[0].number === 34683 || r.rows[0].matched.length >= r.rows[1].matched.length);
+    const only = await subjectHistory({ io: fakes({ search }).io, repo: REPO, issue: 50, title: "fix(x): 'blocked.generic' on broad-base", body: "`blocked.generic`" });
+    assert.deepEqual(only, { terms: [], rows: [], errors: [] });
+  });
+
   it("ranks rows by matched-term count, then newest number", async () => {
     const search = (q) => (q.includes('"a.code"') ? [item(901, "x"), item(950, "y")] : q.includes('"b.code"') ? [item(901, "x")] : []).join("\n");
     const r = await subjectHistory({ io: fakes({ search }).io, repo: REPO, issue: 50, title: "", body: "`a.code` and `b.code`" });

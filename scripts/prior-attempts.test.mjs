@@ -22,7 +22,7 @@ describe("#5085: prior-attempts.mjs", () => {
     assert.ok(t.includes("| #34935 won't fix (issue, not_planned) | ? | no | ? |"), t);
     assert.ok(t.includes("| #34683 TLS bypass counted as block (issue, completed) | ? | closed | ? |"), t);
     assert.ok(t.includes("| #34735 Classify tls.bypass_misclassified as success (PR, merged) | ? | yes | ? |"), t);
-    assert.ok(t.includes("Search terms: tls.bypass_misclassified, bypass, misclassified"), t);
+    assert.ok(t.includes("Search terms: tls.bypass_misclassified, tls, bypass, misclassified"), t);
     assert.ok(queries.every((q) => q.startsWith("q=repo:o/r is:closed ")) && !queries.some((q) => q.includes("src/a.ts")));
   });
 

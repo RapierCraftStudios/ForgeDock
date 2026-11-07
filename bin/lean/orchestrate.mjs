@@ -87,6 +87,8 @@
  * With `remote.fallbackLocal`, a lane placed remote runs on the host path instead of waiting when `max` remote lanes run,
  * and instead of stopping when the budget refuses. The final `{where, reason}` is kept on the run record and the row as
  * `placement` and passed to `runOne` as `ctx.placement` (the lane records it in its FORGE:STATE).
+ * #5174: `overload() -> {overloaded, ...}` (hostload.mjs `liveOverload`) holds every new non-remote admission while the
+ * host is overloaded (retry after `pollMs`), with one `host-overloaded` row per episode; remote placements are never held.
  *
  * In-batch recovery (#4267), on by default: this module recovers only when `recovery: {maxAttempts}` is passed, and the
  * CLI always passes it (forge.yaml `orchestration.recovery.max_attempts`, default 1; 0 disables): a row `classifyNeedsHuman` calls
@@ -127,6 +129,7 @@ import { makeCapWait } from "./capwait.mjs";
 import { mapLimit } from "./pmap.mjs";
 import { quotaRequeue } from "./rotator.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
+import { formatOverload } from "./hostload.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -301,7 +304,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -594,6 +597,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
   // true: start it; false: no capacity now; "busy" (#4481): another batch runs `n`, try the next issue.
+  let overloadNoted = false; // #5174: one host-overloaded row per overload episode
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
     let p = placeOf(n);
@@ -652,6 +656,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         budgetLocal = true; // falls through to the host path
         p = { where: "local", reason: `fallback to local: execution budget: ${adm.reason}` };
       }
+    }
+    if (p?.where !== "remote" && overload) {
+      let snap = null;
+      try { snap = overload(); } catch { snap = null; }
+      if (snap?.overloaded) {
+        if (!overloadNoted) { overloadNoted = true; update({ issue: null, outcome: "host-overloaded", detail: formatOverload(snap) }); }
+        notBefore.set(n, now() + Math.max(pollMs, 1));
+        return false;
+      }
+      overloadNoted = false;
     }
     if (!reg) { if (p) placed.set(n, p); return true; }
     const r = reg.tryAcquire(keyOf(n), entryOf(n), liveCap());
