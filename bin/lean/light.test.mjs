@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { LIGHT_MODES, LIGHT_DEFAULTS, parseLightConfig, lightEligibility, upgradeTriggers } from "./light.mjs";
+import { CHURN_HIGH, LIGHT_MODES, LIGHT_DEFAULTS, parseLightConfig, lightEligibility, upgradeTriggers } from "./light.mjs";
 import { readLight } from "../engine-cli.mjs";
 
 const ON = { mode: "on", maxLines: 40, maxFiles: 2 };
@@ -40,8 +40,9 @@ describe("parseLightConfig (#4448)", () => {
 
 describe("lightEligibility rules (#4448)", () => {
   it("accepts a well-specified size:S issue with 1-2 predicted files", () => {
-    const r = lightEligibility(issue());
+    const { signals, ...r } = lightEligibility(issue());
     assert.deepEqual(r, { mode: "on", verdict: "eligible", eligible: true, light: true, reasons: [] });
+    assert.ok(Array.isArray(signals), "#5209 signals are recorded alongside");
   });
   it("repro or expected behaviour: present accepts, absent is ambiguous (never a model call)", () => {
     for (const body of ["Repro: `x()` throws", "Expected result: 3", "```\nboom\n```", "actual output differs"]) assert.equal(lightEligibility(issue({ body })).verdict, "eligible", body);
@@ -104,7 +105,7 @@ describe("lightEligibility rules (#4448)", () => {
 
 describe("lightEligibility modes (#4448)", () => {
   it("off never returns eligible, even for a fully eligible issue", () => {
-    assert.deepEqual(lightEligibility(issue({ cfg: { mode: "off" } })), { mode: "off", verdict: "off", eligible: false, light: false, reasons: [] });
+    assert.deepEqual(lightEligibility(issue({ cfg: { mode: "off" } })), { mode: "off", verdict: "off", eligible: false, light: false, reasons: [], signals: [] });
   });
   it("shadow returns the verdict without changing the lane shape", () => {
     const r = lightEligibility(issue({ cfg: { mode: "shadow" } }));
@@ -118,6 +119,39 @@ describe("lightEligibility modes (#4448)", () => {
     assert.equal(lightEligibility(issue()).light, true);
     assert.equal(lightEligibility(issue({ labels: ["size:M"] })).light, false);
     assert.equal(lightEligibility(issue({ body: "broken" })).light, false);
+  });
+});
+
+describe("lightEligibility signals and the hotspot reason (#5209)", () => {
+  const sig = (r) => r.signals.map((x) => x.code);
+  const hot = (o = {}) => ({ path: "src/chunk.py", lines: 2400, commits_90d: 1, over: false, ...o });
+  it("a predicted non-test file over the hotspot limit is a hard hotspot reason; a test file or an under-limit file is not", () => {
+    const r = lightEligibility(issue({ hotspots: [hot({ over: true })] }));
+    assert.equal(r.verdict, "ineligible");
+    assert.deepEqual(codes(r), ["hotspot"]);
+    assert.equal(r.reasons[0].detail, "src/chunk.py (2400 lines)");
+    assert.ok(sig(r).includes("hotspot"));
+    assert.equal(lightEligibility(issue({ hotspots: [hot()] })).verdict, "eligible");
+    assert.equal(lightEligibility(issue({ hotspots: [hot({ path: "tests/test_chunk.py", over: true })] })).verdict, "eligible");
+    assert.equal(lightEligibility(issue({ hotspots: [null, "x", { over: true }] })).verdict, "eligible", "malformed rows are skipped");
+  });
+  it("records repro/no_repro, files_named, churn_high at CHURN_HIGH, labels and size", () => {
+    const r = lightEligibility(issue({ labels: ["Docs", "type:config", "chore", "size:S"], hotspots: [hot({ commits_90d: CHURN_HIGH })] }));
+    assert.deepEqual(sig(r).sort(), ["churn_high", "files_named", "label_chore", "label_config", "label_docs", "repro", "size_S"]);
+    assert.equal(r.signals.find((x) => x.code === "files_named").detail, "1");
+    assert.ok(!sig(lightEligibility(issue({ hotspots: [hot({ commits_90d: CHURN_HIGH - 1 })] }))).includes("churn_high"));
+    const n = lightEligibility(issue({ body: "broken", labels: ["bug"] }));
+    assert.ok(sig(n).includes("no_repro") && sig(n).includes("size_none") && !sig(n).includes("repro"));
+    assert.ok(sig(lightEligibility(issue({ labels: ["size:M"] }))).includes("size_M"));
+    assert.ok(sig(lightEligibility(issue({ predictedFiles: ["src/auth/token.py"] }))).includes("risk_path"));
+  });
+  it("signals never change the verdict, eligible or light", () => {
+    const base = lightEligibility(issue());
+    for (const o of [{ labels: ["bug", "size:S", "docs"] }, { hotspots: [hot({ commits_90d: 99 })] }]) {
+      const r = lightEligibility(issue(o));
+      assert.deepEqual([r.verdict, r.eligible, r.light, r.reasons], [base.verdict, base.eligible, base.light, base.reasons], JSON.stringify(o));
+    }
+    assert.deepEqual(lightEligibility(issue({ cfg: { mode: "off" }, hotspots: [hot({ over: true })] })).signals, []);
   });
 });
 
