@@ -8,7 +8,10 @@
  * trigger (oversized diff, repro not red on base, two test failures, risk path, public-API-shape change from #4449)
  * moves the lane to the full pipeline. forge.yaml `lean.light` {mode: off|shadow (default)|on, max_lines: 40,
  * max_files: 2}: off is never eligible, shadow reports the verdict without changing the lane shape, on lets an eligible
- * issue run light (lane wiring: #4450). Pure: no I/O, no model call.
+ * issue run light (lane wiring: #4450). #5209: a named non-test file over maintenance.hotspot.file_lines (scripts/hotspots.sh
+ * `over`) is a hard `hotspot` reason, and every evaluated signal (repro, named files, churn, hotspot, risk path, docs/config/
+ * chore labels, size) is recorded in `signals`, which never changes the verdict: `forgedock stats --depth` attributes lane
+ * outcomes to them. Pure: no I/O, no model call.
  */
 import { riskClassOf, riskPathHits } from "./review-trigger.mjs";
 import { classifyPath } from "./routing.mjs";
@@ -18,6 +21,8 @@ import { postDeployOnly } from "./prefilter.mjs";
 
 export const LIGHT_MODES = Object.freeze(["off", "shadow", "on"]);
 export const LIGHT_DEFAULTS = Object.freeze({ mode: "shadow", maxLines: 40, maxFiles: 2 });
+/** #5209: commits in 90 days (scripts/hotspots.sh commits_90d) at or above which a named file records a `churn_high` signal. */
+export const CHURN_HIGH = 20;
 
 const posInt = (v) => { const s = String(v ?? "").trim(); return /^\d+$/.test(s) && Number(s) > 0 ? Number(s) : null; };
 
@@ -55,6 +60,17 @@ const FENCE_RE = /^\s*(```|~~~)/m;
 const DECISION_LABEL_RE = /^(type[:/]\s*)?(decision|needs-decision|product-decision|rfc|adr)$/i;
 const DECISION_TITLE_RE = /^\s*(decision|rfc|adr)[(:]/i;
 const POST_DEPLOY_LABELS = new Set(["post-deploy", "awaiting-promotion", "awaiting-due"]);
+const KIND_LABELS = [["label_docs", /^(type[:/]\s*)?(docs|documentation)$/i], ["label_config", /^(type[:/]\s*)?(config|configuration)$/i], ["label_chore", /^(type[:/]\s*)?chore$/i]];
+
+/** #5209: hotspots.sh rows by path ({path, lines, commits_90d, over}); anything malformed is skipped. */
+function hotIndex(hotspots) {
+  const m = new Map();
+  for (const h of Array.isArray(hotspots) ? hotspots : []) {
+    const p = h && typeof h === "object" ? String(h.path ?? "").trim().replace(/^\.\//, "") : "";
+    if (p) m.set(p, h);
+  }
+  return m;
+}
 
 /** Risk details for `files`: a built-in risk word or a declared review.risk_paths glob. */
 function riskDetails(files, riskPaths) {
@@ -72,24 +88,49 @@ function riskDetails(files, riskPaths) {
  * Light-lane eligibility of one issue: {mode, verdict, eligible, light, reasons:[{code, detail}]}.
  * verdict: off | eligible | ineligible (a hard reason: files, size, risk_path, investigate, post_deploy, decision) |
  * ambiguous (only soft reasons: no_repro, files_unknown). `light` is the lane shape: true only in mode on when eligible.
+ * #5209: `hotspots` are scripts/hotspots.sh `files` rows; a predicted non-test file with `over` adds the hard `hotspot`
+ * reason. `signals` lists every evaluated signal (codes: repro|no_repro, files_named, churn_high, hotspot, risk_path,
+ * label_docs|label_config|label_chore, size_S|size_M|size_L|size_none) and never changes the verdict.
  */
-export function lightEligibility({ title = "", body = "", labels = [], predictedFiles = [], riskPaths = [], cfg = {} } = {}) {
+export function lightEligibility({ title = "", body = "", labels = [], predictedFiles = [], riskPaths = [], hotspots = [], cfg = {} } = {}) {
   const c = cfgOf(cfg);
-  if (c.mode === "off") return { mode: "off", verdict: "off", eligible: false, light: false, reasons: [] };
-  const hard = [], soft = [];
+  if (c.mode === "off") return { mode: "off", verdict: "off", eligible: false, light: false, reasons: [], signals: [] };
+  const hard = [], soft = [], signals = [];
   const text = String(body ?? "").replace(/<!--[\s\S]*?-->/g, " ");
-  if (!FENCE_RE.test(text) && !REPRO_RE.test(text)) soft.push({ code: "no_repro", detail: "no repro, expected behaviour or code block in the body" });
+  if (!FENCE_RE.test(text) && !REPRO_RE.test(text)) {
+    soft.push({ code: "no_repro", detail: "no repro, expected behaviour or code block in the body" });
+    signals.push({ code: "no_repro", detail: "no repro, expected behaviour or code block in the body" });
+  } else signals.push({ code: "repro", detail: "repro, expected behaviour or code block in the body" });
 
   const files = uniquePaths(predictedFiles);
   const nonTest = files.filter((f) => classifyPath(f) !== "test");
   if (nonTest.length > c.maxFiles) hard.push({ code: "files", detail: `${nonTest.length} predicted non-test files (max ${c.maxFiles})` });
   else if (!nonTest.length) soft.push({ code: "files_unknown", detail: "no predicted non-test files" });
+  signals.push({ code: "files_named", detail: String(nonTest.length) });
+
+  const hot = hotIndex(hotspots);
+  for (const f of nonTest) {
+    const h = hot.get(f);
+    if (!h) continue;
+    const commits = Number(h.commits_90d);
+    if (Number.isFinite(commits) && commits >= CHURN_HIGH) signals.push({ code: "churn_high", detail: `${f} (${commits} commits/90d)` });
+    if (h.over === true) {
+      const d = `${f} (${Number(h.lines) || 0} lines)`;
+      hard.push({ code: "hotspot", detail: d });
+      signals.push({ code: "hotspot", detail: d });
+    }
+  }
 
   const names = labelNames(labels);
   const size = laneSize({ labels: names });
   if (size && size !== "S") hard.push({ code: "size", detail: `size:${size}` });
+  signals.push({ code: size ? `size_${size}` : "size_none", detail: size ? `size:${size}` : "no size label" });
+  for (const [code, re] of KIND_LABELS) {
+    const n = names.find((x) => re.test(x));
+    if (n) signals.push({ code, detail: `label ${n}` });
+  }
 
-  for (const d of riskDetails(files, riskPaths)) hard.push({ code: "risk_path", detail: d });
+  for (const d of riskDetails(files, riskPaths)) { hard.push({ code: "risk_path", detail: d }); signals.push({ code: "risk_path", detail: d }); }
 
   if (isInvestigation(title)) hard.push({ code: "investigate", detail: "investigate( issue" });
   const pdLabel = names.find((n) => POST_DEPLOY_LABELS.has(n.toLowerCase()));
@@ -101,7 +142,7 @@ export function lightEligibility({ title = "", body = "", labels = [], predicted
 
   const verdict = hard.length ? "ineligible" : soft.length ? "ambiguous" : "eligible";
   const eligible = verdict === "eligible";
-  return { mode: c.mode, verdict, eligible, light: c.mode === "on" && eligible, reasons: sortReasons([...hard, ...soft]) };
+  return { mode: c.mode, verdict, eligible, light: c.mode === "on" && eligible, reasons: sortReasons([...hard, ...soft]), signals: sortReasons(signals) };
 }
 
 const lineCount = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
