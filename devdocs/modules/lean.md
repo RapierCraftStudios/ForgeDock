@@ -329,7 +329,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    script, or exit 2+, never blocks.
 7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
    validate results, requirement statuses; each failure has a `kind`),
-   structured review (`parseReview`), `decide` computes the verdict. The
+   structured review (`parseReview`), `decide` computes the verdict. `tmpdirInputs`
+   (#4325) flags `$TMPDIR` reads a validate command never created; #5230: the dir
+   argument of `uv venv`, `virtualenv`, `python[3] -m venv`, `git worktree add`
+   (first) and `git clone` (last) counts as created. The
    reviewer prompt carries a `reviewSkeleton` (#4160): every requirement and
    preserve id, scope rows only for files the contract does not authorize,
    coverage seeded with the contract's verbatim quotes, all statuses empty.
