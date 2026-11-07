@@ -242,6 +242,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
     const int = (k) => { const v = Number(url?.searchParams.get(k)); return Number.isInteger(v) && v > 0 ? v : 0; };
     const sizing = `${int("cpus") ? ` -AllowCpus ${int("cpus")}` : ""}${int("mem") ? ` -AllowMemGb ${int("mem")}` : ""}`;
+    const net = ["nat", "mirrored"].includes(url?.searchParams.get("net")) ? ` -Networking ${url.searchParams.get("net")}` : "";
     return [
       "$ErrorActionPreference = 'Stop'",
       `$RouterUrl = ${q(cfg.public_url)}`,
@@ -251,7 +252,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       "New-Item -ItemType Directory -Path $tmp | Out-Null",
       "Invoke-WebRequest -UseBasicParsing \"$RouterUrl/bootstrap/bundle.tar.gz?token=$EnrollToken\" -OutFile (Join-Path $tmp 'bundle.tar.gz')",
       "tar.exe -xzf (Join-Path $tmp 'bundle.tar.gz') -C $tmp",
-      `& (Join-Path $tmp 'pool\\install\\install-agent.ps1') -RouterUrl $RouterUrl -EnrollToken $EnrollToken -BundlePath (Join-Path $tmp 'bundle.tar.gz')${sizing}`,
+      `& (Join-Path $tmp 'pool\\install\\install-agent.ps1') -RouterUrl $RouterUrl -EnrollToken $EnrollToken -BundlePath (Join-Path $tmp 'bundle.tar.gz')${sizing}${net}`,
       "",
     ].join("\r\n");
   }
