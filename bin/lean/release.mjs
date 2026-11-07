@@ -31,14 +31,14 @@ export function newReleaseId(now = Date.now(), pid = process.pid) {
 }
 
 /** Handle on one release directory; every write is atomic. */
-export function openRelease(root, id) {
+export function openRelease(root, id, mounts) {
   if (!ID_RE.test(String(id ?? ""))) throw new Error(`invalid release id ${JSON.stringify(id)}`);
   const file = join(root, id, "state.json");
   return {
     id, file,
     exists: () => existsSync(file),
     load: () => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } },
-    save: (state) => { assertDiskPath(root); mkdirSync(join(root, id), { recursive: true }); writeAtomic(file, JSON.stringify(state, null, 2) + "\n", { private: true }); },
+    save: (state) => { assertDiskPath(root, mounts); mkdirSync(join(root, id), { recursive: true }); writeAtomic(file, JSON.stringify(state, null, 2) + "\n", { private: true }); },
   };
 }
 
@@ -142,8 +142,8 @@ export const withStubs = (over = {}) => ({ ...STEP_FNS, ...over });
  * marked done (the next resume retries it). Batches are restored on every exit that ends the job (finished, refused, thrown).
  * @returns {{id, status: "done"|"refused"|"blocked"|"stopped", step?, reason?}}
  */
-export async function runRelease({ io, repo, opts = {}, config = {}, branches = {}, root, id, steps = STEP_FNS }) {
-  const rel = openRelease(root, id);
+export async function runRelease({ io, repo, opts = {}, config = {}, branches = {}, root, id, steps = STEP_FNS, mounts }) {
+  const rel = openRelease(root, id, mounts);
   const state = rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
   state.opts = { merge: !!(opts.merge || state.opts?.merge) };
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", save: () => rel.save(state) };
@@ -207,7 +207,7 @@ export async function releaseFromCli(argv, deps = {}) {
   }
   repo ??= JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
-  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config: readReleaseConfig(raw), branches: readBranches(cwd), root, id });
+  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config: readReleaseConfig(raw), branches: readBranches(cwd), root, id, mounts: deps.mounts });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   return r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;

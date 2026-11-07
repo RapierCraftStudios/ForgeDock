@@ -9,6 +9,7 @@ import { releaseFromCli, readReleaseConfig, openRelease, newReleaseId } from "./
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 
+const DISK = [{ mount: "/", type: "ext4" }]; // CI /tmp can be tmpfs, which assertDiskPath refuses
 const tmp = () => mkdtempSync(join(process.env.TMPDIR || tmpdir(), "release-"));
 const REPO = "o/r", HEAD = "a".repeat(40);
 
@@ -43,7 +44,7 @@ describe("release job (#5211)", () => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();
     // Real preflight/release-pr/promotion, with review/fixes/post-merge replaced by no-ops.
     const mod = await import("./release.mjs");
-    const out = await mod.runRelease({ io, repo: REPO, root, id, opts, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
     return { io, out, root, id };
   };
 
@@ -113,11 +114,11 @@ describe("release job (#5211)", () => {
     const base = mod.withStubs({ review: ok, fixes: ok, "post-merge": ok });
     const kill = async () => { throw new Error("killed"); };
     const first = { ...base, preflight: rec("preflight", base.preflight), "release-pr": rec("release-pr", base["release-pr"]), review: kill };
-    await assert.rejects(() => mod.runRelease({ io, repo: REPO, root, id, opts: { merge: true }, config: {}, branches: {}, steps: first }), /killed/);
+    await assert.rejects(() => mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: {}, steps: first }), /killed/);
     const st = openRelease(root, id).load();
     assert.deepEqual(Object.keys(st.steps), ["preflight", "release-pr"]);
     const second = { ...base, preflight: rec("preflight2", base.preflight), "release-pr": rec("release-pr2", base["release-pr"]) };
-    const out = await mod.runRelease({ io, repo: REPO, root, id, opts: { merge: true }, config: {}, branches: {}, steps: second });
+    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: {}, steps: second });
     assert.equal(out.status, "done");
     assert.deepEqual(ran, ["preflight", "release-pr"]); // preflight/release-pr not run again
   });
@@ -125,14 +126,14 @@ describe("release job (#5211)", () => {
   it("stubs return a blocked result that names the manual path; the job exits blocked", async () => {
     for (const r of [await reviewStep({}), await fixStep({}), await postMergeStep({})]) { assert.equal(r.blocked, true); assert.match(r.reason, /manual path/); }
     const io = fakeIo(), root = tmp();
-    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root, id: newReleaseId(), opts: {}, config: {}, branches: {} });
+    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root, mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {} });
     assert.equal(out.status, "blocked");
     assert.equal(out.step, "review");
   });
 
   it("state is written atomically under FORGEDOCK_RELEASE_DIR and is private", async () => {
     const root = tmp(), id = newReleaseId();
-    openRelease(root, id).save({ v: 1 });
+    openRelease(root, id, DISK).save({ v: 1 });
     assert.deepEqual(JSON.parse(readFileSync(join(root, id, "state.json"), "utf8")), { v: 1 });
     assert.ok(!existsSync(join(root, id, `state.json.tmp-${process.pid}`)));
     assert.throws(() => openRelease(root, "../x"), /invalid release id/);
@@ -145,8 +146,8 @@ describe("release job (#5211)", () => {
 
   it("CLI: rejects unknown options and exits 3 on a blocked step, naming the resume command", async () => {
     const root = tmp(), io = fakeIo();
-    await assert.rejects(() => releaseFromCli(["--bogus"], { io, env: { FORGEDOCK_RELEASE_DIR: root }, cwd: root }), /unknown option/);
-    const code = await releaseFromCli(["--repo", REPO], { io, env: { FORGEDOCK_RELEASE_DIR: root }, cwd: root });
+    await assert.rejects(() => releaseFromCli(["--bogus"], { io, env: { FORGEDOCK_RELEASE_DIR: root }, cwd: root, mounts: DISK }), /unknown option/);
+    const code = await releaseFromCli(["--repo", REPO], { io, env: { FORGEDOCK_RELEASE_DIR: root }, cwd: root, mounts: DISK });
     assert.equal(code, 3);
     assert.ok(io.printed.some((l) => /forgedock release --resume r\d/.test(l)));
   });
