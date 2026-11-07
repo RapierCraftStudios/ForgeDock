@@ -30,7 +30,10 @@
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset.
  * #5095: `remote.identity()` names the pool's account (execution.mjs `remoteHoldId`); while it is held, a remote-placed lane
- * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. An `engine-error` is
+ * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. #5203: under a
+ * rotator with headroom a pool usage limit reruns at once (`quotaRequeue` `poolId`) and records no pool hold; with no headroom the
+ * hold lasts until `rotator.resumeAt()` (the earliest reset). `--requeue` of a quota-paused pending issue clears its notBefore
+ * and the pool hold (`drainRequeues`). An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  * #5138: `remote.max`, `remote.fallbackLocal` and `remote.place` are read on every grant too (engine-cli puts live getters on
@@ -797,16 +800,23 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         let delayMs = pol.delayMs;
         if (pol.hold) {
           // #5094: an account rotator with headroom means another account runs the next call, so no host hold is recorded.
-          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs });
+          // #5203: a usage limit on the pool account rotates like a rotator account (the router hands the next sandbox the
+          // lowest-usage login, #5165), so it sets no pool hold and no batch-wide notBefore while any account has headroom.
+          const usage = r?.code === "rate_limited";
+          let poolId = null;
+          if (usage) { try { poolId = remote?.identity?.() ?? null; } catch { poolId = null; } }
+          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, poolId });
+          let rotAt = null;
+          if (!rq && rotator) { try { rotAt = rotator.resumeAt(); } catch { rotAt = null; } }
+          // #5203: no account has headroom: the hold lasts until the earliest reset across accounts, not this lane's own reset.
+          const holdMs = usage && Number.isFinite(rotAt) && rotAt > now() ? rotAt - now() : pol.delayMs;
           if (rq) {
             delayMs = rq.delayMs;
             // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
             try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
-          } else try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          } else try { holds.set(r?.backendId ?? identity(), now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
-          let rotAt = null;
-          if (!rq && rotator) { try { rotAt = rotator.resumeAt(); } catch { rotAt = null; } }
-          const resumeAt = Math.max(now() + (rq ? rq.delayMs : pol.delayMs), Number.isFinite(rotAt) ? rotAt : 0);
+          const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), Number.isFinite(rotAt) ? rotAt : 0);
           quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
             resumeAt, rotations: (q.rotations ?? 0) + (rq?.rotated ? 1 : 0) });
           requeue(n, delayMs); done(); save();
@@ -1101,6 +1111,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     for (const e of fresh) {
       requeueApplied.add(requeueKey(e));
       const row = results.get(e.issue);
+      // #5203: a quota-paused issue (pending, no row) is released: its notBefore and the pool hold go, so the next grant admits it.
+      if (!row && pending.includes(e.issue) && quota.has(e.issue) && !running.has(e.issue)) {
+        notBefore.delete(e.issue);
+        try { const pool = remote?.identity?.(); if (pool) holds.clear(pool); } catch { /* fail-open */ }
+        decided({ issue: e.issue, what: `released quota pause of #${e.issue} by ${e.by ?? "operator"} (forgedock orchestrate --requeue)`, why: e.reason || "operator decision", alternative: "wait for the account reset" });
+        update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (quota pause released)` });
+        n++;
+        continue;
+      }
       if (!row || !REQUEUABLE(row.outcome) || running.has(e.issue)) continue;
       const moved = [e.issue], priors = new Map([[e.issue, row]]);
       results.delete(e.issue);
@@ -1462,6 +1481,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
+      if (getRequeued && pending.some((n) => quota.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
       if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick

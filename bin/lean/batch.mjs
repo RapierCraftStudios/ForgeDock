@@ -177,7 +177,8 @@ export function openBatch(root, id) {
     },
     /**
      * `--requeue` (#4550): record that each issue returns to pending. Refused: not a positive integer, not in the batch's
-     * `order`, no terminal result yet (`not terminal`; a final `engine-error` is terminal, #5168), or already requeued and not yet applied. The needs-human label and
+     * `order`, no terminal result yet (`not terminal`; a final `engine-error` is terminal, #5168; a quota-paused pending issue is
+     * accepted and released, #5203), or already requeued and not yet applied. The needs-human label and
      * closed checks need GitHub and live in the CLI. @returns {{requeued:number[], refused:Array<{issue, reason}>}}
      */
     requeue: (list, { reason = "operator decision", by = "operator" } = {}) => {
@@ -185,13 +186,15 @@ export function openBatch(root, id) {
       const order = new Set(st.order ?? []), applied = new Set(st.requeueApplied ?? []);
       const entries = readRequeueFile(f("requeue"));
       const pend = new Set(entries.filter((e) => !applied.has(requeueKey(e))).map((e) => e.issue));
+      // #5203: a quota-paused issue (pending, no result, a `quota` entry) is released by --requeue: its notBefore is cleared
+      const quotaPaused = (n) => st.results?.[n] === undefined && Array.isArray(st.pending) && st.pending.includes(n) && !!st.quota?.[n];
       const requeued = [], refused = [];
       for (const x of Array.isArray(list) ? list : []) {
         const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
         if (!Number.isSafeInteger(n) || n < 1) refused.push({ issue: x, reason: "not an integer" });
         else if (!order.has(n)) refused.push({ issue: n, reason: "not in batch" });
         else if (pend.has(n)) refused.push({ issue: n, reason: "already requeued" });
-        else if (!REQUEUABLE(st.results?.[n]?.outcome)) refused.push({ issue: n, reason: "not terminal" });
+        else if (!REQUEUABLE(st.results?.[n]?.outcome) && !quotaPaused(n)) refused.push({ issue: n, reason: "not terminal" });
         else { pend.add(n); requeued.push(n); }
       }
       if (requeued.length) {

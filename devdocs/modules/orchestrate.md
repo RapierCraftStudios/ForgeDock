@@ -229,7 +229,7 @@ Cite: #4525.
 
 ## Entry 2026-10-24 — Feat: requeue a terminal issue in a running batch (#4550)
 
-`forgedock orchestrate --requeue <id> N... [--reason]` appends `{issue, reason, by, at}` to the batch's `requeue` file (`batch.requeue`, refuses issues not in the batch or not terminal; the CLI refuses closed and `needs-human`-labelled issues). `orchestrate()` takes a `getRequeued` seam: `drainRequeues` moves the issue and the `skipped` dependents behind it back to pending (prior rows kept in state `requeued`, applied keys in `requeueApplied`), posts a `FORGE:DECISION`, and the report row is the latest outcome with a `requeued:` line. schedd `op:"requeue"` hosts a finished batch again; `--add` is unchanged.
+`forgedock orchestrate --requeue <id> N... [--reason]` appends `{issue, reason, by, at}` to the batch's `requeue` file (`batch.requeue`, refuses issues not in the batch or not terminal; the CLI refuses closed and `needs-human`-labelled issues). #5203: a quota-paused pending issue (no result, a `quota` entry, shown `paused (quota) until <ISO>`) is accepted too; `drainRequeues` releases it in place: its `notBefore` and the pool hold are cleared, and it stays pending so the next grant admits it. `orchestrate()` takes a `getRequeued` seam: `drainRequeues` moves the issue and the `skipped` dependents behind it back to pending (prior rows kept in state `requeued`, applied keys in `requeueApplied`), posts a `FORGE:DECISION`, and the report row is the latest outcome with a `requeued:` line. schedd `op:"requeue"` hosts a finished batch again; `--add` is unchanged.
 Cite: #4550.
 
 ## Entry 2026-10-30 — Fix: usage-limit deferrals are never capped; `deferred` is requeuable (#4784)

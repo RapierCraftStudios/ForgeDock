@@ -1201,6 +1201,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * `--add <id> N...` (#4408) adds issues to that batch instead of starting a second one: they run under its K and DAG
  * (a running batch picks them up on its next pass, a stopped one on its next `--resume`); `--resume <id> N...` adds N too.
  * `--requeue <id> N... [--reason]` (#4550) returns a terminal issue (and the dependents skipped behind it) to pending after an operator decision.
+ * #5203: it also releases a quota-paused pending issue (`paused (quota) until <ISO>`): its notBefore and the pool hold are cleared.
  * `--cancel <id>` (#4376) stops that one batch, never the shared daemon: it admits nothing more, its running local lanes get
  * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
