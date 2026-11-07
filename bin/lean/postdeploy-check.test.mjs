@@ -6,6 +6,10 @@ import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE,
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const item = (id, why) => `- [ ] \`${id}: some quote here\` — post-deploy: ${why}`;
 const body = (items) => `## Acceptance Criteria\n\n${items.join("\n")}\n\n<!-- FORGE:DEFERRED_FROM: #40 -->\n`;
@@ -282,5 +286,30 @@ describe("rollout-blocked rows raise one owner ask per flag (#4769)", () => {
     const w = world({ file: checks, spawn: () => ({ code: 1, stdout: "boom", stderr: "" }) });
     const r = await run(w, rollup([item("R1", "[check:a] x")]));
     assert.equal(r.state, "fail"); assert.equal(asks(w).length, 0);
+  });
+});
+
+describe("R2-remote-hotspot-config check (#5198)", () => {
+  const cmd = JSON.parse(readFileSync(new URL("../../.forge/post-deploy-checks.json", import.meta.url), "utf8"))["R2-remote-hotspot-config"].run;
+  const hasJq = spawnSync("jq", ["--version"]).status === 0;
+  // A stub `gh api ... --jq <expr>`: feeds canned comments through the real jq expression the check passes.
+  const runWith = (comments) => {
+    const dir = mkdtempSync(join(tmpdir(), "r2chk-"));
+    writeFileSync(join(dir, "comments.json"), JSON.stringify(comments));
+    writeFileSync(join(dir, "gh"), `#!/bin/sh\n[ "$1" = api ] || exit 2\ncase "$2" in repos/*/issues/comments*) ;; *) exit 3;; esac\nwhile [ $# -gt 0 ]; do [ "$1" = --jq ] && expr="$2"; shift; done\njq -r "$expr" "${dir}/comments.json"\n`);
+    chmodSync(join(dir, "gh"), 0o755);
+    return spawnSync("sh", ["-c", cmd], { env: { PATH: `${dir}:${process.env.PATH}` } }).status;
+  };
+
+  it("is repo-scoped and no longer a global free-text search", () => {
+    assert.ok(!/gh search/.test(cmd));
+    assert.ok(cmd.includes("repos/{owner}/{repo}/issues/comments") && cmd.includes("FORGE:TRAJECTORY") && cmd.includes("hotspot_config_missing:"));
+  });
+  it("passes when only prose quotes the token", { skip: !hasJq }, () => {
+    assert.equal(runWith([{ body: "review: hotspot_config_missing: is noisy" }, { body: "<!-- FORGE:STATE -->\nhotspot_config_missing: quoted" }, { body: "<!-- FORGE:TRAJECTORY -->\nno anomalies" }]), 0);
+    assert.equal(runWith([]), 0);
+  });
+  it("fails when an engine trajectory comment carries the anomaly", { skip: !hasJq }, () => {
+    assert.notEqual(runWith([{ body: "<!-- FORGE:TRAJECTORY -->\n## Pipeline Trajectory\nhotspot_config_missing: no forge.yaml readable" }]), 0);
   });
 });
