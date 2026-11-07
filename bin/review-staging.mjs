@@ -585,3 +585,26 @@ export async function reviewStagingFromCli(argv, io = defaultIo()) {
     return 1;
   }
 }
+
+/** The real io of the CLI, for a library caller that overrides only `out`/`err`/`cwd`/`env` (#5212). */
+export const reviewStagingIo = defaultIo;
+
+/**
+ * Library entry (#5212): any mode of the CLI, run with `--json`, without printing. Returns `{code, data, lines}`: `data` is the
+ * parsed `--json` object (manifest, finalize state or summary; null when the run stopped before printing one) and `lines` the
+ * diagnostics a CLI run would have written to stderr, with a stop's reason last. The CLI path is untouched.
+ */
+export async function reviewStagingJson(argv, io = defaultIo()) {
+  const out = [], lines = [];
+  const cap = { ...io, out: (s) => out.push(s), err: (s) => lines.push(s) };
+  let code;
+  try {
+    code = await main([...argv.filter((x) => x !== "--json"), "--json"], cap);
+  } catch (e) {
+    if (e instanceof Stop) return { code: e.code, data: null, lines: [...lines, ...e.lines] };
+    throw e;
+  }
+  let data = null;
+  try { data = JSON.parse(out[out.length - 1]); } catch { /* no object printed */ }
+  return { code, data, lines };
+}

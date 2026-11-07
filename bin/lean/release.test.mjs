@@ -126,9 +126,10 @@ describe("release job (#5211)", () => {
     assert.deepEqual(ran, ["preflight", "release-pr"]); // preflight/release-pr not run again
   });
 
-  it("review/fixes stubs return a blocked result that names the manual path; the job exits blocked", async () => {
+  it("unfinished steps return a blocked result that names the manual path; the job exits blocked", async () => {
     for (const r of [await reviewStep({}), await fixStep({})]) { assert.equal(r.blocked, true); assert.match(r.reason, /manual path/); }
     const io = fakeIo(), root = tmp();
+    io.review = { pre: async () => ({ code: 1, data: null, lines: ["stopped"] }) }; // the review step runs against a seam, never a real repo
     const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root, mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {} });
     assert.equal(out.status, "blocked");
     assert.equal(out.step, "review");

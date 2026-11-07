@@ -2708,6 +2708,10 @@ its held subtree to pending in dependency order. The report prints one
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
 
+## Entry 2026-11-07 — Fix: a pool usage limit rotates accounts; --requeue releases a quota pause (#5203)
+
+Since #5165 the pool router hands each sandbox the lowest-usage tokenbaton login, so the pool identity (`remote.identity()`) is a rotating account set under the dispatcher's `execution.account_rotator: tokenbaton`, not one account with its own reset. `quotaRequeue` takes `poolId`; a `rate_limited` result whose `backendId` is the pool identity reruns at once (`rotations` +1, no pool hold, no host hold, no batch-wide `notBefore`) while the rotator has headroom and `rotations < accounts.length`. When no account has headroom, the hold and the `paused (quota) until <ISO>` row use `rotator.resumeAt()`, the earliest reset across accounts, instead of the lane's own reset. Without a rotator the #5095 pool hold is unchanged. `forgedock orchestrate --requeue <id> N...` now also accepts a quota-paused pending issue (`batch.requeue`) and `drainRequeues` clears its `notBefore` and the pool hold; the wake loop polls while a quota-paused issue is pending. This supersedes the #5094/#5095 sentence that a limited pool account keeps its own hold under a rotator with headroom. Tests: `limits.test.mjs` "#5203 ...", `rotator.test.mjs`, `batch.test.mjs` "#5203 --requeue accepts a quota-paused pending issue".
+
 ## Entry 2026-11-07 — upgrade handover: interrupted lanes are logged, requeued and relabelled; remote lanes reattached or reaped (#5204)
 
 - `orchestrate` options `version` (the running engine version) and `onInterrupted(n, {cause, why})` (best effort, errors swallowed). `save()` persists `engineVersion: version`. On a resume the cause is `upgrade v<saved.engineVersion>→v<version>` when both are set and differ, else `dispatcher restart`.
