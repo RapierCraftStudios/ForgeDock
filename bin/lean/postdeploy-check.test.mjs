@@ -291,23 +291,22 @@ describe("rollout-blocked rows raise one owner ask per flag (#4769)", () => {
 
 describe("R2-remote-hotspot-config check command (#5198)", () => {
   const cmd = JSON.parse(readFileSync(new URL("../../.forge/post-deploy-checks.json", import.meta.url), "utf8"))["R2-remote-hotspot-config"].run;
-  // Stub gh: logs argv, then applies the --jq filter (via node) to the comments in $STUB_COMMENTS.
+  // Stub gh: applies the --jq filter's two selects to the comments in comments.json and prints the per-page count.
   const runCheck = (comments) => {
     const dir = tmpDir("r2chk-");
-    try {
-      writeFileSync(join(dir, "comments.json"), JSON.stringify(comments));
-      writeFileSync(join(dir, "gh"), `#!/usr/bin/env node
+    writeFileSync(join(dir, "comments.json"), JSON.stringify(comments));
+    writeFileSync(join(dir, "gh"), `#!/usr/bin/env node
 const fs = require("fs"); const a = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(join(dir, "argv.log"))}, a.join(" ") + "\\n");
 if (a[0] !== "api") process.exit(2);
 const jq = a[a.indexOf("--jq") + 1];
-const body = /contains\\("FORGE:TRAJECTORY"\\)/.test(jq) && /hotspot_config_missing:/.test(jq);
-for (const c of JSON.parse(fs.readFileSync(${JSON.stringify(join(dir, "comments.json"))}, "utf8")))
-  if (body && c.body.includes("FORGE:TRAJECTORY") && /(^|\\n)- hotspot_config_missing:/.test(c.body)) console.log(c.id);
+const start = (jq.match(/startswith\\("([^"]*)"\\)/) || [])[1];
+const has = (jq.match(/contains\\("([^"]*)"\\)/) || [])[1];
+const cs = JSON.parse(fs.readFileSync(${JSON.stringify(join(dir, "comments.json"))}, "utf8"));
+console.log(cs.filter((c) => c.body.startsWith(start) && c.body.includes(has)).length);
 `, { mode: 0o755 });
-      const r = spawnSync("bash", ["-c", cmd], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: "utf8" });
-      return { code: r.status, argv: readFileSync(join(dir, "argv.log"), "utf8") };
-    } finally { /* removed by tmpDir at process exit */ }
+    const r = spawnSync("bash", ["-c", cmd], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: "utf8" });
+    return { code: r.status, argv: readFileSync(join(dir, "argv.log"), "utf8") };
   };
   const traj = (anoms) => ({ id: 1, body: `<!-- FORGE:TRAJECTORY -->\n## Pipeline Trajectory\n\n**Anomalies**\n${anoms}\n` });
 
