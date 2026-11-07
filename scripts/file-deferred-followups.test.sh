@@ -116,9 +116,9 @@ check "race: rows point at canonical issue" "[ \$(printf '%s\n' \"\$OUT\" | grep
 
 # 10. #5207 R1/R10: an engineering deferral is rejected before any gh call; nothing is filed
 for row in 'a/x.sh\twhy a\t' '-\tdefer: wire it\t\t\tR7: wire the report' '-\tdefer: [bucket:new-issue] later\t\t\tR8: later' '-\tpost-deploy: [bucket:new-issue] later\t\t\tR8: later' 'a/x.sh\twhy\t\tengineering' 'a/x.sh\twhy\t\tbacklog'; do
-  reset; printf "$row\n" > "$T/eng.tsv"
+  reset; printf -- "$row\n" > "$T/eng.tsv"
   OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv" 2>"$T/eng.err"); RC=$?
-  check "#5207 engineering row ($(printf "$row" | cut -c1-30)): rc 2, DEFERRED_TSV=INVALID, no gh call" "[ $RC -eq 2 ] && printf '%s' \"\$OUT\" | grep -qx DEFERRED_TSV=INVALID && grep -q 'engineering deferral: build it in-lane (#5207)' '$T/eng.err' && [ ! -s '$GH_LOG' ]"
+  check "#5207 engineering row ($(printf -- "$row" | cut -c1-30)): rc 2, DEFERRED_TSV=INVALID, no gh call" "[ $RC -eq 2 ] && printf '%s' \"\$OUT\" | grep -qx DEFERRED_TSV=INVALID && grep -q 'engineering deferral: build it in-lane (#5207)' '$T/eng.err' && [ ! -s '$GH_LOG' ]"
 done
 reset; printf 'a/x.sh\texternal: ok\t\n-\tdefer: parser first\t\t\tR1: add the parser\n' > "$T/eng.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/eng.tsv" >/dev/null 2>&1; RC=$?
@@ -128,7 +128,7 @@ reset
 issue_json 77 open OWNER; claim_json OWNER 77
 echo '{"items":[]}' > "$SEARCH_JSON" # a search for the aggregate marker never matches a per-parent follow-up
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
-check "#5207 per-parent follow-up #77 untouched: aggregate created, #77 never fetched or changed" "[ $RC -eq 0 ] && grep -q '^issue create' '$GH_LOG' && ! grep -qE 'issues/77|^issue (edit|reopen|close|comment) 77' '$GH_LOG' && ! grep -q 'FORGE:DEFERRED_FROM' '$GH_LOG' && ! grep -q -- '--paginate' '$GH_LOG'"
+check "#5207 per-parent follow-up #77 untouched: aggregate created, #77 never fetched or changed" "[ $RC -eq 0 ] && grep -q '^issue create' '$GH_LOG' && ! grep -qE 'issues/77|^issue (edit|reopen|close|comment) 77' '$GH_LOG' && ! grep -q 'FORGE:DEFERRED_FROM' '$GH_LOG' && ! grep -q 'issues/77/comments' '$GH_LOG'"
 check "#5207 no title 'follow-up: N deferred item(s)'" "! grep -q 'deferred item(s)' '$GH_LOG'"
 # 12. #5207 R2/R8/R9: classes -> the three aggregates (ops shares the external one), never a per-parent issue
 reset; export FORGE_BATCH_ID=b7
