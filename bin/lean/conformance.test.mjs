@@ -1486,3 +1486,12 @@ describe("release review #5103", () => {
     }
   });
 });
+
+import { hostRoute as hostRoute5197 } from "./conformance.mjs";
+describe("#5197 hostRoute is exported as the single host-route source", () => {
+  it("post-promotion text joins the rollup; pre-promotion and external needs stay host", () => {
+    assert.equal(hostRoute5197({ bucket: "host", why: "verify the dashboard after release" }), "post-deploy");
+    assert.equal(hostRoute5197({ bucket: "host", why: "capture logs before promotion" }), "host");
+    assert.equal(hostRoute5197({ bucket: "host", why: "provide the API key after release" }), "host");
+  });
+});

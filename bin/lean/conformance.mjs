@@ -1287,7 +1287,7 @@ export function bucketProblems(r) {
   if (k === "owner" && r.class != null && r.class !== "external" && r.class !== "ops") out.push("an owner bucket belongs in class external or ops, never post-deploy");
   return out;
 }
-/** #5078: post-promotion / production-verify / rollout text (the rollup) and read-only production data or capture (the host: the prod_monitor signals of execution.mjs plus a read-only prod query). Mirrored in scripts/file-deferred-followups.sh. */
+/** #5078: post-promotion / production-verify / rollout text (the rollup) and read-only production data or capture (the host: the prod_monitor signals of execution.mjs plus a read-only prod query). Single source: scripts/file-deferred-followups.sh routes through scripts/followup-route.mjs (#5197). */
 const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
 export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor\b|\bread[- ]only\b[^.]{0,40}\bprod(?:uction)?\b|\bprod(?:uction)?\b[^.]{0,30}\b(?:query|queries|capture|telemetry|logs?)\b/i;
 /** An item that truly needs the outside world (or a write to production) stays external even when it also reads production. */
@@ -1305,8 +1305,8 @@ export function ownerRoute(r) {
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
 }
 const PRE_PROMOTION_RE = /(?:before|pre)[- ]?(?:promotion|release|deploy)/i;
-/** #5186: an explicit host deferral that is post-promotion text (and needs nothing external) joins the release rollup; work needed before promotion stays host. Mirrored in scripts/file-deferred-followups.sh host_route. */
-function hostRoute(r) {
+/** #5186: an explicit host deferral that is post-promotion text (and needs nothing external) joins the release rollup; work needed before promotion stays host. Single source for scripts/file-deferred-followups.sh host_route (#5197). */
+export function hostRoute(r) {
   const text = `${r?.bucket ?? ""} ${r?.why ?? ""}`;
   return POST_PROMOTION_RE.test(text) && !PRE_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "post-deploy" : "host";
 }
