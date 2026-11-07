@@ -10,5 +10,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "release-live-run": {
+    "run": "test \"$(gh pr list --state all --head staging --limit 20 --json comments --jq '[.[].comments[]|select(.body|contains(\"FORGE:GATE_\"))]|length')\" -ge 1",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
   }
 }
