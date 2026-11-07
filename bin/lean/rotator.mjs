@@ -189,14 +189,16 @@ export function rotatorRetry(rotator, tries, exclude = null) {
  * How orchestrate requeues a `rate_limited` lane under a rotator (#5094), or null when the host hold applies (no rotator,
  * no account with headroom outside `exclude`, unreadable state). A lane that ran on one of the rotator's accounts (or reported none) is rerun
  * at once, at most once per account; any other credential (a remote sandbox's) waits for its own reset. Neither sets a host hold.
+ * #5203: `poolId` (orchestrate's `remote.identity()`, the pool hold key) rotates like a rotator account: since #5165 the pool
+ * router hands each sandbox the lowest-usage tokenbaton login, so a rerun lands on another account.
  * @returns {null | {delayMs:number, rotated:boolean}}
  */
-export function quotaRequeue({ rotator, r, prior = null, delayMs, exclude = null }) {
+export function quotaRequeue({ rotator, r, prior = null, delayMs, exclude = null, poolId = null }) {
   if (!rotator) return null;
   try {
     if (!rotator.headroom(exclude)) return null;
     const id = r?.backendId ?? null, rotations = Number(prior?.rotations) || 0;
-    if ((!id || rotator.isAccount(id)) && rotations < rotator.accounts.length) return { delayMs: 0, rotated: true };
+    if ((!id || (poolId && id === poolId) || rotator.isAccount(id)) && rotations < rotator.accounts.length) return { delayMs: 0, rotated: true };
     return { delayMs, rotated: false };
   } catch { return null; }
 }

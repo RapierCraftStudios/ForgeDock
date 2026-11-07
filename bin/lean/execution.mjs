@@ -715,7 +715,13 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     adopt: (n, rec, ctx = {}) => adoptSaved(n, rec, ctx),
   };
   async function adoptSaved(n, rec, ctx = {}) {
-      const saved = rec?.handle;
+      let saved = rec?.handle;
+      // #5204: a record saved before its handle (the old dispatcher halted first) finds the sandbox through the lane's ledger,
+      // which registers it before it exists: a live one is reattached, a gone one reaped below, never orphaned.
+      if (!saved?.id) {
+        const id = provider.idFor(n);
+        saved = (ledgerFor(n)?.entries("sandbox") ?? []).find((e) => e.value === id && (e.provider ?? e.handle?.provider) === provider.name)?.handle;
+      }
       if (!saved?.id || saved.provider !== provider.name) return null;
       // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
       const h = { ...saved, ...(Number.isFinite(saved.startedAt) ? {} : Number.isFinite(rec?.startedAt) ? { startedAt: rec.startedAt } : {}) };

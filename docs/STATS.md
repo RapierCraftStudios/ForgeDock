@@ -106,6 +106,25 @@ conformance pass, and then the post − pre delta.
 the result is under `query.efficiency.compare`. Cohorts are split by batch `plan.created`, as `--window` is; a lane run
 outside a batch is in neither.
 
+## Lane depth (`--depth`, forge#5209)
+
+`forgedock stats --depth [--since <version|date>] [--min-n N] [--offline] [--repo <owner/repo>] [--json]` reads the local
+run logs (`~/.forge/runs/*.jsonl`, every RUN_START..RUN_TERMINAL slice that logged `LIGHT_ELIGIBILITY`) and uses gh only
+for post-merge defect signals; `--offline` skips that crawl (defects print n/a, as does a gh failure).
+
+Columns per cell: n, merge rate, first-pass rate, needs-human rate, median cost, median wall minutes, median wall/model
+time, review findings per lane (conformance failures + verifier findings) and the share of lanes with any, conformance
+failure rate, and the post-merge defect rate (a reopen, a revert naming the PR, or a `fix`/`bug` PR touching the same
+non-test files within 7 days) over merged lanes with known defect data.
+
+Cells are grouped by verdict (eligible, ambiguous, ineligible) and by every reason and signal code (`hotspot`,
+`churn_high`, `label_docs`, `size_S`, ...), so outcomes can be attributed to each signal.
+
+Promotion (#5052): treatment = light-shaped lanes (light or upgraded), control = full lanes the gate rated eligible, in the
+size buckets both have. Met when median cost ratio <= 1.2x, median wall/model <= 1.3x and the treatment defect rate is no
+worse than the control's; a cell under `--min-n` (default 10) is `insufficient data`, with n per cell printed. Flipping
+`lean.light.mode: on` stays a config decision.
+
 ## Pool utilisation (`--pool`, forge#4549)
 
 `forgedock stats --pool [--window 7d,30d] [--json]` reads the repo's local batch `report.json` rows and prints, per window,
@@ -132,6 +151,31 @@ repo's lanes: 1-100, 101-500, 501+, `unranked` for guards without a merged run).
 Efficiency next to quality: run `forgedock stats --efficiency --compare <date|version>` around each child's deploy for
 $/merge, turns/merge and wall p50. Baseline before #4693 enforces: run `forgedock stats --compounding --json --since <date>` in
 a full clone of this repo and one other and keep the output with the #4697 tracker.
+
+## Conformance outcomes (`--conformance-outcomes`, forge#5210)
+
+`forgedock stats --conformance-outcomes [--repo R] [--since <date>] [--window-days 7] [--min-n 20] [--json]` asks whether conformance
+blocks predict post-merge defects. Read only, no model and no GitHub writes. GitHub reads are one `gh api graphql` search per
+page of 100 merged PRs (`repo:R is:pr is:merged merged:>=<since>`, `--since` defaults to 30 days ago; GitHub search stops at
+1000 results, flagged `capped`) plus the usual FORGE:TELEMETRY crawl. Verdicts also come from the local run logs and batch
+reports unless `--no-local`.
+
+- **lane PR**: a merged PR with a conformance verdict (`query.mjs` `conformanceVerdicts`; the latest of the telemetry
+  `run_terminal`/`conformance_shadow`, run-log `RUN_TERMINAL`/`CONFORMANCE_SHADOW`/`CONFORMANCE` and batch-row `conformance`
+  wins). `shadow_would: conforms` conforms. Any other `would` is nonconforming, and its failure codes are the kinds. An
+  enforce merge with no `would` passed the enforced gate and conforms. A merged PR without a verdict counts under `unjoined`.
+- **signals** inside `--window-days` after the merge:
+  - `reverted`: a later merged `Revert ...` PR naming `#N`, `Reverts R#N` or the title.
+  - `reopened`: a closing issue was reopened.
+  - `cited`: a later merged PR says `fix ... #N` or `review-finding ... #N` for the PR or its issue on one line.
+  - `same_hunks`: a later `fix`/`revert` PR whose old-side lines `git blame` to this PR's merge commit. Only in a clone of R.
+    Otherwise it is `null` and counted under `same_hunks_unresolved`.
+  - A PR is defective when any signal is true. A PR whose window has not elapsed is `pending` and is not counted.
+- **cells**: per repo, then the same split per mode and per failure kind. Each cell is `defects/n rate [Wilson 95% interval]`
+  for nonconforming-merged vs conforming-merged, `n/a` under `--min-n` (default 20 per cell).
+- **conclusion** (last line): `nonconforming merges show a higher defect rate` when the nonconforming interval lies wholly
+  above the conforming one, `no higher defect rate shown for nonconforming merges` otherwise, and `insufficient data` when
+  either overall cell is under min n.
 
 ## Explorer A/B (`--explore-ab`, forge#4418)
 

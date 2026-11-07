@@ -30,7 +30,10 @@
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset.
  * #5095: `remote.identity()` names the pool's account (execution.mjs `remoteHoldId`); while it is held, a remote-placed lane
- * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. An `engine-error` is
+ * runs local in hybrid (`fallbackLocal`, local account not held) or waits for the reset; admission is not held. #5203: under a
+ * rotator with headroom a pool usage limit reruns at once (`quotaRequeue` `poolId`) and records no pool hold; with no headroom the
+ * hold lasts until `rotator.resumeAt()` (the earliest reset). `--requeue` of a quota-paused pending issue clears its notBefore
+ * and the pool hold (`drainRequeues`). An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  * #5138: `remote.max`, `remote.fallbackLocal` and `remote.place` are read on every grant too (engine-cli puts live getters on
@@ -304,7 +307,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -411,7 +414,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
   const save = () => {
     if (!store || halted) return;
-    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
+    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
@@ -802,20 +805,27 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         let delayMs = pol.delayMs;
         if (pol.hold) {
           // #5094: an account rotator with headroom means another account runs the next call, so no host hold is recorded.
-          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, exclude: excluded() });
+          // #5203: a usage limit on the pool account rotates like a rotator account (the router hands the next sandbox the
+          // lowest-usage login, #5165), so it sets no pool hold and no batch-wide notBefore while any account has headroom.
+          const usage = r?.code === "rate_limited";
+          let poolId = null;
+          if (usage) { try { poolId = remote?.identity?.() ?? null; } catch { poolId = null; } }
+          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, exclude: excluded(), poolId });
           // #5205: no account with room: hold until the rotator's earliest reset (tokenbaton's, over every account), not now+delay
           let rotAt = null;
-          if (!rq && rotator && (!r?.backendId || (() => { try { return rotator.isAccount(r.backendId); } catch { return false; } })())) { // a remote credential keeps its own reset
+          if (!rq && rotator && (!r?.backendId || (poolId && r.backendId === poolId) || (() => { try { return rotator.isAccount(r.backendId); } catch { return false; } })())) { // a remote credential keeps its own reset
             try { const p = typeof rotator.pick === "function" ? rotator.pick({ exclude: excluded() }) : null; rotAt = p && p.account === null && Number.isFinite(p.earliestReset) ? p.earliestReset : rotator.resumeAt(excluded()); } catch { rotAt = null; }
             if (!(Number.isFinite(rotAt) && rotAt > now())) rotAt = null;
           }
+          // #5203: no account has headroom: the hold lasts until the earliest reset across accounts, not this lane's own reset.
+          const holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
           if (rq) {
             delayMs = rq.delayMs;
             // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
             try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
-          } else try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          } else try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
-          const resumeAt = rotAt ?? now() + (rq ? rq.delayMs : pol.delayMs);
+          const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), rotAt ?? 0);
           quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
             resumeAt, rotations: (q.rotations ?? 0) + (rq?.rotated ? 1 : 0) + (Number(r?.rotations) || 0) }); // #5205: plus the lane's own in-phase rotations
           requeue(n, delayMs); done(); save();
@@ -986,12 +996,24 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Lanes launched by an earlier dispatcher: re-attach to the live ones, queue the rest again (no result was recorded).
   // #4504: every adopt starts at once and races its `onLive` signal, so a live lane never holds up the others: one that
   // already ended is settled from its result (or requeued without one) before scheduling; a live one is awaited in the background.
-  const requeueLost = (n) => { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) { pending.unshift(n); enqueued.set(n, now()); } };
+  // #5204: a requeue is never silent: one `deferred`/`run.interrupted` row names the cause (an upgrade or a plain restart)
+  // and `onInterrupted` reconciles the issue's labels. It consumes no deferral, engine-error or recovery attempt.
+  const interruptCause = saved?.engineVersion && version && saved.engineVersion !== version ? `upgrade v${saved.engineVersion}→v${version}` : "dispatcher restart";
+  const requeueLost = (n, why) => {
+    runRecs.delete(n);
+    if (pending.includes(n) || results.has(n)) return;
+    pending.unshift(n); enqueued.set(n, now());
+    update({ issue: n, outcome: "deferred", code: "run.interrupted", pr: null, cost_usd: 0, minutes: 0, detail: `interrupted: ${interruptCause}; ${why}; requeued` });
+    decided({ issue: n, what: "requeued (interrupted)", why, alternative: "leave it pending silently" });
+    try { Promise.resolve(onInterrupted?.(n, { cause: interruptCause, why })).catch(() => {}); } catch { /* best effort */ }
+  };
+  const adoptErrors = new Map(); // #5204: issue -> adopt error message, kept for the interrupted row
   const adopting = [...runRecs].map(([n, rec]) => {
-    if (!adopt || !(rec?.pid || rec?.handle)) return { n, rec, live: false, p: Promise.resolve(null) };
+    // #5204: a remote record that lost its handle still adopts: the remote seam finds the sandbox through its ledger.
+    if (!adopt || !(rec?.pid || rec?.handle || rec?.remote)) return { n, rec, live: false, p: Promise.resolve(null) };
     let onLive;
     const isLive = new Promise((r) => { onLive = () => r(true); });
-    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch(() => null);
+    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
     return { n, rec, p, first: Promise.race([p.then(() => false), isLive]) };
   });
   for (const a of adopting) a.live = a.first ? await a.first : false;
@@ -1002,12 +1024,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       track(n, p.then((r) => {
         if (r) return settle(n, r, rec, checked.get(n) ?? null);
         if (halted) return; // #4454: kept for the next resume
-        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n); save(); // ended without a result after all
+        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n, "the adopted lane ended without a result"); save(); // ended without a result after all
       }));
       continue;
     }
     const r = await p;
-    if (!r) { requeueLost(n); continue; }
+    if (!r) {
+      const why = adoptErrors.get(n) ?? (!adopt || !(rec?.pid || rec?.handle || rec?.remote) ? "no adoptable pid or handle" : "the lane ended without a result");
+      requeueLost(n, why); continue;
+    }
     if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
     else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle
     track(n, Promise.resolve(r).then((x) => settle(n, x, rec, checked.get(n) ?? null)));
@@ -1110,6 +1135,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     for (const e of fresh) {
       requeueApplied.add(requeueKey(e));
       const row = results.get(e.issue);
+      // #5203: a quota-paused issue (pending, no row) is released: its notBefore and the pool hold go, so the next grant admits it.
+      if (!row && pending.includes(e.issue) && quota.has(e.issue) && !running.has(e.issue)) {
+        notBefore.delete(e.issue);
+        try { const pool = remote?.identity?.(); if (pool) holds.clear(pool); } catch { /* fail-open */ }
+        decided({ issue: e.issue, what: `released quota pause of #${e.issue} by ${e.by ?? "operator"} (forgedock orchestrate --requeue)`, why: e.reason || "operator decision", alternative: "wait for the account reset" });
+        update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (quota pause released)` });
+        n++;
+        continue;
+      }
       if (!row || !REQUEUABLE(row.outcome) || running.has(e.issue)) continue;
       const moved = [e.issue], priors = new Map([[e.issue, row]]);
       results.delete(e.issue);
@@ -1471,6 +1505,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
+      if (getRequeued && pending.some((n) => quota.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
       if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick

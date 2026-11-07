@@ -33,6 +33,12 @@
  * Exit reasons (#4503): every exit logs a line: `idle, exiting`, `exiting (<signal>|uncaught: …)`, `lost lock|socket …,
  * exiting` (checked every `lockCheckMs`: the lock no longer holds this pid, or the socket is gone; nothing it does not own
  * is removed), then `exited (code N)`. Taking over a dead owner's lock is logged, so a SIGKILLed daemon leaves a trace.
+ * Upgrade handover (#5204): the same `lockCheckMs` tick compares `installedVersion()` (the `version` of the package.json of
+ * this install) with the version loaded at start. When the install moved (`npm i -g`, `forgedock update`) it logs
+ * `schedd: install moved v<old> → v<new>; handing over` once, runs `close()` (no admission, lanes keep running, lock and
+ * socket released), then `respawn()`: a fresh daemon from the new install when no systemd unit runs it (`Restart=always`
+ * restarts an active unit). The new daemon resumes every batch; each lane it cannot adopt is requeued with an
+ * `interrupted: upgrade vX→vY` row (orchestrate.mjs).
  * `runBatch({argv, cwd, env, sink, keepBreaker, signal})` is injected (engine-cli `runBatch`); `sink` gets `batch(b)`, `row(r)`, `line(text)`.
  */
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
@@ -148,8 +154,10 @@ function takeLock(lock, pid, alive) {
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
   lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
-  hostLoad = liveOverload() } = {}) {
+  hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined } = {}) {
   const p = scheddPaths(dir);
+  // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
+  const respawnFn = respawn !== undefined ? respawn : () => { if (!["active", "activating"].includes(unitState())) defaultSpawn({ dir }); };
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
   if (lock?.took) log(`schedd: took over the lock of dead pid ${lock.took} (it exited without a clean shutdown)`);
@@ -383,9 +391,18 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (!hosted.size && !conns.size && Date.now() - lastActive >= idleMs) { log("schedd: idle, exiting"); close(); }
   }, Math.min(idleMs, 30_000));
   idleTimer.unref?.();
+  // #5204: the version this daemon runs; an install that moves under it hands over on the next tick.
+  const versionOf = () => { try { return installedVersion?.() ?? null; } catch { return null; } };
+  const loadedVersion = versionOf();
   // #4503: a daemon whose lock or socket was taken stops (its batches stay resumable) instead of running unreachable.
   const lockTimer = setInterval(() => {
     if (closing) return;
+    const now = loadedVersion ? versionOf() : null;
+    if (now && now !== loadedVersion) {
+      log(`schedd: install moved v${loadedVersion} → v${now}; handing over`);
+      close().then(() => { try { respawnFn?.(); } catch (e) { log(`schedd: respawn failed: ${e?.message ?? e}`); } });
+      return;
+    }
     let owner = NaN;
     try { owner = parseInt(readFileSync(p.lock, "utf8"), 10); } catch { /* gone */ }
     if (owner !== pid) { keepSock = true; log(`schedd: lost lock (owner ${Number.isInteger(owner) ? `pid ${owner}` : "none"}), exiting`); close(); }
@@ -431,6 +448,11 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }
   }
   return { running: true, pid, sock: p.sock, close, closed };
+}
+
+/** #5204: `version` of the package.json of this install (../../package.json), null when it cannot be read. */
+export function readInstalledVersion({ file = fileURLToPath(new URL("../../package.json", import.meta.url)) } = {}) {
+  try { return String(JSON.parse(readFileSync(file, "utf8")).version ?? "") || null; } catch { return null; }
 }
 
 /**
