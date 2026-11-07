@@ -359,6 +359,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `conformance-calibrate.mjs --events <run-log>` (#4929) reports the survived-mutation
    share (from `REQUIREMENT_MUTATION_SURVIVED` events) and the false-survived rate
    (labelled `conformance.mutation_survived` cases) for promotion.
+   Host routing (#5186): a `[bucket:host]` item whose text is post-promotion (`POSTPROM_ERE`) and has no external need
+   or `before|pre-promotion` guard goes to the `post-deploy` rollup (deduped on normalized text across parents), not
+   `follow-up (host)` (`host_route` in `file-deferred-followups.sh`, mirrored by `hostRoute` in `conformance.mjs`).
+   Bare `billing` is no longer an external need (reading billing rows is read-only; writes still match).
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).

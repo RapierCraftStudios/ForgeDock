@@ -1291,7 +1291,7 @@ export function bucketProblems(r) {
 const POST_PROMOTION_RE = /(?:after|post)[- ]?(?:promotion|release|deploy)|in production after|production[- ]verif|promot(?:e|ion)|rollout|purge|deploy[- ]time/i;
 export const READONLY_PROD_RE = /\bssh\s+[\w.-]*-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor\b|\bread[- ]only\b[^.]{0,40}\bprod(?:uction)?\b|\bprod(?:uction)?\b[^.]{0,30}\b(?:query|queries|capture|telemetry|logs?)\b/i;
 /** An item that truly needs the outside world (or a write to production) stays external even when it also reads production. */
-export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|billing|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)\b/i;
+export const EXTERNAL_NEED_RE = /credential|secret|api[- ]?key|token|password|passphrase|ssh[- ]?keys?\b|private[- ]key|\blogin\b|\bsudo\b|spend|budget|purchase|payment|account|third[- ]party|vendor|customer|contract sign|legal|\b(?:delete|drop|truncate|wipe|destroy|modify|migrate|write|update|restart|rotate|remove|grant|alter)\b/i;
 /**
  * #5078: where an owner deferral goes. `owner:orchestrator`, `owner:promote:*` or post-promotion text -> post-deploy (the
  * rollup); read-only production data or capture (with no credential/spend/account/third-party/customer need) -> host; else external (credentials, spend, an account, a third party or a customer).
@@ -1304,11 +1304,17 @@ export function ownerRoute(r) {
   if (POST_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text)) return "post-deploy";
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
 }
+const PRE_PROMOTION_RE = /(?:before|pre)[- ]?(?:promotion|release|deploy)/i;
+/** #5186: an explicit host deferral that is post-promotion text (and needs nothing external) joins the release rollup; work needed before promotion stays host. Mirrored in scripts/file-deferred-followups.sh host_route. */
+function hostRoute(r) {
+  const text = `${r?.bucket ?? ""} ${r?.why ?? ""}`;
+  return POST_PROMOTION_RE.test(text) && !PRE_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "post-deploy" : "host";
+}
 /** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
 export function followupClass(r) {
   const k = bucketKind(r?.bucket);
   if (k === "owner") return r?.class === "ops" ? "ops" : ownerRoute(r);
-  if (k === "host") return "host";
+  if (k === "host") return hostRoute(r);
   if (k === "new-issue") return r?.class && r.class !== "post-deploy" && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "engineering";
   if (k) return "post-deploy";
   return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
