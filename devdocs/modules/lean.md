@@ -2718,3 +2718,19 @@ Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entr
 - `bin/stats/depth.mjs` (`forgedock stats --depth`): joins each run-log slice's LIGHT_ELIGIBILITY with its outcome (merged/needs-human, first pass, cost, wall/model time, review findings, conformance failures) and post-merge defect signals over gh (reopen, revert, or a fix PR touching the same non-test files within 7 days; a gh failure is n/a, never false). Grouped by verdict and by every reason/signal code.
 - Promotion rule (#5052): treatment = light|upgraded lanes, control = eligible full lanes in the same size buckets; cost ratio <= 1.2, wall/model <= 1.3, defect rate <= control; any cell under `--min-n` (10) is `insufficient data`. Flipping `lean.light.mode: on` stays a config decision.
 Tests: `light.test.mjs` "#5209", `lean.test.mjs` "#4450 light lane" (#5209 cases), `bin/stats/depth.test.mjs`.
+
+## Conformance outcomes (#5210)
+
+`forgedock stats --conformance-outcomes` (`bin/stats/conformance-outcomes.mjs`) reads whether the conformance gate earns its
+blocks. For each merged lane PR, it joins the PR's last verdict to four post-merge defect signals inside `--window-days` (default 7):
+reverted, closing issue reopened, cited by a later fix, and a later fix touching the same hunks. The verdict is the mode and
+failure kinds from `query.mjs` `conformanceVerdicts`, read from FORGE:TELEMETRY, the run logs and the batch rows.
+How to read it:
+- Each row compares nonconforming-merged with conforming-merged as `defects/n rate [Wilson 95% interval]`. Rows are per repo,
+  per mode and per failure kind. A cell under min n (default 20) is `n/a`.
+- The last line is the conclusion. "higher defect rate" means the intervals do not overlap. Otherwise it says "no higher
+  defect rate shown" or "insufficient data".
+- A kind with a higher rate is a candidate to stay enforced. Kinds with no difference are candidates to narrow or to replace
+  with property checks (#4149). That decision is separate work.
+- Read only: one GraphQL search per 100 PRs plus local `git blame` (same-hunks is `null` outside a clone of the repo). No
+  lane-path cost, no LLM. Definitions: `docs/STATS.md`.

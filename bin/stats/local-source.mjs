@@ -92,6 +92,10 @@ export function summariseLog(events, fallbackIssue = null) {
     builderRoute: routeOf(term, ev),
     conformanceRound: builderCalls.some((e) => e.trigger === "conformance" || e.trigger === "review"),
     shadowWould: typeof term?.shadow_would === "string" ? term.shadow_would : null,
+    // #5210: the per-PR verdict join of --conformance-outcomes (pr, mode, and the last verdict's failure codes)
+    pr: Number.isSafeInteger(term?.pr) ? term.pr : null,
+    conformanceMode: term?.conformance_mode === "enforce" || term?.conformance_mode === "shadow" ? term.conformance_mode : null,
+    conformanceFailures: lastConformanceFailures(ev),
     reachedReview: reviewCalls > 0 || typeof term?.shadow_would === "string",
     // #4394: routes of earlier runs in this log that ended merged: a later run of the same issue is post-merge rework
     reworkedMerges: earlierMergedRoutes(events.slice(0, s)),
@@ -102,6 +106,13 @@ export function summariseLog(events, fallbackIssue = null) {
     laneProfile: profileOf(usage),
     baselines: usage.reduce((acc, e) => { if (Number.isFinite(e.baseline_tokens)) (acc[e.phase ?? "other"] ??= []).push(e.baseline_tokens); return acc; }, {}),
   };
+}
+
+/** #5210: failure codes of the slice's last CONFORMANCE_SHADOW event, else its last CONFORMANCE event; null when neither ran. */
+function lastConformanceFailures(ev) {
+  const pick = (name) => [...ev].reverse().find((e) => e.event === name && Array.isArray(e.failures));
+  const e = pick("CONFORMANCE_SHADOW") ?? pick("CONFORMANCE");
+  return e ? e.failures.filter((f) => typeof f === "string" && f) : null;
 }
 
 /** #4436: the one lane_profile of the usage records, "mixed" when they differ, null when none carries it. */
