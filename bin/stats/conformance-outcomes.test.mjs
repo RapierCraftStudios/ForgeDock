@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, wilson, cites, reverts, sameHunks, INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, verdictOf } from "./query.mjs";
 import { summariseLog } from "./local-source.mjs";
 import { buildReport, parseArgs, runStats } from "./index.mjs";
@@ -100,7 +100,7 @@ describe("conformance outcomes: 2x2 and conclusion (#5210 R2)", () => {
     assert.equal(r.overall.nonconforming.n, 19);
     assert.equal(r.overall.nonconforming.rate, null);
     assert.equal(r.overall.nonconforming.insufficient, true);
-    assert.equal(r.conclusion, INSUFFICIENT);
+    assert.equal(r.conclusion, OUTCOME_INSUFFICIENT);
     const text = renderConformanceOutcomes(r);
     assert.match(text, /\| all \| 10\/19 n\/a \|/);
     assert.match(text.split("\n").at(-1), /^conclusion: insufficient data$/);
@@ -170,7 +170,7 @@ describe("conformance outcomes: read only (#5210 R3)", () => {
     assert.equal(rep.window_days, 5);
     assert.equal(rep.sources.merged_prs, 120);
     assert.equal(rep.sources.graphql_calls, 2);
-    assert.equal(rep.conclusion, INSUFFICIENT);
+    assert.equal(rep.conclusion, OUTCOME_INSUFFICIENT);
     assert.equal(calls.filter((a) => a[1] === "graphql").length, 2);
     assert.ok(calls.every((a) => !isWrite(a)), "no GitHub write");
   });

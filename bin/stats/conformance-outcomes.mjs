@@ -18,7 +18,7 @@ export const DEFAULT_WINDOW_DAYS = 7;
 export const DEFAULT_LOOKBACK_DAYS = 30;
 export const PAGE_SIZE = 100;
 export const SIGNALS = ["reverted", "reopened", "cited", "same_hunks"];
-export const INSUFFICIENT = "insufficient data";
+export const OUTCOME_INSUFFICIENT = "insufficient data";
 export const HIGHER = "nonconforming merges show a higher defect rate";
 export const NOT_HIGHER = "no higher defect rate shown for nonconforming merges";
 const DAY = 86400000;
@@ -43,7 +43,7 @@ export function cell(rows, minN) {
 
 /** "higher" when the nonconforming interval lies wholly above the conforming one; "insufficient data" when a cell is under min n. */
 export function conclude(nonconforming, conforming) {
-  if (nonconforming.insufficient || conforming.insufficient || !nonconforming.interval || !conforming.interval) return INSUFFICIENT;
+  if (nonconforming.insufficient || conforming.insufficient || !nonconforming.interval || !conforming.interval) return OUTCOME_INSUFFICIENT;
   return nonconforming.interval[0] > conforming.interval[1] ? HIGHER : NOT_HIGHER;
 }
 
