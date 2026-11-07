@@ -4,5 +4,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "R2-remote-hotspot-config": {
+    "run": "test \"$(gh search issues 'hotspot_config_missing' --match comments --updated \">=$(date -u -d '1 day ago' +%F)\" --json number --jq length)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

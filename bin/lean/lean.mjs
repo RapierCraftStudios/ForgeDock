@@ -1309,10 +1309,14 @@ export async function runCore(o) {
       try { return selfCheckState(JSON.parse(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)), await worktreeFingerprint({ git, base })); } catch { return "skipped"; }
     };
     /** forge#4195: scripts/hotspots.sh facts in the worktree, or null (no io.hotspots, script failure): never fails a run. */
+    let hotCfgNoted = false;
     const hotspotsOf = async (args) => {
       if (!io.hotspots) return null;
-      const h = await io.hotspots({ cwd: wt, ...args }).catch(() => null);
-      return h && typeof h === "object" && Array.isArray(h.files) ? h : null;
+      const config = existsSync(join(cwd, "forge.yaml")) ? join(cwd, "forge.yaml") : null; // #5163: forge.yaml is often gitignored, so the worktree has none
+      const h = await io.hotspots({ cwd: wt, config, ...args }).catch(() => null);
+      if (!(h && typeof h === "object" && Array.isArray(h.files))) return null;
+      if (h.config_source === null && !hotCfgNoted) { hotCfgNoted = true; T.anomalies.push("hotspot_config_missing: no forge.yaml readable for the hotspot gate (exclude_globs and generated_paths not applied; defaults used)"); }
+      return h;
     };
     /** #4271: a bug lane with lean.repro_test on; refactor:split lanes never set it (no plan call, no repro_test). */
     const reproOn = () => reproTest !== "off" && isBugIssue(iss?.labels);

@@ -5,12 +5,14 @@
 # hotspots.sh — deterministic size and churn facts for named files (forge#4195). No LLM, no network: git + wc + jq,
 # yq (optional) only to read forge.yaml. Run from the repo root.
 #
-# Usage: hotspots.sh [--base <ref>] [--] <path>...
+# Usage: hotspots.sh [--base <ref>] [--config <forge.yaml>] [--] <path>...
+# Config file (#5163, forge.yaml is often gitignored so a lane worktree has none): --config, then $FORGE_CONFIG, then ./forge.yaml;
+#   output config_source is the file read, or null (defaults used).
 # Config: forge.yaml maintenance.hotspot {enabled, file_lines, growth_lines, exclude_globs}; defaults true/2000/150/[] (lockfiles are always excluded)
 #   (also when forge.yaml or yq is missing); maintenance.generated_paths (forge#4519): shell globs of generated,
 #   bot-owned files, default [].
 # Output (stdout, one JSON object):
-#   {"enabled","file_lines","growth_lines","generated_paths",
+#   {"enabled","file_lines","growth_lines","generated_paths","config_source",
 #    "files":[{path,lines,commits_90d,hotspot,over,generated,excluded,base_lines,growth}]}
 # lines = `wc -l` of the working-tree file (0 when missing); commits_90d = `git rev-list --count --since=90.days HEAD`;
 # hotspot = lines × commits_90d; over = lines > file_lines; generated = linguist-generated set by .gitattributes, a
@@ -23,10 +25,11 @@ set -uo pipefail
 
 die() { echo "hotspots: $*" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || die "jq is required"
-BASE=""
+BASE=""; CONFIG_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) [ $# -ge 2 ] && [ -n "$2" ] || die "usage: hotspots.sh [--base <ref>] [--] <path>..."; BASE="$2"; shift 2 ;;
+    --config) [ $# -ge 2 ] && [ -n "$2" ] || die "usage: hotspots.sh [--base <ref>] [--config <forge.yaml>] [--] <path>..."; CONFIG_ARG="$2"; shift 2 ;;
     --) shift; break ;;
     -*) die "unknown option: $1" ;;
     *) break ;;
@@ -34,11 +37,12 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- config: maintenance.hotspot as JSON, {} when unreadable ----
-CFG='{}'; GEN_CFG='[]'
-if [ -f forge.yaml ] && command -v yq >/dev/null 2>&1; then
-  c=$(yq -o=json '.maintenance.hotspot // {}' forge.yaml 2>/dev/null) || c=""
+CFG='{}'; GEN_CFG='[]'; CONFIG_FILE="${CONFIG_ARG:-${FORGE_CONFIG:-forge.yaml}}"; CONFIG_SRC=""
+if [ -f "$CONFIG_FILE" ] && command -v yq >/dev/null 2>&1; then
+  CONFIG_SRC="$CONFIG_FILE"
+  c=$(yq -o=json '.maintenance.hotspot // {}' "$CONFIG_FILE" 2>/dev/null) || c=""
   printf '%s' "$c" | jq -e 'type == "object"' >/dev/null 2>&1 && CFG="$c"
-  g=$(yq -o=json '.maintenance.generated_paths // []' forge.yaml 2>/dev/null) || g=""
+  g=$(yq -o=json '.maintenance.generated_paths // []' "$CONFIG_FILE" 2>/dev/null) || g=""
   printf '%s' "$g" | jq -e 'type == "array"' >/dev/null 2>&1 && GEN_CFG="$g"
 fi
 GEN_CFG=$(printf '%s' "$GEN_CFG" | jq -c '[.[] | strings | select(length > 0)]')
@@ -48,7 +52,7 @@ CFG=$(printf '%s' "$CFG" | jq -c '
     exclude_globs: ([(.exclude_globs // [])[]? | strings]) }')
 ENABLED=$(printf '%s' "$CFG" | jq -r '.enabled')
 FILE_LINES=$(printf '%s' "$CFG" | jq -r '.file_lines')
-head_json() { printf '%s' "$CFG" | jq -c --argjson files "$1" --argjson gen "$GEN_CFG" '{enabled, file_lines, growth_lines, generated_paths: $gen, files: $files}'; }
+head_json() { printf '%s' "$CFG" | jq -c --argjson files "$1" --argjson gen "$GEN_CFG" --arg src "$CONFIG_SRC" '{enabled, file_lines, growth_lines, generated_paths: $gen, config_source: (if $src == "" then null else $src end), files: $files}'; }
 [ "$ENABLED" = true ] || { head_json '[]'; exit 0; }
 
 MB=""
