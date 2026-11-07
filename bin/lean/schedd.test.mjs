@@ -80,6 +80,8 @@ await d.closed;
   // (liveLaneCap derives the cap from them). Run the clients from h.work via h.inWork to use it.
   writeFileSync(join(work, "forge.yaml"), "engine:\n  admission_enabled: false\n");
   h.inWork = async (fn) => { const prev = process.cwd(); process.chdir(work); try { return await fn(); } finally { process.chdir(prev); } };
+  // #5204: a whole-test h.inWork for tests that start clients in the background (and a child client); cleanup restores the cwd.
+  h.enter = () => { h.prevCwd ??= process.cwd(); process.chdir(work); };
   h.launched = () => readFileSync(h.launches, "utf8").trim().split("\n").filter(Boolean).map(Number).sort();
   h.lanePids = () => listBatches(h.root).flatMap((id) => Object.values(openBatch(h.root, id).store.load()?.running ?? {}).map((r) => r.pid).filter(Boolean));
   h.stubPids = () => (existsSync(h.lanePidFile) ? readFileSync(h.lanePidFile, "utf8").trim().split("\n").filter(Boolean).map(Number) : []);
@@ -88,6 +90,7 @@ await d.closed;
     for (const pid of h.stubPids()) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
   };
   h.cleanup = async () => {
+    if (h.prevCwd) { process.chdir(h.prevCwd); h.prevCwd = undefined; }
     if (existsSync(h.work)) writeFileSync(h.release, "");
     h.reap();
     await until(() => h.stubPids().every((pid) => !isLaneAlive(pid, null)), 5000).catch(() => {});
@@ -145,7 +148,7 @@ describe("schedd host scheduler (#4192)", () => {
   });
 
   it("a client that disconnects does not stop the batch; --resume reattaches, and replays the report once done", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       await h.daemon();
       const clientScript = join(h.work, "client.mjs");
@@ -174,7 +177,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("a daemon restart resumes the batch from state and re-adopts its live lanes without duplicate launches", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       const d1 = await h.daemon();
       const first = capture(() => orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], h.client)).then(() => null, (e) => e);
@@ -303,7 +306,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       const d = await h.daemon();
       await withRoot(h, () => capture(async () => {
@@ -514,7 +517,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("#4454: kill -TERM stops both batches and exits 143 within the bound; lanes keep running; the next daemon resumes and adopts them", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       const d1 = await h.daemon();
       const { lines } = await withRoot(h, () => capture(async () => {
@@ -657,7 +660,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   it("#4503: test runs never resolve ~/.forge/sched, and teardown leaves no live stub lane", async () => {
     assert.notEqual(schedDir(), join(homedir(), ".forge", "sched"));
     assert.ok(schedDir().startsWith(tmpdir()), schedDir());
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     let pids = [], a;
     try {
       await h.daemon();
