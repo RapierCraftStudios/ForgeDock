@@ -22,6 +22,9 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { batchRoot } from "../lean/batch.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
+import { conformanceVerdicts, readBatchRows } from "./query.mjs";
+import { gitProbes } from "./compounding.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +34,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
+       forgedock stats --conformance-outcomes [--repo <owner/repo>] [--since <date>] [--window-days 7] [--min-n 20] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
@@ -93,6 +97,14 @@ Compounding (forge#4696; GitHub + git of the current clone, no model):
                         bucket; n/a where no data is recorded. Pair with --efficiency --compare for $/merge and turns/merge
   --bucket <list>       lane-age bucket upper bounds (default 100,500: lanes 1-100, 101-500, 501+)
 
+Conformance outcomes (forge#5210; read only: one GraphQL search per 100 merged PRs, FORGE:TELEMETRY, local run and batch logs, git):
+  --conformance-outcomes  each merged lane PR's last conformance verdict (mode, failure kinds) joined to post-merge defect
+                        signals inside the window (reverted, closing issue reopened, cited by a later fix, a later fix
+                        touching the same hunks via local git blame); defect rate, n and a Wilson 95% interval of
+                        nonconforming-merged vs conforming-merged per repo, mode and failure kind; n/a under --min-n
+                        (default ${DEFAULT_OUTCOME_MIN_N} per cell); the last line is the conclusion or "insufficient data"
+  --window-days N       post-merge defect window in days (default ${DEFAULT_WINDOW_DAYS}); --since defaults to 30 days ago
+
 Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
   --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
                         (mid, mid->top escalated, top) and routing class; --json for JSON
@@ -107,7 +119,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, conformanceOutcomes: false, windowDays: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -130,6 +142,8 @@ export function parseArgs(argv) {
     else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
+    else if (name === "--conformance-outcomes") o.conformanceOutcomes = true;
+    else if (name === "--window-days") { const v = take(); if (!/^[1-9]\d*$/.test(v)) throw new Error("--window-days must be a positive integer"); o.windowDays = Number(v); }
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--pool") o.pool = true;
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
@@ -158,6 +172,7 @@ export function parseArgs(argv) {
   if (o.windows && !o.efficiency && !o.pool && !o.compounding) throw new Error("--batch and --window need --efficiency");
   if (o.bucket && !o.compounding) throw new Error("--bucket needs --compounding");
   if ((o.compare || o.offline) && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
+  if (o.windowDays != null && !o.conformanceOutcomes) throw new Error("--window-days needs --conformance-outcomes");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
   return o;
 }
@@ -305,6 +320,7 @@ export async function buildReport(opts, deps = {}) {
     return { repo, sources: { local: { runs: runs.length } }, query: { lane_profile: laneProfileReport(runs, { issues: opts.issues }) } };
   }
   const bound = sinceToTimestamp(opts.since, releaseTimes);
+  if (opts.conformanceOutcomes && !bound.since) bound.since = new Date((deps.now?.() ?? Date.now()) - DEFAULT_LOOKBACK_DAYS * 86400000).toISOString().replace(/\.\d{3}Z$/, "Z"); // #5210: bounded crawl
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
     onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
@@ -312,6 +328,18 @@ export async function buildReport(opts, deps = {}) {
     const e = opts.edge ? parseEdge(opts.edge) : null;
     const query = { ...(e ? { edge: { ...e, prs: edgeQuery(gh.records, e.from, e.to) } } : {}), ...(opts.milestone ? { mix: verdictMix(gh.records, gh.items, opts.milestone) } : {}) };
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
+  }
+  if (opts.conformanceOutcomes) { // forge#5210: read only; GraphQL search per 100 PRs + the telemetry records above + local logs + git
+    const now = deps.now?.() ?? Date.now();
+    const input = await (deps.gatherConformanceOutcomes ?? gatherConformanceOutcomes)({ repo, gh: deps.gh ?? defaultGh, since: bound.since, now });
+    const verdicts = conformanceVerdicts({ records: gh.records,
+      runs: opts.local ? (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo) : [],
+      batchRows: opts.local ? (deps.batchRows ?? readBatchRows({ batchRoot: deps.batchRoot ?? batchRoot(env), repo })) : [] });
+    const git = deps.git !== undefined ? deps.git : resolveRepo(null)?.toLowerCase() === repo.toLowerCase() ? gitProbes(process.cwd()) : null;
+    const report = conformanceOutcomes({ prs: input.prs, verdicts, minN: opts.minNSet ? opts.minN : DEFAULT_OUTCOME_MIN_N, windowDays: opts.windowDays ?? DEFAULT_WINDOW_DAYS,
+      now, git, graphqlCalls: input.graphqlCalls, since: input.since });
+    if (input.capped) report.sources.capped = true;
+    return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { conformance_outcomes: report } };
   }
   const model = toModel(repo, gh);
   if (opts.compounding) { // forge#4696: GitHub records + guards + git, no model
@@ -366,6 +394,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
+    if (report.query?.conformance_outcomes && !opts.json) { process.stdout.write(`${renderConformanceOutcomes(report.query.conformance_outcomes)}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {

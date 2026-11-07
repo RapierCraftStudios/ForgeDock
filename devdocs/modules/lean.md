@@ -2706,3 +2706,19 @@ its held subtree to pending in dependency order. The report prints one
 - schedd `status` adds `host` (the `hostLoad` probe snapshot, null when it throws); `forgedock schedd status` prints `schedd: host_overloaded (...)` or `schedd: host load X.X/core (threshold T)`; `forgedock status` has a `host` row (`unknown` on any failure).
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
+
+## Conformance outcomes (#5210)
+
+`forgedock stats --conformance-outcomes` (`bin/stats/conformance-outcomes.mjs`) reads whether the conformance gate earns its
+blocks. For each merged lane PR, it joins the PR's last verdict to four post-merge defect signals inside `--window-days` (default 7):
+reverted, closing issue reopened, cited by a later fix, and a later fix touching the same hunks. The verdict is the mode and
+failure kinds from `query.mjs` `conformanceVerdicts`, read from FORGE:TELEMETRY, the run logs and the batch rows.
+How to read it:
+- Each row compares nonconforming-merged with conforming-merged as `defects/n rate [Wilson 95% interval]`. Rows are per repo,
+  per mode and per failure kind. A cell under min n (default 20) is `n/a`.
+- The last line is the conclusion. "higher defect rate" means the intervals do not overlap. Otherwise it says "no higher
+  defect rate shown" or "insufficient data".
+- A kind with a higher rate is a candidate to stay enforced. Kinds with no difference are candidates to narrow or to replace
+  with property checks (#4149). That decision is separate work.
+- Read only: one GraphQL search per 100 PRs plus local `git blame` (same-hunks is `null` outside a clone of the repo). No
+  lane-path cost, no LLM. Definitions: `docs/STATS.md`.

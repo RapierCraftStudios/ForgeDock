@@ -8,6 +8,10 @@
  *   run_terminal: reason, pr, milestone, conformance_mode, shadow_would
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { listBatches } from "../lean/batch.mjs";
+
 const list = (v) => (typeof v === "string" && v !== "none" ? v.split(",").filter(Boolean) : []);
 const day = (ts) => (typeof ts === "string" ? ts.slice(0, 10) : "unknown");
 
@@ -274,4 +278,69 @@ export function renderLaneProfiles(rep) {
   return `| Profile | Phase | Sessions | Median baseline | Mean baseline |\n| --- | --- | --- | --- | --- |\n${base.length ? base.join("\n") : "| none | | 0 | | |"}\n\n`
     + `| Profile | Runs | Conformance rate (reviewed) | Shadow would-block |\n| --- | --- | --- | --- |\n${conf.length ? conf.join("\n") : "| none | 0 | | |"}\n\n`
     + `Issues with a finished run under every profile: ${rep?.issues_in_all?.length ? rep.issues_in_all.map((i) => `#${i}`).join(", ") : "none"}`;
+}
+
+/**
+ * #5210: the last conformance verdict of each lane PR, for `forgedock stats --conformance-outcomes`. Sources, latest wins:
+ *   FORGE:TELEMETRY `run_terminal` (pr, conformance_mode, shadow_would) plus the issue's last `conformance_shadow` failures;
+ *   local run-log summaries (local-source summariseLog: pr, conformanceMode, shadowWould, conformanceFailures);
+ *   batch report rows (`conformance: {mode, would, kinds}`, written by orchestrate from the lane result).
+ * would "conforms" is conforming, any other would is nonconforming (its failure codes are the kinds); an enforce merge with
+ * no would passed the enforced gate, so it conforms. A shadow run with no would never reached the gate: no verdict.
+ * Returns a Map keyed `pr:<n>` and `issue:<n>` of {issue, pr, mode, state, kinds, ts, source}.
+ */
+const codes = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : list(v));
+export function verdictOf({ mode, would, merged, failures }) {
+  const m = mode === "enforce" || mode === "shadow" ? mode : null;
+  if (typeof would === "string" && would) return { mode: m, state: would === "conforms" ? "conforms" : "nonconforming", kinds: would === "conforms" ? [] : [...new Set(codes(failures))].sort() };
+  if (m === "enforce" && merged) return { mode: m, state: "conforms", kinds: [] };
+  return null;
+}
+export function conformanceVerdicts({ records = [], runs = [], batchRows = [] } = {}) {
+  const out = new Map();
+  const put = (v) => {
+    if (!v) return;
+    for (const k of [v.pr != null ? `pr:${v.pr}` : null, v.issue != null ? `issue:${v.issue}` : null]) {
+      if (!k) continue;
+      const cur = out.get(k);
+      if (!cur || String(v.ts ?? "") >= String(cur.ts ?? "")) out.set(k, v);
+    }
+  };
+  const int = (x) => (Number.isSafeInteger(Number(x)) && Number(x) > 0 ? Number(x) : null);
+  for (const row of batchRows) {
+    const c = row?.conformance;
+    if (!c || typeof c !== "object") continue;
+    const v = verdictOf({ mode: c.mode, would: c.would, merged: row.outcome === "merged", failures: c.kinds });
+    if (v) put({ issue: int(row.issue), pr: int(row.pr), ...v, ts: row.ts ?? row.created ?? "", source: "batch" });
+  }
+  for (const r of runs) {
+    if (!r?.finished) continue;
+    const v = verdictOf({ mode: r.conformanceMode, would: r.shadowWould, merged: r.reason === "merged", failures: r.conformanceFailures });
+    if (v) put({ issue: int(r.issue), pr: int(r.pr), ...v, ts: r.endTs ?? "", source: "local" });
+  }
+  const shadows = new Map();
+  for (const r of records) {
+    if (r?.event !== "conformance_shadow" || r.issue == null) continue;
+    const cur = shadows.get(r.issue);
+    if (!cur || String(r.ts ?? "") >= String(cur.ts ?? "")) shadows.set(r.issue, r);
+  }
+  for (const r of records) {
+    if (r?.event !== "run_terminal") continue;
+    const sh = shadows.get(r.issue);
+    const v = verdictOf({ mode: r.conformance_mode, would: r.shadow_would, merged: r.reason === "merged", failures: sh && String(sh.ts ?? "") <= String(r.ts ?? "￿") ? sh.failures : null });
+    if (v) put({ issue: int(r.issue), pr: int(r.pr), ...v, ts: r.ts ?? "", source: "github" });
+  }
+  return out;
+}
+
+/** #5210: report.json rows of the repo's local batches, each stamped with its batch's plan.created as `ts` (no network). */
+export function readBatchRows({ batchRoot, repo = null } = {}) {
+  const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
+  const rows = [];
+  for (const id of batchRoot && existsSync(batchRoot) ? listBatches(batchRoot) : []) {
+    const dir = join(batchRoot, id), plan = readJson(join(dir, "plan.json")) ?? {};
+    if (repo && plan.repo && String(plan.repo).toLowerCase() !== String(repo).toLowerCase()) continue;
+    for (const row of readJson(join(dir, "report.json"))?.rows ?? []) if (row && typeof row === "object") rows.push({ ...row, ts: typeof plan.created === "string" ? plan.created : "" });
+  }
+  return rows;
 }
