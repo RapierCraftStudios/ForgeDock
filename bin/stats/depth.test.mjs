@@ -1,0 +1,133 @@
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { INSUFFICIENT, buildDepth, depthReport, depthRows, gatherDefects, promotion, renderDepth } from "./depth.mjs";
+import { parseArgs, HELP } from "./index.mjs";
+
+const T0 = Date.parse("2026-10-01T00:00:00Z"), MIN = 60000, DAY = 86400000;
+const iso = (ms) => new Date(ms).toISOString();
+
+/** One synthetic RUN_START..RUN_TERMINAL slice. */
+function slice({ issue = 1, repo = "o/r", at = T0, verdict = "eligible", reasons = [], signals = ["repro"], shape = "full", reason = "merged",
+  cost = 1, wall = 30 * MIN, model = 25 * MIN, size = "S", pr = 100 + issue, rework = false, conformance = [], verifier = 0, elig = true } = {}) {
+  const ev = [{ event: "RUN_START", issue, repo, ts: iso(at) }];
+  if (elig) ev.push({ event: "LIGHT_ELIGIBILITY", mode: "shadow", verdict, light: false, reasons: reasons.map((code) => ({ code, detail: "" })), signals: signals.map((code) => ({ code, detail: "" })) });
+  if (shape === "light") ev.push({ event: "LIGHT_DONE" });
+  if (shape === "upgraded") ev.push({ event: "LIGHT_UPGRADE", reasons: [] });
+  ev.push({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", trigger: "build", cost_usd_delta: cost });
+  if (rework) ev.push({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", trigger: "review", cost_usd: 0 });
+  for (const c of conformance) ev.push({ event: "CONFORMANCE", state: c.state, failures: c.failures });
+  if (verifier) ev.push({ event: "VERIFIER", findings: verifier });
+  ev.push({ event: "PR_OPENED", pr });
+  ev.push({ event: "RUN_TERMINAL", reason, ts: iso(at + wall), wall_ms: wall, model_ms: model, turns: { size } });
+  return ev;
+}
+
+test("depthRows: one row per slice with LIGHT_ELIGIBILITY and RUN_TERMINAL, filtered by repo and since", () => {
+  const ev = [...slice({ issue: 7, reasons: ["hotspot"], verdict: "ineligible", rework: true, conformance: [{ state: "fails", failures: [1, 2] }], verifier: 3 }),
+    ...slice({ issue: 7, elig: false }), ...slice({ issue: 7, at: T0 + DAY, shape: "light", reason: "needs-human", repo: "O/R" })];
+  const rows = depthRows(ev, { repo: "o/r" });
+  assert.equal(rows.length, 2);
+  const [a, b] = rows;
+  assert.deepEqual([a.issue, a.verdict, a.reasons, a.signals, a.shape, a.merged, a.firstPass, a.cost, a.findings, a.conformanceFailures, a.size, a.pr],
+    [7, "ineligible", ["hotspot"], ["repro"], "full", true, false, 1, 5, 1, "S", 107]);
+  assert.deepEqual([b.shape, b.needsHuman, b.merged, b.firstPass], ["light", true, false, true]);
+  assert.equal(depthRows(ev, { repo: "x/y" }).length, 0);
+  assert.equal(depthRows(ev, { sinceMs: T0 + DAY / 2 }).length, 1);
+});
+
+const rowsOf = (...slices) => slices.flatMap((s) => depthRows(slice(s)));
+
+test("depthReport: verdict cells carry merge, first-pass, needs-human, median cost, wall, findings and defect rate", () => {
+  const rows = rowsOf({ issue: 1, cost: 1 }, { issue: 2, cost: 3, rework: true, verifier: 2 }, { issue: 3, cost: 2, reason: "needs-human" },
+    { issue: 4, verdict: "ineligible", reasons: ["size"], signals: ["size_M"] });
+  const defects = new Map([[1, { defect: true }], [2, { defect: false }]]);
+  const rep = depthReport({ rows, defects, minN: 1 });
+  const e = rep.by_verdict.eligible;
+  assert.deepEqual([e.n, e.merge_rate, e.needs_human_rate, e.median_cost_usd, e.median_wall_min, e.median_wall_over_model, e.findings_per_lane, e.share_with_findings, e.defect_rate, e.defects_n],
+    [3, 0.6667, 0.3333, 2, 30, 1.2, 0.67, 0.3333, 0.5, 2]);
+  assert.equal(e.first_pass_rate, 0.6667);
+  assert.equal(rep.by_verdict.ambiguous.n, 0);
+  assert.equal(rep.by_verdict.ineligible.n, 1);
+  assert.deepEqual(Object.keys(rep.by_code), ["repro", "size", "size_M"]);
+  assert.equal(rep.by_code.repro.n, 3);
+  assert.equal(rep.by_code.size.n, 1);
+});
+
+test("promotion: met, not met and insufficient data below min-n, with n per cell", () => {
+  const light = (i, o = {}) => ({ issue: i, shape: "light", cost: 1, wall: 12 * MIN, model: 10 * MIN, ...o });
+  const full = (i, o = {}) => ({ issue: 100 + i, cost: 1, ...o });
+  const rows = rowsOf(light(1), light(2), full(1), full(2), full(3, { size: "L" }));
+  const p = promotion(rows, new Map([[1, { defect: false }], [2, { defect: false }], [101, { defect: false }], [102, { defect: true }]]), 2);
+  assert.deepEqual(p.sizes, ["S"]);
+  assert.deepEqual([p.n_treatment, p.n_control], [2, 2], "size L control excluded");
+  assert.deepEqual([p.checks.cost.value, p.checks.cost.met, p.checks.cost.n_treatment, p.checks.cost.n_control], [1, true, 2, 2]);
+  assert.deepEqual([p.checks.wall.value, p.checks.wall.met], [1.2, true]);
+  assert.deepEqual([p.checks.defects.value, p.checks.defects.limit, p.checks.defects.met], [0, 0.5, true]);
+  assert.equal(p.met, true);
+  assert.match(p.note, /config decision/);
+  const costly = promotion(rowsOf(light(1, { cost: 5 }), light(2, { cost: 5 }), full(1), full(2)), new Map(), 2);
+  assert.equal(costly.checks.cost.met, false);
+  assert.equal(costly.checks.defects.verdict, INSUFFICIENT);
+  assert.equal(costly.met, false);
+  const few = promotion(rows, new Map(), 10);
+  assert.deepEqual([few.met, few.checks.cost.verdict, few.checks.cost.met, few.checks.wall.verdict], [INSUFFICIENT, INSUFFICIENT, null, INSUFFICIENT]);
+});
+
+const fakeGh = (o = {}) => async (args) => {
+  const path = args[2] ?? "";
+  if (o.fail) throw new Error("gh down");
+  if (path.includes("issues/events")) return JSON.stringify({ issue: 2, ts: iso(T0 + 2 * DAY) });
+  if (path.startsWith("search/issues")) return [
+    { number: 300, title: "Revert \"feat: x (#101)\"", body: "", labels: [], merged_at: iso(T0 + DAY) },
+    { number: 301, title: "fix: y", body: "", labels: [], merged_at: iso(T0 + 2 * DAY) },
+    { number: 302, title: "fix: late", body: "", labels: [], merged_at: iso(T0 + 30 * DAY) },
+  ].map((x) => JSON.stringify(x)).join("\n");
+  const files = { 101: "src/a.js", 102: "src/b.js\ntest/b.test.js", 103: "src/c.js\ntest/shared.test.js", 301: "src/b.js\ntest/shared.test.js", 302: "src/c.js" };
+  const m = /pulls\/(\d+)\/files/.exec(path);
+  return m ? files[m[1]] ?? "" : "";
+};
+
+test("gatherDefects: reopen, revert and a same-file fix PR within 7 days; gh failure is null, never false", async () => {
+  const rows = rowsOf({ issue: 1 }, { issue: 2 }, { issue: 3 });
+  const d = await gatherDefects({ repo: "o/r", gh: fakeGh(), rows });
+  assert.deepEqual(d.get(1), { reopen: false, revert: true, fixPr: false, defect: true });
+  assert.deepEqual(d.get(2), { reopen: true, revert: false, fixPr: true, defect: true });
+  assert.deepEqual(d.get(3), { reopen: false, revert: false, fixPr: false, defect: false }, "test-only overlap and an out-of-window fix do not count");
+  const bad = await gatherDefects({ repo: "o/r", gh: fakeGh({ fail: true }), rows });
+  assert.deepEqual(bad.get(1), { reopen: null, revert: null, fixPr: null, defect: null });
+  assert.equal(depthReport({ rows, defects: bad, minN: 1 }).by_verdict.eligible.defect_rate, null);
+});
+
+test("renderDepth and buildDepth: verdict and promotion lines with n per cell from run logs", async () => {
+  const dir = tmpDir("depth-");
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  writeFileSync(join(dir, "runs", "5.jsonl"), slice({ issue: 5, shape: "light" }).map((e) => JSON.stringify(e)).join("\n") + "\n{torn");
+  writeFileSync(join(dir, "runs", "6.jsonl"), slice({ issue: 6, verdict: "ambiguous", reasons: ["no_repro"], signals: ["no_repro"] }).map((e) => JSON.stringify(e)).join("\n"));
+  const rep = await buildDepth({ runsDir: join(dir, "runs"), repo: "o/r", gh: null });
+  assert.equal(rep.lanes, 2);
+  assert.equal(rep.defects_source, "offline");
+  const text = renderDepth(rep, { repo: "o/r" });
+  assert.match(text, /lane depth o\/r/);
+  assert.match(text, /^  eligible: n=1, merge 100%/m);
+  assert.match(text, /^  ambiguous: n=1/m);
+  assert.match(text, /^  ineligible: n=0/m);
+  assert.match(text, /^  no_repro: n=1/m);
+  assert.match(text, /light-lane promotion \(#5052, min n 10 per cell\): insufficient data \(treatment light\|upgraded n=0, control eligible full n=0/);
+  assert.match(text, /cost ratio: insufficient data/);
+  assert.match(text, /config decision/);
+});
+
+test("parseArgs accepts --depth and --depth --offline; --offline alone still needs --efficiency; HELP lists --depth", () => {
+  assert.equal(parseArgs(["--depth"]).depth, true);
+  const o = parseArgs(["--depth", "--offline", "--min-n", "3"]);
+  assert.deepEqual([o.depth, o.offline, o.minN], [true, true, 3]);
+  assert.equal(parseArgs(["--efficiency", "--offline"]).offline, true);
+  assert.throws(() => parseArgs(["--offline"]), /--offline need --efficiency/);
+  assert.throws(() => parseArgs(["--compare", "2026-01-01"]), /--compare and --offline need --efficiency/);
+  assert.match(HELP, /stats --depth/);
+});
