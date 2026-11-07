@@ -338,3 +338,49 @@ describe("account rotator and usage-limit holds (#5094)", () => {
     assert.ok(log.some((u) => u.issue === 1 && u.outcome === "requeued" && /quota pause released/.test(u.detail)));
   });
 });
+
+describe("tokenbaton rotation holds (#5205)", () => {
+  const H = 3_600_000;
+  const memStore = () => { const states = []; return { states, load: () => null, save: (s) => states.push(JSON.parse(JSON.stringify(s))) }; };
+
+  it("#5205 all accounts limited: the hold lasts until tokenbaton's earliest reset, not the limited account's own; rotations summed", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t, earliest = t0 + 2 * H, own = t0 + 5 * H;
+    const picks = [];
+    let exhausted = false; // every account limited once the first run returns
+    const rot = { accounts: [{ n: 1 }, { n: 2 }, { n: 3 }], headroom: () => !exhausted || now() >= earliest, resumeAt: () => t0 + 4 * H, isAccount: (id) => id === "acct-1", currentIdentity: () => "acct-1",
+      pick: ({ exclude }) => { picks.push([...exclude.keys()]); return now() >= earliest ? { account: 2, stale: false } : { account: null, earliestReset: earliest }; } };
+    const limits = openLimits(storeFile(), { now }), store = memStore(), updates = [], starts = [];
+    const rows = await orchestrate({ issues: [1], now, sleep, readBody: async () => "", rotator: rot, limits, identity: () => "acct-1", store, onUpdate: (u) => updates.push(u),
+      runOne: async () => { starts.push(now()); exhausted = true; return starts.length === 1 ? { ...limited("acct-1", own), rotations: 2, limited: [{ account: 1, until: own }, { account: 3, until: t0 + 3 * H }] } : { terminalReason: "merged" }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(limits.holdUntil("acct-1") ?? earliest, earliest, "the hold is tokenbaton's earliest reset");
+    const paused = updates.find((u) => u.outcome === "paused");
+    assert.equal(paused.quota.resumeAt, new Date(earliest).toISOString());
+    assert.equal(starts[1], earliest, "rerun at the earliest reset, not the account's own reset");
+    assert.deepEqual(picks[0]?.sort(), [1, 3], `lane-reported limited accounts are excluded: ${JSON.stringify({ picks, starts, u: updates.map((u) => u.outcome) })}`);
+    const st = store.states.find((s) => s.quota?.["1"]);
+    assert.equal(st.quota["1"].rotations, 2, "lane-reported rotations add to quota.rotations");
+    assert.deepEqual(Object.keys(st.limitedAccounts).sort(), ["1", "3"], "limited accounts persist with the batch");
+  });
+
+  it("#5205 a lane-reported limited account is excluded from headroom until its reset", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t, seen = [];
+    const rot = { accounts: [{ n: 1 }, { n: 2 }], headroom: (ex) => { seen.push(ex ? [...ex.keys()] : []); return !(ex?.has(1) && ex?.has(2)); }, resumeAt: () => t0 + H, isAccount: () => true, currentIdentity: () => "acct-1", pick: () => ({ account: null, earliestReset: t0 + H }) };
+    let runs = 0;
+    await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", rotator: rot, limits: openLimits(storeFile(), { now }), identity: () => "acct-1",
+      runOne: async (n) => { runs++; return n === 1 ? { terminalReason: "merged", rotations: 1, limited: [{ account: 1, until: t0 + H }] } : { terminalReason: "merged" }; } });
+    assert.equal(runs, 2);
+    assert.ok(seen.some((x) => x.includes(1)), `headroom saw the limited account excluded: ${JSON.stringify(seen)}`);
+  });
+
+  it("#5205 no rotator: the hold is now + the reset delay, as before", async () => {
+    const { c, now, sleep } = fakeClock();
+    const limits = openLimits(storeFile(), { now });
+    const until = c.t + H;
+    await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => "A",
+      runOne: async () => { if (now() < until) { const r = limited("A", until); setImmediate(() => {}); return r; } return { terminalReason: "merged" }; },
+      onUpdate: (u) => { if (u.outcome === "paused") assert.equal(limits.holdUntil("A"), until); } });
+  });
+});

@@ -333,10 +333,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let errorTimes = [...(saved?.errorTimes ?? [])];
   // A legacy batch-local `holdUntil` (pre-#4190) names no account and is ignored: a same-account lane re-sets the hold.
   const holds = limits ?? memoryLimits(now);
+  // #5205: accounts lanes reported limited (account -> until ms), persisted with the batch, excluded from headroom until then.
+  const limitedAccounts = toMap(saved?.limitedAccounts);
+  const excluded = () => { for (const [k, u] of limitedAccounts) if (!(Number(u) > now())) limitedAccounts.delete(k); return limitedAccounts; };
+  const noteLimited = (r) => { for (const l of Array.isArray(r?.limited) ? r.limited : []) { const a = Number(l?.account), u = Number(l?.until); if (Number.isInteger(a) && a > 0 && Number.isFinite(u)) limitedAccounts.set(a, Math.max(u, Number(limitedAccounts.get(a)) || 0)); } };
   // #5094: with an account rotator, admissions stop only when no account has headroom, and resume when the first one resets.
   const rotatorHold = () => {
     if (!rotator) return undefined;
-    try { if (rotator.headroom()) return null; const u = rotator.resumeAt(); return Number.isFinite(u) && u > now() ? u : undefined; } catch { return undefined; }
+    try { if (rotator.headroom(excluded())) return null; const u = rotator.resumeAt(excluded()); return Number.isFinite(u) && u > now() ? u : undefined; } catch { return undefined; }
   };
   const heldUntil = () => {
     const r = rotatorHold();
@@ -411,7 +415,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const save = () => {
     if (!store || halted) return;
     store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
@@ -720,6 +724,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
       ...(r?.conformance && typeof r.conformance === "object" ? { conformance: r.conformance } : {}), // #4398
       ...(rec?.placement ? { placement: rec.placement } : {}), ...(estimates.has(n) ? { est_minutes: Math.round(estimates.get(n) * 10) / 10 } : {}) }; // #4409
+    noteLimited(r); // #5205
     const quotaPause = row.outcome === "deferred" && r?.code === "rate_limited" && !cancelled;
     if (!quotaPause && quota.has(n)) { // #5094: the paused attempts' cost, added once
       const q = quota.get(n); quota.delete(n);
@@ -805,20 +810,24 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           const usage = r?.code === "rate_limited";
           let poolId = null;
           if (usage) { try { poolId = remote?.identity?.() ?? null; } catch { poolId = null; } }
-          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, poolId });
+          const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, exclude: excluded(), poolId });
+          // #5205: no account with room: hold until the rotator's earliest reset (tokenbaton's, over every account), not now+delay
           let rotAt = null;
-          if (!rq && rotator) { try { rotAt = rotator.resumeAt(); } catch { rotAt = null; } }
+          if (!rq && rotator && (!r?.backendId || (poolId && r.backendId === poolId) || (() => { try { return rotator.isAccount(r.backendId); } catch { return false; } })())) { // a remote credential keeps its own reset
+            try { const p = typeof rotator.pick === "function" ? rotator.pick({ exclude: excluded() }) : null; rotAt = p && p.account === null && Number.isFinite(p.earliestReset) ? p.earliestReset : rotator.resumeAt(excluded()); } catch { rotAt = null; }
+            if (!(Number.isFinite(rotAt) && rotAt > now())) rotAt = null;
+          }
           // #5203: no account has headroom: the hold lasts until the earliest reset across accounts, not this lane's own reset.
-          const holdMs = usage && Number.isFinite(rotAt) && rotAt > now() ? rotAt - now() : pol.delayMs;
+          const holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
           if (rq) {
             delayMs = rq.delayMs;
             // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
             try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
-          } else try { holds.set(r?.backendId ?? identity(), now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          } else try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
-          const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), Number.isFinite(rotAt) ? rotAt : 0);
+          const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), rotAt ?? 0);
           quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
-            resumeAt, rotations: (q.rotations ?? 0) + (rq?.rotated ? 1 : 0) });
+            resumeAt, rotations: (q.rotations ?? 0) + (rq?.rotated ? 1 : 0) + (Number(r?.rotations) || 0) }); // #5205: plus the lane's own in-phase rotations
           requeue(n, delayMs); done(); save();
           const iso = new Date(resumeAt).toISOString();
           update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (${r?.code === "backend.auth" ? "backend.auth" : "quota"}) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });

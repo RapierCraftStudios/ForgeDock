@@ -80,7 +80,8 @@ function world(o = {}) {
   const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
   w.writeStages = writeStages;
   w.io = {
-    now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
+    credExec: () => ({ status: 1 }), now: () => w.clock, // #5205: never the host's real cs-cred (a sandbox sets CS_CRED_BASE)
+    sleep: async (ms) => { w.clock += ms; },
     gh: async (a, opts) => {
       const k = a.slice(0, 2).join(" ");
       if (opts?.env) (w.ghEnvs ??= []).push(opts.env);
@@ -3531,6 +3532,73 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     const r = await run(w);
     assert.equal(r.terminalReason, "deferred");
     assert.equal(sent.length, 1);
+  });
+
+  // #5205: a rotator with pick() relaunches the limited phase pinned to another account (real claude + CLAUDE_CONFIG_DIR), no pause.
+  const smartRotator = (o = {}) => { const marked = [], picks = [];
+    return { ...fakeRotator({ accounts: [{ n: 1 }, { n: 2 }, { n: 3 }] }), marked, picks, accountOfPid: (pid) => pid - 100, realClaude: () => "/real/claude", configDir: (n) => `/h/.claude-${n}`,
+      markLimited: (n, until) => { marked.push([n, until]); return true; },
+      pick: ({ exclude }) => { picks.push([...exclude.keys()]); return o.none ? { account: null, earliestReset: o.none } : { account: [1, 2, 3].find((n) => !exclude.has(n)) ?? null, earliestReset: 7e6 }; } }; };
+  const spawnAs = (w, err, times) => { const orig = w.io.runner; const sent = []; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { const acct = c.env?.CLAUDE_CONFIG_DIR ? Number(c.env.CLAUDE_CONFIG_DIR.split("-").at(-1)) : 1;
+      c.onSpawn?.({ pid: 100 + acct }); sent.push({ prompt: c.prompt, resume: c.resume ?? null, bin: c.bin ?? null, dir: c.env?.CLAUDE_CONFIG_DIR ?? null }); if (n++ < times) throw err; } return orig(c); }; return sent; };
+
+  it("#5205 3 accounts, the first limited: the phase relaunches pinned to another account with no pause, rotations = 1", async () => {
+    const w = world(); const sleeps = []; const progress = []; const dir = tmpDir("core-");
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    const rot = smartRotator(); w.io.rotator = rot;
+    const r = await run(w, { dir, onProgress: (p) => progress.push(p) });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(r.rotations, 1);
+    assert.deepEqual(r.limited, [{ account: 1, until: 3 * 3600 * 1000 }]);
+    assert.deepEqual(rot.marked, [[1, 3 * 3600 * 1000]], "the limited account is marked");
+    assert.deepEqual(rot.picks[0], [1], "the limited account is excluded");
+    assert.deepEqual({ ...sent[1], bin: null, dir: null }, { ...sent[0], bin: null, dir: null }, "same prompt and resume");
+    assert.equal(sent[1].bin, "/real/claude"); assert.equal(sent[1].dir, "/h/.claude-2");
+    assert.equal(sleeps.includes(3 * 3600 * 1000), false);
+    assert.equal(progress.some((p) => p.event === "phase_paused"), false);
+    const log = readLog(dir, 7);
+    assert.equal(log.some((e) => e.event === "PHASE_RATE_LIMITED"), false);
+    assert.ok(log.some((e) => e.event === "PHASE_ACCOUNT_ROTATED" && e.from === 1 && e.to === 2));
+  });
+
+  it("#5205 every account limited: rotations stop at the account count; pick none defers with tokenbaton's earliest reset", async () => {
+    const w = world();
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w.io.rotator = smartRotator();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
+    assert.equal(sent.length, 3, "one call per account, never the limited one again");
+    assert.equal(r.resetAtEpochMs, 7e6, "held until the earliest reset pick() reports");
+    assert.equal(r.rotations, 2);
+    const w2 = world(); spawnAs(w2, limitErr({ resetAtEpochMs: 3600 * 1000 }), 99); w2.io.rotator = smartRotator({ none: 5 * 3600 * 1000 });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "rate_limited"); assert.equal(r2.resetAtEpochMs, 5 * 3600 * 1000, "not the limited account's own reset");
+  });
+
+  it("#5205 sandbox (CS_CRED_BASE, no rotator): cs-cred claude --limited reports the limit and re-sends at once; its failure defers as before", async () => {
+    const w = world(); const calls = [];
+    const sent = captureBuilders(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    w.io.rotator = null; w.io.env = { CS_CRED_BASE: "http://agent/sandboxes/x/creds" }; w.io.credExec = (a) => { calls.push(a); return { status: 0 }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.rotations, 1);
+    assert.deepEqual(calls, [["claude", "--limited", String(3 * 3600)]]);
+    assert.deepEqual(sent[1], sent[0]);
+    const w2 = world(); captureBuilders(w2, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w2.io.rotator = null; w2.io.env = { CS_CRED_BASE: "x" }; let n = 0; w2.io.credExec = () => { n++; return { status: 1 }; };
+    const r2 = await run(w2);
+    assert.equal(r2.code, "rate_limited"); assert.equal(n, 1, "a 429 from the router falls through to the existing defer");
+  });
+
+  it("#5205 no rotator and no sandbox: the pause path is unchanged (no cs-cred, no rotation facts)", async () => {
+    const w = world(); const sleeps = []; let cred = 0;
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 90000, resetAt: "8:30pm" }));
+    w.io.rotator = null; w.io.env = {}; w.io.credExec = () => { cred++; return { status: 0 }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.ok(sleeps.includes(90000));
+    assert.equal(cred, 0); assert.equal(r.rotations, undefined); assert.equal(r.limited, undefined);
   });
 
   it("#4101 a non-limit runner error is still engine-error", async () => {
