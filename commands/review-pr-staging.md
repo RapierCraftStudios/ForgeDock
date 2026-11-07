@@ -10,6 +10,8 @@ install: core
 
 # Staging Review
 
+> **Default path:** `forgedock release [--repo R] [--merge] [--resume <id>]` runs the whole staging→default release (PR, review panel, findings, gate, promotion, post-merge) as one resumable job; issue-watch `mode: release` starts it for the deploy PR it opens. This spec is the manual fallback when the job is unavailable or you need to drive a step by hand.
+
 > **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
 
 **Trigger**: Invoked by the orchestrator via `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", $ARGUMENTS)`, or directly with `$ARGUMENTS` = "staging", a PR number targeting main, or "staging:feature".

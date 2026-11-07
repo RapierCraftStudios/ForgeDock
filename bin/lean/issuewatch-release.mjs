@@ -176,7 +176,7 @@ export function releasePlanComment({ theme, tag, decision, policy, now }) {
     `**Included:** ${r.set.map((i) => `#${i.number}`).join(" ")}`,
     ...(r.pulled.length ? [`**Pulled prerequisites:** ${r.pulled.map((p) => `#${p.number} (${p.theme}, for #${p.for})`).join(", ")}`] : []),
     `**Excluded (stay pooled):** ${r.excluded.map((e) => `#${e.number} (${e.reason})`).join(", ") || "none"}`,
-    "Promotion to the default branch stays human-only; the watch opens the deploy PR and never merges it."].join("\n");
+    "Promotion to the default branch stays opt-in (`release.auto_merge`); the watch opens the deploy PR, starts `forgedock release` for it and never merges it itself."].join("\n");
 }
 
 // ── the tick ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -200,7 +200,11 @@ export async function releaseTick({ watch, repo, io, state, defaults = [], listO
       if (!base) throw new Error("no default branch known; cannot open the deploy PR");
       const open = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", rel.lane, "--base", base, "--state", "open", "--json", "number"]));
       rel.deployPr = open[0]?.number ?? (+(/(\d+)\s*$/.exec(await gh(["pr", "create", "-R", repo, "--base", base, "--head", rel.lane, "--title", `release(${rel.theme}): ${rel.tag}`,
-        "--body", `Themed release **${rel.theme}** (${rel.tag}).\n\nIssues: ${rel.issues.map((n) => `#${n}`).join(" ")}\nMerged: ${state.merged.filter((n) => rel.issues.includes(n)).map((n) => `#${n}`).join(" ") || "none"}\nFailed: ${state.failed.filter((n) => rel.issues.includes(n)).map((n) => `#${n}`).join(" ") || "none"}\n\nPromotion is human-only: the issue watch opened this PR and never merges it.`]))?.[1]) || true);
+        "--body", `Themed release **${rel.theme}** (${rel.tag}).\n\nIssues: ${rel.issues.map((n) => `#${n}`).join(" ")}\nMerged: ${state.merged.filter((n) => rel.issues.includes(n)).map((n) => `#${n}`).join(" ") || "none"}\nFailed: ${state.failed.filter((n) => rel.issues.includes(n)).map((n) => `#${n}`).join(" ") || "none"}\n\nThe issue watch opened this PR and starts forgedock release for it; it never merges (promotion is opt-in via release.auto_merge).`]))?.[1]) || true);
+    }
+    // Hand the deploy PR to the release job (#5214); a failed start is recorded, never thrown (claims must not strand). Promotion stays opt-in.
+    if (io.release?.start && !rel.job) {
+      try { rel.job = (await io.release.start({ repo, pr: rel.deployPr, tag: rel.tag })) || "started"; } catch (e) { rel.jobError = String(e?.message ?? e); }
     }
     (state.releases ??= []).push(rel); state.release = null;
   }

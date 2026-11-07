@@ -9,7 +9,7 @@
  * batch (batch.mjs `addIssues`, so K, the `Depends on` DAG and the report apply) and starts a new one after it reports.
  * No LLM calls.
  */
-import { existsSync, mkdirSync, readFileSync, rmdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ import { writeAtomic, batchRoot, openBatch, listBatches } from "./batch.mjs";
 import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_STAGING_BRANCH, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
 import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
+import { releaseRoot } from "./release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { decisionContext, decisionsActive, decisionStep, decisionCounts, formatDecisionDryRun, claimsUsed } from "./issuewatch-decisions.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
@@ -482,6 +483,15 @@ function realIo(repo, env = process.env) {
       const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env });
       p.on("close", (code) => { res = { code: code ?? 1 }; }); p.on("error", () => { res = { code: 1 }; });
       return { poll: () => res };
+    },
+    release: {
+      // #5214: start the resumable `forgedock release` job for the deploy PR; no --merge (promotion is release.auto_merge only)
+      start: async ({ repo: r }) => {
+        const dir = releaseRoot(env), ls = () => { try { return readdirSync(dir); } catch { return []; } }, before = new Set(ls());
+        spawn(process.execPath, [CLI, "release", "--repo", r], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env }).unref();
+        for (let i = 0; i < 10; i++) { const id = ls().find((x) => !before.has(x)); if (id) return id; await new Promise((res) => setTimeout(res, 500)); }
+        return "started";
+      },
     },
     batch: {
       add: (id, issues) => openBatch(root, id).addIssues(issues),
