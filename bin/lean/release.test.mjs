@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { releaseFromCli, readReleaseConfig, openRelease, newReleaseId } from "./release.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 
 const DISK = [{ mount: "/", type: "ext4" }]; // CI /tmp can be tmpfs, which assertDiskPath refuses
-const tmp = () => mkdtempSync(join(process.env.TMPDIR || tmpdir(), "release-"));
+const tmp = () => tmpDir("release-");
 const REPO = "o/r", HEAD = "a".repeat(40);
 
 /** io fake; `world` tunes the gh answers. */
