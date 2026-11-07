@@ -1532,6 +1532,7 @@ describe("#5167 early batch health in runBatch", () => {
       return a[0] === "repo" ? "main\n" : "[]";
     }, git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
     const deps = { dir: tmpDir("bh-run-"), batchRoot: tmpDir("bh-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, leanIo, pollMs: 5, preflight: null,
+      sched: null, // host-independent: the host lane registry caps lanes by free memory (cap 1 starves #1 behind the held #3)
       io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ body: bodies[a[2]] ?? "", state: "OPEN" }) : "o/r\n"), git: async () => "" },
       healthConfig: { rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: [15, 60], issue: 77, notifyCommand: "notify-me" },
       healthTimer: { set: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clear: () => {} },
