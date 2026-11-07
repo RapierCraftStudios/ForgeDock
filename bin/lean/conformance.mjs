@@ -1163,7 +1163,9 @@ export function decide(raw, ctx) {
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, detail: `${r.id} is a [type:e2e] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack); run one, or mark ${r.id} post-deploy with a tracked follow-up` });
     }
-    if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
+    // #5207: in-lane engineering work is never deferrable, whatever the reviewer says; one failure per row.
+    if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
+    else if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
   for (const s of rv.scope) {
     if (!blank(s.authorized_by)) continue;
@@ -1224,7 +1226,8 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
 }
 
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */
-export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked);
+/** #5207: in-lane engineering deferrals are never filed (decide() sends them back to the builder). */
+export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked && !inLaneDeferral(r));
 
 /** #4398: an `investigate(` (or `investigate:`) issue, whose stated question must be answered before it closes as completed. */
 export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(title ?? ""));
@@ -1264,8 +1267,8 @@ export function formatShadowSummary(rows) {
   return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}${kinds.length ? `; per kind: ${kinds.join(", ")}` : ""}`;
 }
 
-/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724), external one aggregate per batch and host a `host-task` (#5078). */
-export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host", "backlog"];
+/** #4664/#5207: follow-up classes (scripts/file-deferred-followups.sh files aggregates only, never a per-parent issue): post-deploy is one rollup per release lane (#4724), external and ops one aggregate per batch, host one host-task aggregate per batch (#5078); engineering is never filed, it is built in-lane. */
+export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops", "host"];
 /** #4724: the bucket every deferred row gets at contract time. `date:<YYYY-MM-DD>` and `owner:<action>` carry a value. */
 export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue", "host"]);
 const DATE_BUCKET_RE = /^date:(\d{4})-(\d{2})-(\d{2})$/;
@@ -1310,15 +1313,17 @@ export function hostRoute(r) {
   const text = `${r?.bucket ?? ""} ${r?.why ?? ""}`;
   return POST_PROMOTION_RE.test(text) && !PRE_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "post-deploy" : "host";
 }
-/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> host, new-issue -> backlog (one issue per batch, #5188), other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
+/** The follow-up class of a requirement: owner -> ownerRoute (ops kept), host -> hostRoute, new-issue -> engineering (#5207: built in-lane, never filed), other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
 export function followupClass(r) {
   const k = bucketKind(r?.bucket);
   if (k === "owner") return r?.class === "ops" ? "ops" : ownerRoute(r);
   if (k === "host") return hostRoute(r);
-  if (k === "new-issue") return r?.class && !["post-deploy", "engineering"].includes(r.class) && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "backlog"; // #5188: the per-batch backlog issue
+  if (k === "new-issue") return "engineering"; // #5207: anything this lane can build in this repo is delivered, not deferred
   if (k) return "post-deploy";
   return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
 }
+/** #5207: a defer/post-deploy row that is in-lane engineering work (bucket new-issue, or no bucket and no out-of-lane class): not deliverable as a deferral. */
+export const inLaneDeferral = (r) => TRACKED.includes(r?.disposition) && followupClass(r) === "engineering";
 /** #4724: deferred items per bucket kind (`none` = no bucket), for the batch telemetry line. */
 export const bucketTally = (reqs) => (reqs ?? []).reduce((t, r) => { const k = bucketKind(r?.bucket) ?? "none"; t[k] = (t[k] ?? 0) + 1; return t; }, {});
 

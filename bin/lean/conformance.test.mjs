@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -548,12 +548,27 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(i.state, "review.inconsistent"); assert.deepEqual(codes(i), ["review.inconsistent"]);
   });
   it("a deferred requirement needs the reviewer's deferral_ok; false is an unjustified deferral", () => {
-    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w" }] };
+    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const c2 = { ...ctx, contract: k };
     const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", status: "deferred", ...extra }] });
     assert.equal(decide(rv({}), c2).state, "review.incomplete");
     assert.equal(decide(rv({ deferral_ok: true }), c2).state, "conforms");
     assert.deepEqual(codes(decide(rv({ deferral_ok: false, note: "two lines in the same file" }), c2)), ["conformance.unjustified_deferral"]);
+  });
+  it("#5207 an in-lane engineering deferral (new-issue or unbucketed) is never accepted, whatever deferral_ok says, and is never filed", () => {
+    const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", status: "deferred", ...extra }] });
+    for (const bucket of ["new-issue", undefined]) {
+      const c2 = { ...ctx, contract: { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w", ...(bucket ? { bucket } : {}) }] } };
+      for (const ok of [true, false]) {
+        const d = decide(rv({ deferral_ok: ok }), c2);
+        assert.deepEqual(codes(d), ["conformance.unjustified_deferral"], `${bucket} ${ok}`); // one per row, no duplicate
+        assert.match(d.failures[0].detail, new RegExp(`^R2 is in-lane engineering work \\(bucket ${bucket ?? "none"}\\): deliver it .*\\(#5207\\)$`));
+      }
+      assert.deepEqual(pendingTracking(c2.contract).map((r) => r.id), [], "never filed");
+      assert.ok(inLaneDeferral(c2.contract.requirements[1]));
+    }
+    for (const r of [{ disposition: "defer", bucket: "owner:spend" }, { disposition: "defer", bucket: "host" }, { disposition: "post-deploy", bucket: "post-deploy" }, { disposition: "defer", class: "ops" }, { disposition: "deliver" }]) assert.equal(inLaneDeferral(r), false, JSON.stringify(r));
+    assert.deepEqual(pendingTracking({ requirements: [{ id: "R1", disposition: "defer", bucket: "owner:spend" }, { id: "R2", disposition: "defer", bucket: "new-issue" }] }).map((r) => r.id), ["R1"]);
   });
   it("short quotes are accepted only as a whole issue line or list item", () => {
     const t = "Do this:\n- [ ] add --dry-run\n2. keep -v";
@@ -998,7 +1013,7 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
     assert.equal(cls({ disposition: "defer", class: "external" }), "external");
     assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
-    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host", "backlog"]);
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host"]); // #5207: backlog removed
     assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
     const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
     assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
@@ -1025,8 +1040,8 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend" }), "external");
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend", class: "ops" }), "ops");
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }), "external");
-    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "backlog");
-    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue" }), "backlog"); assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "ops" }), "ops"); // #5188
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "engineering");
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue" }), "engineering"); assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "ops" }), "engineering"); // #5207
     for (const bucket of ["post-deploy", "verify-now", "date:2026-12-01"]) assert.equal(followupClass({ disposition: "defer", bucket }), "post-deploy");
     assert.equal(one({ bucket: "owner:rotate the key" }).why, "owner: rotate the key. [bucket:owner] w");
     assert.equal(one({ bucket: "verify-now" }).why, "post-deploy: [bucket:verify-now] w");
