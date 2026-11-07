@@ -248,24 +248,139 @@ describe("account rotator and usage-limit holds (#5094)", () => {
     assert.deepEqual(starts, [t0]);
   });
 
-  it("#5094 #5095 a limited pool account keeps its own hold under a rotator with headroom; the host account is never held", async () => {
+  it("#5094 #5095 #5203 a limited pool account rotates under a rotator with headroom (no pool hold); once every account was tried it keeps its own hold", async () => {
     const { c, now, sleep } = fakeClock();
     const t0 = c.t;
     const limits = openLimits(storeFile(), { now });
     const rotator = { accounts: [{ n: 1 }], headroom: () => true, resumeAt: () => now(), isAccount: (id) => id === "acct-1", currentIdentity: () => "acct-1" };
     const remote = { max: 2, fallbackLocal: true, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool" };
-    const runs = [];
+    const runs = [], pausedHolds = [];
     const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", limits, rotator, remote, identity: () => laneBackendId({}, rotator),
+      onUpdate: (u) => { if (u.outcome === "paused") pausedHolds.push(limits.holdUntil("remote:pool")); },
       runOne: async (n, _l, ctx) => {
         runs.push({ n, at: now(), where: ctx.placement?.where, poolHeld: limits.holdUntil("remote:pool"), hostHeld: limits.holdUntil("acct-1") });
-        return n === 1 && runs.length === 1 ? limited("remote:pool", t0 + 600_000) : { terminalReason: "merged" };
+        return n === 1 && runs.filter((x) => x.n === 1).length <= 2 ? limited("remote:pool", t0 + 600_000) : { terminalReason: "merged" };
       } });
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
-    const second = runs.find((x) => x.n === 2);
-    assert.equal(runs[0].where, "remote");
-    assert.equal(second.at, t0, "the host account is not held: admissions continue");
-    assert.equal(second.poolHeld, t0 + 600_000, "the pool's own hold is recorded (#5095)");
-    assert.ok(!(second.hostHeld > now()), "no host-wide hold while the rotator has headroom");
-    assert.equal(second.where, "local", "hybrid falls back local while the pool is held");
+    const ones = runs.filter((x) => x.n === 1);
+    assert.equal(ones[0].where, "remote");
+    assert.equal(ones[1].at, t0, "the pool limit reruns at once (the router hands out another login, #5165)");
+    assert.equal(ones[1].poolHeld, null, "no pool hold while an account has headroom (#5203)");
+    assert.equal(ones[1].where, "remote");
+    assert.ok(runs.every((x) => !(x.hostHeld > x.at)), "no host-wide hold while the rotator has headroom");
+    // the second limit exhausted the one-account rotation budget: the pool's own hold applies again (#5095)
+    assert.deepEqual(pausedHolds, [null, t0 + 600_000], "only the second limit records the pool hold (#5095)");
+  });
+
+  it("#5203 a rate-limited pool lane with another usable account rotates and sets no batch-wide notBefore", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t;
+    const limits = openLimits(storeFile(), { now });
+    const rotator = { accounts: [{ n: 1 }, { n: 3 }, { n: 5 }], headroom: () => true, resumeAt: () => now(), isAccount: (id) => /^acct-/.test(id), currentIdentity: () => "acct-1" };
+    const remote = { max: 2, fallbackLocal: false, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool" };
+    let state = null;
+    const store = { load: () => state, save: (s) => { state = JSON.parse(JSON.stringify(s)); } };
+    const runs = [];
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, now, sleep, readBody: async () => "", limits, rotator, remote, store, identity: () => laneBackendId({}, rotator),
+      runOne: async (n) => {
+        runs.push({ n, at: now(), poolHeld: limits.holdUntil("remote:pool"), notBefore: { ...(state?.notBefore ?? {}) }, quota: state?.quota?.[1] ?? null });
+        return n === 1 && runs.length === 1 ? limited("remote:pool", t0 + 2 * 3_600_000) : { terminalReason: "merged" };
+      } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
+    assert.ok(runs.every((x) => x.at === t0), "every lane starts at once: nothing waits for the limited account's reset");
+    const rerun = runs.filter((x) => x.n === 1)[1];
+    assert.equal(rerun.quota.rotations, 1, "rotations >= 1");
+    assert.equal(rerun.poolHeld, null, "no pool hold");
+    assert.ok(runs.every((x) => Object.values(x.notBefore).every((v) => !(v > t0))), "no batch-wide notBefore");
+  });
+
+  it("#5203 when every account is limited, the pool hold and notBefore are the earliest reset across accounts", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t;
+    let everyLimited = false; // the rotator has headroom until the lane reports the limit
+    const earliest = t0 + 1_800_000, laneReset = t0 + 3 * 3_600_000;
+    const limits = openLimits(storeFile(), { now });
+    const rotator = { accounts: [{ n: 1 }, { n: 2 }], headroom: () => !everyLimited || now() >= earliest, resumeAt: () => Math.max(earliest, now()), isAccount: (id) => /^acct-/.test(id), currentIdentity: () => "acct-1" };
+    const remote = { max: 2, fallbackLocal: false, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool" };
+    let poolHold = null;
+    const runs = [], log = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", limits, rotator, remote, identity: () => laneBackendId({}, rotator),
+      onUpdate: (u) => { log.push(u); if (u.outcome === "paused") poolHold = limits.holdUntil("remote:pool"); },
+      runOne: async (n) => {
+        runs.push({ n, at: now() });
+        if (n === 1 && runs.length === 1) { everyLimited = true; return limited("remote:pool", laneReset); }
+        return { terminalReason: "merged" };
+      } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.equal(poolHold, earliest, "the pool hold (the notBefore of every remote-placed issue) is the earliest reset across accounts, not the lane's own");
+    assert.equal(runs.find((x) => x.n === 2).at, earliest, "the next lane starts at the earliest reset");
+    assert.match(log.find((u) => u.outcome === "paused").detail, new RegExp(`until ${new Date(earliest).toISOString()}`));
+  });
+
+  it("#5203 --requeue of a quota-paused pending issue clears its notBefore and the pool hold", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t;
+    const limits = openLimits(storeFile(), { now });
+    const remote = { max: 2, fallbackLocal: false, isRemote: () => true, place: () => ({ where: "remote", reason: "heavy" }), identity: () => "remote:pool" };
+    let paused = false;
+    const runs = [], log = [];
+    const rows = await orchestrate({ issues: [1], parallel: 1, now, sleep, pollMs: 5000, readBody: async () => "", limits, remote, identity: () => "local", onUpdate: (u) => log.push(u),
+      getRequeued: () => (paused ? [{ issue: 1, reason: "accounts 1, 3, 5 usable", by: "operator", at: "2026-11-07T08:05:00Z" }] : []),
+      runOne: async (n) => {
+        runs.push({ n, at: now() });
+        if (runs.length === 1) { paused = true; return limited("remote:pool", t0 + 2 * 3_600_000); }
+        return { terminalReason: "merged" };
+      } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(runs.length, 2);
+    assert.ok(runs[1].at < t0 + 60_000, `the released issue runs on the next poll, not at the reset (ran at +${runs[1].at - t0}ms)`);
+    assert.equal(limits.holdUntil("remote:pool"), null, "the pool hold is cleared");
+    assert.ok(log.some((u) => u.issue === 1 && u.outcome === "requeued" && /quota pause released/.test(u.detail)));
+  });
+});
+
+describe("tokenbaton rotation holds (#5205)", () => {
+  const H = 3_600_000;
+  const memStore = () => { const states = []; return { states, load: () => null, save: (s) => states.push(JSON.parse(JSON.stringify(s))) }; };
+
+  it("#5205 all accounts limited: the hold lasts until tokenbaton's earliest reset, not the limited account's own; rotations summed", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t, earliest = t0 + 2 * H, own = t0 + 5 * H;
+    const picks = [];
+    let exhausted = false; // every account limited once the first run returns
+    const rot = { accounts: [{ n: 1 }, { n: 2 }, { n: 3 }], headroom: () => !exhausted || now() >= earliest, resumeAt: () => t0 + 4 * H, isAccount: (id) => id === "acct-1", currentIdentity: () => "acct-1",
+      pick: ({ exclude }) => { picks.push([...exclude.keys()]); return now() >= earliest ? { account: 2, stale: false } : { account: null, earliestReset: earliest }; } };
+    const limits = openLimits(storeFile(), { now }), store = memStore(), updates = [], starts = [];
+    const rows = await orchestrate({ issues: [1], now, sleep, readBody: async () => "", rotator: rot, limits, identity: () => "acct-1", store, onUpdate: (u) => updates.push(u),
+      runOne: async () => { starts.push(now()); exhausted = true; return starts.length === 1 ? { ...limited("acct-1", own), rotations: 2, limited: [{ account: 1, until: own }, { account: 3, until: t0 + 3 * H }] } : { terminalReason: "merged" }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(limits.holdUntil("acct-1") ?? earliest, earliest, "the hold is tokenbaton's earliest reset");
+    const paused = updates.find((u) => u.outcome === "paused");
+    assert.equal(paused.quota.resumeAt, new Date(earliest).toISOString());
+    assert.equal(starts[1], earliest, "rerun at the earliest reset, not the account's own reset");
+    assert.deepEqual(picks[0]?.sort(), [1, 3], `lane-reported limited accounts are excluded: ${JSON.stringify({ picks, starts, u: updates.map((u) => u.outcome) })}`);
+    const st = store.states.find((s) => s.quota?.["1"]);
+    assert.equal(st.quota["1"].rotations, 2, "lane-reported rotations add to quota.rotations");
+    assert.deepEqual(Object.keys(st.limitedAccounts).sort(), ["1", "3"], "limited accounts persist with the batch");
+  });
+
+  it("#5205 a lane-reported limited account is excluded from headroom until its reset", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t, seen = [];
+    const rot = { accounts: [{ n: 1 }, { n: 2 }], headroom: (ex) => { seen.push(ex ? [...ex.keys()] : []); return !(ex?.has(1) && ex?.has(2)); }, resumeAt: () => t0 + H, isAccount: () => true, currentIdentity: () => "acct-1", pick: () => ({ account: null, earliestReset: t0 + H }) };
+    let runs = 0;
+    await orchestrate({ issues: [1, 2], parallel: 1, now, sleep, readBody: async () => "", rotator: rot, limits: openLimits(storeFile(), { now }), identity: () => "acct-1",
+      runOne: async (n) => { runs++; return n === 1 ? { terminalReason: "merged", rotations: 1, limited: [{ account: 1, until: t0 + H }] } : { terminalReason: "merged" }; } });
+    assert.equal(runs, 2);
+    assert.ok(seen.some((x) => x.includes(1)), `headroom saw the limited account excluded: ${JSON.stringify(seen)}`);
+  });
+
+  it("#5205 no rotator: the hold is now + the reset delay, as before", async () => {
+    const { c, now, sleep } = fakeClock();
+    const limits = openLimits(storeFile(), { now });
+    const until = c.t + H;
+    await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => "A",
+      runOne: async () => { if (now() < until) { const r = limited("A", until); setImmediate(() => {}); return r; } return { terminalReason: "merged" }; },
+      onUpdate: (u) => { if (u.outcome === "paused") assert.equal(limits.holdUntil("A"), until); } });
   });
 });

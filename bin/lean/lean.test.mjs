@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
+import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -79,7 +80,8 @@ function world(o = {}) {
   const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
   w.writeStages = writeStages;
   w.io = {
-    now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
+    credExec: () => ({ status: 1 }), now: () => w.clock, // #5205: never the host's real cs-cred (a sandbox sets CS_CRED_BASE)
+    sleep: async (ms) => { w.clock += ms; },
     gh: async (a, opts) => {
       const k = a.slice(0, 2).join(" ");
       if (opts?.env) (w.ghEnvs ??= []).push(opts.env);
@@ -3540,6 +3542,73 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(sent.length, 1);
   });
 
+  // #5205: a rotator with pick() relaunches the limited phase pinned to another account (real claude + CLAUDE_CONFIG_DIR), no pause.
+  const smartRotator = (o = {}) => { const marked = [], picks = [];
+    return { ...fakeRotator({ accounts: [{ n: 1 }, { n: 2 }, { n: 3 }] }), marked, picks, accountOfPid: (pid) => pid - 100, realClaude: () => "/real/claude", configDir: (n) => `/h/.claude-${n}`,
+      markLimited: (n, until) => { marked.push([n, until]); return true; },
+      pick: ({ exclude }) => { picks.push([...exclude.keys()]); return o.none ? { account: null, earliestReset: o.none } : { account: [1, 2, 3].find((n) => !exclude.has(n)) ?? null, earliestReset: 7e6 }; } }; };
+  const spawnAs = (w, err, times) => { const orig = w.io.runner; const sent = []; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { const acct = c.env?.CLAUDE_CONFIG_DIR ? Number(c.env.CLAUDE_CONFIG_DIR.split("-").at(-1)) : 1;
+      c.onSpawn?.({ pid: 100 + acct }); sent.push({ prompt: c.prompt, resume: c.resume ?? null, bin: c.bin ?? null, dir: c.env?.CLAUDE_CONFIG_DIR ?? null }); if (n++ < times) throw err; } return orig(c); }; return sent; };
+
+  it("#5205 3 accounts, the first limited: the phase relaunches pinned to another account with no pause, rotations = 1", async () => {
+    const w = world(); const sleeps = []; const progress = []; const dir = tmpDir("core-");
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    const rot = smartRotator(); w.io.rotator = rot;
+    const r = await run(w, { dir, onProgress: (p) => progress.push(p) });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(r.rotations, 1);
+    assert.deepEqual(r.limited, [{ account: 1, until: 3 * 3600 * 1000 }]);
+    assert.deepEqual(rot.marked, [[1, 3 * 3600 * 1000]], "the limited account is marked");
+    assert.deepEqual(rot.picks[0], [1], "the limited account is excluded");
+    assert.deepEqual({ ...sent[1], bin: null, dir: null }, { ...sent[0], bin: null, dir: null }, "same prompt and resume");
+    assert.equal(sent[1].bin, "/real/claude"); assert.equal(sent[1].dir, "/h/.claude-2");
+    assert.equal(sleeps.includes(3 * 3600 * 1000), false);
+    assert.equal(progress.some((p) => p.event === "phase_paused"), false);
+    const log = readLog(dir, 7);
+    assert.equal(log.some((e) => e.event === "PHASE_RATE_LIMITED"), false);
+    assert.ok(log.some((e) => e.event === "PHASE_ACCOUNT_ROTATED" && e.from === 1 && e.to === 2));
+  });
+
+  it("#5205 every account limited: rotations stop at the account count; pick none defers with tokenbaton's earliest reset", async () => {
+    const w = world();
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w.io.rotator = smartRotator();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
+    assert.equal(sent.length, 3, "one call per account, never the limited one again");
+    assert.equal(r.resetAtEpochMs, 7e6, "held until the earliest reset pick() reports");
+    assert.equal(r.rotations, 2);
+    const w2 = world(); spawnAs(w2, limitErr({ resetAtEpochMs: 3600 * 1000 }), 99); w2.io.rotator = smartRotator({ none: 5 * 3600 * 1000 });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "rate_limited"); assert.equal(r2.resetAtEpochMs, 5 * 3600 * 1000, "not the limited account's own reset");
+  });
+
+  it("#5205 sandbox (CS_CRED_BASE, no rotator): cs-cred claude --limited reports the limit and re-sends at once; its failure defers as before", async () => {
+    const w = world(); const calls = [];
+    const sent = captureBuilders(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    w.io.rotator = null; w.io.env = { CS_CRED_BASE: "http://agent/sandboxes/x/creds" }; w.io.credExec = (a) => { calls.push(a); return { status: 0 }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.rotations, 1);
+    assert.deepEqual(calls, [["claude", "--limited", String(3 * 3600)]]);
+    assert.deepEqual(sent[1], sent[0]);
+    const w2 = world(); captureBuilders(w2, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w2.io.rotator = null; w2.io.env = { CS_CRED_BASE: "x" }; let n = 0; w2.io.credExec = () => { n++; return { status: 1 }; };
+    const r2 = await run(w2);
+    assert.equal(r2.code, "rate_limited"); assert.equal(n, 1, "a 429 from the router falls through to the existing defer");
+  });
+
+  it("#5205 no rotator and no sandbox: the pause path is unchanged (no cs-cred, no rotation facts)", async () => {
+    const w = world(); const sleeps = []; let cred = 0;
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 90000, resetAt: "8:30pm" }));
+    w.io.rotator = null; w.io.env = {}; w.io.credExec = () => { cred++; return { status: 0 }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.ok(sleeps.includes(90000));
+    assert.equal(cred, 0); assert.equal(r.rotations, undefined); assert.equal(r.limited, undefined);
+  });
+
   it("#4101 a non-limit runner error is still engine-error", async () => {
     const w = world(); failFirstBuilder(w, new Error("boom"));
     assert.equal((await run(w)).terminalReason, "engine-error");
@@ -4232,8 +4301,12 @@ describe("batch robustness (#4112-#4115)", () => {
     const r = await run(w);
     assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
   });
-  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
-    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+  it("#5202 a non-ff push no other lane owns ends engine-error engine.push_diverged, never needs-human", async () => {
+    const r = await run(ownerProbe(world({ pushErrors: [NONFF] })));
+    assert.equal([r.terminalReason, r.code].join("/"), "engine-error/engine.push_diverged");
+    assert.match(r.detail, /non-fast-forward.*no other lane owns feat\/issue-7-lean/s);
+  });
+  it("#4920 any other permanent push rejection (protected branch) stays needs-human", async () => {
     assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
   });
   it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {
@@ -6749,6 +6822,36 @@ describe("explorer subagent (#4391)", () => {
   });
 });
 
+describe("experiment arm overrides (#5206)", () => {
+  const capture = (w) => { const seen = []; const inner = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, agents: c.agents ?? null }); return inner(c); }; return seen; };
+  // issue 7 hashes to arm "on" under id x0 and to "off" under id x2 (assignArm, sha1 of id:issue)
+  const exp = (id) => parseExperiment({ id, arms: "on,off", "on.lean.explore": "on", "off.lean.explore": "off" });
+
+  it("R1/R3: the explorer runs only in the on arm; RUN_TERMINAL carries arm and the applied overrides", async () => {
+    assert.equal(assignArm(exp("x0"), 7), "on"); assert.equal(assignArm(exp("x2"), 7), "off");
+    const on = world(), seenOn = capture(on), dOn = tmpDir("core-");
+    assert.equal((await run(on, { dir: dOn, experiment: exp("x0"), explore: { model: "claude-haiku-5-5" } })).terminalReason, "merged");
+    assert.ok(seenOn.filter((s) => s.role === "builder").every((s) => s.agents?.explorer?.model === "claude-haiku-5-5"));
+    const tOn = readLog(dOn, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([tOn.experiment, tOn.arm, tOn.arm_overrides, tOn.explore], ["x0", "on", "lean.explore=on", "on"]);
+    const off = world(), seenOff = capture(off), dOff = tmpDir("core-");
+    assert.equal((await run(off, { dir: dOff, experiment: exp("x2"), explore: { mode: "on" } })).terminalReason, "merged");
+    assert.ok(seenOff.every((s) => s.agents === null));
+    const tOff = readLog(dOff, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([tOff.arm, tOff.arm_overrides, tOff.explore], ["off", "lean.explore=off", "off"]);
+    assert.ok(readLog(dOff, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE").every((e) => e.arm === "off" && e.arm_overrides === "lean.explore=off"));
+  });
+
+  it("R4: no experiment: prompts and RUN_TERMINAL carry no arm fields", async () => {
+    const w = world(), d = tmpDir("core-");
+    await run(w, { dir: d, explore: { mode: "off" } });
+    const t = readLog(d, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.ok(!("arm" in t) && !("arm_overrides" in t) && !("experiment" in t));
+    const x = world(); await run(x, { explore: { mode: "off" } });
+    assert.deepEqual(builders(w).map((c) => c[4]), builders(x).map((c) => c[4]));
+  });
+});
+
 describe("e2e merge gate (#4403)", () => {
   const SPECS = ["src/foo.js", "test/foo.test.js", "e2e/foo.spec.ts"];
   const RUN = "https://github.com/o/r/actions/runs/777/job/1";
@@ -7355,9 +7458,34 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const plan = w.calls.indexOf(builders(w)[1]);
     // each fake notes w.calls.length when called, i.e. the index the next call takes: <= plan means before the plan call
     assert.ok(w.over.hot.some((i) => i <= plan) && w.over.pack.some((i) => i <= plan), JSON.stringify({ plan, ...w.over }));
-    assert.ok(w.over.hot.every((i) => i > w.calls.indexOf(builders(w)[0])), "not before the light session");
+    const light = w.calls.indexOf(builders(w)[0]);
+    assert.equal(w.over.hot.filter((i) => i <= light).length, 1, "#5209: only the eligibility-signal call precedes the light session");
+    assert.ok(w.over.hot.some((i) => i > light && i <= plan), "the upgrade recomputes the plan facts after the light session");
     assert.ok(w.over.structure.length >= 1);
     assert.equal(events(dir, "RUN_TERMINAL")[0].light, false);
+  });
+  it("#5209 shadow mode: LIGHT_ELIGIBILITY carries signals and the hotspot reason; the lane keeps the full shape", async () => {
+    const w = lworld(), dir = tmpDir("light-5209-shadow-");
+    w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 2400, commits_90d: 25, over: true, excluded: false, growth: 0 }] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const e = events(dir, "LIGHT_ELIGIBILITY")[0];
+    assert.equal(e.mode, "shadow");
+    assert.equal(e.verdict, "ineligible");
+    assert.equal(e.light, false);
+    assert.ok(e.reasons.some((x) => x.code === "hotspot" && /src\/foo\.js \(2400 lines\)/.test(x.detail)), JSON.stringify(e.reasons));
+    const sig = e.signals.map((x) => x.code);
+    for (const c of ["repro", "files_named", "churn_high", "hotspot", "size_none"]) assert.ok(sig.includes(c), `${c} in ${sig}`);
+    assert.match(builders(w)[0][4], /PLANNING ONLY/, "plan call present");
+    assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+  it("#5209 mode on: an eligible light try still gets no hotspot build rule in its builder prompt", async () => {
+    const w = lworld(), dir = tmpDir("light-5209-on-");
+    w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 120, commits_90d: 3, over: false, excluded: false, growth: 0 }] });
+    await run(w, { dir, ...ON });
+    assert.equal(events(dir, "LIGHT_ELIGIBILITY")[0].verdict, "eligible");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1);
+    assert.ok(!/Don't grow a file over/.test(builders(w)[0][4]), "no hotspotBuildRule in the light prompt");
   });
   it("#4451 a full lane (light off) keeps its context-pack, structure and hotspot calls", async () => {
     const w = overhead(), dir = tmpDir("light-over-off-");

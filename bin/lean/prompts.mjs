@@ -89,7 +89,7 @@ export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
 export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0 } = {}) {
   const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
   const c = String(check ?? "").trim();
-  return `\n\nContext restart: the previous session on this lane reached the ${ceiling}-token context ceiling and the engine stopped it. Its history is gone, its work is not: ${CONTRACT_FILE} is still the frozen authority, and the branch holds the committed work (uncommitted edits were saved in a \`wip(forge): checkpoint\` commit). Continue from this state; do not start over, and do not re-read what the summary below already shows.
+  return `\n\nContext restart: the previous session on this lane reached the ${ceiling}-token context ceiling and the engine stopped it. Its history is gone, its work is not: ${CONTRACT_FILE} is still the frozen authority, and the branch holds the committed work (uncommitted edits were saved in a \`wip(forge): checkpoint\` commit, already pushed to the lane branch: do not amend, reword, squash, reset or rebase commits already on the branch; add new commits on top). Continue from this state; do not start over, and do not re-read what the summary below already shows.
 
 <diff_stat base="${base}">
 ${String(stat ?? "").trim() || "(no changes yet)"}

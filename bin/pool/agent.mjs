@@ -237,10 +237,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   // GitHub credentials for a running sandbox: fetched from the router on demand (installation tokens expire hourly).
   const credCache = {};
   const CRED_TTL = { github: 120000, claude: 300000 };
-  async function sandboxCred(id, kind, req) {
+  const sandboxAuthed = (id, req) => {
     const r = own(id);
     const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
-    if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized", hop: "agent", reason: "agent auth: bad sandbox credential" } };
+    return Boolean(r && r.state !== "exited" && m && sameSecret(m[1].trim(), r.credToken));
+  };
+  const SANDBOX_UNAUTHORIZED = { status: 401, body: { error: "unauthorized", hop: "agent", reason: "agent auth: bad sandbox credential" } };
+  async function sandboxCred(id, kind, req) {
+    if (!sandboxAuthed(id, req)) return SANDBOX_UNAUTHORIZED;
     if (!CRED_TTL[kind]) return { status: 404, body: { error: "unknown credential" } };
     const c = credCache[kind];
     if (!c || now() - c.at > CRED_TTL[kind]) {
@@ -251,6 +255,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       credCache[kind] = { token: x.data.token, at: now() };
     }
     return { status: 200, body: { token: credCache[kind].token } };
+  }
+  /** #5205: a sandbox's lane hit a usage limit: drop the cached claude token and tell the router to exclude that account. */
+  async function sandboxCredLimited(id, req, body) {
+    if (!sandboxAuthed(id, req)) return SANDBOX_UNAUTHORIZED;
+    delete credCache.claude;
+    const x = await call(cfg.router_url, "POST", "/agent/creds/claude/limited", { body: body && typeof body === "object" ? body : {}, token: cfg.token, timeoutMs: 20000 });
+    return { status: x.ok ? 200 : x.status || 502, body: x.data && typeof x.data === "object" ? x.data : {} };
   }
 
   // #4778: read-only capability relay. The sandbox's request is forwarded to the router queue with the agent token; the
@@ -400,6 +411,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     try {
       const cred = req.method === "GET" && /^\/sandboxes\/([^/]+)\/creds\/([a-z]+)$/.exec(url.pathname);
       if (cred) { const r = await sandboxCred(decodeURIComponent(cred[1]), cred[2], req); return send(res, r.status, r.body, r.retryAfter ? { "retry-after": String(r.retryAfter) } : {}); }
+      const limited = req.method === "POST" && /^\/sandboxes\/([^/]+)\/creds\/claude\/limited$/.exec(url.pathname); // #5205
+      if (limited) { const r = await sandboxCredLimited(decodeURIComponent(limited[1]), req, await readJson(req)); return send(res, r.status, r.body); }
       const relay = (req.method === "POST" && /^\/sandboxes\/([^/]+)\/relay$/.exec(url.pathname)) || (req.method === "GET" && /^\/sandboxes\/([^/]+)\/relay\/([^/]+)$/.exec(url.pathname));
       if (relay) { const r = await sandboxRelay(decodeURIComponent(relay[1]), relay[2] ? decodeURIComponent(relay[2]) : null, req); return send(res, r.status, r.body ?? {}); }
       if (url.pathname !== "/health" && !bearerOk(req, cfg.token)) return send(res, 401, { error: "unauthorized", hop: "agent", reason: "agent auth: router token rejected by agent" });

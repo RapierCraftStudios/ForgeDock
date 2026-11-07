@@ -107,6 +107,8 @@ All pass: the issue counts as **verified**, and a `FORGE:WATCH_VERIFY` comment r
 
 `mode: release` claims nothing immediately. It pools the issues that match the selectors and cut a **themed release** when a trigger fires, then orchestrates just that set.
 
+Once the batch reports and the deploy PR is open, the watch starts `forgedock release` for it (resumable; promotion stays opt-in via `--merge` / `release.auto_merge`, the watch never merges).
+
 ```yaml
 issue_watch:
   watches:

@@ -13,7 +13,7 @@ import { localLaneCap } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
-import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
+import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
@@ -29,7 +29,7 @@ import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
 import { otherLaneOwner } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
-import { openRotator } from "./lean/rotator.mjs";
+import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
@@ -998,7 +998,7 @@ export async function runFromCli(argv, deps = {}) {
     let lres;
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
-      ...(readExecution(process.cwd())?.accountRotator ? { accountRotator: readExecution(process.cwd()).accountRotator } : {}), // #5094
+      ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
@@ -1201,6 +1201,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * `--add <id> N...` (#4408) adds issues to that batch instead of starting a second one: they run under its K and DAG
  * (a running batch picks them up on its next pass, a stopped one on its next `--resume`); `--resume <id> N...` adds N too.
  * `--requeue <id> N... [--reason]` (#4550) returns a terminal issue (and the dependents skipped behind it) to pending after an operator decision.
+ * #5203: it also releases a quota-paused pending issue (`paused (quota) until <ISO>`): its notBefore and the pool hold are cleared.
  * `--cancel <id>` (#4376) stops that one batch, never the shared daemon: it admits nothing more, its running local lanes get
  * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
@@ -1745,7 +1746,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      ...(readExecution(cwd)?.accountRotator ? { accountRotator: readExecution(cwd).accountRotator } : {}), // #5094
+      ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
@@ -1856,7 +1857,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
   // #5094: with an account rotator the identity is its current account, and admissions hold only when every account is exhausted.
-  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: readExecution(cwd)?.accountRotator });
+  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: rotatorKind({ execution: readExecution(cwd), env }), env }); // #5205: detected
   const identity = deps.identity ?? (() => limitsMod.laneBackendId(env, rotator));
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
   const schedMod = await import("./lean/sched.mjs");
@@ -2000,6 +2001,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
       dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo }),
+      // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
+      version: ENGINE_VERSION,
+      // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
+      onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
@@ -2302,7 +2307,7 @@ export async function poolFromCli(argv, deps = {}) {
 export async function limitsFromCli(argv, deps = {}) {
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
-  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: readExecution(process.cwd())?.accountRotator }); // #5094
+  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: rotatorKind({ execution: readExecution(process.cwd()), env: process.env }) }); // #5094, #5205: detected
   const current = (deps.identity ?? (() => limitsMod.laneBackendId(process.env, rotator)))();
   const usage = "usage: forgedock limits show | forgedock limits clear <id>|--all";
   const [sub, arg] = argv;
@@ -2310,7 +2315,7 @@ export async function limitsFromCli(argv, deps = {}) {
     const holds = limits.list();
     if (!holds.length) console.log(`no usage-limit holds (this account: ${current})`);
     for (const h of holds) console.log(`${h.id === current ? "*" : " "} ${h.id}  until ${new Date(h.until).toISOString()}  source ${h.source ?? "-"}`);
-    for (const a of rotator?.accounts ?? []) console.log(`  ${rotator.kind} account ${a.n} (${rotator.accountIdentity(a.n)}): 5h ${a.fiveHourPct}% resets ${new Date(a.fiveHourResetMs).toISOString()}`);
+    for (const a of rotator?.accounts ?? []) console.log(`  ${rotator.kind} account ${a.n} (${rotator.accountIdentity(a.n)}): 5h ${a.stale ? "(stale)" : `${a.fiveHourPct}%`} resets ${new Date(a.fiveHourResetMs).toISOString()}`); // #5205: a passed reset is unknown, not its old %
     return { holds, current };
   }
   if (sub === "clear") {

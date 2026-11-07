@@ -137,7 +137,8 @@ export function parseExecution(sec = {}) {
   const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
   const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
-  const accountRotator = str(s.account_rotator) === "tokenbaton" ? "tokenbaton" : null; // #5094: rotator.mjs reads its per-account quota state
+  // #5094: rotator.mjs reads its per-account quota state; #5205: off/none/false disables auto-detection, anything else is unset (auto)
+  const rot = str(s.account_rotator).toLowerCase(), accountRotator = rot === "tokenbaton" ? "tokenbaton" : ["off", "none", "false"].includes(rot) ? "off" : null;
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
   return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
 }
@@ -714,7 +715,13 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     adopt: (n, rec, ctx = {}) => adoptSaved(n, rec, ctx),
   };
   async function adoptSaved(n, rec, ctx = {}) {
-      const saved = rec?.handle;
+      let saved = rec?.handle;
+      // #5204: a record saved before its handle (the old dispatcher halted first) finds the sandbox through the lane's ledger,
+      // which registers it before it exists: a live one is reattached, a gone one reaped below, never orphaned.
+      if (!saved?.id) {
+        const id = provider.idFor(n);
+        saved = (ledgerFor(n)?.entries("sandbox") ?? []).find((e) => e.value === id && (e.provider ?? e.handle?.provider) === provider.name)?.handle;
+      }
       if (!saved?.id || saved.provider !== provider.name) return null;
       // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
       const h = { ...saved, ...(Number.isFinite(saved.startedAt) ? {} : Number.isFinite(rec?.startedAt) ? { startedAt: rec.startedAt } : {}) };

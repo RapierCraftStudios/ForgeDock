@@ -244,3 +244,19 @@ test("CLI: --dry-run prints the cut without writing; refuses a non-release watch
   const w = loadWatches(`issue_watch:\n  watches:\n    sr:\n      mode: release\n      threshold: { min_issues: 2 }\n`).sr;
   assert.match(formatStatus({ name: "sr", repo: "o/r", phase: "running", claimed: [1], inflight: [1], merged: [], verified: [], failed: [], pool: [2, 3], llm: 2, releases: [], release: { theme: "billing", issues: [1], batch: "b1" } }, w), /pool: 2.*active: billing.*llm-classified: 2/);
 });
+
+test("#5214: the deploy PR is handed to the release job once, without merge; a failed start is recorded", async () => {
+  for (const [prs, fail] of [[[], false], [[{ number: 9 }], false], [[], true]]) {
+    const issues = [1, 2, 3].map((n) => iss(n, { labels: lbl("billing") }));
+    const io = world(issues, { prs }), started = [];
+    io.release = { start: async (a) => { started.push(a); if (fail) throw new Error("spawn failed"); return "r1"; } };
+    const w = W(), st = fresh();
+    await step(io, w, st);
+    io.reported.add("b1"); io.closed.add(1);
+    await step(io, w, st);
+    assert.deepEqual(started, [{ repo: "o/r", pr: prs[0]?.number ?? 77, tag: "billing-2026-10-30" }]);
+    assert.equal(st.releases[0].job, fail ? undefined : "r1"); assert.equal(st.releases[0].jobError, fail ? "spawn failed" : undefined);
+    assert.equal(io.calls.some((a) => a[0] === "pr" && a[1] === "merge"), false);
+    await step(io, w, st); assert.equal(started.length, 1);
+  }
+});
