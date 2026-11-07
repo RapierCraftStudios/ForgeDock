@@ -460,9 +460,17 @@ function usageRouter(accounts, { usage = true, ceiling } = {}) {
   const get = () => new Promise((resolve) => {
     r.handle({ method: "GET", url: "/agent/creds/claude", headers: { authorization: "Bearer agent-secret" }, socket: {} }, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader(k, v) { (this.h ??= {})[k.toLowerCase()] = v; }, end(b) { resolve({ status: this.s, headers: this.h ?? {}, body: JSON.parse(String(b)) }); } });
   });
-  return { get, logs };
+  const post = (body, token = "agent-secret") => new Promise((resolve) => { // #5205
+    r.handle(jsonReq("POST", "/agent/creds/claude/limited", { authorization: `Bearer ${token}` }, body), { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(String(b)) }); } });
+  });
+  return { get, post, logs };
 }
 const inS = (s) => Math.floor((Date.now() + s * 1000) / 1000);
+/** A fake request carrying a JSON body (readJson iterates the request). */
+function jsonReq(method, url, headers, body) {
+  const buf = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+  return { method, url, headers, socket: {}, async *[Symbol.asyncIterator]() { yield* buf; } };
+}
 
 test("router hands out the lowest-usage Claude login, not the longest-valid one (#5165)", async () => {
   const { get, logs } = usageRouter({ 1: { validH: 6, live: `97 ${inS(3600)} 40 ${inS(86400)} 0` }, 2: { validH: 2, live: `20 ${inS(3600)} 10 ${inS(86400)} 0` } });
@@ -494,11 +502,11 @@ test("router without a usage source falls back to the longest-valid Claude login
   assert.ok(logs.warn.some((m) => /no usage source/.test(m)));
 });
 
-test("equal Claude login usage is broken by validity; a passed reset counts as 0; a custom ceiling applies (#5165)", async () => {
+test("equal Claude login usage is broken by validity; a passed reset is unknown, ranked after a fresh sample (#5205); a custom ceiling applies (#5165)", async () => {
   const tie = usageRouter({ 1: { validH: 2, live: `30 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 5, live: `30 ${inS(3600)} 0 ${inS(86400)} 0` } });
   assert.equal((await tie.get()).body.token, "tok-2");
   const reset = usageRouter({ 1: { validH: 2, live: `99 ${inS(-60)} 0 ${inS(86400)} 0` }, 2: { validH: 5, live: `50 ${inS(3600)} 0 ${inS(86400)} 0` } });
-  assert.equal((await reset.get()).body.token, "tok-1");
+  assert.equal((await reset.get()).body.token, "tok-2", "#5205: a stale 99% is unknown, not 0%: the fresh 50% ranks first");
   const ceil = usageRouter({ 1: { validH: 2, live: `60 ${inS(3600)} 0 ${inS(86400)} 0` } }, { ceiling: 50 });
   assert.equal((await ceil.get()).status, 429);
   const weekly = usageRouter({ 1: { validH: 2, live: `10 ${inS(3600)} 100 ${inS(86400)} 0` }, 2: { validH: 5, live: `80 ${inS(3600)} 0 ${inS(86400)} 0` } });
@@ -519,5 +527,65 @@ test("agent passes a router usage-limit 429 for Claude credentials through to th
     assert.equal(r.status, 429);
     assert.equal(r.body.reason, reason);
     assert.equal(r.headers["retry-after"], "120");
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("#5205 router: a fresh 47% account ranks over a stale 99% one whose reset passed; a stale-only pool still hands it out as unknown", async () => {
+  const { get, logs } = usageRouter({ 1: { validH: 8, live: `99 ${inS(-600)} 50 ${inS(86400)} 0` }, 4: { validH: 2, live: `47 ${inS(3600)} 10 ${inS(86400)} 0` } });
+  const r = await get();
+  assert.equal(r.body.token, "tok-4");
+  assert.equal(r.body.account, 4);
+  assert.match(logs.info.find((m) => /claude login selected/.test(m)), /account=4 usage=47%/);
+  const only = usageRouter({ 1: { validH: 8, live: `99 ${inS(-600)} 50 ${inS(86400)} 0` } });
+  const o = await only.get();
+  assert.equal(o.status, 200);
+  assert.match(only.logs.info.find((m) => /claude login selected/.test(m)), /account=1 usage=unknown% \(stale\)/);
+});
+
+test("#5205 router: a reported-limited account is skipped until its reset; all limited -> 429 with the earliest reset", async () => {
+  const late = inS(7200), early = inS(1800);
+  const { get, post, logs } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` }, 3: { validH: 6, live: `97 ${late} 0 ${inS(86400)} 0` } });
+  assert.equal((await get()).body.token, "tok-1");
+  assert.equal((await post({ reset_at: inS(3600) }, "wrong")).status, 401);
+  const m = await post({ reset_at: inS(3600) });
+  assert.equal(m.status, 200);
+  assert.equal(m.body.account, 1);
+  assert.ok(logs.info.some((l) => /claude login limited: account=1 agent=a1/.test(l)));
+  assert.equal((await get()).body.token, "tok-2", "the limited account is excluded");
+  await post({ reset_at: early });
+  const r = await get();
+  assert.equal(r.status, 429);
+  assert.equal(r.body.code, "rate_limited");
+  assert.equal(r.body.reset_at, new Date(early * 1000).toISOString(), "the earliest reset includes limited untils");
+  assert.ok(!logs.info.concat(logs.warn).join("\n").includes("tok-"), "the token is never logged");
+});
+
+test("#5205 router: a limited report with no reset excludes the account for an hour", async () => {
+  const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await post({})).status, 404, "no account handed to this agent yet");
+  await get();
+  const m = await post({ reset_at: null });
+  assert.ok(Math.abs(Date.parse(m.body.until) - (Date.now() + 3600000)) < 60000);
+  assert.equal((await get()).status, 429);
+});
+
+test("#5205 agent: the sandbox limited route drops the claude cache and forwards to the router", async () => {
+  const { agent } = agentFixture();
+  await agent.launch({ spec: spec("cl1"), cpus: 2, mem_gb: 3 });
+  const rec = Object.values(agent.store.data.sandboxes ?? {}).find((x) => x.id === "cl1") ?? agent.store.data.sandboxes?.cl1;
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => { calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : null }); return new Response(JSON.stringify(String(url).endsWith("/limited") ? { account: 1, until: "2026-11-07T12:00:00.000Z" } : { token: `t${calls.length}` }), { status: 200 }); };
+  const send = (req) => new Promise((resolve) => { agent.handle(req, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(String(b)) }); } }); });
+  const getCred = () => send({ method: "GET", url: "/sandboxes/cl1/creds/claude", headers: { authorization: `Bearer ${rec.credToken}` }, socket: {} });
+  try {
+    assert.equal((await getCred()).body.token, "t1");
+    assert.equal((await getCred()).body.token, "t1", "cached");
+    assert.equal((await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: "Bearer nope" }, { reset_at: 1 }))).status, 401);
+    const r = await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: `Bearer ${rec.credToken}` }, { reset_at: 1800000000 }));
+    assert.equal(r.status, 200);
+    const fwd = calls.find((c) => c.url.endsWith("/agent/creds/claude/limited"));
+    assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000 }]);
+    assert.equal((await getCred()).body.token, "t3", "the cache was dropped: a fresh token");
   } finally { globalThis.fetch = realFetch; }
 });
