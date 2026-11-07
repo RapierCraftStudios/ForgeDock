@@ -16,5 +16,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "30d"
+  },
+  "schedd-upgrade-handover": {
+    "run": "test \"$(npx --no-install forgedock schedd status 2>&1 | grep -c 'is not hosted')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

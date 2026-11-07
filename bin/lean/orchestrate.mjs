@@ -304,7 +304,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -407,7 +407,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
   const save = () => {
     if (!store || halted) return;
-    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
+    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
@@ -977,12 +977,24 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Lanes launched by an earlier dispatcher: re-attach to the live ones, queue the rest again (no result was recorded).
   // #4504: every adopt starts at once and races its `onLive` signal, so a live lane never holds up the others: one that
   // already ended is settled from its result (or requeued without one) before scheduling; a live one is awaited in the background.
-  const requeueLost = (n) => { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) { pending.unshift(n); enqueued.set(n, now()); } };
+  // #5204: a requeue is never silent: one `deferred`/`run.interrupted` row names the cause (an upgrade or a plain restart)
+  // and `onInterrupted` reconciles the issue's labels. It consumes no deferral, engine-error or recovery attempt.
+  const interruptCause = saved?.engineVersion && version && saved.engineVersion !== version ? `upgrade v${saved.engineVersion}→v${version}` : "dispatcher restart";
+  const requeueLost = (n, why) => {
+    runRecs.delete(n);
+    if (pending.includes(n) || results.has(n)) return;
+    pending.unshift(n); enqueued.set(n, now());
+    update({ issue: n, outcome: "deferred", code: "run.interrupted", pr: null, cost_usd: 0, minutes: 0, detail: `interrupted: ${interruptCause}; ${why}; requeued` });
+    decided({ issue: n, what: "requeued (interrupted)", why, alternative: "leave it pending silently" });
+    try { Promise.resolve(onInterrupted?.(n, { cause: interruptCause, why })).catch(() => {}); } catch { /* best effort */ }
+  };
+  const adoptErrors = new Map(); // #5204: issue -> adopt error message, kept for the interrupted row
   const adopting = [...runRecs].map(([n, rec]) => {
-    if (!adopt || !(rec?.pid || rec?.handle)) return { n, rec, live: false, p: Promise.resolve(null) };
+    // #5204: a remote record that lost its handle still adopts: the remote seam finds the sandbox through its ledger.
+    if (!adopt || !(rec?.pid || rec?.handle || rec?.remote)) return { n, rec, live: false, p: Promise.resolve(null) };
     let onLive;
     const isLive = new Promise((r) => { onLive = () => r(true); });
-    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch(() => null);
+    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
     return { n, rec, p, first: Promise.race([p.then(() => false), isLive]) };
   });
   for (const a of adopting) a.live = a.first ? await a.first : false;
@@ -993,12 +1005,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       track(n, p.then((r) => {
         if (r) return settle(n, r, rec, checked.get(n) ?? null);
         if (halted) return; // #4454: kept for the next resume
-        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n); save(); // ended without a result after all
+        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n, "the adopted lane ended without a result"); save(); // ended without a result after all
       }));
       continue;
     }
     const r = await p;
-    if (!r) { requeueLost(n); continue; }
+    if (!r) {
+      const why = adoptErrors.get(n) ?? (!adopt || !(rec?.pid || rec?.handle || rec?.remote) ? "no adoptable pid or handle" : "the lane ended without a result");
+      requeueLost(n, why); continue;
+    }
     if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
     else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle
     track(n, Promise.resolve(r).then((x) => settle(n, x, rec, checked.get(n) ?? null)));

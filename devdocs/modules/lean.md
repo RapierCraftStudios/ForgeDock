@@ -2708,6 +2708,16 @@ its held subtree to pending in dependency order. The report prints one
 - `heavy.mjs` `runWrapped` passes `spawnInherit` an `onSpawn` hook that calls `lowerPriority` on the gated path only; the child stays in the lane's process group, so signal forwarding is unchanged.
 Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entry mini-dashboard host row.
 
+## Entry 2026-11-07 — upgrade handover: interrupted lanes are logged, requeued and relabelled; remote lanes reattached or reaped (#5204)
+
+- `orchestrate` options `version` (the running engine version) and `onInterrupted(n, {cause, why})` (best effort, errors swallowed). `save()` persists `engineVersion: version`. On a resume the cause is `upgrade v<saved.engineVersion>→v<version>` when both are set and differ, else `dispatcher restart`.
+- `requeueLost(n, why)`: when it actually requeues (the issue is neither pending nor settled) it logs one row `{outcome: "deferred", code: "run.interrupted", pr: null, cost_usd: 0, minutes: 0, detail: "interrupted: <cause>; <why>; requeued"}` to `store.log`/`onUpdate` (never to the rows `orchestrate()` returns), records a `requeued (interrupted)` decision and calls `onInterrupted`. It counts no deferral, engine-error, recovery or needs-human, and the issue goes to the head of `pending`; the relaunch resumes from the pushed branch or salvage ref as before. `why` is one of `no adoptable pid or handle`, `adopt failed: <message>` (the adopt error is kept, no longer swallowed) or `the lane ended without a result` / `the adopted lane ended without a result`. #4454 is unchanged: after a halt nothing is requeued, logged or saved.
+- A saved running record with `remote: true` but no `pid`/`handle` (the old dispatcher halted before `onStart` could save) is still passed to `adopt`. `providerLanes.adoptSaved` then looks up `ledgerFor(n).entries("sandbox")` for `provider.idFor(n)` with the same provider and uses its `handle`. A live sandbox is reattached (`onLive`, then awaited), an ended one returns its result, and a gone one or one that exited without a result is torn down (ledger released) before returning null, so the lane is requeued and the sandbox is never orphaned. An unreachable sandbox is still kept (#4672). No ledger entry returns null.
+- schedd upgrade handover: `startDaemon` options `installedVersion` (default `readInstalledVersion()`: `version` of `../../package.json` of this install, null on error) and `respawn` (default: `defaultSpawn({dir})` unless `unitState()` is `active`/`activating`, where systemd `Restart=always` restarts the unit). The version is recorded at start. On each `lockCheckMs` tick, when the installed version is readable and differs, the daemon logs `schedd: install moved v<old> → v<new>; handing over` once, awaits `close()` (no admission, lanes keep running, lock and socket released) and then calls `respawn`. The new daemon resumes every batch and adopts the live lanes. Any lane it cannot adopt gets the interrupted row above, so this catches `npm i -g` as well as `forgedock update`.
+- Label reconcile: engine-cli `runBatch` passes `version: ENGINE_VERSION` and `onInterrupted` (default: `gh issue edit <n> --remove-label workflow:building`, best effort; `deps.onInterrupted` overrides), so no requeued issue stays `workflow:building` with nothing running.
+- Post-deploy check `schedd-upgrade-handover` (`.forge/post-deploy-checks.json`, 7d): `forgedock schedd status` lists no batch as `is not hosted`. The live 2 local + 2 remote upgrade is observed there.
+Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs` "#5204".
+
 `release.mjs` (#5208): `forgedock release`, the resumable staging→default release job (state `~/.forge/releases/<id>/`, steps preflight → release-pr → review → fixes → promotion → post-merge, promotion opt-in via `--merge` / `release.auto_merge`); `release-review.mjs` and `release-postmerge.mjs` are blocked stubs until #5212 / #5213. ADR `devdocs/decisions/5208-release-job.md`.
 
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
@@ -2718,3 +2728,19 @@ Tests: `hostload.test.mjs`, `schedd.test.mjs` "#5174", `router.test.mjs` re-entr
 - `bin/stats/depth.mjs` (`forgedock stats --depth`): joins each run-log slice's LIGHT_ELIGIBILITY with its outcome (merged/needs-human, first pass, cost, wall/model time, review findings, conformance failures) and post-merge defect signals over gh (reopen, revert, or a fix PR touching the same non-test files within 7 days; a gh failure is n/a, never false). Grouped by verdict and by every reason/signal code.
 - Promotion rule (#5052): treatment = light|upgraded lanes, control = eligible full lanes in the same size buckets; cost ratio <= 1.2, wall/model <= 1.3, defect rate <= control; any cell under `--min-n` (10) is `insufficient data`. Flipping `lean.light.mode: on` stays a config decision.
 Tests: `light.test.mjs` "#5209", `lean.test.mjs` "#4450 light lane" (#5209 cases), `bin/stats/depth.test.mjs`.
+
+## Conformance outcomes (#5210)
+
+`forgedock stats --conformance-outcomes` (`bin/stats/conformance-outcomes.mjs`) reads whether the conformance gate earns its
+blocks. For each merged lane PR, it joins the PR's last verdict to four post-merge defect signals inside `--window-days` (default 7):
+reverted, closing issue reopened, cited by a later fix, and a later fix touching the same hunks. The verdict is the mode and
+failure kinds from `query.mjs` `conformanceVerdicts`, read from FORGE:TELEMETRY, the run logs and the batch rows.
+How to read it:
+- Each row compares nonconforming-merged with conforming-merged as `defects/n rate [Wilson 95% interval]`. Rows are per repo,
+  per mode and per failure kind. A cell under min n (default 20) is `n/a`.
+- The last line is the conclusion. "higher defect rate" means the intervals do not overlap. Otherwise it says "no higher
+  defect rate shown" or "insufficient data".
+- A kind with a higher rate is a candidate to stay enforced. Kinds with no difference are candidates to narrow or to replace
+  with property checks (#4149). That decision is separate work.
+- Read only: one GraphQL search per 100 PRs plus local `git blame` (same-hunks is `null` outside a clone of the repo). No
+  lane-path cost, no LLM. Definitions: `docs/STATS.md`.
