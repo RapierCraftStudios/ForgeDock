@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -591,6 +591,47 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     await d2.closed;
     assert.ok(lines2.includes(`schedd: lost socket ${p.sock}, exiting`), lines2.join("\n"));
     assert.equal(existsSync(p.lock), false, "its own lock is released");
+  });
+
+  it("#5204: an install that moves under the daemon hands over once: batches stop resumable, lock and socket released, then respawn starts the next daemon", async () => {
+    const dir = tmpDir("schedd-upgrade-"), p = scheddPaths(dir), root = join(dir, "batches"), lines = [];
+    let version = "1.51.0", stopped = false, d2 = null, lockAtRespawn = null, respawns = 0;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version,
+      runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => signal.addEventListener("abort", () => { stopped = true; rej(Object.assign(new Error("stopped"), { code: "batch.stopped" })); })); },
+      respawn: async () => { respawns++; lockAtRespawn = existsSync(p.lock); d2 = await startDaemon({ dir, root, runBatch: async () => ({}), log: () => {}, resumeOnStart: false, installedVersion: () => version }); } });
+    request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+    await until(() => lines.some((l) => l.includes("listening")));
+    await new Promise((r) => setTimeout(r, 90));
+    assert.ok(!lines.some((l) => l.includes("handing over")), "no handover while the install is unchanged");
+    version = "1.52.0";
+    await d.closed;
+    await until(() => d2 !== null);
+    try {
+      assert.equal(lines.filter((l) => l === "schedd: install moved v1.51.0 → v1.52.0; handing over").length, 1, lines.join("\n"));
+      assert.equal(stopped, true, "the hosted batch stopped resumable (no admission, lanes keep running)");
+      assert.equal(lockAtRespawn, false, "the lock was released before the respawn");
+      assert.equal(respawns, 1);
+      assert.equal(d2.running, true, "the next daemon took the lock");
+    } finally { await d2?.close?.(); }
+  });
+
+  it("#5204: readInstalledVersion reads this install's package.json version, null when unreadable", () => {
+    assert.equal(readInstalledVersion(), JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
+    const dir = tmpDir("schedd-ver-");
+    writeFileSync(join(dir, "package.json"), "{not json");
+    assert.equal(readInstalledVersion({ file: join(dir, "package.json") }), null);
+    assert.equal(readInstalledVersion({ file: join(dir, "missing.json") }), null);
+  });
+
+  it("#5204: an unreadable install version never hands over", async () => {
+    const dir = tmpDir("schedd-upgrade-null-"), lines = [];
+    let calls = 0;
+    const d = await startDaemon({ dir, root: join(dir, "batches"), runBatch: async () => ({}), log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 20,
+      installedVersion: () => (++calls === 1 ? "1.51.0" : null), respawn: () => assert.fail("no respawn") });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(calls > 1, "checked on the tick");
+    assert.ok(!lines.some((l) => l.includes("handing over")));
+    await d.close();
   });
 
   it("#4503: a client whose daemon is SIGKILLed re-attaches to the next daemon and finishes, without relaunching a lane", async () => {

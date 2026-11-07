@@ -881,6 +881,54 @@ describe("#4504: a resume settles lanes that ended while no dispatcher ran", () 
   });
 });
 
+describe("#5204: lanes interrupted by an upgrade are logged and requeued, never dropped", () => {
+  const stateOf = (running, extra = {}) => ({ v: 1, order: Object.keys(running).map(Number), deps: Object.fromEntries(Object.keys(running).map((k) => [k, []])), lanes: {}, crossSeen: [], results: {},
+    running, pending: [], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null, ...extra });
+  it("#5204: a resume after an upgrade logs an interrupted row and requeues a lane that ended without a result", async () => {
+    let saved = stateOf({ 3: { startedAt: 1, pid: 33 }, 5: { startedAt: 1, remote: true }, 6: { startedAt: 1, pid: 66 }, 7: { startedAt: 1 } }, { engineVersion: "1.51.0" });
+    const logged = [], updates = [], decisions = [], interrupted = [], adopted = [];
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: (r) => logged.push(r) };
+    const adopt = async (n, rec) => { adopted.push(n); if (n === 6) throw new Error("ledger unreadable"); return null; };
+    const launched = [];
+    const rows = await orchestrate({ issues: [], parallel: 3, pollMs: 5, readBody: async () => "", store, adopt, version: "1.52.0",
+      onUpdate: (r) => updates.push(r), decide: (d) => decisions.push(d),
+      onInterrupted: async (n, detail) => { interrupted.push([n, detail.cause]); if (n === 3) throw new Error("gh down"); }, // errors are swallowed
+      runOne: async (n) => { launched.push(n); return { terminalReason: "merged", pr: 100 + n }; } });
+    assert.deepEqual(adopted.sort(), [3, 5, 6], "a handle-less remote record is still adopted (the ledger seam); a record with nothing to adopt is not");
+    const ir = logged.filter((r) => r.code === "run.interrupted");
+    assert.deepEqual(ir.map((r) => r.issue).sort(), [3, 5, 6, 7], "one interrupted row per requeued lane");
+    for (const r of ir) {
+      assert.equal(r.outcome, "deferred");
+      assert.equal(r.pr, null); assert.equal(r.cost_usd, 0); assert.equal(r.minutes, 0);
+      assert.match(r.detail, /^interrupted: upgrade v1\.51\.0→v1\.52\.0; .+; requeued$/);
+    }
+    assert.match(ir.find((r) => r.issue === 6).detail, /adopt failed: ledger unreadable/, "the adopt error is kept");
+    assert.match(ir.find((r) => r.issue === 7).detail, /no adoptable pid or handle/);
+    assert.match(ir.find((r) => r.issue === 3).detail, /ended without a result/);
+    assert.deepEqual(updates.filter((r) => r.code === "run.interrupted").length, 4, "onUpdate sees the same rows");
+    assert.deepEqual(decisions.filter((d) => d.what === "requeued (interrupted)").map((d) => d.issue).sort(), [3, 5, 6, 7]);
+    assert.deepEqual(interrupted.map(([n]) => n).sort(), [3, 5, 6, 7]);
+    assert.ok(interrupted.every(([, c]) => c === "upgrade v1.51.0→v1.52.0"));
+    assert.deepEqual(launched.sort(), [3, 5, 6, 7], "each requeued lane runs once");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [[3, "merged"], [5, "merged"], [6, "merged"], [7, "merged"]], "the interrupted row is not a result");
+    assert.deepEqual(saved.deferrals, {}, "no deferral consumed");
+    assert.deepEqual(saved.engineErrors, {}, "no engine-error consumed");
+    assert.equal(saved.engineVersion, "1.52.0", "the running engine version is saved");
+  });
+  it("#5204: without a version change the cause is a dispatcher restart; a lane with a result is settled, not interrupted", async () => {
+    let saved = stateOf({ 1: { startedAt: 1, pid: 11 }, 2: { startedAt: 1, pid: 22 } }, { engineVersion: "1.52.0" });
+    const logged = [];
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: (r) => logged.push(r) };
+    const adopt = async (n) => (n === 1 ? { terminalReason: "merged", pr: 101 } : null);
+    const rows = await orchestrate({ issues: [], parallel: 2, pollMs: 5, readBody: async () => "", store, adopt, version: "1.52.0",
+      runOne: async (n) => ({ terminalReason: "merged", pr: 100 + n }) });
+    const ir = logged.filter((r) => r.code === "run.interrupted");
+    assert.deepEqual(ir.map((r) => r.issue), [2]);
+    assert.match(ir[0].detail, /^interrupted: dispatcher restart; the lane ended without a result; requeued$/);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 101], [2, "merged", 102]]);
+  });
+});
+
 describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => {
   it("sandbox.capacity is uncapped and honours retryInSeconds; other codes still cap at maxDeferrals", () => {
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
