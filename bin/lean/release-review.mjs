@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { reviewStagingJson, reviewStagingIo } from "../review-staging.mjs";
+import { reviewStagingJson, reviewStagingIo, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 /** Delta passes after a head move, and fix-lane rounds: past either the job blocks for the manual path. */
 export const MAX_DELTA_PASSES = 2;
@@ -120,8 +120,15 @@ export async function fixStep(ctx) {
   const seam = seamOf(ctx);
   for (let round = 0; r.marker !== "FORGE:GATE_PASS"; round++) {
     if (round >= MAX_FIX_ROUNDS) return blocked(`still ${r.verdict} after ${MAX_FIX_ROUNDS} fix round(s)`);
-    if (!r.blocking?.length) return blocked(`${r.verdict} with no blocking finding to fix (CI red: ${r.ciFailing ?? "unknown"})`);
-    for (const issue of r.blocking) {
+    // Blocking findings are already filed issues; red CI has none, so it gets one issue naming the failing checks.
+    const issues = [...(r.blocking ?? [])];
+    if (r.ciFailing > 0) {
+      const n = await seam.fileCiIssue({ pr: r.pr, head: r.head });
+      if (!n) return blocked(`could not file an issue for the red CI of #${r.pr}`);
+      issues.push(n);
+    }
+    if (!issues.length) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
+    for (const issue of issues) {
       const lane = await seam.runLane({ issue, lane: ctx.staging });
       if (lane?.terminalReason !== "merged") return blocked(`fix lane for #${issue} ended ${lane?.terminalReason ?? "without a result"}`);
     }
@@ -154,6 +161,11 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd() }) 
       runner ??= (await import("./effects.mjs")).makeLeanRunner();
       // not readOnly: each reviewer posts its own PR comment
       return runner({ role, issue, cwd, prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+    },
+    async fileCiIssue({ pr, head }) {
+      const rows = JSON.parse(gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,bucket"]));
+      const names = rows.filter((c) => c.bucket === "fail" && !CI_EXCLUDED_CHECKS.includes(c.name)).map((c) => c.name);
+      return this.fileIssue({ item: { title: `Release PR #${pr}: CI red at ${head.slice(0, 7)}`, severity: "HIGH", body: `Failing required checks on the release PR #${pr} at ${head}:\n${names.map((n) => `- ${n}`).join("\n")}\n\nFix them on the staging branch.` }, pr });
     },
     fileIssue: async ({ item, pr }) => {
       const dir = mkdtempSync(join(tmpdir(), "release-finding-"));

@@ -24,6 +24,7 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [] } = {}) {
     saveTestGate: () => "/sd/7_test_gate_output.txt",
     runAgent: async (a) => { agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
+    fileCiIssue: async () => { log.push(["ci-issue"]); return n++; },
     addNotes: async (pr, notes) => log.push(["notes", notes]),
     runLane: async (a) => { log.push(["lane", a.issue, a.lane]); return lanes[l++] ?? { terminalReason: "merged" }; },
   };
@@ -137,10 +138,26 @@ describe("fixStep", () => {
     assert.equal(s.log.filter((e) => e[0] === "lane").length, MAX_FIX_ROUNDS);
   });
 
-  it("blocks when a lane does not merge, and when only CI is red", async () => {
+  it("blocks when a lane does not merge", async () => {
     const s = fakeSeam({ lanes: [{ terminalReason: "needs-human" }] });
     assert.equal((await fixStep(ctx(s, { review: { result: failed } }))).blocked, true);
-    assert.match((await fixStep(ctx(fakeSeam(), { review: { result: { ...failed, blocking: [], ciFailing: 2 } } }))).reason, /no blocking finding/);
+  });
+
+  it("red CI with no finding files one CI issue and runs a lane on it, then reviews the delta", async () => {
+    const s = fakeSeam({ heads: [H2] });
+    const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], ciFailing: 2 } } }));
+    assert.deepEqual(s.log.slice(0, 3), [["ci-issue"], ["lane", 100, "staging"], ["pre", H1]]);
+    assert.equal(r.blocked, undefined);
+  });
+
+  it("a blocking finding and red CI together get a lane each", async () => {
+    const s = fakeSeam({ heads: [H2] });
+    await fixStep(ctx(s, { review: { result: { ...failed, ciFailing: 1 } } }));
+    assert.deepEqual(s.log.filter((e) => e[0] === "lane").map((e) => e[1]), [101, 100]);
+  });
+
+  it("blocks when the verdict is not a pass but there is nothing to fix", async () => {
+    assert.match((await fixStep(ctx(fakeSeam(), { review: { result: { ...failed, blocking: [], ciFailing: 0 } } }))).reason, /nothing to fix|neither/);
   });
 });
 
