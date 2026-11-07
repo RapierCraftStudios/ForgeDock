@@ -6,8 +6,8 @@ import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE,
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -293,7 +293,7 @@ describe("R2-remote-hotspot-config check command (#5198)", () => {
   const cmd = JSON.parse(readFileSync(new URL("../../.forge/post-deploy-checks.json", import.meta.url), "utf8"))["R2-remote-hotspot-config"].run;
   // Stub gh: logs argv, then applies the --jq filter (via node) to the comments in $STUB_COMMENTS.
   const runCheck = (comments) => {
-    const dir = mkdtempSync(join(tmpdir(), "r2chk-"));
+    const dir = tmpDir("r2chk-");
     try {
       writeFileSync(join(dir, "comments.json"), JSON.stringify(comments));
       writeFileSync(join(dir, "gh"), `#!/usr/bin/env node
@@ -307,7 +307,7 @@ for (const c of JSON.parse(fs.readFileSync(${JSON.stringify(join(dir, "comments.
 `, { mode: 0o755 });
       const r = spawnSync("bash", ["-c", cmd], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: "utf8" });
       return { code: r.status, argv: readFileSync(join(dir, "argv.log"), "utf8") };
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { /* removed by tmpDir at process exit */ }
   };
   const traj = (anoms) => ({ id: 1, body: `<!-- FORGE:TRAJECTORY -->\n## Pipeline Trajectory\n\n**Anomalies**\n${anoms}\n` });
 
