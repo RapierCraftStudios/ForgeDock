@@ -21,6 +21,7 @@ import { experimentReport, renderExperiment } from "./experiment.mjs";
 import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
+import { buildDepth, renderDepth } from "./depth.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,6 +33,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
+       forgedock stats --depth [--since <version|date>] [--min-n N] [--offline] [--repo <owner/repo>] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
 delta against the previous version and a low-n flag for samples under 10. Missing data prints n/a.
@@ -86,6 +88,14 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
                         their delta and full-lane cohorts matched per size (forge#4491)
   --offline             skip the GitHub crawl for merged issues (issue quality and acceptance print n/a)
 
+Lane depth (forge#5209; local run logs, gh only for post-merge defect signals, no model):
+  --depth               light-eligible versus ineligible lanes (LIGHT_ELIGIBILITY verdict) with merge, first-pass and
+                        needs-human rates, median cost, wall time, review findings, conformance failures and post-merge
+                        defects (reopen, revert, a fix PR touching the same files within 7 days), grouped by verdict and
+                        by every reason/signal code, plus the #5052 light-lane promotion verdict: light-shaped lanes cost
+                        <= 1.2x and wall <= 1.3x model time, defect rate <= eligible full lanes of the same size;
+                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a)
+
 Compounding (forge#4696; GitHub + git of the current clone, no model):
   --compounding         reintroduction rate (guarded fix reopened, or its lines blamed by a later guarded fix within 90 days),
                         reopen-after-close rate, guard activity (guard_run, guard_broken, supersedes_accepted) and decision
@@ -107,7 +117,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { depth: false, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -131,6 +141,7 @@ export function parseArgs(argv) {
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
     else if (name === "--efficiency") o.efficiency = true;
+    else if (name === "--depth") o.depth = true;
     else if (name === "--pool") o.pool = true;
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
     else if (name === "--window") o.windows = parseWindows(take());
@@ -157,7 +168,8 @@ export function parseArgs(argv) {
   if (o.batch && !o.efficiency) throw new Error("--batch and --window need --efficiency");
   if (o.windows && !o.efficiency && !o.pool && !o.compounding) throw new Error("--batch and --window need --efficiency");
   if (o.bucket && !o.compounding) throw new Error("--bucket needs --compounding");
-  if ((o.compare || o.offline) && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
+  if (o.compare && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
+  if (o.offline && !o.efficiency && !o.depth) throw new Error("--compare and --offline need --efficiency (--offline also works with --depth)");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
   return o;
 }
@@ -280,6 +292,11 @@ export async function buildReport(opts, deps = {}) {
     const pool = poolUtilisation({ batchRoot: deps.batchRoot ?? batchRoot(env), repo, windows: opts.windows ?? parseWindows("7d,30d"), now: deps.now?.() ?? Date.now() });
     return { repo, query: { pool } };
   }
+  if (opts.depth) { // forge#5209: run logs; gh only for post-merge defect signals
+    const st = sinceToTimestamp(opts.since, releaseTimes), sinceMs = st.since ? Date.parse(st.since) : null;
+    const depth = await buildDepth({ runsDir: deps.runsDir ?? runsDir(env), repo, sinceMs, gh: opts.offline ? null : (deps.gh ?? defaultGh), minN: opts.minN });
+    return { repo, query: { depth } };
+  }
   if (opts.efficiency) { // forge#4402: local batch dirs + run logs; gh only for merged issues
     const root = deps.batchRoot ?? batchRoot(env), rd = deps.runsDir ?? runsDir(env), now = deps.now?.() ?? Date.now(), gh = opts.offline ? null : (deps.gh ?? defaultGh);
     const efficiency = {};
@@ -367,6 +384,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
+    if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;
