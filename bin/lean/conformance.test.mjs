@@ -1405,6 +1405,12 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
     }
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Keep playwright e2e coverage; add unit tests (no new fixtures needed for e2e)", source: "doc" }] }), []);
   });
+  it("#5184 a negated omission verb keeps e2e and is not flagged", () => {
+    for (const choice of ["Mocked the gateway with stubs; will not forget to add the e2e test", "Mocked the gateway with stubs; not going to forget to add the e2e test", "Mocked the gateway with stubs; never intending to skip the e2e test", "Stubs for the API; will not fail to run e2e", "Mocks used; never omit the e2e test"]) {
+      assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice, source: "doc" }] }), [], choice);
+    }
+    assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "We do not need to run e2e; mocked route tests cover it", source: "doc" }] }), ["K1"]);
+  });
   it("leaves unrelated decisions and contracts without decisions alone", () => {
     assert.deepEqual(weakenedE2eDecisions(C), []);
     assert.deepEqual(weakenedE2eDecisions({ ...C, decisions: [{ id: "K1", choice: "Run the Playwright e2e suite against the live stack", source: "doc" }, { id: "K3", choice: "Use unit tests with mocks for the parser", source: "spec" }] }), []);

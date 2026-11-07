@@ -2640,6 +2640,7 @@ Every milestone read in `bin/` goes through `lane.mjs` `listMilestones({gh, repo
 ## Entry 2026-11-06 — e2e-weakening check: negated verbs keep reaching e2e (#5157)
 
 - `weakenedE2eDecisions` (`bin/lean/conformance.mjs`): #5145 stopped every bare negator at a preposition, so "do not need to run e2e; mocked tests cover it", "not with e2e" and "not for e2e" slipped through. Now only the determiner `no` + noun phrase stops at a preposition (`no new fixtures needed for e2e` stays unflagged); `not`/`without`/`never` and `no need/reason/point/requirement` keep the 5-word gap. The `forge-probe` exemption is unchanged. Test: `conformance.test.mjs` "#5157".
+- `weakenedE2eDecisions` (`bin/lean/conformance.mjs`, #5184): the wide `not`/`without`/`never` gap flagged "will not forget to add the e2e test". Negated omission verbs (forget/fail/omit/neglect, with an optional "going/planning/intending/about/trying to" lead-in, `won't` included) are now blanked by `NEG_OMIT_RE` before matching, like `NEG_DROP_RE` (which accepts the same lead-in), so the double negative keeps e2e. The #5157/#5145 cases ("do not need to run e2e; mocked route tests cover it") stay flagged. Test: `conformance.test.mjs` "#5184".
 
 ## Entry 2026-11-05 — Domain checks in the lane review; review.enforce_domains (#5099)
 
