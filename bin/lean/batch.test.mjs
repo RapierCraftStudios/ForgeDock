@@ -1547,6 +1547,10 @@ describe("#5167 early batch health in runBatch", () => {
   it("#5167 roots ending engine-error raise one BATCH UNHEALTHY at T+15 with recovery commands, on every channel", async () => {
     const { deps, timers, comments, notes, gate } = mk({ fail: true });
     let id = null;
+    // Three concurrent roots must not depend on host memory: the live local lane cap (#4777) reads forge.yaml from the cwd.
+    const adm = tmpDir("bh-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
     const lines = await capture(async () => {
       const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
       try {
@@ -1555,7 +1559,7 @@ describe("#5167 early batch health in runBatch", () => {
         await timers[0].fn();
         await until(() => existsSync(join(deps.batchRoot, id, "health.json")) && JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, 5000);
         await until(() => notes.length === 1, 5000);
-      } finally { gate.open(); await run; }
+      } finally { gate.open(); await run; process.chdir(prevCwd); }
     });
     assert.ok(lines.some((l) => /^health checks: T\+15 \d\d:\d\dZ, T\+60 \d\d:\d\dZ, and at batch end; forgedock status --batch /.test(l)), lines.join("\n"));
     const alerts = lines.filter((l) => /^BATCH UNHEALTHY /.test(l));
