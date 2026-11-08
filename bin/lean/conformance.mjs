@@ -1256,14 +1256,38 @@ export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(tit
  * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
  * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
  */
-export function closePlan(contract, { title = null, review = null } = {}) {
+export function closePlan(contract, { title = null, review = null, issueText = null } = {}) {
   const reqs = contract.requirements ?? [];
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
-  if (!isInvestigation(title)) return { reason: "completed", tracked };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
+  if (!isInvestigation(title)) {
+    const unticked = unmetChecklist(reqs, rows, issueText);
+    return unticked.length ? { reason: "partial", tracked, checklist: true, open: unticked.map((u) => u.req), unticked: unticked.map((u) => u.item) } : { reason: "completed", tracked };
+  }
   const open = reqs.filter((r) => TRACKED.includes(r.disposition)
     || (r.disposition === "deliver" && rows && rows.find((x) => x?.id === r.id)?.status !== "implemented"));
   return open.length ? { reason: "partial", tracked, open } : { reason: "completed", tracked };
+}
+
+const UNTICKED_RE = /^\s*[-*+]\s+\[ \]\s+(.+?)\s*$/;
+/**
+ * #5240: the issue's unticked `- [ ]` acceptance items whose requirement is not settled: a deliver row the review did not mark
+ * implemented, or a defer/post-deploy row with no tracking issue. An item no contract quote matches is not judged here (the
+ * reviewer's issue_coverage gate owns coverage), and a skipped review (null rows) judges dispositions only.
+ */
+function unmetChecklist(reqs, rows, issueText) {
+  if (!issueText) return [];
+  const out = [];
+  for (const line of String(noComments(String(issueText))).split("\n")) {
+    const item = UNTICKED_RE.exec(line)?.[1];
+    if (!item) continue;
+    const req = reqs.find((r) => r?.quote && matchCriterion(String(r.quote).replace(ITEM_PREFIX_RE, ""), item) !== null);
+    if (!req) continue;
+    const unmet = TRACKED.includes(req.disposition) ? !req.tracked
+      : req.disposition === "deliver" && rows && rows.find((x) => x?.id === req.id)?.status !== "implemented";
+    if (unmet) out.push({ item, req });
+  }
+  return out;
 }
 
 const UNUSABLE_REVIEW = ["review.incomplete", "review.inconsistent", "review.unparseable"];

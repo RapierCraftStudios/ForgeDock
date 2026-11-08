@@ -2774,3 +2774,16 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 ## Entry 2026-11-08 — repro command environment rule and repeat-signature stop (#5232)
 
 `reproPlanNote` (`prompts.mjs`) requires a repro command's environment to come from the repo's lockfile or toolchain. `validateContract` (`conformance.mjs`, `guessedUvEnv`) rejects a `repro_test` or validate command of the form `uv run --offline --no-project --with <pkgs>` without `--with-requirements`: one plan-time correction, no LLM call. In `orchestrate.mjs`, a recovery attempt that ends with the same `env.repro_unrunnable` or `env.tool_missing` code and the same normalized detail (the command) as the run before it is not requeued (`REPEAT_ENV_CODES`); the row detail is prefixed "Environment defect" and the needs-human evidence names the command to run on the host. `env.validate_timeout` is excluded (load-dependent).
+
+## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
+
+`closePlan(contract, {title, review, issueText})` now also judges the issue's unticked `- [ ]` items for non-investigation
+issues: an item whose contract quote matches (`matchCriterion`) and whose requirement is a `deliver` row the review did not
+mark `implemented`, or a `defer`/`post-deploy` row with no tracking issue, makes the plan `partial` (`checklist: true`,
+`open`, `unticked`). The close step then leaves the issue open (not `completed`) and posts a FORGE:TRACKED "Left open:
+partial" note listing the criteria and tracked follow-ups. Items no quote matches are not judged here (issue_coverage owns
+coverage); a skipped review judges dispositions only; investigations keep their #4398 behaviour (close `completed`).
+`activation.mjs` `rolloutModes(cfg, changedFiles, read)` reads the current mode of registry flags (forge.yaml
+`rollouts.files`) that the changed files name; a non-live mode (shadow/off) adds a trajectory decision "Inert in
+production" and a line in the partial note, so the production outcome is never claimed. Intake triage of
+live-measurement issues is not part of this change.
