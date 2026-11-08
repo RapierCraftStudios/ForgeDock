@@ -1470,7 +1470,7 @@ const LIVE_EVIDENCE_RE = /\b(?:measur\w*|capture\w*)\b[^.\n]{0,60}\b(?:productio
 export function intakeHostWork(body) {
   const text = String(body ?? "");
   if (/FORGE:(?:DEFERRED_FROM|BACKLOG_BATCH)/.test(text)) return { host: false, items: [] };
-  const section = text.replace(/<!--[\s\S]*?-->/g, "").split(/^#{1,2}\s+(?=\S)/m).find((s) => /^acceptance\b/i.test(s)) ?? "";
+  const section = noComments(text).split(/^#{1,2}\s+(?=\S)/m).find((s) => /^acceptance\b/i.test(s)) ?? "";
   const items = [...section.matchAll(/^\s*[-*]\s+\[[ xX]\]\s+(.+)$/gm)].map((m) => m[1].trim());
   const host = items.length > 0 && items.every((t) => (LIVE_EVIDENCE_RE.test(t) || READONLY_PROD_RE.test(t)) && !EXTERNAL_NEED_RE.test(t));
   return { host, items: host ? items : [] };
