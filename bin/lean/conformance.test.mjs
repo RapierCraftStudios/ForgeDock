@@ -493,6 +493,12 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py" }));
     assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: not found: /repo/tests/x.py::t" }));
     assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed, 2 passed" }));
+    // exit 4 or 5 of a pytest command is unrunnable whatever the output says; other runners and test failures are not
+    for (const rc of [4, 5]) assert.ok(unrunnableValidate({ rc, output: "" }, "poetry run pytest -q tests/x.py"), `rc ${rc}`);
+    assert.ok(!unrunnableValidate({ rc: 4, output: "" }, "node --test x.mjs"));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed" }, "pytest tests/x.py"));
+    assert.equal(substituteVerdict({ rc: 4, output: "" }, { command: poetry }), "ok");
+    assert.equal(substituteVerdict({ rc: 1, output: "1 failed" }, { command: poetry }), "runs");
     assert.equal(substituteVerdict(exit4), "ok");
     const contract = { requirements: [], deliverables: [], validate: [{ id: "V1", command: poetry }] };
     const p = precheck({ contract, result: { validation: [{ id: "V1", exit: 4 }] }, changedFiles: [], validateRuns: { V1: exit4 } });

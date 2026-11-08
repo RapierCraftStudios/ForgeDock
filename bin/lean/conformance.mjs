@@ -803,7 +803,7 @@ export function noopCommand(command) {
  */
 export function substituteVerdict(run, { repoHas = () => false, command = "" } = {}) {
   if (!run) return "unverified";
-  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
+  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run, command) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
   return run.rc === 124 ? "timeout" : "runs";
 }
 /**
@@ -843,7 +843,9 @@ export async function removedPathsOf(git, base) {
 }
 const UNRUNNABLE_RE = /ERROR: file or directory not found|ERROR: not found:|no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
-export function unrunnableValidate({ rc, output } = {}) {
+export function unrunnableValidate({ rc, output } = {}, command = "") {
+  // #5234: pytest's own exit 4 (usage error, path not found) and 5 (no tests collected) are never a test failure
+  if ((rc === 4 || rc === 5) && /\b(?:py\.?test|pytest)\b/.test(String(command ?? ""))) return true;
   return rc !== 0 && rc !== 124 && UNRUNNABLE_RE.test(String(output ?? ""));
 }
 const BLOCK_VALIDATE_RE = /\b(?:V\d+|validate|repro)\b/i;
@@ -965,7 +967,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
-      if (rerun && unrunnableValidate(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
+      if (rerun && unrunnableValidate(rerun, v.command)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
       // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
       if (rerun?.rc === 124) {
         if (ciVerified) { ciCovered.push(v.id); continue; }
