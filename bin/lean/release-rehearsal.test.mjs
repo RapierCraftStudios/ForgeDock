@@ -20,7 +20,7 @@ function fakeIo({ run = { ok: true }, issues = [], body = "Bundle" } = {}) {
     gh: async (a) => {
       calls.push(a); const j = a.join(" ");
       if (a[0] === "pr" && a[1] === "list" && a.includes("open")) return JSON.stringify(a.includes("--head") ? [{ number: 7, headRefOid: HEAD, url: "u" }] : []);
-      if (j.includes("--json headRefOid")) return JSON.stringify({ headRefOid: HEAD });
+      if (j.includes("headRefOid")) return JSON.stringify({ headRefOid: HEAD });
       if (j.includes("--json comments")) return JSON.stringify({ comments: [{ body: "FORGE:GATE_PASS" }] });
       if (a[0] === "api") return JSON.stringify([{ name: "forge/deploy-gate", conclusion: "success" }]);
       if (j.includes("--json body")) return JSON.stringify({ body: st.body });

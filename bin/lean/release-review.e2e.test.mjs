@@ -23,7 +23,7 @@ function world() {
     gh: async (a) => {
       const j = a.join(" ");
       if (a[0] === "pr" && a[1] === "list") return JSON.stringify(a.includes("--head") && a[a.indexOf("--state") + 1] === "open" ? [{ number: 7, headRefOid: sha(w.head), url: "u" }] : []);
-      if (j.includes("--json headRefOid")) return JSON.stringify({ headRefOid: sha(w.head) });
+      if (j.includes("headRefOid")) return JSON.stringify({ headRefOid: sha(w.head) });
       if (j.includes("--json comments")) return JSON.stringify({ comments: w.comments.map((body) => ({ body })) });
       if (a[0] === "api") return JSON.stringify([{ name: "forge/deploy-gate", conclusion: "success" }]);
       throw new Error(`unexpected gh ${j}`);
