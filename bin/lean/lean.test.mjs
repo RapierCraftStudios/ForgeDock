@@ -6368,6 +6368,17 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /deterministic: 2 union \/ JSON-map \/ generated file/);
     });
 
+    it("#5235 a hand-off renumber reruns the frozen validates without a spurious failure (no fix round, no anomaly)", async () => {
+      const w = dworld({ seq: [COLL, []] }), ran = [];
+      w.io.runCommand = async (a) => { ran.push(a.command); return { rc: 0, output: "" }; };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(w.renumbers.length, 1);
+      assert.ok(ran.includes("node --test test/foo.test.js"), `validate rerun after hand-off renumber: ${JSON.stringify(ran)}`);
+      assert.equal(builders(w).length, 2, "no fix round");
+      assert.ok(!(r.anomalies ?? []).some((x) => /after the hand-off renumber/.test(x)), JSON.stringify(r.anomalies));
+    });
+
     it("#5235 a renumber after a base-sync reruns the frozen validates before the merge; no renumber, no extra run", async () => {
       const w = dworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"], mine: [] }), ran = [];
       w.io.runCommand = async (a) => { ran.push(a.command); return { rc: 0, output: "" }; };

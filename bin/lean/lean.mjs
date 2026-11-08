@@ -2031,7 +2031,7 @@ export async function runCore(o) {
     async function revalidateRenumbered(trigger) {
       if (!io.runCommand || !frozen?.validate?.length) return;
       const env = laneEnv();
-      const runAll = () => revalidate({ validates: frozen.validate, runOne: async (v) => { const x = (await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r)) ?? {}; return { rc: x.rc, output: x.output }; } });
+      const runAll = () => revalidate({ validates: frozen.validate, runOne: async (v) => { const x = (await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: resolveForgedockPaths(String(v.command), { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI }), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r)) ?? {}; return { rc: x.rc, output: x.output }; } });
       let bad = await runAll();
       ev({ event: "SEQUENCE_REVALIDATED", trigger, failed: bad.map((x) => x.id) });
       if (bad.length && sessionId) {
