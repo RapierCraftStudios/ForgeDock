@@ -21,7 +21,7 @@
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit (and #5168 a claude login failure, `backend.auth`) holds admissions for that account until its reset, and deferrals other than a wait (`host.busy`,
- * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784; `backend.auth`, #5168) stop after `maxDeferrals`.
+ * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784; `backend.auth`, #5168; `quota.exhausted`, #5236) stop after `maxDeferrals`.
  * #5161: an engine-error whose detail is a transport/gateway failure (`isTransientEngineError`) is requeued with backoff
  * (`transientRetryDelayMs`) up to `transientRetries` times, not counted against `ENGINE_ERROR_RELAUNCHES`; then it ends engine-error.
  * #5112: with `remote.offlineFallback` (`execution.fallback_local`), an issue deferred `remote.capacityFallbackAfter` times (default
@@ -238,7 +238,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
   const code = r?.code ?? null;
   if (UNCAPPED_DEFERRALS.has(code)) return { delayMs: (posNum(r?.retryInSeconds) ?? HOST_BUSY_RETRY_S) * 1000, host: true };
   // #4784: a usage limit is a known-time wait gated by the account hold, never capped.
-  if (code === "rate_limited") {
+  if (code === "rate_limited" || code === "quota.exhausted") { // #5236: no account has capacity: held until the earliest reset
     const at = posNum(r?.resetAtEpochMs) && r.resetAtEpochMs > now ? r.resetAtEpochMs : now + (posNum(r?.retryInSeconds) ?? RATE_LIMIT_FALLBACK_S) * 1000;
     return { delayMs: at - now, hold: true };
   }
@@ -732,7 +732,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.conformance && typeof r.conformance === "object" ? { conformance: r.conformance } : {}), // #4398
       ...(rec?.placement ? { placement: rec.placement } : {}), ...(estimates.has(n) ? { est_minutes: Math.round(estimates.get(n) * 10) / 10 } : {}) }; // #4409
     noteLimited(r); // #5205
-    const quotaPause = row.outcome === "deferred" && r?.code === "rate_limited" && !cancelled;
+    const quotaPause = row.outcome === "deferred" && (r?.code === "rate_limited" || r?.code === "quota.exhausted") && !cancelled;
     if (!quotaPause && quota.has(n)) { // #5094: the paused attempts' cost, added once
       const q = quota.get(n); quota.delete(n);
       row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(q.cost_usd) || 0)) * 1e6) / 1e6;
@@ -814,7 +814,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           // #5094: an account rotator with headroom means another account runs the next call, so no host hold is recorded.
           // #5203: a usage limit on the pool account rotates like a rotator account (the router hands the next sandbox the
           // lowest-usage login, #5165), so it sets no pool hold and no batch-wide notBefore while any account has headroom.
-          const usage = r?.code === "rate_limited";
+          const usage = r?.code === "rate_limited" || r?.code === "quota.exhausted";
           let poolId = null;
           if (usage) { try { poolId = remote?.identity?.() ?? null; } catch { poolId = null; } }
           const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, exclude: excluded(), poolId });
@@ -838,6 +838,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           requeue(n, delayMs); done(); save();
           const iso = new Date(resumeAt).toISOString();
           update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (${r?.code === "backend.auth" ? "backend.auth" : "quota"}) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+          if (r?.code === "quota.exhausted") { const ev = { event: "quota.exhausted", issue: n, batch: batchId ?? null, resumeAt: iso, detail: `quota.exhausted: no account has capacity; resuming ${iso}` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } // #5236: batch-level event supervisors see
           return;
         }
         requeue(n, capGated ? 0 : delayMs); done(); save();

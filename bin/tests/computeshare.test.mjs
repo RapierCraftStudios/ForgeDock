@@ -453,6 +453,7 @@ function usageRouter(accounts, { usage = true, ceiling } = {}) {
     const d = join(dir, `.claude-${n}`); mkdirSync(d); dirs.push(d);
     writeFileSync(join(d, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: `tok-${n}`, refreshToken: "refresh-SECRET", expiresAt: Date.now() + a.validH * 3600000 } }));
     if (usage && a.live) writeFileSync(join(src, `live.${n}`), a.live);
+    if (usage && a.used !== undefined) writeFileSync(join(src, `used.${n}`), `${a.used}\n`); // #5236: tokenbaton's polled figure
   }
   const log = { info: (m) => logs.info.push(String(m)), warn: (m) => logs.warn.push(String(m)), error() {} };
   const r = createRouter({ state_dir: dir, enroll_token: "enroll", forgedock_token: "fd", claude_config_dirs: dirs, usage_source: src, ...(ceiling ? { usage_ceiling_pct: ceiling } : {}) }, { fetchFn: async () => new Response("{}"), log });
@@ -540,6 +541,30 @@ test("#5205 router: a fresh 47% account ranks over a stale 99% one whose reset p
   const o = await only.get();
   assert.equal(o.status, 200);
   assert.match(only.logs.info.find((m) => /claude login selected/.test(m)), /account=1 usage=unknown% \(stale\)/);
+});
+
+test("#5236 router: weekly-exhausted account with an old-updated 5h sample is excluded; old samples rank after fresh ones", async () => {
+  const old = inS(-3 * 3600); // updated 3h ago, reset still in the future
+  const r = usageRouter({
+    1: { validH: 9, live: `0 ${inS(3600)} 100 ${inS(86400)} ${old}` }, // weekly 100: never handed out
+    2: { validH: 8, live: `0 ${inS(3600)} 10 ${inS(86400)} ${old}` }, // "0%" from a days-old sample: unknown
+    3: { validH: 2, live: `60 ${inS(3600)} 10 ${inS(86400)} ${inS(-60)}` },
+  });
+  const a = await r.get();
+  assert.equal(a.body.account, 3, "the fresh 60% ranks before the old 0%, and 1 is excluded");
+  const only = usageRouter({ 1: { validH: 9, live: `0 ${inS(3600)} 100 ${inS(86400)} ${old}` } });
+  const o = await only.get();
+  assert.equal(o.status, 429, "the weekly-exhausted account is the only one: typed 429 with its weekly reset");
+  assert.match(o.body.reset_at, /^\d{4}-/);
+});
+
+test("#5236 router: a newer polled used.N figure blocks an account whose live sample looks fine", async () => {
+  const fresh = inS(-60);
+  const r = usageRouter({
+    1: { validH: 9, live: `10 ${inS(3600)} 10 ${inS(86400)} ${fresh}`, used: 100 },
+    2: { validH: 2, live: `50 ${inS(3600)} 10 ${inS(86400)} ${fresh}` },
+  });
+  assert.equal((await r.get()).body.account, 2, "polled 100% (newer than the sample) excludes account 1");
 });
 
 test("#5205 router: a reported-limited account is skipped until its reset; all limited -> 429 with the earliest reset", async () => {
