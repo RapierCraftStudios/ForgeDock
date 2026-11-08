@@ -17,7 +17,7 @@ const ACCEPT_NAME = /\b\w*(?:rescue|allowlist|whitelist|safelist|benign|exempt|b
 const DENY = /\b(?:raise|throw)\b|\breturn\s+(?:false|False|deny|denied|block|blocked|reject|rejected)\b|\b(?:deny|reject|blocked)\w*\s*[=(]/;
 const NEGATIVE = /assertFalse|assert\s+not\b|assert_not|\.not\.|toBe\(false\)|toBeFalsy|toThrow|rejects|pytest\.raises|assert_raises|assert\.(?:throws|rejects|ok\(!|equal\(.*,\s*false\))|\b(?:must|should)(?:\s+still)?\s+(?:be\s+)?(?:detect|block|reject|deny|refuse|fail)|not[ _](?:accept|allow|benign|rescue)|negative|counterexample|still[ _](?:detected|blocked|rejected)/i;
 
-export const isTestPath = (p) => TEST_PATH.test(String(p));
+export const isRelaxationTestPath = (p) => TEST_PATH.test(String(p));
 
 /** Per-file added/removed lines of a unified diff: [{file, added: [{line, text}], removed: [text]}]. */
 function parseDiff(diff) {
@@ -44,11 +44,11 @@ const excerpt = (t) => String(t).trim().replace(/\s+/g, " ").slice(0, 160);
  */
 export function analyzeRelaxations({ diff = "", riskPaths = [] } = {}) {
   const files = parseDiff(diff);
-  const risky = new Set(riskPathHits(files.map((f) => f.file).filter((f) => !isTestPath(f)), riskPaths));
+  const risky = new Set(riskPathHits(files.map((f) => f.file).filter((f) => !isRelaxationTestPath(f)), riskPaths));
   const relaxations = [];
   let negatives = 0;
   for (const f of files) {
-    if (isTestPath(f.file)) { negatives += f.added.filter((a) => NEGATIVE.test(a.text)).length; continue; }
+    if (isRelaxationTestPath(f.file)) { negatives += f.added.filter((a) => NEGATIVE.test(a.text)).length; continue; }
     if (!risky.has(f.file)) continue;
     const code = f.added.filter((a) => !COMMENT.test(a.text));
     for (const a of code) if (ACCEPT_RETURN.test(a.text) || ACCEPT_NAME.test(a.text)) relaxations.push({ file: f.file, line: a.line, class: "accept", excerpt: excerpt(a.text) });

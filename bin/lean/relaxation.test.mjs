@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { analyzeRelaxations, relaxationFailures, relaxationBlock, isTestPath } from "./relaxation.mjs";
+import { analyzeRelaxations, relaxationFailures, relaxationBlock, isRelaxationTestPath } from "./relaxation.mjs";
 import { reviewerPrompt } from "./prompts.mjs";
 import { verifierPrompt } from "./verifier.mjs";
 
@@ -37,7 +37,7 @@ describe("#5237 relaxation detector", () => {
     assert.deepEqual(analyzeRelaxations({ diff: RESCUE, riskPaths: [] }).relaxations, []);
     assert.deepEqual(analyzeRelaxations({ diff: hunk("shared/detection/x.py", ["# return True when benign"]), riskPaths: GLOBS }).relaxations, []);
     assert.deepEqual(analyzeRelaxations({ diff: hunk("shared/detection/test_x.py", ["    return True"]), riskPaths: GLOBS }).relaxations, []);
-    assert.ok(isTestPath("tests/a.py") && isTestPath("src/a.test.ts") && !isTestPath("src/a.ts"));
+    assert.ok(isRelaxationTestPath("tests/a.py") && isRelaxationTestPath("src/a.test.ts") && !isRelaxationTestPath("src/a.ts"));
     assert.deepEqual(analyzeRelaxations({ diff: "", riskPaths: GLOBS }), { relaxations: [], negatives: 0 });
   });
   it("prompts carry the relaxed hunks; unchanged without relaxations", () => {
