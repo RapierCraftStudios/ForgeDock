@@ -32,7 +32,7 @@ export function parseLive(text) {
 }
 
 /** #5236: a sample older than this is unknown for the 5-hour window, whatever its reset says (0 or absent updated = age unknown). */
-export const SAMPLE_MAX_AGE_MS = 30 * 60000;
+export const ROTATOR_SAMPLE_MAX_AGE_MS = 30 * 60000;
 
 const isExec = (p) => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } };
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };
@@ -107,12 +107,12 @@ export function openRotator({ kind, home = undefined, env = process.env, now = (
       let live = null;
       try { live = parseLive(readFile(join(dir, name))); } catch { live = null; }
       if (!live) continue;
-      const aged = live.updatedMs > 0 && now() - live.updatedMs > SAMPLE_MAX_AGE_MS;
+      const aged = live.updatedMs > 0 && now() - live.updatedMs > ROTATOR_SAMPLE_MAX_AGE_MS;
       // #5236: the polled `used.N` percent, when newer than the sample and itself fresh, replaces the 5-hour figure.
       let polled = null;
       try {
         const p = Number(String(readFile(join(dir, `used.${m[1]}`))).trim().split(/\s+/)[0]), at = stat(join(dir, `used.${m[1]}`));
-        if (Number.isFinite(p) && p >= 0 && Number.isFinite(at) && at > live.updatedMs && now() - at <= SAMPLE_MAX_AGE_MS) polled = p;
+        if (Number.isFinite(p) && p >= 0 && Number.isFinite(at) && at > live.updatedMs && now() - at <= ROTATOR_SAMPLE_MAX_AGE_MS) polled = p;
       } catch { polled = null; }
       out.push({ n: Number(m[1]), ...live, polledPct: polled, aged: aged && polled === null, stale: live.fiveHourResetMs <= now() || live.weeklyResetMs <= now() || (aged && polled === null) });
     }
