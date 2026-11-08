@@ -2780,6 +2780,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `reproPlanNote` (`prompts.mjs`) requires a repro command's environment to come from the repo's lockfile or toolchain. `validateContract` (`conformance.mjs`, `guessedUvEnv`) rejects a `repro_test` or validate command of the form `uv run --offline --no-project --with <pkgs>` without `--with-requirements`: one plan-time correction, no LLM call. In `orchestrate.mjs`, a recovery attempt that ends with the same `env.repro_unrunnable` or `env.tool_missing` code and the same normalized detail (the command) as the run before it is not requeued (`REPEAT_ENV_CODES`); the row detail is prefixed "Environment defect" and the needs-human evidence names the command to run on the host. `env.validate_timeout` is excluded (load-dependent).
 
+## Entry 2026-11-08 — intake host triage (#5250)
+
+`intakeHostWork` (`conformance.mjs`) reads the issue's `## Acceptance` checklist at intake. When it is non-empty and every item needs live production measurement or a real-browser capture (`LIVE_EVIDENCE_RE` or `READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match), `runCore` (`lean.mjs`, before the worktree step, skipped on resume or recovery) adds `host-task`, posts `FORGE:HOST_TASK` and ends `host-task`: no builder runs. One code-shaped item keeps the code lane, and backlog aggregates (`FORGE:DEFERRED_FROM` / `FORGE:BACKLOG_BATCH`) are exempt. Cost: 0 LLM calls.
+
 ## Entry 2026-11-08 — finding lifecycle resolved at close (#5254)
 
 `resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.
