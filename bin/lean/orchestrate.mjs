@@ -833,6 +833,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           requeue(n, delayMs); done(); save();
           const iso = new Date(resumeAt).toISOString();
           update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (${r?.code === "backend.auth" ? "backend.auth" : "quota"}) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+          if (r?.code === "quota.exhausted") { const ev = { event: "quota.exhausted", issue: n, batch: batchId ?? null, resumeAt: iso, detail: `quota.exhausted: no account has capacity; resuming ${iso}` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } // #5236: batch-level event supervisors see
           return;
         }
         requeue(n, capGated ? 0 : delayMs); done(); save();

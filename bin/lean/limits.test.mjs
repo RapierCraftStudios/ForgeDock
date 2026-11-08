@@ -377,6 +377,9 @@ describe("tokenbaton rotation holds (#5205)", () => {
     const paused = updates.find((u) => u.outcome === "paused");
     assert.equal(paused.quota.resumeAt, new Date(earliest).toISOString());
     assert.match(paused.detail, /quota\.exhausted/);
+    const evt = updates.find((u) => u.event === "quota.exhausted");
+    assert.ok(evt, "batch-level quota.exhausted event");
+    assert.equal(evt.resumeAt, new Date(earliest).toISOString());
   });
 
   it("#5205 a lane-reported limited account is excluded from headroom until its reset", async () => {
