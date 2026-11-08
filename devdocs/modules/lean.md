@@ -2784,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 A batch run past its dispatch loop (probe/alert/report tail) still counts as hosted, so `add`/`requeue` answered `hosted:true` and nothing read the entry; `runBatch` then wrote `report.json` over it and `rehostLater` (#4917) skips reported batches, so the issue waited for a manual `--resume`. Now `runBatch` leaves no report while `unrunAdds()`/`unrunRequeues()` exist (unless cancelled), and the schedd (`rehostUnrun`, `schedd.mjs`) hosts `--resume` again once such a run ends, once per distinct set of unrun entries (no loop on a cancel or tripped breaker). The hosted line of `--add` says when the runner next passes.
 Cite: #5242, #5000, #4917.
 
+## Entry 2026-11-08 — release rehearsal step (#5253)
+
+`release.mjs` runs `RELEASE_STEPS` preflight, release-pr, review, fixes, **rehearsal**, promotion, post-merge. `release-rehearsal.mjs` `rehearsalStep` runs forge.yaml `release.rehearsal_command` (flat keys `rehearsal_command`/`_timeout` seconds/`_blocking`, `parseRehearsalConfig`; the forge.yaml parser reads two levels) through `io.rehearse` (host `sh -c`, captured output, configurable timeout) on the release-PR head. Unset: the step is skipped with no `gh` calls. A failure files one open `release-blocker` issue per head (dedup by the hidden `FORGE:RELEASE_BLOCKER head=<sha>` marker; a rerun comments) with the output tail and head SHA, and returns `{stopped:true}` so promotion is held and `--resume` retries; `blocking: false` only records. The result lands in `state.steps.rehearsal` and a `FORGE:REHEARSAL` section of the release PR body. Config: `docs/CONFIG.md` `release`.
+
 ## Entry 2026-11-08 — cancel confirms or reports each lane, releases its lease; dead-lease takeover; one batch per issue (#5241)
 
 `--cancel --stop-remote` no longer fires once and forgets. `orchestrate.mjs` `stop` records whether `stopLane` accepted the stop,
