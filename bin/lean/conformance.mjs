@@ -263,8 +263,8 @@ const TMP_PATH = /\$(?:\{TMPDIR(?::-[^}]*)?\}|TMPDIR)\/([^\s"'`;|&<>()=]+)/g;
  * #4325: the `$TMPDIR/<name>` paths a frozen command reads without creating them itself. The run TMPDIR is per run, so such
  * a file (written by the builder before) is gone for the engine's red-green check and for any rerun. A path counts as
  * created when it, or a directory above it, was earlier the target of `>`/`>>`, `tee`, `touch|mkdir|mktemp`, the last
- * argument of `cp|mv|ln|install`, an output-like option (`-o`, `--output`, `--basetemp`, `--junitxml`, `--cache-dir`…) or an
- * env assignment (`X=$TMPDIR/y`). Returns the read paths in first-use order (deduped), e.g. ["$TMPDIR/req.txt"].
+ * argument of `cp|mv|ln|install`, an output-like option (`-o`, `--output`, `--basetemp`, `--junitxml`, `--cache-dir`…), the dir argument of
+ * `uv venv`, `virtualenv`, `python[3] -m venv`, `git worktree add` (first) or `git clone` (last), or an env assignment (`X=$TMPDIR/y`). Returns the read paths in first-use order (deduped), e.g. ["$TMPDIR/req.txt"].
  */
 export function tmpdirInputs(command) {
   const made = [], reads = [];
@@ -273,6 +273,12 @@ export function tmpdirInputs(command) {
     const toks = seg.trim().split(/\s+/).filter(Boolean).map((t) => t.replace(/^["']+|["']+$/g, ""));
     const words = toks.filter((t) => !/^[A-Za-z_]\w*=/.test(t));
     const cmd = (words[0] ?? "").replace(/^.*\//, "");
+    // #5230: tools whose positional dir argument they create: the first $TMPDIR token (clone: the last token) is made.
+    const makesDir = (cmd === "uv" && words[1] === "venv") || cmd === "virtualenv"
+      || (/^python[\d.]*$/.test(cmd) && words.includes("-m") && words[words.indexOf("-m") + 1] === "venv")
+      || (cmd === "git" && words[1] === "worktree" && words[2] === "add");
+    const cloneDir = cmd === "git" && words[1] === "clone";
+    const firstTmp = toks.findIndex((t) => /\$(?:\{TMPDIR|TMPDIR)/.test(t));
     toks.forEach((tok, i) => {
       for (const m of tok.matchAll(TMP_PATH)) {
         const path = m[1].replace(/\/+$/, "");
@@ -281,7 +287,8 @@ export function tmpdirInputs(command) {
         const write = /\d*>>?$|&>$/.test(before) || (before === "" && /^(?:\d*>>?|&>)$/.test(prev))
           || /^[A-Za-z_]\w*=["']?$/.test(before) || (opt !== null && WRITE_OPT.test(opt))
           || cmd === "tee" || ["touch", "mkdir", "mktemp"].includes(cmd)
-          || (["cp", "mv", "ln", "install"].includes(cmd) && i === toks.length - 1);
+          || (["cp", "mv", "ln", "install"].includes(cmd) && i === toks.length - 1)
+          || (makesDir && i === firstTmp) || (cloneDir && i === toks.length - 1);
         if (write) made.push(path);
         else if (!createdAbove(path) && !reads.includes(`$TMPDIR/${path}`)) reads.push(`$TMPDIR/${path}`);
       }
