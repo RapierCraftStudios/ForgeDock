@@ -23,6 +23,7 @@ export async function reserveForBuild({ git, base, deliverables = [], versioned 
   const res = [];
   if (!reserve) return res;
   try {
+    await git(["rev-parse", "--verify", "-q", base]); // an unreadable base must not reserve from a floor of 0
     const paths = (deliverables ?? []).map((d) => String(d?.path ?? "")).filter(Boolean);
     const classes = parseVersioned(versioned);
     for (const c of classes) {

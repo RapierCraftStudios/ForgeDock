@@ -21,7 +21,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { promisify } from "node:util";
-import { renumberVersioned, versionedCollisions } from "./seqversioned.mjs";
+import { parseVersioned, renumberVersioned, versionedCollisions } from "./seqversioned.mjs";
 
 const NUM_RE = /^(\d{3,})[_-]/;
 const DATE_RE = /^(?:19|20)\d\d(-?)(?:0[1-9]|1[0-2])\1(?:0[1-9]|[12]\d|3[01])[_-]/;
@@ -312,7 +312,17 @@ const writeJson = (p, o) => writeFileSync(p, `${JSON.stringify(o, null, 2)}\n`);
  * @returns {Promise<{ok:true, moves:Array<{from,to}>, commit:string|null}|{unsupported:string, nonSequence?:string[]}>}
  */
 export async function renumberLane({ versioned = [], ...o }) {
-  const r = await renumberNumbered(o);
+  let r = await renumberNumbered(o);
+  if (r.unsupported && versioned?.length && r.nonSequence?.length) {
+    // #5235: base-merge conflicts only inside versioned dirs: the versioned pass takes the base side, then the numbered pass reruns
+    const cls = parseVersioned(versioned), inCls = (f) => cls.some((c) => (!c.dir || f.startsWith(`${c.dir}/`)) && c.re.test(posix.relative(c.dir || ".", f).split("/")[0]));
+    if (r.nonSequence.every(inCls)) {
+      const pre = await renumberVersioned({ git: o.git, base: o.base, cwd: o.cwd, laneRef: o.laneRef ?? "HEAD", versioned, reserve: o.reserve ? (x) => o.reserve({ ...x }) : null });
+      if (pre.unsupported) return pre;
+      const r2 = await renumberNumbered({ ...o, laneRef: "HEAD" });
+      return r2.unsupported ? r2 : { ...r2, ok: true, moves: [...(r2.moves ?? []), ...pre.moves], commit: r2.commit ?? pre.commit ?? null };
+    }
+  }
   if (r.unsupported || !versioned?.length) return r;
   // #5235: versioned dirs after the numbered files (the base is merged by then); a failure leaves the numbered commit in place
   const v = await renumberVersioned({ git: o.git, base: o.base, cwd: o.cwd, laneRef: o.laneRef ?? "HEAD", versioned, reserve: o.reserve ? (x) => o.reserve({ ...x }) : null });
