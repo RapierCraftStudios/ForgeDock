@@ -18,8 +18,9 @@ import { ghRunner } from "./issuewatch.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
+import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 
-export const RELEASE_STEPS = ["preflight", "release-pr", "review", "fixes", "promotion", "post-merge"];
+export const RELEASE_STEPS = ["preflight", "release-pr", "review", "fixes", "rehearsal", "promotion", "post-merge"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -42,13 +43,16 @@ export function openRelease(root, id, mounts) {
   };
 }
 
-/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow}`. */
+/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow, rehearsal}` (#5253). */
 export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...rehearsalKey(r) };
 }
+
+/** `{rehearsal}` only when configured, so the config of a repo without it keeps its shape. */
+const rehearsalKey = (r) => { const rehearsal = parseRehearsalConfig(r); return rehearsal ? { rehearsal } : {}; };
 
 const json = (s) => JSON.parse(String(s || "null"));
 
@@ -130,6 +134,7 @@ const STEP_FNS = {
   "release-pr": releasePrStep,
   review: (ctx) => reviewStep(ctx),
   fixes: (ctx) => fixStep(ctx),
+  rehearsal: (ctx) => rehearsalStep(ctx),
   promotion: promotionStep,
   "post-merge": (ctx) => postMergeStep(ctx),
 };
@@ -178,6 +183,10 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
     gh: (args) => gh(args), print, now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     run: async (cmd) => { try { exec("sh", ["-c", cmd], { stdio: "ignore", timeout: 120_000 }); return { ok: true }; } catch { return { ok: false }; } },
+    rehearse: async (cmd, { timeout } = {}) => {
+      try { return { ok: true, code: 0, output: String(exec("sh", ["-c", cmd], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer: 16 << 20 })) }; }
+      catch (e) { return { ok: false, code: e.status ?? null, timedOut: e.code === "ETIMEDOUT", output: `${e.stdout ?? ""}${e.stderr ?? ""}` || String(e.message) }; }
+    },
     runningLanes: (repo) => unfinished(repo).flatMap((b) => Object.entries(b.state.load()?.lanes ?? {})
       .filter(([n, rec]) => rec?.pid && isLaneAlive(rec.pid, b.resultFile(n)) && !existsSync(b.resultFile(n)))
       .map(([n]) => ({ batch: b.id, issue: n }))),

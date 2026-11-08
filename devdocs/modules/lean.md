@@ -93,7 +93,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the merge the rest is filed as one chained `refactor:split` issue.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
-   checks quotes against the issue and trusted comments; the engine freezes it
+   checks quotes against the issue and trusted comments (markdown, `...` elision and
+   punctuation-only differences are tolerated; a quote still missing snaps to the one
+   issue line or sentence holding at least 90% of its tokens, `snapQuotes`, original kept
+   as `requoted`, #5244); the engine freezes it
    (`FORGE:CONTRACT`, `contractHash`; the summary also records `issue S`, the
    hash of `scopeText`: title, body and trusted comments without HTML-comment
    blocks or `<!-- FORGE:` comments, #4265). `ISSUE_EDITED` fires only when that
@@ -545,6 +548,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    half of their range (sparse issue-numbered docs are not a series).
 
    Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
+
+   Project-dir paths (#5234): `poetry -C D run pytest D/x.py` / `uv run --project D pytest D/x.py` name repo-root paths that do not exist from `D` (pytest exit 4). `freezeRewrites` rewrites the single-segment, all-`D/`-prefixed case to `cd D && poetry run pytest x.py` (`rewriteProjectDirCommand`, logged in decisions); `validateContract` rejects any other (`projectDirPathMiss`). `UNRUNNABLE_RE` also matches pytest's `ERROR: file or directory not found`, and `unrunnableValidate(run, command)` treats pytest exit 4 or 5 of a pytest command as unrunnable whatever the output, so such a rerun is `contract.invalid_command` (not `conformance.unimplemented`) and a substitute-validate for it is judged ok.
 
 ## Host parallelism (#4182)
 
@@ -2673,7 +2678,7 @@ Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.te
 
 ## Entry 2026-11-07 — early batch health: BATCH UNHEALTHY alert, refusal record, status lines (#5167)
 
-- `bin/lean/batch-health.mjs` (new): `evaluateHealth(state, {held, refused, config, batchId, repo})` is pure over `state.json`. Its causes are `root-failed` (roots are the issues with no in-batch dependency edge), `terminal-share` (non-merged terminal rows; `merged`/`invalid`/`decomposed` are good ends; `held` counts although it stays pending, at or above `terminalShare` with 0 merged), `stalled` (0 running, pending minus operator-held, not in `setup` and not cancelled) and `refused`. It also returns the exact recovery commands. `runCheck` persists `health.json` (`checks`, `last`, `alertedAt`, `alert`) and alerts only when no `alertedAt` is recorded yet. `scheduleChecks` arms unref'd timers from `plan.created`, skipping checkpoints already recorded. `deliverAlert` sends a sink line, a `gh issue comment` on `orchestrate.health.issue` (else on each `--epic` issue), and `runNotify` (`notify.command` through the shell, JSON on stdin, `FORGEDOCK_ALERT*` env, 30 s timeout, never throws). `recordRefusal`/`readRefusals` read and write `<batch root>/refusals.json` (keeps the newest 20, shown for 24 h). `statusLines(root, {batch})` returns the lines for `forgedock status`.
+- `bin/lean/batch-health.mjs` (new): `evaluateHealth(state, {held, refused, config, batchId, repo})` is pure over `state.json`. Its causes are `root-failed` (roots are the issues with no in-batch dependency edge), `terminal-share` (non-merged terminal rows; `merged`/`invalid`/`decomposed` are good ends; `held` counts although it stays pending, at or above `terminalShare` with 0 merged), `stalled` (0 running, pending minus operator-held, not in `setup` and not cancelled) and `refused`. It also returns the exact recovery commands. `runCheck` (#5243) first asks the injected `resolve` (engine: `resolvedOnGithub`, a `gh issue view`/`gh pr view` re-read) which failed rows are already resolved on GitHub (issue CLOSED with a MERGED closing PR, or a `needs-human` row whose label was removed with a `FORGE:DECISION` comment) and passes them to `evaluateHealth` as `resolved`: they are good ends, so they raise no `root-failed`/`terminal-share` cause and get no `--requeue` suggestion; a read failure leaves the row failed. `runCheck` persists `health.json` (`checks`, `last`, `alertedAt`, `alert`) and alerts only when no `alertedAt` is recorded yet. `scheduleChecks` arms unref'd timers from `plan.created`, skipping checkpoints already recorded. `deliverAlert` sends a sink line, a `gh issue comment` on `orchestrate.health.issue` (else on each `--epic` issue), and `runNotify` (`notify.command` through the shell, JSON on stdin, `FORGEDOCK_ALERT*` env, 30 s timeout, never throws). `recordRefusal`/`readRefusals` read and write `<batch root>/refusals.json` (keeps the newest 20, shown for 24 h). `statusLines(root, {batch})` returns the lines for `forgedock status`.
 - `runBatch` (`bin/engine-cli.mjs`) prints `health checks: …` after the `batch:` line, arms the timers before `orchestrate()`, clears them in its `finally`, and runs the `end` check after the report is written. The return value, the report and `report.json` are unchanged. Test seams: `deps.healthConfig`, `deps.healthNow`, `deps.healthTimer {set, clear}` and `deps.notify`. The #4659 refusal goes through `alertRefusal` (record plus channels, best effort) before the same error is rethrown. `readHealthConfig(cwd)` reads the flattened `orchestrate.*` keys and `notify.command`. `readDrift` ignores them.
 - `forgedock status` (`bin/forgedock.mjs` `batchHealthSection`) always appends the batch-health lines. `--batch <id>` and its value are not taken as the status directory.
 - Tests: `batch-health.test.mjs`, `batch.test.mjs` "#5167" (roots engine-error alert once at T+15 on every channel; a healthy batch emits no alert), `plan-validate-live.test.mjs` "#5167" (refusal record), `router.test.mjs` "#5167" (status lines, `--batch`).
@@ -2778,3 +2783,55 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 ## Entry 2026-11-08 — repro command environment rule and repeat-signature stop (#5232)
 
 `reproPlanNote` (`prompts.mjs`) requires a repro command's environment to come from the repo's lockfile or toolchain. `validateContract` (`conformance.mjs`, `guessedUvEnv`) rejects a `repro_test` or validate command of the form `uv run --offline --no-project --with <pkgs>` without `--with-requirements`: one plan-time correction, no LLM call. In `orchestrate.mjs`, a recovery attempt that ends with the same `env.repro_unrunnable` or `env.tool_missing` code and the same normalized detail (the command) as the run before it is not requeued (`REPEAT_ENV_CODES`); the row detail is prefixed "Environment defect" and the needs-human evidence names the command to run on the host. `env.validate_timeout` is excluded (load-dependent).
+
+## Entry 2026-11-08 — an add after the runner's last pass is re-hosted, not stranded (#5242)
+A batch run past its dispatch loop (probe/alert/report tail) still counts as hosted, so `add`/`requeue` answered `hosted:true` and nothing read the entry; `runBatch` then wrote `report.json` over it and `rehostLater` (#4917) skips reported batches, so the issue waited for a manual `--resume`. Now `runBatch` leaves no report while `unrunAdds()`/`unrunRequeues()` exist (unless cancelled), and the schedd (`rehostUnrun`, `schedd.mjs`) hosts `--resume` again once such a run ends, once per distinct set of unrun entries (no loop on a cancel or tripped breaker). The hosted line of `--add` says when the runner next passes.
+Cite: #5242, #5000, #4917.
+
+## Entry 2026-11-08 — intake host triage (#5250)
+
+`intakeHostWork` (`conformance.mjs`) reads the issue's `## Acceptance` checklist at intake. When it is non-empty and every item needs live production measurement or a real-browser capture (`LIVE_EVIDENCE_RE` or `READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match), `runCore` (`lean.mjs`, before the worktree step, skipped on resume or recovery) adds `host-task`, posts `FORGE:HOST_TASK` and ends `host-task`: no builder runs. One code-shaped item keeps the code lane, and backlog aggregates (`FORGE:DEFERRED_FROM` / `FORGE:BACKLOG_BATCH`) are exempt. Cost: 0 LLM calls.
+
+## Entry 2026-11-08 — finding lifecycle resolved at close (#5254)
+
+`resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.
+
+## Entry 2026-11-08 — doctor I4/I6 stop flagging lean lanes, lane PRs and dependency bots (#5255)
+
+`scripts/doctor-pipeline-state.sh` I4 counts `FORGE:BUILDER|CONTRACT|PLAN|WORK-ON` as builder evidence (lean lanes never write `FORGE:BUILDER`) and skips `workflow:building` issues updated within `--stuck-hours`, so a fresh lane is never CRITICAL. I6 fetches `author,headRefName` and skips PRs whose head is `feat|fix/issue-N-lean`, whose author is the pipeline app (`rapiercraft-forgedock`) or a dependency bot (`dependabot`, `renovate`); a hand-made PR with no `FORGE:` marker still warns. Output shape, exit codes and fail-open `add_skip` are unchanged. Tests: `bin/tests/doctor-pipeline-state.test.mjs` (fake `gh` on PATH).
+
+## Entry 2026-11-08 — release rehearsal step (#5253)
+
+`release.mjs` runs `RELEASE_STEPS` preflight, release-pr, review, fixes, **rehearsal**, promotion, post-merge. `release-rehearsal.mjs` `rehearsalStep` runs forge.yaml `release.rehearsal_command` (flat keys `rehearsal_command`/`_timeout` seconds/`_blocking`, `parseRehearsalConfig`; the forge.yaml parser reads two levels) through `io.rehearse` (host `sh -c`, captured output, configurable timeout) on the release-PR head. Unset: the step is skipped with no `gh` calls. A failure files one open `release-blocker` issue per head (dedup by the hidden `FORGE:RELEASE_BLOCKER head=<sha>` marker; a rerun comments) with the output tail and head SHA, and returns `{stopped:true}` so promotion is held and `--resume` retries; `blocking: false` only records. The result lands in `state.steps.rehearsal` and a `FORGE:REHEARSAL` section of the release PR body. Config: `docs/CONFIG.md` `release`.
+
+## Entry 2026-11-08 — cancel confirms or reports each lane, releases its lease; dead-lease takeover; one batch per issue (#5241)
+
+`--cancel --stop-remote` no longer fires once and forgets. `orchestrate.mjs` `stop` records whether `stopLane` accepted the stop,
+re-sends a refused one every `stopRetryMs` (15 s) and, when a lane outlives `stopTimeoutMs` (120 s), posts a `cancelled` row and
+decision naming it and why (`rec.stopNote`, set by `providerLanes.stopLane` from `remoteProvider.stopReason`: no transport stop,
+404/405, error); the pass keeps polling while a stop is unconfirmed. When a lane of a cancelled batch settles, the `releaseLease`
+seam (engine-cli: `lanelock.clearLease` through the projector) clears the issue's lease unless a live lane of another batch runs the
+issue (`batch.batchesOwning`). A lane that never ends keeps its lease and is reported. `--requeue`/`--release` of a pending issue
+waiting out a deferral (`notBefore`) while a cancelled batch of the repo owns it (`batch.cancelledOwners`) is accepted: the lease is
+cleared, `drainRequeues` drops the wait and the next pass relaunches it. A fresh `orchestrate N...` skips each issue pending or
+running in another active batch of the repo (no report, no cancel, state saved within 3 h) with a line naming the batch, and refuses
+when none is left; `--force "<reason>"` starts them anyway. Cost: 0 LLM calls.
+
+## Base red (#5239)
+
+`bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
+
+## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
+
+`closePlan(contract, {title, review, issueText})` now also judges the issue's unticked `- [ ]` items for non-investigation
+issues: an item whose contract quote matches (`matchCriterion`) and whose requirement is a `deliver` row the review did not
+mark `implemented`, or a `defer`/`post-deploy` row with no tracking issue, makes the plan `partial` (`checklist: true`,
+`open`, `unticked`). The close step then leaves the issue open (not `completed`) and posts a FORGE:TRACKED "Left open:
+partial" note listing the criteria and tracked follow-ups. Items no quote matches are not judged here (issue_coverage owns
+coverage); a skipped review judges dispositions only; investigations keep their #4398 behaviour (close `completed`).
+`activation.mjs` `rolloutModes(cfg, changedFiles, read)` reads the current mode of registry flags (forge.yaml
+`rollouts.files`) that the changed files name; a non-live mode (shadow/off) adds a trajectory decision "Inert in
+production" and a line in the partial note, so the production outcome is never claimed. Intake triage of
+live-measurement issues is not part of this change.
+
+**Relaxation gate (#5237).** `relaxation.mjs` `analyzeRelaxations` reads `git diff -U0 base...HEAD` when the lane touches a declared `review.risk_paths` glob (`riskPathHits`; built-in risk words do not count). In non-test risk files it flags added accept/rescue/allow branches (`class: accept`) and removed deny lines (`deny_removed`), and counts negative assertions added in changed test files. `relaxationFailures` is a blocking `conformance.unimplemented` (kind `relaxation_untested`, passed to `precheck` as `relaxationFailures`) when the diff adds fewer negative assertions than relaxed files. The detection is syntactic and per file, not per semantic rescue class. A relaxation lane also gets a `<relaxation_checks>` block in the reviewer and verifier prompts (counterexamples, negative corpus), and the independent verifier (#4397) runs in enforce for it even with `review.verifier: off`, which is the second reviewer. Run log: `RELAXATION_DETECTED {files, count, negatives}`. No new forge.yaml key; 0 LLM calls for detection.

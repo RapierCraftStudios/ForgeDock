@@ -143,7 +143,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
-      if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      if (a[0] === "diff") return w.diffText ?? "diff --git a/src/foo.js b/src/foo.js\n+fix";
       if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ([...(o.shipped ?? []), ...(o.unusedAncestors ?? [])].includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
@@ -1089,6 +1089,16 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(tracked, /Left open: follow-up pending/); assert.match(tracked, /#900/);
     assert.ok(!w.comments.some((c) => /Closed as/.test(c)));
     assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/);
+  });
+
+  it("#5240 an unticked acceptance box whose requirement the review marks implemented still closes as completed, with no partial note", async () => {
+    const body = "foo crashes on null input.\n\n- [ ] foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
+    const w = world({ contract: CONTRACT, body, claims: [{ id: "R1", status: "implemented" }], reviews: [conf()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.closed.length, 1);
+    assert.ok(!w.comments.some((c) => /Left open: partial/.test(c)));
+    assert.doesNotMatch(traj(w).join("\n"), /left open as partial/);
   });
 
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
@@ -5549,6 +5559,37 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(n >= 2, "the invariant is rerun after the builder fix round");
   });
 
+  it("#5239 a guard failing only on the lane tree blocks the merge (ci.red), never merges", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command, cwd }) => { ran.push(cwd); return /basered-/.test(cwd) ? { rc: 0, output: "" } : { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" }; };
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+    assert.equal(w.merges.length, 0);
+    assert.ok(ran.some((c) => /basered-/.test(c)), "the guard was also run on the base");
+  });
+
+  it("#5239 a guard that also fails on the base defers the lane (base.red), comments on the introducing issue, no needs-human", async () => {
+    const w = world(); const comments = [], gh = w.io.gh, git = w.io.git;
+    w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+    w.io.git = async (a, o) => (a[0] === "log" && a.includes("--format=%H%x1f%s%x1f%b") ? `${"a".repeat(40)}\x1ffeat: feeds (#39805)\x1f` : git(a, o));
+    w.io.gh = async (a, o) => {
+      if (a[0] === "issue" && a[1] === "view" && a[2] === "39805") return "OPEN";
+      if (a[0] === "issue" && a[1] === "comment" && a[2] === "39805") { comments.push(a.at(-1)); return ""; }
+      return gh(a, o);
+    };
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "base.red");
+    assert.equal(w.merges.length, 0);
+    assert.equal(comments.length, 1); assert.match(comments[0], /FORGE:BASE_RED/);
+    assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
+  });
+
+  it("#5239 verify.guard_block false keeps a failing invariant advisory", async () => {
+    const w = world(); w.io.runCommand = async () => ({ rc: 1, output: "x" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"], guardBlock: false } });
+    assert.notEqual(r.code, "base.red"); assert.notEqual(r.code, "ci.red");
+  });
+
   it("pre-PR: a passing set adds no builder turn; no commands configured runs nothing", async () => {
     const w = world(); let n = 0;
     w.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };
@@ -7675,5 +7716,54 @@ describe("prompt budgets (#4969)", () => {
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
     assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
+  });
+});
+
+describe("#5250 intake host triage", () => {
+  const hostBody = "## Acceptance Criteria\n\n- [ ] Measured clear rate on live production traffic is above 50%\n- [ ] Root-cause capture from a real browser is attached\n";
+  it("an issue whose criteria are all live-production or real-browser work ends host-task with no builder run", async () => {
+    const w = world({ body: hostBody });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "host-task");
+    assert.ok(w.edits.some((e) => e.includes("--add-label") && e.includes("host-task")), JSON.stringify(w.edits));
+    assert.ok(w.comments.some((c) => String(c.body ?? c).includes("FORGE:HOST_TASK")), "FORGE:HOST_TASK comment");
+    assert.equal(w.builderN, 0);
+  });
+  it("a code issue is unaffected", async () => {
+    const w = world({ body: "## Acceptance Criteria\n\n- [ ] foo no longer breaks\n" });
+    assert.notEqual((await run(w)).terminalReason, "host-task");
+  });
+});
+
+describe("#5237 relaxation gate", () => {
+  const rescue = "diff --git a/src/foo.js b/src/foo.js\n@@ -1,0 +5,1 @@\n+  if (looksThin(page)) return true; // rescue\n";
+  const negTest = "diff --git a/test/foo.test.js b/test/foo.test.js\n@@ -1,0 +1,1 @@\n+  assert.equal(isBenign(cookieChallenge), false);\n";
+  const withV = (w) => {
+    const orig = w.io.runner; w.vcalls = [];
+    w.io.runner = async (c) => {
+      if (c.role !== "verifier") return orig(c);
+      w.vcalls.push(c);
+      return { text: "```json\n{\"findings\":[]}\n```", sessionId: "ver", usage: { input_tokens: 3, output_tokens: 1 }, costUsd: 0.01, durationMs: 300, turns: 2, model: c.model };
+    };
+    return w;
+  };
+  it("relaxation without a negative test blocks (relaxation_untested) in a risk path", async () => {
+    const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf(), conf()] })); w.diffText = rescue;
+    const r = await run(w, { dir: tmpDir("relax-"), reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(w.merges.length, 0); assert.equal(r.code, "conformance.unimplemented");
+  });
+  it("a negative test lets it through, and the verifier runs even with review.verifier off, fed the hunk", async () => {
+    const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf()] })); w.diffText = rescue + negTest;
+    const dir = tmpDir("relax-");
+    const r = await run(w, { dir, reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.vcalls.length, 1);
+    assert.match(w.vcalls[0].prompt, /<relaxation_checks>[\s\S]*src\/foo\.js:5/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "RELAXATION_DETECTED"));
+  });
+  it("no declared risk glob: no relaxation check, no verifier", async () => {
+    const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf()] })); w.diffText = rescue;
+    assert.equal((await run(w, { dir: tmpDir("relax-") })).terminalReason, "merged");
+    assert.equal(w.vcalls.length, 0);
   });
 });

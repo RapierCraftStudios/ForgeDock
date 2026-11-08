@@ -146,6 +146,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
   if (!transport) throw new Error("remote provider needs a transport");
   const idFor = (issue) => `fdrsbx-${safeSegment(batch.id)}-${issue}`;
   const known = new Set(); // secret values seen this process, for redaction
+  const stopWhy = new Map(); // #5241: sandbox id -> why its last stop was not accepted
   const remember = (v) => { if (typeof v === "string" && v.length >= 4) known.add(v); };
   for (const k of settings.secrets ?? []) remember(credentials(k));
   if (settings.tokenEnv) remember(credentials(settings.tokenEnv));
@@ -240,9 +241,15 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     },
     /** #4612: a graceful stop at the lane's checkpoint; false when unsupported or failed. Never destroys the sandbox. */
     async stop(h) {
-      if (typeof transport.stop !== "function") return false;
-      try { return (await transport.stop(h.id)) === true; } catch { return false; }
+      if (typeof transport.stop !== "function") { stopWhy.set(h.id, "the transport has no stop"); return false; }
+      try {
+        const ok = (await transport.stop(h.id)) === true;
+        if (ok) stopWhy.delete(h.id); else stopWhy.set(h.id, "the pool does not support stop (404/405)");
+        return ok;
+      } catch (e) { stopWhy.set(h.id, `stop failed: ${e?.message ?? e}`); return false; }
     },
+    /** #5241: why the last `stop(h)` returned false (null when it succeeded or never ran), so a cancel can report it. */
+    stopReason: (h) => stopWhy.get(h?.id) ?? null,
     async teardown(h) {
       await minutesOf(h);
       try { return (await transport.destroy(h.id)) !== false; } catch { return false; }

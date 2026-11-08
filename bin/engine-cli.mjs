@@ -27,7 +27,7 @@ import { parseVerify } from "./lean/verify.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
-import { otherLaneOwner } from "./lean/lanelock.mjs";
+import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
@@ -418,7 +418,7 @@ export function readMergeWait(cwd = process.cwd()) {
 /**
  * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
  * `  skip_paths` comma-separated, `  max_rounds`, `  check_run: true` (#4270)) for the core path; undefined when the
- * section is absent or unreadable.
+ * section is absent or unreadable. `  guard_block: false` (#5239) lets verify.invariants fail without blocking the merge.
  */
 export function readVerify(cwd = process.cwd()) {
   try {
@@ -1307,7 +1307,7 @@ async function addedEdges({ added, records, io, repo }) {
  */
 /** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
 const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
-  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass (within ~5s while lanes run; if it is finishing, the schedd re-hosts the batch)`
   : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
 
 async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
@@ -1374,7 +1374,7 @@ function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
  */
-async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) => console.log(l) }) {
+async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
   let res = viaDaemon ? await viaDaemon(op, issues) : null;
@@ -1382,6 +1382,11 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) =
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
     res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
+  }
+  if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
+    const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;
+    const dead = issues.filter((n) => st?.pending?.includes(n) && st?.results?.[n] === undefined && Number.isFinite(st?.notBefore?.[n]) && batchMod.cancelledOwners(root, repo, n, id).length);
+    if (dead.length) await takeover(dead);
   }
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
   print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
@@ -1412,6 +1417,11 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
     else if (v.state !== "OPEN") refused.push({ issue: n, reason: "closed" });
     else if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) refused.push({ issue: n, reason: "still labelled needs-human: record the decision and remove the label first" });
     else open.push(n);
+  }
+  // #5241: an issue deferred on a lease a cancelled batch's lane holds: the lease goes, so the requeue takes over at once
+  for (const n of open) {
+    if (!batchMod.cancelledOwners(root, repo, n, id).length || !b.store.load()?.pending?.includes(n)) continue;
+    try { await clearLease({ projector: makeProjector(io, { repo: repo ?? undefined }), issue: n }); } catch { /* the lease expires */ }
   }
   const why = reason || "operator decision", by = "operator";
   let res = { requeued: [], refused: [] };
@@ -1513,7 +1523,9 @@ async function orchestrateClient(argv, deps = {}) {
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
-    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root: await batchRootOf(), viaDaemon: holdVia(id) });
+    const root = await batchRootOf(), io = deps.io ?? makeIo();
+    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id),
+      takeover: (ns) => requeueBatch({ id, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io, viaDaemon: requeueVia(id) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
@@ -1616,7 +1628,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
-    return holdBatch({ op, id: flag(argv, `--${op}`), tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l) });
+    const hid = flag(argv, `--${op}`);
+    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l),
+      takeover: (ns) => requeueBatch({ id: hid, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
@@ -1640,7 +1654,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #5031: a resume (operator or schedd restart) keeps the base waits recorded at start; a landed commit releases on the first check
     for (const [n, l] of Object.entries(plan.baseWaits ?? {})) if (Array.isArray(l) && l.length) baseWaits.set(Number(n), l.filter((w) => w && typeof w.sha === "string" && typeof w.base === "string"));
   }
-  const issues = issuesOf(argv);
+  let issues = issuesOf(argv);
   if (!issues.length) throw new Error(ORCH_USAGE);
   const parallel = parallelOf(argv);
   // The lanes' env: a resumed daemon batch uses the env its plan kept, over the daemon's own.
@@ -1684,6 +1698,21 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         const refusal = new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
         await alertRefusal({ root, issues, repo, cwd, argv, message: refusal.message, unmet, sink, gh: gateIo.gh, deps }); // #5167: recorded for `forgedock status`
         throw refusal;
+      }
+    }
+    // #5241: an issue already pending or running in another active batch of the repo is skipped (naming it), unless --force <reason>
+    if (!force) {
+      const taken = new Map(issues.map((n) => [n, batchMod.activeBatchOf(root, repo, n)]).filter(([, b]) => b));
+      for (const [n, b] of taken) sink.line(`skipped: #${n} is already in active batch ${b}; --force "<reason>" starts it here anyway`);
+      if (taken.size) {
+        if (taken.size === issues.length) throw new Error(`every issue is already in an active batch (${[...new Set(taken.values())].join(", ")}); pass --force "<reason>" to start them anyway`);
+        const out = []; // drop the skipped operands, keeping each valued flag with its value
+        for (let i = 0; i < argv.length; i++) {
+          if (ORCH_VALUED.includes(argv[i])) { out.push(argv[i], argv[++i]); continue; }
+          if (/^#?\d+$/.test(argv[i]) && taken.has(parseInt(argv[i].replace("#", ""), 10))) continue;
+          out.push(argv[i]);
+        }
+        argv = out; issues = issuesOf(argv);
       }
     }
     const base = deps.batchId ?? batchMod.newBatchId();
@@ -1843,7 +1872,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");
     const stopLane = deps.stopLane ?? ((n, rec) => (rec?.remote || rec?.handle ? remoteStop?.(n, rec) ?? false : rec?.pid ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
-    lanes = { ...lanes, stopLane };
+    // #5241: a cancelled lane that ended gives its issue lease back, unless a live lane of another batch runs the issue.
+    const releaseLease = deps.releaseLease ?? (leanIo?.projector ? async (n) => { await clearLease({ projector: leanIo.projector, issue: n, shouldClear: () => !batchMod.batchesOwning(root, repo, n, { exceptId: batch.id }).some((o) => !o.cancelled && o.running) }); } : null);
+    lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
@@ -1972,6 +2003,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
+    resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
@@ -2082,7 +2114,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
-  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
+  try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };

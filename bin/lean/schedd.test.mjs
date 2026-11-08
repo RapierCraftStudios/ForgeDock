@@ -427,6 +427,43 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("#5242: an add that lands while the runner is past its dispatch loop is dispatched by a re-host, not left for a manual --resume", async () => {
+    for (const drains of [true, false]) {
+      const dir = tmpDir("schedd-tail-add-"), root = join(dir, "batches"), id = "b20261108-000000-5242";
+      const calls = [];
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const runBatch = async ({ argv, sink }) => {
+        calls.push(argv);
+        const b = openBatch(root, id);
+        if (argv[0] !== "--resume") {
+          b.writePlan({ daemon: true, repo: "o/r" });
+          b.store.save({ v: 1, order: [1], results: { 1: { issue: 1, outcome: "merged" } }, running: {}, pending: [] });
+          sink.batch({ id, dir: b.dir });
+          await gate; // the run's tail: hosted, no longer draining adds
+        } else {
+          sink.batch({ id, dir: b.dir });
+          if (drains) b.store.save({ ...b.store.load(), order: [1, 6], results: { 1: { issue: 1, outcome: "merged" }, 6: { issue: 6, outcome: "merged" } } });
+        }
+        return {};
+      };
+      const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+      try {
+        const submitted = request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} }).catch(() => {}); // streams until the run ends
+        await until(() => calls.length === 1 && openBatch(root, id).readPlan());
+        const res = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "add", id, issues: [6] });
+        assert.deepEqual(res.added, [6]);
+        assert.equal(res.reopened, false, "the runner still counts as hosted");
+        release();
+        await submitted;
+        await until(() => calls.length === 2, 8000);
+        assert.deepEqual(calls[1], ["--resume", id]);
+        await new Promise((r) => setTimeout(r, 300));
+        assert.equal(calls.length, 2, drains ? "drained: no further re-host" : "an add that cannot drain does not loop");
+      } finally { release(); await d.close(); }
+    }
+  });
+
   it("#4917: a resume that leaves the waiting issue unadmitted (breaker tripped, retry-at passed) is not re-hosted again", async () => {
     const dir = tmpDir("schedd-rehost-loop-"), root = join(dir, "batches"), id = "b20261031-000000-4918";
     const calls = [];
