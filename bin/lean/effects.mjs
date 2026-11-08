@@ -367,6 +367,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
       try { const out = String(await run("gh")(["run", "view", String(runId), "-R", repo, "--log-failed"])); return out.length > 64000 ? out.slice(-64000) : out; } catch { return ""; }
     },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
+    /** Finding lifecycle (#5254): needs-validation to validated / false-positive. */
+    async validateLabel(issue, verdict) { await pexec("bash", [script("transition-label.sh"), "--validate", verdict, String(issue), "-R", repo], { timeout: 60000 }); },
     /**
      * Append the parent's deferred items to the aggregates only (scripts/file-deferred-followups.sh: trusted lookup, append,
      * create, duplicate re-check): the release rollup, the batch external aggregate and the batch host aggregate; never a
