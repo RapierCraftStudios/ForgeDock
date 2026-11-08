@@ -69,9 +69,61 @@ const ITEM_PREFIX_RE = /^\s*(?:[-*+]\s+)?(?:\[[ xX]\]\s+)?(?:\d+[.)]\s+)?/;
  */
 export function inIssue(quote, issueText) {
   const q = norm(quote);
-  if (q.length >= MIN_QUOTE_CHARS) return norm(issueText).includes(q);
+  if (q.length >= MIN_QUOTE_CHARS) return norm(issueText).includes(q) || elidedIn(q, norm(issueText)) || compact(issueText).includes(compact(q));
   if (q.length < 3) return false;
   return String(issueText ?? "").split("\n").some((l) => norm(l.replace(ITEM_PREFIX_RE, "")) === q);
+}
+/** #5244: alphanumerics only, so `SLI_X` retyped as "SLI X" or a dropped punctuation mark still compares equal. */
+const compact = (s) => norm(s).replace(/[^a-z0-9]/g, "");
+/** #5244: a quote shortened with "..." (norm folds the ellipsis char): every segment is in the issue, in order, and one is a full-length quote. */
+function elidedIn(q, issue) {
+  if (!q.includes("...")) return false;
+  const segs = q.split("...").map((x) => x.trim()).filter(Boolean);
+  if (!segs.some((x) => x.length >= MIN_QUOTE_CHARS)) return false;
+  let at = 0;
+  for (const seg of segs) { const i = issue.indexOf(seg, at); if (i < 0) return false; at = i + seg.length; }
+  return true;
+}
+const SNAP_MIN = 0.9;
+const tokens = (s) => norm(String(s ?? "").replace(/_/g, " ")).match(/[a-z0-9]+/g) ?? [];
+/**
+ * #5244: the issue's exact line or sentence a near-verbatim quote stands for, or null. At least SNAP_MIN of the quote's tokens must be
+ * in exactly one line or sentence (the shortest of the best scorers; a rival that is not nested in it makes the match ambiguous).
+ */
+export function snapQuote(quote, issueText) {
+  const qt = [...new Set(tokens(quote))];
+  if (qt.length < 4) return null;
+  const seen = new Set(), cands = [];
+  for (const line of String(noComments(String(issueText ?? ""))).split("\n")) {
+    const l = line.replace(ITEM_PREFIX_RE, "").trim();
+    for (const raw of [l, ...l.split(/(?<=[.!?])\s+/)]) {
+      const n = norm(raw);
+      if (n.length < MIN_QUOTE_CHARS || seen.has(n)) continue;
+      seen.add(n);
+      const ct = new Set(tokens(raw));
+      cands.push({ raw, n, score: qt.filter((w) => ct.has(w)).length / qt.length });
+    }
+  }
+  const ok = cands.filter((c) => c.score >= SNAP_MIN);
+  if (!ok.length) return null;
+  const top = Math.max(...ok.map((c) => c.score));
+  const best = ok.filter((c) => c.score === top).sort((a, b) => a.n.length - b.n.length)[0];
+  const rival = ok.some((c) => c !== best && !c.n.includes(best.n) && !best.n.includes(c.n));
+  return rival ? null : best.raw;
+}
+/** #5244: replaces each failing requirement quote with the issue line it snaps to (original kept as `requoted`). */
+export function snapQuotes(contract, issueText) {
+  const reqs = contract?.requirements;
+  if (!Array.isArray(reqs) || issueText == null) return { contract, snapped: [] };
+  const snapped = [];
+  const requirements = reqs.map((r) => {
+    if (!r || typeof r.quote !== "string" || inIssue(r.quote, issueText)) return r;
+    const to = snapQuote(r.quote, issueText);
+    if (!to || !inIssue(to, issueText)) return r;
+    snapped.push({ id: r.id, from: r.quote, to });
+    return { ...r, quote: to, requoted: r.quote };
+  });
+  return { contract: snapped.length ? { ...contract, requirements } : contract, snapped };
 }
 /** #5164: the issue's list or checklist item lines (item marker stripped), or every non-empty line when it has none. */
 export function criterionLines(issueText) {
@@ -549,8 +601,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
-      if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
-      const r = { disposition: "deliver", ...a.requirement, amended: true };
+      let snapTo = null;
+      if (issueText != null && !inIssue(a.requirement.quote, issueText)) {
+        snapTo = snapQuote(a.requirement.quote, issueText);
+        if (!snapTo) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
+      }
+      const r = { disposition: "deliver", ...a.requirement, ...(snapTo ? { quote: snapTo, requoted: a.requirement.quote } : {}), amended: true };
       if (!DISPOSITIONS.includes(r.disposition)) { problems.push(`add-requirement ${r.id}: bad disposition ${r.disposition}`); continue; }
       if (TRACKED.includes(r.disposition) && blank(r.why)) r.why = a.why;
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
@@ -1257,14 +1313,38 @@ export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(tit
  * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
  * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
  */
-export function closePlan(contract, { title = null, review = null } = {}) {
+export function closePlan(contract, { title = null, review = null, issueText = null } = {}) {
   const reqs = contract.requirements ?? [];
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
-  if (!isInvestigation(title)) return { reason: "completed", tracked };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
+  if (!isInvestigation(title)) {
+    const unticked = unmetChecklist(reqs, rows, issueText);
+    return unticked.length ? { reason: "partial", tracked, checklist: true, open: unticked.map((u) => u.req), unticked: unticked.map((u) => u.item) } : { reason: "completed", tracked };
+  }
   const open = reqs.filter((r) => TRACKED.includes(r.disposition)
     || (r.disposition === "deliver" && rows && rows.find((x) => x?.id === r.id)?.status !== "implemented"));
   return open.length ? { reason: "partial", tracked, open } : { reason: "completed", tracked };
+}
+
+const UNTICKED_RE = /^\s*[-*+]\s+\[ \]\s+(.+?)\s*$/;
+/**
+ * #5240: the issue's unticked `- [ ]` acceptance items whose requirement is not settled: a deliver row the review did not mark
+ * implemented, or a defer/post-deploy row with no tracking issue. An item no contract quote matches is not judged here (the
+ * reviewer's issue_coverage gate owns coverage), and a skipped review (null rows) judges dispositions only.
+ */
+function unmetChecklist(reqs, rows, issueText) {
+  if (!issueText) return [];
+  const out = [];
+  for (const line of String(noComments(String(issueText))).split("\n")) {
+    const item = UNTICKED_RE.exec(line)?.[1];
+    if (!item) continue;
+    const req = reqs.find((r) => r?.quote && matchCriterion(String(r.quote).replace(ITEM_PREFIX_RE, ""), item) !== null);
+    if (!req) continue;
+    const unmet = TRACKED.includes(req.disposition) ? !req.tracked
+      : req.disposition === "deliver" && rows && rows.find((x) => x?.id === req.id)?.status !== "implemented";
+    if (unmet) out.push({ item, req });
+  }
+  return out;
 }
 
 const UNUSABLE_REVIEW = ["review.incomplete", "review.inconsistent", "review.unparseable"];

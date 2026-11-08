@@ -1570,12 +1570,14 @@ describe("#5161 transient engine-error retries", () => {
 
 describe("#5167 early batch health in runBatch", () => {
   // #1 and #3 are roots, #2 depends on #1. #3 runs until `release`; the captured T+15 timer fires while it runs.
-  const mk = ({ fail }) => {
+  const mk = ({ fail, merged = false }) => {
     const timers = [], comments = [], notes = [], gate = { open: null };
     const released = new Promise((r) => { gate.open = r; });
     const bodies = { 1: "", 2: "Depends on #1", 3: "" };
     const leanIo = { gh: async (a) => {
       if (a[0] === "issue" && a[1] === "comment") { if (/FORGE:BATCH-HEALTH/.test(a.at(-1))) comments.push(a); return ""; }
+      if (merged && a[0] === "issue" && a[1] === "view" && a.some((x) => /closedByPullRequestsReferences/.test(x))) return JSON.stringify({ state: "CLOSED", labels: [], comments: [], closedByPullRequestsReferences: [{ number: 99 }] });
+      if (merged && a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: "MERGED" });
       if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "", milestone: { title: "M Two" }, comments: [], author: { login: "x" } });
       return a[0] === "repo" ? "main\n" : "[]";
     }, git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
@@ -1591,6 +1593,25 @@ describe("#5167 early batch health in runBatch", () => {
     return { deps, timers, comments, notes, gate };
   };
   const capture = async (fn) => { const lines = [], l = console.log; console.log = (...a) => lines.push(a.join(" ")); try { await fn(); } finally { console.log = l; } return lines; };
+
+  it("#5243 roots whose issues were merged by hand raise no BATCH UNHEALTHY and no requeue suggestion", async () => {
+    const { deps, timers, comments, gate } = mk({ fail: true, merged: true });
+    let id = null;
+    const adm = tmpDir("bh-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
+    const lines = await capture(async () => {
+      const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
+      try {
+        await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
+        await timers[0].fn();
+        await until(() => existsSync(join(deps.batchRoot, id, "health.json")), 5000);
+      } finally { gate.open(); await run; process.chdir(prevCwd); }
+    });
+    assert.ok(!lines.some((l) => /BATCH UNHEALTHY|--requeue/.test(l)), lines.join("\n"));
+    assert.equal(comments.length, 0);
+    assert.equal(JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, undefined);
+  });
 
   it("#5167 roots ending engine-error raise one BATCH UNHEALTHY at T+15 with recovery commands, on every channel", async () => {
     const { deps, timers, comments, notes, gate } = mk({ fail: true });
