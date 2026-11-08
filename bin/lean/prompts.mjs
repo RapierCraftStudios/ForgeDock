@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
+import { sequenceBuildNote } from "./seqreserve.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
@@ -317,6 +318,9 @@ export function sequencePrompt(collisions, lane, mode = "local") {
   const rows = collisions.slice(0, 30).map((c) => `- ${c.lane} -> number ${c.next}${c.base.length ? ` (base has ${c.base.join(", ")})` : " (moves to keep the order)"}`).join("\n");
   return `origin/${lane} already uses sequence numbers this change adds:\n${rows}\n\nFirst bring the branch up to date with \`git merge --no-edit origin/${lane}\` if it is not (already fetched; never rebase or force). ${RENUMBER_RULE} ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
+
+/** #5235: the builder-prompt paragraph naming the numbers reserved for this lane before the build ("" when none). */
+export const sequenceBuildRule = (reservations) => sequenceBuildNote(reservations);
 
 /** #4322: the base-sync conflict addition when a conflicted file is a numbered migration or a journal; "" otherwise. */
 export function sequenceSyncNote(files) {
