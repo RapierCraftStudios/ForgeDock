@@ -2780,6 +2780,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `reproPlanNote` (`prompts.mjs`) requires a repro command's environment to come from the repo's lockfile or toolchain. `validateContract` (`conformance.mjs`, `guessedUvEnv`) rejects a `repro_test` or validate command of the form `uv run --offline --no-project --with <pkgs>` without `--with-requirements`: one plan-time correction, no LLM call. In `orchestrate.mjs`, a recovery attempt that ends with the same `env.repro_unrunnable` or `env.tool_missing` code and the same normalized detail (the command) as the run before it is not requeued (`REPEAT_ENV_CODES`); the row detail is prefixed "Environment defect" and the needs-human evidence names the command to run on the host. `env.validate_timeout` is excluded (load-dependent).
 
+## Base red (#5239)
+
+`bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
+
 ## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
 
 `closePlan(contract, {title, review, issueText})` now also judges the issue's unticked `- [ ]` items for non-investigation

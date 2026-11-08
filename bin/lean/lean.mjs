@@ -41,6 +41,7 @@ const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or dir
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
+import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
@@ -1943,7 +1944,8 @@ export async function runCore(o) {
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
         checkCommandsFailing = true;
-        if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
+        { const red = await guardRed(failed); if (red) return red; } // #5239: a guard that also fails on the base defers the lane
+        if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
         const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
@@ -1957,7 +1959,7 @@ export async function runCore(o) {
         await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
-        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { if (vcfg.precheckBlock) return await needsHuman(`Declared check command(s) failing and the builder made no new commit for them (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
+        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) failing and the builder made no new commit for them (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
         files = await changedFiles();
       }
     }
@@ -2145,7 +2147,7 @@ export async function runCore(o) {
     await i18nGate("hand-off");
     /** #4406: verify.post_merge (else the scoped typecheck) on the merged tree before the base-sync push; fix rounds up to verify.max_rounds. */
     async function postMergeGate(trigger) {
-      const commands = io.runCommand && !isSplit ? postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }) : [];
+      const commands = io.runCommand && !isSplit ? [...new Set([...postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }), ...(guardOn() ? vcfg.invariants : [])])] : []; // #5239: the guard set also runs on the merged tree
       let fixed = false, results = [];
       for (let round = 0; commands.length; round++) {
         await renew();
@@ -2166,7 +2168,23 @@ export async function runCore(o) {
         fixed = true;
         if ((String(await git(["rev-parse", "HEAD"])).trim()) === before) { T.anomalies.push(`Post-merge check(s) failing and the builder made no new commit for them: ${names}`); break; }
       }
-      return { fixed, ran: results.map(({ command, rc }) => `${command}: ${rc === 0 ? "pass" : `fail (exit ${rc})`}`).join("; ") };
+      return { fixed, stuck: results.filter((r) => r.rc !== 0 && guardFailing([r])), ran: results.map(({ command, rc }) => `${command}: ${rc === 0 ? "pass" : `fail (exit ${rc})`}`).join("; ") };
+    }
+    /** #5239: verify.invariants are the pre-merge guard set; blocking unless verify.guard_block is false. */
+    function guardOn() { return vcfg.guardBlock !== false && (vcfg.invariants ?? []).length > 0; }
+    function guardFailing(failed) { return guardOn() && failed.some((f) => vcfg.invariants.includes(f.command)); }
+    /** #5239: guard commands failing here are run once on the base; failing there too, the lane is deferred (base.red) and the introducing issue is told. null: the failure is the lane's. */
+    async function guardRed(failed) {
+      const g = failed.filter((f) => guardFailing([f]));
+      if (!g.length || isSplit || !io.runCommand) return null;
+      const baseRuns = await heavyStep("precheck", () => runOnBase({ commands: g.map((f) => f.command), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }));
+      const { baseRed } = classifyBaseRed({ failed: g, baseRuns });
+      if (!baseRed.length) return null;
+      const att = await attributeBaseRed({ failed: baseRed, git, base });
+      const cmds = baseRed.map((f) => f.command), n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds });
+      T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}`);
+      ev({ event: "BASE_RED", commands: cmds, sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
+      return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"}`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
     }
     const structureLine = structureNote(structure);
 
@@ -2828,6 +2846,7 @@ export async function runCore(o) {
       let pm = { fixed: false, ran: "" }, dupFixed = false;
       if ((await gitOut(["rev-parse", "HEAD"])) !== before) { // #4406: the merged tree, before the push
         pm = await postMergeGate(`base-sync ${syncs}`);
+        if (pm.stuck?.length) return (await guardRed(pm.stuck)) ?? await needsHuman(`Guard command(s) still fail on the merged tree after ${base} was merged in (${pm.stuck.map((f) => f.command).join(", ")}); nothing merged.`, OUTCOME_CODES.CI_RED); // #5239
         if (pm.ran) tests = clean ? pm.ran : `${tests}; post-merge: ${pm.ran}`;
         if (pm.fixed) how += "; builder fixed post-merge check failures";
         dupFixed = await duplicateGate(`base-sync ${syncs}`);

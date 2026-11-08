@@ -69,7 +69,8 @@ export function parseVerify(sec = {}) {
     }
   }
   const precheckBlock = str(s.precheck_block).toLowerCase() === "true"; // #5079: a still-failing declared check stops the lane (ci.red)
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
+  const guardBlock = str(s.guard_block).toLowerCase() !== "false"; // #5239: verify.invariants (the pre-merge guard set) block the merge unless false
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
