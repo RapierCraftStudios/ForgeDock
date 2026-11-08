@@ -685,7 +685,16 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
     // #4612: a graceful stop of a live sandbox (the provider's checkpoint stop); false when it has none.
-    stopLane: async (n, rec) => (typeof provider.stop === "function" && rec?.handle ? (await provider.stop(rec.handle)) === true : false),
+    // #5241: false leaves its reason on `rec.stopNote`, so the cancel reports a lane it could not stop.
+    stopLane: async (n, rec) => {
+      const note = (why) => { if (rec && typeof rec === "object") rec.stopNote = why; };
+      if (typeof provider.stop !== "function") { note("the provider cannot stop a lane"); return false; }
+      if (!rec?.handle) { note("no sandbox handle yet"); return false; }
+      let ok = false;
+      try { ok = (await provider.stop(rec.handle)) === true; } catch (e) { note(`stop failed: ${e?.message ?? e}`); return false; }
+      if (!ok) note((typeof provider.stopReason === "function" ? provider.stopReason(rec.handle) : null) ?? "stop not accepted");
+      return ok;
+    },
     runOne: async (n, lane, ctx = {}) => {
       const led = ledgerFor(n);
       const base = { provider: provider.name, id: provider.idFor(n), issue: n, startedAt: now() };
