@@ -41,9 +41,11 @@
 #   I1  Issues stuck in workflow:investigating beyond threshold
 #   I2  Issues stuck in workflow:building beyond threshold
 #   I3  Issues stuck in workflow:in-review beyond threshold
-#   I4  Issues in workflow:building with no FORGE:BUILDER annotation
+#   I4  Issues in workflow:building past the threshold with no builder evidence
+#       (FORGE:BUILDER, or the lean FORGE:CONTRACT / FORGE:PLAN / FORGE:WORK-ON)
 #   I5  Issues in workflow:in-review with no open PR
-#   I6  PRs open without a FORGE:CONTRACT or FORGE:BUILDER annotation
+#   I6  PRs open without a FORGE: marker that are not lane PRs (lean head branch or
+#       pipeline bot author) or dependency-bot PRs (dependabot, renovate)
 #   I7  Orphaned worktree branches (local branches fix/* with no open PR)
 #   I8  FORGE-referenced gists with public visibility (KNOWLEDGE_GIST, MILESTONE_INDEX,
 #       PRIOR_GIST annotations in recent issue comments)
@@ -401,16 +403,21 @@ while IFS= read -r row; do
 done < <(echo "$ENGINE_ERRORS" | jq -c '.[]')
 
 # ---------------------------------------------------------------------------
-# I4: Issues in workflow:building with no FORGE:BUILDER annotation
+# I4: Issues in workflow:building with no builder evidence
+# Lean lanes never write FORGE:BUILDER; FORGE:CONTRACT / FORGE:PLAN / FORGE:WORK-ON
+# count as evidence. Issues active within the stuck threshold are in flight, not broken.
 # ---------------------------------------------------------------------------
 while IFS= read -r row; do
   num=$(echo "$row" | jq -r '.number')
-  # Check for FORGE:BUILDER annotation in issue comments.
+  if [ "$(hours_since "$(echo "$row" | jq -r '.updatedAt')")" -lt "$STUCK_HOURS" ]; then
+    continue
+  fi
+  # Check for builder evidence in issue comments.
   # Distinguish a confirmed-absent annotation from a gh API failure (rate limit,
   # network blip, auth issue) — an API failure must NOT be treated as confirmed-missing.
   if ! has_builder=$(gh issue view "$num" $GH_FLAG \
     --json comments \
-    --jq '[.comments[].body | contains("FORGE:BUILDER")] | any' 2>"$GH_STDERR_TMP"); then
+    --jq '[.comments[].body | test("FORGE:(BUILDER|CONTRACT|PLAN|WORK-ON)")] | any' 2>"$GH_STDERR_TMP"); then
     echo "WARNING: gh issue view failed for #$num — I4 check inconclusive, skipping (not treated as missing): $(cat "$GH_STDERR_TMP")" >&2
     add_skip "I4" "$num" "gh issue view failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
     continue
@@ -458,7 +465,7 @@ done < <(echo "$IN_REVIEW" | jq -c '.[]')
 if ! OPEN_PRS=$(gh pr list $GH_FLAG \
   --state open \
   --limit 50 \
-  --json number,title,body,createdAt 2>"$GH_STDERR_TMP"); then
+  --json number,title,body,createdAt,author,headRefName 2>"$GH_STDERR_TMP"); then
   echo "WARNING: gh pr list failed for open PRs — I6 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
   add_skip "I6" "all" "gh pr list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
   OPEN_PRS="[]"
@@ -474,6 +481,14 @@ while IFS= read -r row; do
     continue
   fi
   has_forge=$(echo "$body" | grep -c "FORGE:" || true)
+  # Lane PRs (lean head branch or pipeline bot app) and dependency-bot PRs are not hand-made.
+  head_ref=$(echo "$row" | jq -r '.headRefName // ""')
+  author=$(echo "$row" | jq -r '.author.login // ""')
+  if [[ "$head_ref" =~ ^(feat|fix)/issue-[0-9]+-lean$ ]] || \
+     [[ "$author" =~ ^(app/)?(rapiercraft-forgedock|forgedock)(\[bot\])?$ ]] || \
+     [[ "$author" =~ ^(app/)?(dependabot|renovate)(\[bot\])?$ ]]; then
+    continue
+  fi
   if [ "$has_forge" -eq 0 ]; then
     add_finding \
       "pr_missing_annotations" "warning" \
