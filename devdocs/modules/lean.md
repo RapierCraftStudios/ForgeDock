@@ -549,6 +549,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 
    Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
 
+   Project-dir paths (#5234): `poetry -C D run pytest D/x.py` / `uv run --project D pytest D/x.py` name repo-root paths that do not exist from `D` (pytest exit 4). `freezeRewrites` rewrites the single-segment, all-`D/`-prefixed case to `cd D && poetry run pytest x.py` (`rewriteProjectDirCommand`, logged in decisions); `validateContract` rejects any other (`projectDirPathMiss`). `UNRUNNABLE_RE` also matches pytest's `ERROR: file or directory not found`, and `unrunnableValidate(run, command)` treats pytest exit 4 or 5 of a pytest command as unrunnable whatever the output, so such a rerun is `contract.invalid_command` (not `conformance.unimplemented`) and a substitute-validate for it is judged ok.
+
 ## Host parallelism (#4182)
 
 Every runner call gets `FORGE_HOST_PARALLELISM` in its env, next to the

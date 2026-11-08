@@ -383,6 +383,53 @@ export function guessedUvEnv(command) {
   return /\buv\s+run\b/.test(c) && /--no-project\b/.test(c) && /--offline\b/.test(c) && /--with(?:\s|=)/.test(c) && !/--with-requirements\b/.test(c);
 }
 const guessedUvProblem = (id) => `${id}: the command builds its environment from a hand-picked \`uv run --offline --no-project --with ...\` list, which cannot import the project's full dependency set (env.repro_unrunnable); derive it from the repo's lockfile or toolchain (\`--with-requirements\` of an export, the project runner, or a forge.yaml validate.recipes entry)`;
+const PROJECT_DIR_RE = /^(?:\.\/)?(.+?)\/?$/;
+const ARG_PATH_LIKE_RE = /\/|\.py(?:::|$)|::/;
+const stripDot = (t) => String(t).replace(PROJECT_DIR_RE, "$1");
+/**
+ * #5234: the project dir a segment moves into (`poetry -C D run ...`, `poetry --directory D`, `uv run --project D`, `uv --directory D`)
+ * with its token indexes, or null.
+ */
+function projectDirOf(tokens) {
+  const runner = tokens.findIndex((t) => t === "poetry" || t === "uv");
+  if (runner < 0) return null;
+  const flags = tokens[runner] === "poetry" ? ["-C", "--directory"] : ["--project", "--directory"];
+  for (let i = runner + 1; i < tokens.length; i++) {
+    const t = tokens[i], eq = flags.find((f) => t.startsWith(`${f}=`));
+    if (eq) return { dir: stripDot(t.slice(eq.length + 1)), at: [i] };
+    if (flags.includes(t) && tokens[i + 1]) return { dir: stripDot(tokens[i + 1]), at: [i, i + 1] };
+  }
+  return null;
+}
+/**
+ * #5234: a frozen command that moves its cwd with `poetry -C D` / `uv run --project D` but names pytest paths relative to the
+ * repo root (`D/tests/x.py`), which do not exist from D: pytest exits 4. Returns {dir, paths} (the D-prefixed path args) or null.
+ * Pure string check, one runner segment at a time.
+ */
+export function projectDirPathMiss(command) {
+  for (const seg of String(command ?? "").split(/&&|\|\||;|\|/)) {
+    const tokens = seg.trim().split(/\s+/), pd = projectDirOf(tokens);
+    const py = tokens.findIndex((t) => t === "pytest" || t === "py.test");
+    if (!pd || py < 0) continue;
+    const paths = tokens.slice(py + 1).filter((t) => !t.startsWith("-") && ARG_PATH_LIKE_RE.test(t) && stripDot(t).startsWith(`${pd.dir}/`));
+    if (paths.length) return { dir: pd.dir, paths };
+  }
+  return null;
+}
+/**
+ * #5234: `poetry -C D run pytest D/x.py` -> `cd D && poetry run pytest x.py` (uv: `cd D && uv run pytest x.py`) when the command is
+ * one segment and every path-like pytest arg is D-prefixed; any other command comes back unchanged (validateContract rejects it).
+ */
+export function rewriteProjectDirCommand(command) {
+  const cmd = String(command ?? "");
+  if (/&&|\|\||;|\||[\n'"]/.test(cmd) || !projectDirPathMiss(cmd)) return cmd;
+  const tokens = cmd.trim().split(/\s+/), pd = projectDirOf(tokens), py = tokens.findIndex((t) => t === "pytest" || t === "py.test");
+  const like = (t) => !t.startsWith("-") && ARG_PATH_LIKE_RE.test(t);
+  if (tokens.slice(py + 1).some((t) => like(t) && !stripDot(t).startsWith(`${pd.dir}/`))) return cmd;
+  const out = tokens.map((t, i) => (i > py && like(t) ? stripDot(t).slice(pd.dir.length + 1) : t)).filter((_, i) => !pd.at.includes(i));
+  return `cd ${pd.dir} && ${out.join(" ")}`;
+}
+const projectDirProblem = (id, m) => `${id}: the command moves its cwd to \`${m.dir}\` (poetry -C / uv --project) but names repo-root-relative paths (${m.paths.map((x) => `\`${x}\``).join(", ")}) that do not exist from there, so pytest exits 4 before any test runs; use \`cd ${m.dir} && poetry run pytest <${m.dir}-relative paths>\` instead`;
 /**
  * #5087: a plan decision whose effect is to drop an e2e/integration check for mocked tests ("no Playwright e2e; integration
  * coverage via route and component tests"). The #4726 rule keys on the `[type:e2e]` tag, which a reworded criterion
@@ -441,6 +488,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
     for (const p of tmpdirInputs(v.command)) problems.push(tmpInputProblem(v.id, p));
     if (guessedUvEnv(v.command)) problems.push(guessedUvProblem(v.id));
+    const pdm = projectDirPathMiss(v.command);
+    if (pdm) problems.push(projectDirProblem(v.id, pdm));
     if (vitestQuietFlag(v.command)) problems.push(`${v.id}: vitest 3 rejects -q/--quiet (usage error before any test runs); use --reporter=dot`);
     const syn = shellSyntaxError(v.command);
     if (syn) problems.push(`${v.id}: the command is not valid shell (bash -n: ${syn}); keep notes out of the command`);
@@ -452,6 +501,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));
+      const pdr = projectDirPathMiss(t.command);
+      if (pdr) problems.push(projectDirProblem("repro_test", pdr));
       if (vitestQuietFlag(t.command)) problems.push("repro_test: vitest 3 rejects -q/--quiet; use --reporter=dot");
       const syn = shellSyntaxError(t.command);
       if (syn) problems.push(`repro_test: the command is not valid shell (bash -n: ${syn})`);
@@ -752,7 +803,7 @@ export function noopCommand(command) {
  */
 export function substituteVerdict(run, { repoHas = () => false, command = "" } = {}) {
   if (!run) return "unverified";
-  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
+  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run, command) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
   return run.rc === 124 ? "timeout" : "runs";
 }
 /**
@@ -790,9 +841,11 @@ export async function removedPathsOf(git, base) {
   }
   return gone;
 }
-const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
+const UNRUNNABLE_RE = /ERROR: file or directory not found|ERROR: not found:|no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
-export function unrunnableValidate({ rc, output } = {}) {
+export function unrunnableValidate({ rc, output } = {}, command = "") {
+  // #5234: pytest's own exit 4 (usage error, path not found) and 5 (no tests collected) are never a test failure
+  if ((rc === 4 || rc === 5) && /\b(?:py\.?test|pytest)\b/.test(String(command ?? ""))) return true;
   return rc !== 0 && rc !== 124 && UNRUNNABLE_RE.test(String(output ?? ""));
 }
 const BLOCK_VALIDATE_RE = /\b(?:V\d+|validate|repro)\b/i;
@@ -914,7 +967,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
-      if (rerun && unrunnableValidate(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
+      if (rerun && unrunnableValidate(rerun, v.command)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
       // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
       if (rerun?.rc === 124) {
         if (ciVerified) { ciCovered.push(v.id); continue; }
