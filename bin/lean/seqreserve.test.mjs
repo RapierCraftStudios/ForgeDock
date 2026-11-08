@@ -11,6 +11,8 @@ import { reserveForBuild, sequenceBuildNote, revalidate } from "./seqreserve.mjs
 import { sequenceCollisions, renumberLane, snapshotLane, verifyRenumber } from "./sequence.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { sequenceBuildRule } from "./prompts.mjs";
+// The real-git runCore replay (R4) is part of this file's run, so the frozen V1 executes it.
+import "./seqreserve.e2e.test.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
 const gitIn = (cwd) => async (a) => sh(cwd, ...a);
