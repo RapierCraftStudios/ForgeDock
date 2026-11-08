@@ -1091,6 +1091,16 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/);
   });
 
+  it("#5240 an unticked acceptance box whose requirement the review marks implemented still closes as completed, with no partial note", async () => {
+    const body = "foo crashes on null input.\n\n- [ ] foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
+    const w = world({ contract: CONTRACT, body, claims: [{ id: "R1", status: "implemented" }], reviews: [conf()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.closed.length, 1);
+    assert.ok(!w.comments.some((c) => /Left open: partial/.test(c)));
+    assert.doesNotMatch(traj(w).join("\n"), /left open as partial/);
+  });
+
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });

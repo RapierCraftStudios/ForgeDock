@@ -93,7 +93,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the merge the rest is filed as one chained `refactor:split` issue.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
-   checks quotes against the issue and trusted comments; the engine freezes it
+   checks quotes against the issue and trusted comments (markdown, `...` elision and
+   punctuation-only differences are tolerated; a quote still missing snaps to the one
+   issue line or sentence holding at least 90% of its tokens, `snapQuotes`, original kept
+   as `requoted`, #5244); the engine freezes it
    (`FORGE:CONTRACT`, `contractHash`; the summary also records `issue S`, the
    hash of `scopeText`: title, body and trusted comments without HTML-comment
    blocks or `<!-- FORGE:` comments, #4265). `ISSUE_EDITED` fires only when that
@@ -2673,7 +2676,7 @@ Tests: `review-trigger.test.mjs` "pathDomains / domain checks (#5099)", `lean.te
 
 ## Entry 2026-11-07 — early batch health: BATCH UNHEALTHY alert, refusal record, status lines (#5167)
 
-- `bin/lean/batch-health.mjs` (new): `evaluateHealth(state, {held, refused, config, batchId, repo})` is pure over `state.json`. Its causes are `root-failed` (roots are the issues with no in-batch dependency edge), `terminal-share` (non-merged terminal rows; `merged`/`invalid`/`decomposed` are good ends; `held` counts although it stays pending, at or above `terminalShare` with 0 merged), `stalled` (0 running, pending minus operator-held, not in `setup` and not cancelled) and `refused`. It also returns the exact recovery commands. `runCheck` persists `health.json` (`checks`, `last`, `alertedAt`, `alert`) and alerts only when no `alertedAt` is recorded yet. `scheduleChecks` arms unref'd timers from `plan.created`, skipping checkpoints already recorded. `deliverAlert` sends a sink line, a `gh issue comment` on `orchestrate.health.issue` (else on each `--epic` issue), and `runNotify` (`notify.command` through the shell, JSON on stdin, `FORGEDOCK_ALERT*` env, 30 s timeout, never throws). `recordRefusal`/`readRefusals` read and write `<batch root>/refusals.json` (keeps the newest 20, shown for 24 h). `statusLines(root, {batch})` returns the lines for `forgedock status`.
+- `bin/lean/batch-health.mjs` (new): `evaluateHealth(state, {held, refused, config, batchId, repo})` is pure over `state.json`. Its causes are `root-failed` (roots are the issues with no in-batch dependency edge), `terminal-share` (non-merged terminal rows; `merged`/`invalid`/`decomposed` are good ends; `held` counts although it stays pending, at or above `terminalShare` with 0 merged), `stalled` (0 running, pending minus operator-held, not in `setup` and not cancelled) and `refused`. It also returns the exact recovery commands. `runCheck` (#5243) first asks the injected `resolve` (engine: `resolvedOnGithub`, a `gh issue view`/`gh pr view` re-read) which failed rows are already resolved on GitHub (issue CLOSED with a MERGED closing PR, or a `needs-human` row whose label was removed with a `FORGE:DECISION` comment) and passes them to `evaluateHealth` as `resolved`: they are good ends, so they raise no `root-failed`/`terminal-share` cause and get no `--requeue` suggestion; a read failure leaves the row failed. `runCheck` persists `health.json` (`checks`, `last`, `alertedAt`, `alert`) and alerts only when no `alertedAt` is recorded yet. `scheduleChecks` arms unref'd timers from `plan.created`, skipping checkpoints already recorded. `deliverAlert` sends a sink line, a `gh issue comment` on `orchestrate.health.issue` (else on each `--epic` issue), and `runNotify` (`notify.command` through the shell, JSON on stdin, `FORGEDOCK_ALERT*` env, 30 s timeout, never throws). `recordRefusal`/`readRefusals` read and write `<batch root>/refusals.json` (keeps the newest 20, shown for 24 h). `statusLines(root, {batch})` returns the lines for `forgedock status`.
 - `runBatch` (`bin/engine-cli.mjs`) prints `health checks: …` after the `batch:` line, arms the timers before `orchestrate()`, clears them in its `finally`, and runs the `end` check after the report is written. The return value, the report and `report.json` are unchanged. Test seams: `deps.healthConfig`, `deps.healthNow`, `deps.healthTimer {set, clear}` and `deps.notify`. The #4659 refusal goes through `alertRefusal` (record plus channels, best effort) before the same error is rethrown. `readHealthConfig(cwd)` reads the flattened `orchestrate.*` keys and `notify.command`. `readDrift` ignores them.
 - `forgedock status` (`bin/forgedock.mjs` `batchHealthSection`) always appends the batch-health lines. `--batch <id>` and its value are not taken as the status directory.
 - Tests: `batch-health.test.mjs`, `batch.test.mjs` "#5167" (roots engine-error alert once at T+15 on every channel; a healthy batch emits no alert), `plan-validate-live.test.mjs` "#5167" (refusal record), `router.test.mjs` "#5167" (status lines, `--batch`).
@@ -2778,3 +2781,16 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 ## Base red (#5239)
 
 `bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
+
+## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
+
+`closePlan(contract, {title, review, issueText})` now also judges the issue's unticked `- [ ]` items for non-investigation
+issues: an item whose contract quote matches (`matchCriterion`) and whose requirement is a `deliver` row the review did not
+mark `implemented`, or a `defer`/`post-deploy` row with no tracking issue, makes the plan `partial` (`checklist: true`,
+`open`, `unticked`). The close step then leaves the issue open (not `completed`) and posts a FORGE:TRACKED "Left open:
+partial" note listing the criteria and tracked follow-ups. Items no quote matches are not judged here (issue_coverage owns
+coverage); a skipped review judges dispositions only; investigations keep their #4398 behaviour (close `completed`).
+`activation.mjs` `rolloutModes(cfg, changedFiles, read)` reads the current mode of registry flags (forge.yaml
+`rollouts.files`) that the changed files name; a non-live mode (shadow/off) adds a trajectory decision "Inert in
+production" and a line in the partial note, so the production outcome is never claimed. Intake triage of
+live-measurement issues is not part of this change.

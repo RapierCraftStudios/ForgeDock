@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -626,6 +626,22 @@ describe("close plan and follow-up items", () => {
     assert.deepEqual(closePlan(d, { title, review: rows("implemented", "deferred") }).open.map((r) => r.id), ["R2"]);
     assert.deepEqual(closePlan(d, { title, review: { requirements: [{ id: "R1", status: "implemented" }] } }).open.map((r) => r.id), ["R2"], "a missing row is not an answer");
     assert.equal(closePlan(d, { title, review: null }).reason, "completed", "a skipped review judges dispositions only");
+  });
+  it("#5240 an unticked acceptance box with an undelivered or untracked requirement closes partial for any title", () => {
+    const issueText = "## Acceptance\n\n- [ ] Replaying the incident keeps the issue open with a partial outcome\n- [ ] The gate mode is recorded in the trajectory notes\n";
+    const reqs = [
+      { id: "R1", quote: "- [ ] Replaying the incident keeps the issue open with a partial outcome", disposition: "deliver" },
+      { id: "R2", quote: "- [ ] The gate mode is recorded in the trajectory notes", disposition: "defer", tracked: "#9" },
+    ];
+    const rows = (s1) => ({ requirements: [{ id: "R1", status: s1 }, { id: "R2", status: "deferred" }] });
+    const p = closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial"), issueText });
+    assert.equal(p.reason, "partial"); assert.equal(p.checklist, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R1"]); assert.deepEqual(p.unticked, ["Replaying the incident keeps the issue open with a partial outcome"]);
+    assert.deepEqual(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("implemented"), issueText }), { reason: "completed", tracked: ["#9"] });
+    const untracked = closePlan({ requirements: [reqs[0], { ...reqs[1], tracked: undefined }] }, { title: "fix: x", review: rows("implemented"), issueText });
+    assert.deepEqual(untracked.open.map((r) => r.id), ["R2"]);
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial") }).reason, "completed", "no issue text: unchanged");
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: null, issueText }).reason, "completed", "skipped review judges dispositions only");
   });
   it("#4398 formatShadowSummary: shadow would-block and false-block shares, risk-enforced lanes; null without conformance rows", () => {
     assert.equal(formatShadowSummary([{ issue: 1 }]), null); assert.equal(formatShadowSummary(undefined), null);
@@ -1530,5 +1546,32 @@ describe("#5197 hostRoute is exported as the single host-route source", () => {
     assert.equal(hostRoute5197({ bucket: "host", why: "verify the dashboard after release" }), "post-deploy");
     assert.equal(hostRoute5197({ bucket: "host", why: "capture logs before promotion" }), "host");
     assert.equal(hostRoute5197({ bucket: "host", why: "provide the API key after release" }), "host");
+  });
+});
+
+describe("contract quote snapping (#5244)", () => {
+  const LINE = "- Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`). Below it, publish no signal.";
+  const ISS = `## Problem\n\n${LINE}\n- Remove the legacy **alert** path entirely from the worker.\n- Remove the legacy alert path entirely from the scheduler.\n`;
+  it("markdown inline code spans, elision and spaced identifiers all match", () => {
+    assert.ok(inIssue("Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`).", ISS));
+    assert.ok(inIssue("Add SLI_CONCENTRATION_MIN_REST_EVENTS (default 30 per window, documented in config.env.example). Below it, publish...", ISS));
+    assert.ok(inIssue("Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`). Below it, publish…", ISS));
+    assert.ok(inIssue("Add SLI CONCENTRATION MIN REST EVENTS (default 30 per window", ISS));
+    assert.ok(!inIssue("Add SLI_CONCENTRATION_MIN_REST_EVENTS (default 99 per window", ISS));
+  });
+  it("a near-verbatim quote snaps to the one issue line and records the original", () => {
+    const q = "Add the SLI_CONCENTRATION_MIN_REST_EVENTS (default 30 per window, documented in config.env.example)";
+    assert.ok(!inIssue(q, ISS));
+    const c = { requirements: [{ id: "R2b", quote: q, disposition: "deliver" }] };
+    const { contract, snapped } = snapQuotes(c, ISS);
+    assert.equal(snapped.length, 1);
+    assert.ok(contract.requirements[0].quote.includes("`SLI_CONCENTRATION_MIN_REST_EVENTS`"));
+    assert.equal(contract.requirements[0].requoted, q);
+    assert.ok(inIssue(contract.requirements[0].quote, ISS));
+  });
+  it("an ambiguous or dissimilar quote does not snap", () => {
+    assert.equal(snapQuote("Remove the legacy alert path entirely from the service", ISS), null);
+    assert.equal(snapQuote("Publish a completely different dashboard widget for billing", ISS), null);
+    assert.equal(snapQuotes({ requirements: [{ id: "R1", quote: "totally unrelated words about something else here" }] }, ISS).snapped.length, 0);
   });
 });
