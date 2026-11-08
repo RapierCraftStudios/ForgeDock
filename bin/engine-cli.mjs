@@ -1972,6 +1972,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
+    resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
