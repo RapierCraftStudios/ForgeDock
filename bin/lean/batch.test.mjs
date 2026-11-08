@@ -1568,6 +1568,25 @@ describe("#5161 transient engine-error retries", () => {
   });
 });
 
+describe("#5242 an add that lands after the last dispatch pass keeps the batch open", () => {
+  it("a run that receives an add in its post-loop tail writes no report.json, so the add is not stranded", async () => {
+    const batchRoot = tmpDir("tail-add-batch-");
+    const leanIo = { gh: async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ body: "", milestone: null, comments: [], author: { login: "x" } }) : a[0] === "repo" ? "main\n" : "[]"), git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
+    const deps = { dir: tmpDir("tail-add-run-"), batchRoot, allowTmpfs: true, emitTelemetry: async () => {}, leanIo, pollMs: 5, preflight: null,
+      io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ body: "", state: "OPEN" }) : "o/r\n"), git: async () => "" },
+      alertConfig: { get tailAdd() { openBatch(batchRoot, readdirSync(batchRoot)[0]).addIssues([9]); return null; } }, // read by the post-loop alerts step
+      leanModule: { runCore: async (o) => ({ terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }) } };
+    const adm = tmpDir("tail-add-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
+    const l = console.log; console.log = () => {};
+    try { await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], deps); } finally { console.log = l; process.chdir(prevCwd); }
+    const b = openBatch(batchRoot, readdirSync(batchRoot)[0]);
+    assert.deepEqual(b.unrunAdds(), [9], "the add was never drained");
+    assert.equal(b.readReport(), null, "the batch stays open for a re-host or --resume");
+  });
+});
+
 describe("#5167 early batch health in runBatch", () => {
   // #1 and #3 are roots, #2 depends on #1. #3 runs until `release`; the captured T+15 timer fires while it runs.
   const mk = ({ fail }) => {

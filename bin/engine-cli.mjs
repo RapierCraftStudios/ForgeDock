@@ -1307,7 +1307,7 @@ async function addedEdges({ added, records, io, repo }) {
  */
 /** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
 const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
-  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass (within ~5s while lanes run; if it is finishing, the schedd re-hosts the batch)`
   : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
 
 async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
@@ -2082,7 +2082,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
-  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
+  try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
