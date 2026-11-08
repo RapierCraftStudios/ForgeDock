@@ -2784,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 A batch run past its dispatch loop (probe/alert/report tail) still counts as hosted, so `add`/`requeue` answered `hosted:true` and nothing read the entry; `runBatch` then wrote `report.json` over it and `rehostLater` (#4917) skips reported batches, so the issue waited for a manual `--resume`. Now `runBatch` leaves no report while `unrunAdds()`/`unrunRequeues()` exist (unless cancelled), and the schedd (`rehostUnrun`, `schedd.mjs`) hosts `--resume` again once such a run ends, once per distinct set of unrun entries (no loop on a cancel or tripped breaker). The hosted line of `--add` says when the runner next passes.
 Cite: #5242, #5000, #4917.
 
+## Entry 2026-11-08 — finding lifecycle resolved at close (#5254)
+
+`resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.
+
 ## Entry 2026-11-08 — doctor I4/I6 stop flagging lean lanes, lane PRs and dependency bots (#5255)
 
 `scripts/doctor-pipeline-state.sh` I4 counts `FORGE:BUILDER|CONTRACT|PLAN|WORK-ON` as builder evidence (lean lanes never write `FORGE:BUILDER`) and skips `workflow:building` issues updated within `--stuck-hours`, so a fresh lane is never CRITICAL. I6 fetches `author,headRefName` and skips PRs whose head is `feat|fix/issue-N-lean`, whose author is the pipeline app (`rapiercraft-forgedock`) or a dependency bot (`dependabot`, `renovate`); a hand-made PR with no `FORGE:` marker still warns. Output shape, exit codes and fail-open `add_skip` are unchanged. Tests: `bin/tests/doctor-pipeline-state.test.mjs` (fake `gh` on PATH).
