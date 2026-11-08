@@ -5,6 +5,7 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
+import { resolveFindingLabel } from "./findinglabel.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
@@ -1803,6 +1804,7 @@ export async function runCore(o) {
           // #5152: already-fixed is delivered behaviour (`completed`); only invalid is dropped scope (`not planned`)
           await ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]);
           await label("invalid");
+          if (result.status === "invalid") { const f = await resolveFindingLabel({ io, issue, labels: iss.labels, reason: "invalid" }); if (f.error) T.anomalies.push(`finding label not resolved: ${f.error}`); } // #5254
           return await finish("invalid", result.summary ?? result.status, result.status === "already-fixed" ? { close: "already-fixed" } : {});
         }
         const blocked = await endIfBlocked();
@@ -3201,6 +3203,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`refactor:split chain issue not filed (the maintenance scan re-files the hotspot): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     await label("merged");
+    if (!keepOpen) { const f = await resolveFindingLabel({ io, issue, labels: iss.labels, reason: "merged" }); if (f.error) T.anomalies.push(`finding label not resolved: ${f.error}`); } // #5254
     try { // #4695/#4737: FORGE:DECISION records and supersession are persisted only after the merge
       const rec = await recordDecisions(pendingDecisions, { issue, repo, post });
       if (rec.length) T.decisions.push(`FORGE:DECISION: ${rec.map((d) => d.id).join(", ")}`);
