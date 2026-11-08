@@ -2784,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `intakeHostWork` (`conformance.mjs`) reads the issue's `## Acceptance` checklist at intake. When it is non-empty and every item needs live production measurement or a real-browser capture (`LIVE_EVIDENCE_RE` or `READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match), `runCore` (`lean.mjs`, before the worktree step, skipped on resume or recovery) adds `host-task`, posts `FORGE:HOST_TASK` and ends `host-task`: no builder runs. One code-shaped item keeps the code lane, and backlog aggregates (`FORGE:DEFERRED_FROM` / `FORGE:BACKLOG_BATCH`) are exempt. Cost: 0 LLM calls.
 
+## Entry 2026-11-08 — finding lifecycle resolved at close (#5254)
+
+`resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.
+
 ## Entry 2026-11-08 — doctor I4/I6 stop flagging lean lanes, lane PRs and dependency bots (#5255)
 
 `scripts/doctor-pipeline-state.sh` I4 counts `FORGE:BUILDER|CONTRACT|PLAN|WORK-ON` as builder evidence (lean lanes never write `FORGE:BUILDER`) and skips `workflow:building` issues updated within `--stuck-hours`, so a fresh lane is never CRITICAL. I6 fetches `author,headRefName` and skips PRs whose head is `feat|fix/issue-N-lean`, whose author is the pipeline app (`rapiercraft-forgedock`) or a dependency bot (`dependabot`, `renovate`); a hand-made PR with no `FORGE:` marker still warns. Output shape, exit codes and fail-open `add_skip` are unchanged. Tests: `bin/tests/doctor-pipeline-state.test.mjs` (fake `gh` on PATH).
