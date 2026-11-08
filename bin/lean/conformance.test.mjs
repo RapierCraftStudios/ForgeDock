@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -467,6 +467,65 @@ describe("conformance review: the engine computes the verdict from complete rows
       assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
     }
   });
+  it("#5234 project-dir paths and pytest exit 4", () => {
+    const poetry = "poetry -C services/api run pytest -q services/api/tests/test_x.py services/api/tests/test_y.py";
+    assert.deepEqual(projectDirPathMiss(poetry), { dir: "services/api", paths: ["services/api/tests/test_x.py", "services/api/tests/test_y.py"] });
+    assert.equal(rewriteProjectDirCommand(poetry), "cd services/api && poetry run pytest -q tests/test_x.py tests/test_y.py");
+    const uv = "uv run --project services/api pytest services/api/tests/x.py -k foo";
+    assert.equal(rewriteProjectDirCommand(uv), "cd services/api && uv run pytest tests/x.py -k foo");
+    assert.equal(rewriteProjectDirCommand("poetry --directory=./services/api run pytest services/api/tests/x.py"), "cd services/api && poetry run pytest tests/x.py");
+    const mixed = "poetry -C services/api run pytest services/api/tests/x.py tests/hands_conformance";
+    assert.equal(rewriteProjectDirCommand(mixed), mixed);
+    const chained = "poetry -C services/api run pytest services/api/tests/x.py && echo ok";
+    assert.equal(rewriteProjectDirCommand(chained), chained);
+    for (const fine of ["cd services/api && poetry run pytest ../../services/api/tests/x.py", "poetry -C services/api run pytest tests/x.py", "poetry run pytest services/api/tests/x.py"]) {
+      assert.equal(projectDirPathMiss(fine), null, fine);
+      assert.equal(rewriteProjectDirCommand(fine), fine);
+    }
+    for (const cmd of [poetry, uv, mixed]) {
+      const v = validateContract({ ...C, validate: [{ id: "V1", command: cmd }] }, ISSUE);
+      assert.ok(v.problems.some((x) => x.startsWith("V1: the command moves its cwd to `services/api`")), v.problems.join("; "));
+    }
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: uv } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: the command moves its cwd")), rt.problems.join("; "));
+    // pytest exit 4 is a defect of the frozen command: contract.invalid_command, and a substitute is judged ok
+    const exit4 = { rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py\n\nno tests ran in 0.01s" };
+    assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py" }));
+    assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: not found: /repo/tests/x.py::t" }));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed, 2 passed" }));
+    // exit 4 or 5 of a pytest command is unrunnable whatever the output says; other runners and test failures are not
+    for (const rc of [4, 5]) assert.ok(unrunnableValidate({ rc, output: "" }, "poetry run pytest -q tests/x.py"), `rc ${rc}`);
+    assert.ok(!unrunnableValidate({ rc: 4, output: "" }, "node --test x.mjs"));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed" }, "pytest tests/x.py"));
+    assert.equal(substituteVerdict({ rc: 4, output: "" }, { command: poetry }), "ok");
+    assert.equal(substituteVerdict({ rc: 1, output: "1 failed" }, { command: poetry }), "runs");
+    assert.equal(substituteVerdict(exit4), "ok");
+    const contract = { requirements: [], deliverables: [], validate: [{ id: "V1", command: poetry }] };
+    const p = precheck({ contract, result: { validation: [{ id: "V1", exit: 4 }] }, changedFiles: [], validateRuns: { V1: exit4 } });
+    assert.deepEqual(p.failures.map((f) => [f.code, f.kind]), [["contract.invalid_command", "validate_command_invalid"]]);
+  });
+  it("#5232 a guessed offline uv --with environment is rejected for repro_test and validate; a requirements export passes", () => {
+    const bad = "cd w && uv run --offline --no-project --with pytest --with structlog python -m pytest -q t.py";
+    assert.equal(guessedUvEnv(bad), true);
+    assert.equal(guessedUvEnv("uv run --no-project --python 3.12 --with-requirements r.txt pytest -q t.py"), false);
+    assert.equal(guessedUvEnv("uv run --offline --no-project --with-requirements r.txt pytest"), false);
+    assert.equal(guessedUvEnv("pnpm vitest run x"), false);
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: bad } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: the command builds its environment from a hand-picked")), rt.problems.join("; "));
+    const v = validateContract({ ...C, validate: [{ id: "V1", command: bad }] }, ISSUE);
+    assert.ok(v.problems.some((x) => x.startsWith("V1: the command builds its environment")), v.problems.join("; "));
+    const ok = validateContract({ ...C, repro_test: { path: "t/x.py", command: "uv run --no-project --with-requirements r.txt pytest t/x.py" } }, ISSUE, { repro: true });
+    assert.ok(!ok.problems.some((x) => /hand-picked/.test(x)));
+  });
+
+  it("#5230 tmpdirInputs counts venv, clone and worktree dirs as created", () => {
+    assert.deepEqual(tmpdirInputs('uv venv -q "$TMPDIR/pv" && uv pip install --offline -q --python "$TMPDIR/pv/bin/python" pytest && "$TMPDIR/pv/bin/python" -m pytest -q x'), []);
+    assert.deepEqual(tmpdirInputs("python3 -m venv $TMPDIR/v && $TMPDIR/v/bin/pip install x"), []);
+    assert.deepEqual(tmpdirInputs("virtualenv $TMPDIR/v && $TMPDIR/v/bin/pip install x"), []);
+    assert.deepEqual(tmpdirInputs("git clone https://x/y.git $TMPDIR/c && cat $TMPDIR/c/f"), []);
+    assert.deepEqual(tmpdirInputs("git worktree add $TMPDIR/w && cat $TMPDIR/w/f"), []);
+    assert.deepEqual(tmpdirInputs('uv pip install --python "$TMPDIR/pv/bin/python" pytest'), ["$TMPDIR/pv/bin/python"]);
+  });
   it("#4325 tmpdirInputs lists read-before-create $TMPDIR paths once, in first-use order", () => {
     assert.deepEqual(tmpdirInputs("cat ${TMPDIR:-/tmp}/a.json | jq . && cp $TMPDIR/b.txt out && cat $TMPDIR/a.json"), ["$TMPDIR/a.json", "$TMPDIR/b.txt"]);
     assert.deepEqual(tmpdirInputs("cp src.txt $TMPDIR/b.txt && cat $TMPDIR/b.txt"), []);
@@ -548,12 +607,27 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(i.state, "review.inconsistent"); assert.deepEqual(codes(i), ["review.inconsistent"]);
   });
   it("a deferred requirement needs the reviewer's deferral_ok; false is an unjustified deferral", () => {
-    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w" }] };
+    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const c2 = { ...ctx, contract: k };
     const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", status: "deferred", ...extra }] });
     assert.equal(decide(rv({}), c2).state, "review.incomplete");
     assert.equal(decide(rv({ deferral_ok: true }), c2).state, "conforms");
     assert.deepEqual(codes(decide(rv({ deferral_ok: false, note: "two lines in the same file" }), c2)), ["conformance.unjustified_deferral"]);
+  });
+  it("#5207 an in-lane engineering deferral (new-issue or unbucketed) is never accepted, whatever deferral_ok says, and is never filed", () => {
+    const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", status: "deferred", ...extra }] });
+    for (const bucket of ["new-issue", undefined]) {
+      const c2 = { ...ctx, contract: { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w", ...(bucket ? { bucket } : {}) }] } };
+      for (const ok of [true, false]) {
+        const d = decide(rv({ deferral_ok: ok }), c2);
+        assert.deepEqual(codes(d), ["conformance.unjustified_deferral"], `${bucket} ${ok}`); // one per row, no duplicate
+        assert.match(d.failures[0].detail, new RegExp(`^R2 is in-lane engineering work \\(bucket ${bucket ?? "none"}\\): deliver it .*\\(#5207\\)$`));
+      }
+      assert.deepEqual(pendingTracking(c2.contract).map((r) => r.id), [], "never filed");
+      assert.ok(inLaneDeferral(c2.contract.requirements[1]));
+    }
+    for (const r of [{ disposition: "defer", bucket: "owner:spend" }, { disposition: "defer", bucket: "host" }, { disposition: "post-deploy", bucket: "post-deploy" }, { disposition: "defer", class: "ops" }, { disposition: "deliver" }]) assert.equal(inLaneDeferral(r), false, JSON.stringify(r));
+    assert.deepEqual(pendingTracking({ requirements: [{ id: "R1", disposition: "defer", bucket: "owner:spend" }, { id: "R2", disposition: "defer", bucket: "new-issue" }] }).map((r) => r.id), ["R1"]);
   });
   it("short quotes are accepted only as a whole issue line or list item", () => {
     const t = "Do this:\n- [ ] add --dry-run\n2. keep -v";
@@ -589,6 +663,22 @@ describe("close plan and follow-up items", () => {
     assert.deepEqual(closePlan(d, { title, review: rows("implemented", "deferred") }).open.map((r) => r.id), ["R2"]);
     assert.deepEqual(closePlan(d, { title, review: { requirements: [{ id: "R1", status: "implemented" }] } }).open.map((r) => r.id), ["R2"], "a missing row is not an answer");
     assert.equal(closePlan(d, { title, review: null }).reason, "completed", "a skipped review judges dispositions only");
+  });
+  it("#5240 an unticked acceptance box with an undelivered or untracked requirement closes partial for any title", () => {
+    const issueText = "## Acceptance\n\n- [ ] Replaying the incident keeps the issue open with a partial outcome\n- [ ] The gate mode is recorded in the trajectory notes\n";
+    const reqs = [
+      { id: "R1", quote: "- [ ] Replaying the incident keeps the issue open with a partial outcome", disposition: "deliver" },
+      { id: "R2", quote: "- [ ] The gate mode is recorded in the trajectory notes", disposition: "defer", tracked: "#9" },
+    ];
+    const rows = (s1) => ({ requirements: [{ id: "R1", status: s1 }, { id: "R2", status: "deferred" }] });
+    const p = closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial"), issueText });
+    assert.equal(p.reason, "partial"); assert.equal(p.checklist, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R1"]); assert.deepEqual(p.unticked, ["Replaying the incident keeps the issue open with a partial outcome"]);
+    assert.deepEqual(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("implemented"), issueText }), { reason: "completed", tracked: ["#9"] });
+    const untracked = closePlan({ requirements: [reqs[0], { ...reqs[1], tracked: undefined }] }, { title: "fix: x", review: rows("implemented"), issueText });
+    assert.deepEqual(untracked.open.map((r) => r.id), ["R2"]);
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial") }).reason, "completed", "no issue text: unchanged");
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: null, issueText }).reason, "completed", "skipped review judges dispositions only");
   });
   it("#4398 formatShadowSummary: shadow would-block and false-block shares, risk-enforced lanes; null without conformance rows", () => {
     assert.equal(formatShadowSummary([{ issue: 1 }]), null); assert.equal(formatShadowSummary(undefined), null);
@@ -998,7 +1088,7 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
     assert.equal(cls({ disposition: "defer", class: "external" }), "external");
     assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
-    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host", "backlog"]);
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops", "host"]); // #5207: backlog removed
     assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
     const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
     assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
@@ -1025,8 +1115,8 @@ describe("post-deploy check ids (#4626)", () => {
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend" }), "external");
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend", class: "ops" }), "ops");
     assert.equal(followupClass({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }), "external");
-    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "backlog");
-    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue" }), "backlog"); assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "ops" }), "ops"); // #5188
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "engineering");
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue" }), "engineering"); assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "ops" }), "engineering"); // #5207
     for (const bucket of ["post-deploy", "verify-now", "date:2026-12-01"]) assert.equal(followupClass({ disposition: "defer", bucket }), "post-deploy");
     assert.equal(one({ bucket: "owner:rotate the key" }).why, "owner: rotate the key. [bucket:owner] w");
     assert.equal(one({ bucket: "verify-now" }).why, "post-deploy: [bucket:verify-now] w");
@@ -1484,5 +1574,62 @@ describe("release review #5103", () => {
       assert.equal(host(why), false, why);
       assert.equal(route5103({ bucket: "owner:x", why }), "external", why);
     }
+  });
+});
+
+import { hostRoute as hostRoute5197 } from "./conformance.mjs";
+describe("#5197 hostRoute is exported as the single host-route source", () => {
+  it("post-promotion text joins the rollup; pre-promotion and external needs stay host", () => {
+    assert.equal(hostRoute5197({ bucket: "host", why: "verify the dashboard after release" }), "post-deploy");
+    assert.equal(hostRoute5197({ bucket: "host", why: "capture logs before promotion" }), "host");
+    assert.equal(hostRoute5197({ bucket: "host", why: "provide the API key after release" }), "host");
+  });
+});
+
+import { intakeHostWork } from "./conformance.mjs";
+describe("#5250 intakeHostWork", () => {
+  const body = (...items) => `## Problem\nx\n\n## Acceptance Criteria\n\n${items.map((t) => `- [ ] ${t}`).join("\n")}\n`;
+  it("matches when every criterion needs live production measurement or a real-browser capture", () => {
+    const r = intakeHostWork(body("Measured clear rate on live production traffic is above 50%", "Root-cause capture from a real browser is attached"));
+    assert.equal(r.host, true); assert.equal(r.items.length, 2);
+  });
+  it("one code-shaped criterion keeps a code lane", () => {
+    assert.equal(intakeHostWork(body("Measured clear rate on live production traffic is above 50%", "The retry guard stops after a rejection")).host, false);
+  });
+  it("code-only, credential-needing, checklist-less and empty bodies do not match", () => {
+    assert.equal(intakeHostWork(body("The retry guard stops after a rejection")).host, false);
+    assert.equal(intakeHostWork(body("Measure live production latency using the API key")).host, false);
+    assert.equal(intakeHostWork("## Acceptance\nmeasured on live production").host, false);
+    assert.equal(intakeHostWork("").host, false); assert.equal(intakeHostWork(null).host, false);
+  });
+  it("a backlog aggregate that merely quotes such text is not host work", () => {
+    assert.equal(intakeHostWork("## Acceptance Criteria\n\n### #5240\n<!-- FORGE:DEFERRED_FROM: #5240 -->\n\n- [ ] classify issues whose acceptance requires live production measurement or real-browser captures as host work\n").host, false);
+  });
+});
+
+describe("contract quote snapping (#5244)", () => {
+  const LINE = "- Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`). Below it, publish no signal.";
+  const ISS = `## Problem\n\n${LINE}\n- Remove the legacy **alert** path entirely from the worker.\n- Remove the legacy alert path entirely from the scheduler.\n`;
+  it("markdown inline code spans, elision and spaced identifiers all match", () => {
+    assert.ok(inIssue("Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`).", ISS));
+    assert.ok(inIssue("Add SLI_CONCENTRATION_MIN_REST_EVENTS (default 30 per window, documented in config.env.example). Below it, publish...", ISS));
+    assert.ok(inIssue("Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`). Below it, publish…", ISS));
+    assert.ok(inIssue("Add SLI CONCENTRATION MIN REST EVENTS (default 30 per window", ISS));
+    assert.ok(!inIssue("Add SLI_CONCENTRATION_MIN_REST_EVENTS (default 99 per window", ISS));
+  });
+  it("a near-verbatim quote snaps to the one issue line and records the original", () => {
+    const q = "Add the SLI_CONCENTRATION_MIN_REST_EVENTS (default 30 per window, documented in config.env.example)";
+    assert.ok(!inIssue(q, ISS));
+    const c = { requirements: [{ id: "R2b", quote: q, disposition: "deliver" }] };
+    const { contract, snapped } = snapQuotes(c, ISS);
+    assert.equal(snapped.length, 1);
+    assert.ok(contract.requirements[0].quote.includes("`SLI_CONCENTRATION_MIN_REST_EVENTS`"));
+    assert.equal(contract.requirements[0].requoted, q);
+    assert.ok(inIssue(contract.requirements[0].quote, ISS));
+  });
+  it("an ambiguous or dissimilar quote does not snap", () => {
+    assert.equal(snapQuote("Remove the legacy alert path entirely from the service", ISS), null);
+    assert.equal(snapQuote("Publish a completely different dashboard widget for billing", ISS), null);
+    assert.equal(snapQuotes({ requirements: [{ id: "R1", quote: "totally unrelated words about something else here" }] }, ISS).snapped.length, 0);
   });
 });

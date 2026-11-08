@@ -881,6 +881,54 @@ describe("#4504: a resume settles lanes that ended while no dispatcher ran", () 
   });
 });
 
+describe("#5204: lanes interrupted by an upgrade are logged and requeued, never dropped", () => {
+  const stateOf = (running, extra = {}) => ({ v: 1, order: Object.keys(running).map(Number), deps: Object.fromEntries(Object.keys(running).map((k) => [k, []])), lanes: {}, crossSeen: [], results: {},
+    running, pending: [], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null, ...extra });
+  it("#5204: a resume after an upgrade logs an interrupted row and requeues a lane that ended without a result", async () => {
+    let saved = stateOf({ 3: { startedAt: 1, pid: 33 }, 5: { startedAt: 1, remote: true }, 6: { startedAt: 1, pid: 66 }, 7: { startedAt: 1 } }, { engineVersion: "1.51.0" });
+    const logged = [], updates = [], decisions = [], interrupted = [], adopted = [];
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: (r) => logged.push(r) };
+    const adopt = async (n, rec) => { adopted.push(n); if (n === 6) throw new Error("ledger unreadable"); return null; };
+    const launched = [];
+    const rows = await orchestrate({ issues: [], parallel: 3, pollMs: 5, readBody: async () => "", store, adopt, version: "1.52.0",
+      onUpdate: (r) => updates.push(r), decide: (d) => decisions.push(d),
+      onInterrupted: async (n, detail) => { interrupted.push([n, detail.cause]); if (n === 3) throw new Error("gh down"); }, // errors are swallowed
+      runOne: async (n) => { launched.push(n); return { terminalReason: "merged", pr: 100 + n }; } });
+    assert.deepEqual(adopted.sort(), [3, 5, 6], "a handle-less remote record is still adopted (the ledger seam); a record with nothing to adopt is not");
+    const ir = logged.filter((r) => r.code === "run.interrupted");
+    assert.deepEqual(ir.map((r) => r.issue).sort(), [3, 5, 6, 7], "one interrupted row per requeued lane");
+    for (const r of ir) {
+      assert.equal(r.outcome, "deferred");
+      assert.equal(r.pr, null); assert.equal(r.cost_usd, 0); assert.equal(r.minutes, 0);
+      assert.match(r.detail, /^interrupted: upgrade v1\.51\.0→v1\.52\.0; .+; requeued$/);
+    }
+    assert.match(ir.find((r) => r.issue === 6).detail, /adopt failed: ledger unreadable/, "the adopt error is kept");
+    assert.match(ir.find((r) => r.issue === 7).detail, /no adoptable pid or handle/);
+    assert.match(ir.find((r) => r.issue === 3).detail, /ended without a result/);
+    assert.deepEqual(updates.filter((r) => r.code === "run.interrupted").length, 4, "onUpdate sees the same rows");
+    assert.deepEqual(decisions.filter((d) => d.what === "requeued (interrupted)").map((d) => d.issue).sort(), [3, 5, 6, 7]);
+    assert.deepEqual(interrupted.map(([n]) => n).sort(), [3, 5, 6, 7]);
+    assert.ok(interrupted.every(([, c]) => c === "upgrade v1.51.0→v1.52.0"));
+    assert.deepEqual(launched.sort(), [3, 5, 6, 7], "each requeued lane runs once");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [[3, "merged"], [5, "merged"], [6, "merged"], [7, "merged"]], "the interrupted row is not a result");
+    assert.deepEqual(saved.deferrals, {}, "no deferral consumed");
+    assert.deepEqual(saved.engineErrors, {}, "no engine-error consumed");
+    assert.equal(saved.engineVersion, "1.52.0", "the running engine version is saved");
+  });
+  it("#5204: without a version change the cause is a dispatcher restart; a lane with a result is settled, not interrupted", async () => {
+    let saved = stateOf({ 1: { startedAt: 1, pid: 11 }, 2: { startedAt: 1, pid: 22 } }, { engineVersion: "1.52.0" });
+    const logged = [];
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: (r) => logged.push(r) };
+    const adopt = async (n) => (n === 1 ? { terminalReason: "merged", pr: 101 } : null);
+    const rows = await orchestrate({ issues: [], parallel: 2, pollMs: 5, readBody: async () => "", store, adopt, version: "1.52.0",
+      runOne: async (n) => ({ terminalReason: "merged", pr: 100 + n }) });
+    const ir = logged.filter((r) => r.code === "run.interrupted");
+    assert.deepEqual(ir.map((r) => r.issue), [2]);
+    assert.match(ir[0].detail, /^interrupted: dispatcher restart; the lane ended without a result; requeued$/);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 101], [2, "merged", 102]]);
+  });
+});
+
 describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => {
   it("sandbox.capacity is uncapped and honours retryInSeconds; other codes still cap at maxDeferrals", () => {
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
@@ -1520,14 +1568,35 @@ describe("#5161 transient engine-error retries", () => {
   });
 });
 
+describe("#5242 an add that lands after the last dispatch pass keeps the batch open", () => {
+  it("a run that receives an add in its post-loop tail writes no report.json, so the add is not stranded", async () => {
+    const batchRoot = tmpDir("tail-add-batch-");
+    const leanIo = { gh: async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ body: "", milestone: null, comments: [], author: { login: "x" } }) : a[0] === "repo" ? "main\n" : "[]"), git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
+    const deps = { dir: tmpDir("tail-add-run-"), batchRoot, allowTmpfs: true, emitTelemetry: async () => {}, leanIo, pollMs: 5, preflight: null,
+      io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ body: "", state: "OPEN" }) : "o/r\n"), git: async () => "" },
+      alertConfig: { get tailAdd() { openBatch(batchRoot, readdirSync(batchRoot)[0]).addIssues([9]); return null; } }, // read by the post-loop alerts step
+      leanModule: { runCore: async (o) => ({ terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }) } };
+    const adm = tmpDir("tail-add-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
+    const l = console.log; console.log = () => {};
+    try { await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], deps); } finally { console.log = l; process.chdir(prevCwd); }
+    const b = openBatch(batchRoot, readdirSync(batchRoot)[0]);
+    assert.deepEqual(b.unrunAdds(), [9], "the add was never drained");
+    assert.equal(b.readReport(), null, "the batch stays open for a re-host or --resume");
+  });
+});
+
 describe("#5167 early batch health in runBatch", () => {
   // #1 and #3 are roots, #2 depends on #1. #3 runs until `release`; the captured T+15 timer fires while it runs.
-  const mk = ({ fail }) => {
+  const mk = ({ fail, merged = false }) => {
     const timers = [], comments = [], notes = [], gate = { open: null };
     const released = new Promise((r) => { gate.open = r; });
     const bodies = { 1: "", 2: "Depends on #1", 3: "" };
     const leanIo = { gh: async (a) => {
       if (a[0] === "issue" && a[1] === "comment") { if (/FORGE:BATCH-HEALTH/.test(a.at(-1))) comments.push(a); return ""; }
+      if (merged && a[0] === "issue" && a[1] === "view" && a.some((x) => /closedByPullRequestsReferences/.test(x))) return JSON.stringify({ state: "CLOSED", labels: [], comments: [], closedByPullRequestsReferences: [{ number: 99 }] });
+      if (merged && a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: "MERGED" });
       if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "", milestone: { title: "M Two" }, comments: [], author: { login: "x" } });
       return a[0] === "repo" ? "main\n" : "[]";
     }, git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
@@ -1544,9 +1613,32 @@ describe("#5167 early batch health in runBatch", () => {
   };
   const capture = async (fn) => { const lines = [], l = console.log; console.log = (...a) => lines.push(a.join(" ")); try { await fn(); } finally { console.log = l; } return lines; };
 
+  it("#5243 roots whose issues were merged by hand raise no BATCH UNHEALTHY and no requeue suggestion", async () => {
+    const { deps, timers, comments, gate } = mk({ fail: true, merged: true });
+    let id = null;
+    const adm = tmpDir("bh-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
+    const lines = await capture(async () => {
+      const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
+      try {
+        await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
+        await timers[0].fn();
+        await until(() => existsSync(join(deps.batchRoot, id, "health.json")), 5000);
+      } finally { gate.open(); await run; process.chdir(prevCwd); }
+    });
+    assert.ok(!lines.some((l) => /BATCH UNHEALTHY|--requeue/.test(l)), lines.join("\n"));
+    assert.equal(comments.length, 0);
+    assert.equal(JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, undefined);
+  });
+
   it("#5167 roots ending engine-error raise one BATCH UNHEALTHY at T+15 with recovery commands, on every channel", async () => {
     const { deps, timers, comments, notes, gate } = mk({ fail: true });
     let id = null;
+    // Three concurrent roots must not depend on host memory: the live local lane cap (#4777) reads forge.yaml from the cwd.
+    const adm = tmpDir("bh-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
     const lines = await capture(async () => {
       const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
       try {
@@ -1555,7 +1647,7 @@ describe("#5167 early batch health in runBatch", () => {
         await timers[0].fn();
         await until(() => existsSync(join(deps.batchRoot, id, "health.json")) && JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, 5000);
         await until(() => notes.length === 1, 5000);
-      } finally { gate.open(); await run; }
+      } finally { gate.open(); await run; process.chdir(prevCwd); }
     });
     assert.ok(lines.some((l) => /^health checks: T\+15 \d\d:\d\dZ, T\+60 \d\d:\d\dZ, and at batch end; forgedock status --batch /.test(l)), lines.join("\n"));
     const alerts = lines.filter((l) => /^BATCH UNHEALTHY /.test(l));
@@ -1614,6 +1706,16 @@ describe("#5168: --requeue accepts engine-error; a claude login failure is held,
     assert.equal(started.filter((x) => x === 1).length, 4, "two runs before the requeue, then a fresh run and its relaunch");
     assert.equal(rows.find((x) => x.issue === 1).outcome, "merged");
     assert.equal(rows.find((x) => x.issue === 1).requeued.prior[0].outcome, "engine-error");
+  });
+
+  it("#5203 --requeue accepts a quota-paused pending issue; other pending issues stay refused not terminal", () => {
+    const b = openBatch(tmpDir("batch-requeue-5203-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2, 3], pending: [1, 2], results: { 3: { outcome: "merged" } }, notBefore: { 1: 9e12, 2: 9e12 }, quota: { 1: { cost_usd: 0, minutes: 1, resumeAt: 9e12, rotations: 0 } } });
+    const r = b.requeue([1, 2, 3], { reason: "accounts usable", by: "operator" });
+    assert.deepEqual(r.requeued, [1]);
+    assert.deepEqual(r.refused, [{ issue: 2, reason: "not terminal" }, { issue: 3, reason: "not terminal" }]);
+    assert.deepEqual(b.readRequeued().map((e) => e.issue), [1]);
   });
 
   it("#5168 deferPolicy holds backend.auth like a usage limit: never capped, never counted", () => {

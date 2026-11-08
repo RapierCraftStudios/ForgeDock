@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -96,7 +96,10 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // Claude access token for sandboxes (#5165): among the logins with 30+ minutes left, the one with the lowest tokenbaton
   // usage (validity breaks ties). Only the short-lived access token is shared; refresh tokens stay here, so this host
   // keeps refreshing its own sessions.
-  function claudeToken() {
+  // #5205: the account last handed to each agent, and accounts a lane reported limited (n -> until ms), excluded until then.
+  const handed = new Map(), limited = new Map(); // handed: agent -> accounts handed to it
+  const MAX_LIMIT_MS = 7 * 86400000; // a reported reset is clamped to now+7d
+  function claudeToken(req = null) {
     const dirs = cfg.claude_config_dirs ?? readdirSync(homedir()).filter((d) => /^\.claude(-\d+)?$/.test(d)).map((d) => join(homedir(), d));
     const logins = [];
     for (const d of dirs) {
@@ -108,13 +111,28 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
     const src = usageSource(cfg);
     const usage = readUsage(src, logins.map((l) => l.n).filter((n) => n !== null));
-    const pick = pickClaudeLogin({ logins, usage, ceilingPct: cfg.usage_ceiling_pct ?? 95, now: now() });
+    for (const [k, u] of limited) if (!(u > now())) limited.delete(k);
+    const pick = pickClaudeLogin({ logins, usage, ceilingPct: cfg.usage_ceiling_pct ?? 95, now: now(), limited });
     if (pick.status === 503) throw Object.assign(new Error("no Claude login on the router host with 30+ minutes left"), { status: 503 });
     if (pick.status === 429) { log.warn?.(`claude login: every account at or above the usage ceiling; ${pick.body.reason}`); return pick; }
     if (pick.fallback) log.warn?.(`claude login: no usage source (${src}), falling back to longest validity`);
     const { login, pct } = pick;
-    log.info?.(`claude login selected: account=${login.n ?? "default"} usage=${pct ?? "unknown"}% expires_at=${new Date(login.expiresAt).toISOString()}`);
-    return { status: 200, body: { token: login.accessToken, expires_at: new Date(login.expiresAt).toISOString() } };
+    log.info?.(`claude login selected: account=${login.n ?? "default"} usage=${pct ?? "unknown"}%${pick.stale ? " (stale)" : ""} expires_at=${new Date(login.expiresAt).toISOString()}`);
+    const agent = req ? agentFor(req) : null;
+    if (agent && login.n !== null) handed.set(agent, (handed.get(agent) ?? new Set()).add(login.n));
+    return { status: 200, body: { token: login.accessToken, expires_at: new Date(login.expiresAt).toISOString(), account: login.n ?? null } };
+  }
+  /** #5205: a sandbox on this agent hit a usage limit: the account it reports (one handed to this agent) is excluded until reset_at (default now+1h, at most now+7d). */
+  function claudeLimited(req, body) {
+    const agent = agentFor(req), n = body?.account;
+    if (!Number.isInteger(n)) return { status: 400, body: { error: "account required (the number from the credential response)" } };
+    if (!agent || !handed.get(agent)?.has(n)) return { status: 404, body: { error: "that claude account was not handed to this agent" } };
+    const t = Date.parse(String(body?.reset_at ?? "")), e = Number(body?.reset_at);
+    const at = body?.reset_at !== null && body?.reset_at !== "" && Number.isFinite(e) ? e * 1000 : t; // epoch s, or an ISO time
+    const until = Number.isFinite(at) && at > now() ? Math.min(at, now() + MAX_LIMIT_MS) : now() + 3600000;
+    limited.set(n, Math.max(until, limited.get(n) ?? 0));
+    log.info?.(`claude login limited: account=${n} agent=${agent} until=${new Date(until).toISOString()}`);
+    return { status: 200, body: { account: n, until: new Date(until).toISOString() } };
   }
   const agentCall = (a, method, path, body, timeoutMs) => call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
 
@@ -295,7 +313,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
-    [route("GET", "/agent/creds/claude"), { fn: async () => claudeToken(), auth: "agent" }],
+    [route("GET", "/agent/creds/claude"), { fn: async (_p, _b, _u, req) => claudeToken(req), auth: "agent" }],
+    [route("POST", "/agent/creds/claude/limited"), { fn: async (_p, body, _u, req) => claudeLimited(req, body), auth: "agent" }], // #5205
     [route("POST", "/agent/relay/:id"), { fn: async (p, body, _u, req) => relayPost(req, p, body), auth: "agent" }], // #4778
     [route("GET", "/agent/relay/:id/:rid"), { fn: async (p, _b, _u, req) => relayPoll(req, p), auth: "agent" }],
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
@@ -374,47 +393,70 @@ export function usageSource(cfg, env = process.env) {
 export function parseLiveUsage(text) {
   const f = String(text ?? "").trim().split(/\s+/).map(Number);
   if (f.length < 4 || !f.slice(0, 4).every(Number.isFinite)) return null;
-  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000 };
+  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000, updatedMs: Number.isFinite(f[4]) && f[4] > 0 ? f[4] * 1000 : 0 };
 }
 
+/** #5236: a `live.<n>` sample older than this is unknown for the 5-hour window (updated 0 or absent: age unknown). */
+export const SAMPLE_MAX_AGE_MS = 30 * 60000;
+
 /** Map account n -> parsed `live.<n>` for the given accounts; unreadable or malformed files are left out. */
-export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8")) {
+export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8"), mtime = (p) => statSync(p).mtimeMs) {
   const out = new Map();
-  for (const n of ns) { try { const u = parseLiveUsage(readFile(join(dir, `live.${n}`))); if (u) out.set(n, u); } catch { /* no usage for n */ } }
+  for (const n of ns) {
+    let u = null;
+    try { u = parseLiveUsage(readFile(join(dir, `live.${n}`))); } catch { u = null; }
+    // #5236: tokenbaton's polled endpoint figure `used.<n>` (a percent; the file mtime is its age), feature-detected.
+    try {
+      const p = join(dir, `used.${n}`), pct = Number(String(readFile(p)).trim().split(/\s+/)[0]), at = mtime(p);
+      if (Number.isFinite(pct) && pct >= 0 && Number.isFinite(at)) u = { ...(u ?? {}), polledPct: pct, polledAtMs: at };
+    } catch { /* no polled figure for n */ }
+    if (u) out.set(n, u);
+  }
   return out;
 }
 
 /**
  * Pick the Claude login to hand out (#5165). Candidates have 30+ minutes of validity. A login with known usage is
- * excluded at or above `ceilingPct` 5-hour use or 100% weekly use (a passed reset counts as 0, like the local rotator);
- * the rest rank by 5-hour use, then validity. Logins with unknown usage follow. No usage at all: longest validity,
- * `fallback: true`. Every candidate excluded: a typed 429 carrying the earliest reset.
- * @returns {{status: 200, login, pct, fallback} | {status: 429, retryAfter, body} | {status: 503}}
+ * excluded at or above `ceilingPct` 5-hour use or 100% weekly use; the rest rank by 5-hour use, then validity. Logins
+ * with unknown usage follow, including stale samples whose reset has passed (#5205: unknown, never 0%). Accounts in
+ * `limited` (n -> until ms, reported by a lane) are excluded until then. No usage at all: longest validity,
+ * `fallback: true`. Every candidate excluded: a typed 429 carrying the earliest reset (limited untils included).
+ * @returns {{status: 200, login, pct, fallback, stale} | {status: 429, retryAfter, body} | {status: 503}}
  */
-export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now }) {
+export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited = new Map(), maxAgeMs = SAMPLE_MAX_AGE_MS }) {
   const valid = logins.filter((l) => l.accessToken && l.expiresAt > now + 30 * 60000);
   if (!valid.length) return { status: 503 };
-  const used = (pct, resetMs) => (resetMs <= now ? 0 : pct);
+  const used = (pct, resetMs) => (resetMs <= now ? null : pct); // #5205: a passed reset is unknown
   const byValidity = (a, b) => b.expiresAt - a.expiresAt;
   const known = [], unknown = [], blocked = [];
   for (const l of valid) {
+    const lim = l.n !== null && l.n !== undefined ? Number(limited?.get?.(l.n)) : NaN;
+    if (Number.isFinite(lim) && lim > now) { blocked.push(lim); continue; }
     const u = l.n !== null && l.n !== undefined ? usage.get(l.n) : undefined;
-    if (!u) { unknown.push(l); continue; }
-    const five = used(u.fiveHourPct, u.fiveHourResetMs), week = used(u.weeklyPct, u.weeklyResetMs);
-    if (five >= ceilingPct || week >= 100) {
+    if (!u) { unknown.push({ l, stale: false }); continue; }
+    // #5236: a 5-hour figure older than maxAgeMs is unknown (a future reset does not make an old sample fresh); the
+    // weekly figure holds until its reset. A newer polled `used.<n>` replaces the 5-hour figure.
+    const has = Number.isFinite(u.fiveHourPct) && Number.isFinite(u.weeklyPct);
+    const aged = has && u.updatedMs > 0 && now - u.updatedMs > maxAgeMs;
+    const polled = Number.isFinite(u.polledPct) && now - u.polledAtMs <= maxAgeMs && u.polledAtMs > (u.updatedMs ?? 0) ? u.polledPct : null;
+    const five = polled !== null ? polled : has && !aged ? used(u.fiveHourPct, u.fiveHourResetMs) : null;
+    const week = has ? used(u.weeklyPct, u.weeklyResetMs) : null;
+    const fiveFull = five !== null && five >= ceilingPct, weekFull = week !== null && week >= 100;
+    if (fiveFull || weekFull) {
       const r = [];
-      if (five >= ceilingPct) r.push(u.fiveHourResetMs);
-      if (week >= 100) r.push(u.weeklyResetMs);
+      if (fiveFull) r.push(has && u.fiveHourResetMs > now ? u.fiveHourResetMs : has && u.weeklyResetMs > now ? u.weeklyResetMs : now + 3600000);
+      if (weekFull) r.push(u.weeklyResetMs);
       blocked.push(Math.max(...r));
-    } else known.push({ l, pct: five });
+    } else if (five === null || week === null) unknown.push({ l, stale: true });
+    else known.push({ l, pct: five });
   }
   if (known.length) {
     known.sort((a, b) => a.pct - b.pct || byValidity(a.l, b.l));
-    return { status: 200, login: known[0].l, pct: known[0].pct, fallback: false };
+    return { status: 200, login: known[0].l, pct: known[0].pct, fallback: false, stale: false };
   }
   if (unknown.length) {
-    unknown.sort(byValidity);
-    return { status: 200, login: unknown[0], pct: null, fallback: !blocked.length };
+    unknown.sort((a, b) => byValidity(a.l, b.l));
+    return { status: 200, login: unknown[0].l, pct: null, fallback: !blocked.length && !unknown.some((x) => x.stale), stale: unknown[0].stale };
   }
   const resetMs = Math.min(...blocked), at = new Date(resetMs).toISOString();
   return { status: 429, retryAfter: Math.max(1, Math.ceil((resetMs - now) / 1000)),

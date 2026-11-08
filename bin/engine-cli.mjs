@@ -13,7 +13,7 @@ import { localLaneCap } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
-import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
+import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
@@ -27,9 +27,9 @@ import { parseVerify } from "./lean/verify.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
-import { otherLaneOwner } from "./lean/lanelock.mjs";
+import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
-import { openRotator } from "./lean/rotator.mjs";
+import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
@@ -418,7 +418,7 @@ export function readMergeWait(cwd = process.cwd()) {
 /**
  * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
  * `  skip_paths` comma-separated, `  max_rounds`, `  check_run: true` (#4270)) for the core path; undefined when the
- * section is absent or unreadable.
+ * section is absent or unreadable. `  guard_block: false` (#5239) lets verify.invariants fail without blocking the merge.
  */
 export function readVerify(cwd = process.cwd()) {
   try {
@@ -998,7 +998,7 @@ export async function runFromCli(argv, deps = {}) {
     let lres;
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
-      ...(readExecution(process.cwd())?.accountRotator ? { accountRotator: readExecution(process.cwd()).accountRotator } : {}), // #5094
+      ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
@@ -1201,6 +1201,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * `--add <id> N...` (#4408) adds issues to that batch instead of starting a second one: they run under its K and DAG
  * (a running batch picks them up on its next pass, a stopped one on its next `--resume`); `--resume <id> N...` adds N too.
  * `--requeue <id> N... [--reason]` (#4550) returns a terminal issue (and the dependents skipped behind it) to pending after an operator decision.
+ * #5203: it also releases a quota-paused pending issue (`paused (quota) until <ISO>`): its notBefore and the pool hold are cleared.
  * `--cancel <id>` (#4376) stops that one batch, never the shared daemon: it admits nothing more, its running local lanes get
  * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
@@ -1306,7 +1307,7 @@ async function addedEdges({ added, records, io, repo }) {
  */
 /** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
 const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
-  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass (within ~5s while lanes run; if it is finishing, the schedd re-hosts the batch)`
   : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
 
 async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
@@ -1373,7 +1374,7 @@ function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
  */
-async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) => console.log(l) }) {
+async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
   let res = viaDaemon ? await viaDaemon(op, issues) : null;
@@ -1381,6 +1382,11 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) =
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
     res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
+  }
+  if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
+    const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;
+    const dead = issues.filter((n) => st?.pending?.includes(n) && st?.results?.[n] === undefined && Number.isFinite(st?.notBefore?.[n]) && batchMod.cancelledOwners(root, repo, n, id).length);
+    if (dead.length) await takeover(dead);
   }
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
   print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
@@ -1411,6 +1417,11 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
     else if (v.state !== "OPEN") refused.push({ issue: n, reason: "closed" });
     else if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) refused.push({ issue: n, reason: "still labelled needs-human: record the decision and remove the label first" });
     else open.push(n);
+  }
+  // #5241: an issue deferred on a lease a cancelled batch's lane holds: the lease goes, so the requeue takes over at once
+  for (const n of open) {
+    if (!batchMod.cancelledOwners(root, repo, n, id).length || !b.store.load()?.pending?.includes(n)) continue;
+    try { await clearLease({ projector: makeProjector(io, { repo: repo ?? undefined }), issue: n }); } catch { /* the lease expires */ }
   }
   const why = reason || "operator decision", by = "operator";
   let res = { requeued: [], refused: [] };
@@ -1512,7 +1523,9 @@ async function orchestrateClient(argv, deps = {}) {
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
-    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root: await batchRootOf(), viaDaemon: holdVia(id) });
+    const root = await batchRootOf(), io = deps.io ?? makeIo();
+    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id),
+      takeover: (ns) => requeueBatch({ id, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io, viaDaemon: requeueVia(id) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
@@ -1615,7 +1628,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
-    return holdBatch({ op, id: flag(argv, `--${op}`), tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l) });
+    const hid = flag(argv, `--${op}`);
+    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l),
+      takeover: (ns) => requeueBatch({ id: hid, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
@@ -1639,7 +1654,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #5031: a resume (operator or schedd restart) keeps the base waits recorded at start; a landed commit releases on the first check
     for (const [n, l] of Object.entries(plan.baseWaits ?? {})) if (Array.isArray(l) && l.length) baseWaits.set(Number(n), l.filter((w) => w && typeof w.sha === "string" && typeof w.base === "string"));
   }
-  const issues = issuesOf(argv);
+  let issues = issuesOf(argv);
   if (!issues.length) throw new Error(ORCH_USAGE);
   const parallel = parallelOf(argv);
   // The lanes' env: a resumed daemon batch uses the env its plan kept, over the daemon's own.
@@ -1683,6 +1698,21 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         const refusal = new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
         await alertRefusal({ root, issues, repo, cwd, argv, message: refusal.message, unmet, sink, gh: gateIo.gh, deps }); // #5167: recorded for `forgedock status`
         throw refusal;
+      }
+    }
+    // #5241: an issue already pending or running in another active batch of the repo is skipped (naming it), unless --force <reason>
+    if (!force) {
+      const taken = new Map(issues.map((n) => [n, batchMod.activeBatchOf(root, repo, n)]).filter(([, b]) => b));
+      for (const [n, b] of taken) sink.line(`skipped: #${n} is already in active batch ${b}; --force "<reason>" starts it here anyway`);
+      if (taken.size) {
+        if (taken.size === issues.length) throw new Error(`every issue is already in an active batch (${[...new Set(taken.values())].join(", ")}); pass --force "<reason>" to start them anyway`);
+        const out = []; // drop the skipped operands, keeping each valued flag with its value
+        for (let i = 0; i < argv.length; i++) {
+          if (ORCH_VALUED.includes(argv[i])) { out.push(argv[i], argv[++i]); continue; }
+          if (/^#?\d+$/.test(argv[i]) && taken.has(parseInt(argv[i].replace("#", ""), 10))) continue;
+          out.push(argv[i]);
+        }
+        argv = out; issues = issuesOf(argv);
       }
     }
     const base = deps.batchId ?? batchMod.newBatchId();
@@ -1745,7 +1775,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      ...(readExecution(cwd)?.accountRotator ? { accountRotator: readExecution(cwd).accountRotator } : {}), // #5094
+      ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
@@ -1842,7 +1872,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");
     const stopLane = deps.stopLane ?? ((n, rec) => (rec?.remote || rec?.handle ? remoteStop?.(n, rec) ?? false : rec?.pid ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
-    lanes = { ...lanes, stopLane };
+    // #5241: a cancelled lane that ended gives its issue lease back, unless a live lane of another batch runs the issue.
+    const releaseLease = deps.releaseLease ?? (leanIo?.projector ? async (n) => { await clearLease({ projector: leanIo.projector, issue: n, shouldClear: () => !batchMod.batchesOwning(root, repo, n, { exceptId: batch.id }).some((o) => !o.cancelled && o.running) }); } : null);
+    lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
@@ -1856,7 +1888,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
   // #5094: with an account rotator the identity is its current account, and admissions hold only when every account is exhausted.
-  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: readExecution(cwd)?.accountRotator });
+  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: rotatorKind({ execution: readExecution(cwd), env }), env }); // #5205: detected
   const identity = deps.identity ?? (() => limitsMod.laneBackendId(env, rotator));
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
   const schedMod = await import("./lean/sched.mjs");
@@ -1971,6 +2003,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
+    resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
@@ -2000,6 +2033,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
       dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo }),
+      // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
+      version: ENGINE_VERSION,
+      // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
+      onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
@@ -2077,7 +2114,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
-  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
+  try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
@@ -2302,7 +2339,7 @@ export async function poolFromCli(argv, deps = {}) {
 export async function limitsFromCli(argv, deps = {}) {
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
-  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: readExecution(process.cwd())?.accountRotator }); // #5094
+  const rotator = deps.rotator !== undefined ? deps.rotator : openRotator({ kind: rotatorKind({ execution: readExecution(process.cwd()), env: process.env }) }); // #5094, #5205: detected
   const current = (deps.identity ?? (() => limitsMod.laneBackendId(process.env, rotator)))();
   const usage = "usage: forgedock limits show | forgedock limits clear <id>|--all";
   const [sub, arg] = argv;
@@ -2310,7 +2347,7 @@ export async function limitsFromCli(argv, deps = {}) {
     const holds = limits.list();
     if (!holds.length) console.log(`no usage-limit holds (this account: ${current})`);
     for (const h of holds) console.log(`${h.id === current ? "*" : " "} ${h.id}  until ${new Date(h.until).toISOString()}  source ${h.source ?? "-"}`);
-    for (const a of rotator?.accounts ?? []) console.log(`  ${rotator.kind} account ${a.n} (${rotator.accountIdentity(a.n)}): 5h ${a.fiveHourPct}% resets ${new Date(a.fiveHourResetMs).toISOString()}`);
+    for (const a of rotator?.accounts ?? []) console.log(`  ${rotator.kind} account ${a.n} (${rotator.accountIdentity(a.n)}): 5h ${a.stale ? "(stale)" : `${a.fiveHourPct}%`} resets ${new Date(a.fiveHourResetMs).toISOString()}`); // #5205: a passed reset is unknown, not its old %
     return { holds, current };
   }
   if (sub === "clear") {

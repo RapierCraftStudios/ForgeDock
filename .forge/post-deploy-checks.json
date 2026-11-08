@@ -6,7 +6,19 @@
     "for": "7d"
   },
   "R2-remote-hotspot-config": {
-    "run": "test \"$(gh search issues 'hotspot_config_missing' --match comments --updated \">=$(date -u -d '1 day ago' +%F)\" --json number --jq length)\" -eq 0",
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|startswith(\"<!-- FORGE:TRAJECTORY -->\"))|select(.body|contains(\"hotspot_config_missing:\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
+  },
+  "release-live-run": {
+    "run": "test \"$(gh pr list --state all --head staging --limit 20 --json comments --jq '[.[].comments[]|select(.body|contains(\"FORGE:GATE_\"))]|length')\" -ge 1",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
+  },
+  "schedd-upgrade-handover": {
+    "run": "test \"$(npx --no-install forgedock schedd status 2>&1 | grep -c 'is not hosted')\" -eq 0",
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"

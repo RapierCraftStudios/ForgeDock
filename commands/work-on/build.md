@@ -376,7 +376,7 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 - **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
 - Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
 
-**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining scope budget (a small fraction of the plan's own estimate: at most 20% of the current `ESTIMATED_DIFF_LINES`, or 200 lines when no estimate exists) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue per class (engineering | post-deploy | external | ops, each labelled `followup:<class>` and carrying the parent's milestone, #4664) with a checklist; `scripts/file-deferred-followups.sh` appends to an existing trusted follow-up for the same parent (exact path match; a closed one is reopened only if completed, not resolved by a person, and given new items) or creates one, then records a `<!-- FORGE:DEFERRED_ISSUE: #M -->` claim marker on the parent.
+**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining scope budget (a small fraction of the plan's own estimate: at most 20% of the current `ESTIMATED_DIFF_LINES`, or 200 lines when no estimate exists) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). Engineering items are never filed (#5207): fold them into scope, or list them in the PR body under Out of scope. Only `post-deploy:`/`external:`/`ops:`/`host:` items are piped to `scripts/file-deferred-followups.sh`, which appends them to the aggregates (the release rollup, the batch external aggregate, the batch host aggregate), never a per-parent issue; an engineering row exits 2.
 
 **File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
 
@@ -384,7 +384,7 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 # <Script resolution block from work-on/build.md, verbatim>
 # DEFERRED_TSV: one line per remaining deferred item: path-or-`-`<TAB>one-line why<TAB>known-flaw (or empty)[<TAB>class<TAB>label]
 # Column 1 must be a path or `-` (never requirement text or an `R<n>:` prefix: that exits 2, nothing filed); a requirement-level item
-# is `-` with its text in the label column. class: engineering|post-deploy|external|ops (default: the why's `post-deploy:`/`external:`/`ops:` prefix, else engineering).
+# is `-` with its text in the label column. class: post-deploy|external|ops|host (default: the why's prefix; none = engineering, rejected).
 SCRIPT_REF=$(resolve_script 'file-deferred-followups')
 case "$SCRIPT_REF" in
   prose:*) echo "DEFERRED_SCRIPT=PROSE" ;;   # file ONE issue by hand: marker + checklist of every path (see below)
@@ -695,7 +695,6 @@ if [ -n "$JUSTIFICATION" ]; then echo "OVERRIDE=VALID"; else echo "OVERRIDE=NONE
 # <Script resolution block from above goes here, verbatim>
 MB=$(git -C "{WORKTREE_PATH}" merge-base HEAD "origin/{PR_BASE}") || { echo "TRIM=FAILED"; exit 0; }
 PATCH_PATH="$(git -C "{WORKTREE_PATH}" rev-parse --git-common-dir)/forge-trimmed-{NUMBER}.patch"
-DEFERRED_TSV=""
 # OOP_PATHS: the out_of_plan= values, one per line (data, never evaluated)
 while IFS= read -r _p; do
   [ -n "$_p" ] || continue
@@ -705,12 +704,11 @@ while IFS= read -r _p; do
   else
     git -C "{WORKTREE_PATH}" rm -q -f --cached -- "$_p" && rm -f -- "{WORKTREE_PATH}/$_p" || { echo "TRIM=FAILED"; exit 0; }
   fi
-  DEFERRED_TSV="${DEFERRED_TSV}${_p}"$'\t'"out-of-plan hunks trimmed from #{NUMBER}; saved in ${PATCH_PATH}"$'\t'$'\n'
 done <<< "$OOP_PATHS"
-printf '%s' "$DEFERRED_TSV" | bash "$(resolve_script 'file-deferred-followups' | sed 's/^[^:]*://')" --parent {NUMBER} --repo {GH_REPO}; echo "DEFERRED_RC=$?"
+echo "TRIMMED_PATCH=${PATCH_PATH}"
 ```
 
-`TRIM=FAILED` or a non-zero `DEFERRED_RC` → do not trim further; keep whatever state is staged, fall back to the flag outcome (`SCOPE_FLAGGED`, nothing lost), and say so in the comment. After a successful trim re-run Step 2 once so `FORGE:DIFF_SIZE` records the trimmed numbers, set `trimmed: <N> file(s) -> #<follow-up>` and result `SCOPE_FLAGGED`.
+The trimmed paths and `TRIMMED_PATCH` go into the PR body under Out of scope, never into a follow-up issue (#5207). `TRIM=FAILED` → do not trim further; keep whatever state is staged, fall back to the flag outcome (`SCOPE_FLAGGED`, nothing lost), and say so in the comment. After a successful trim re-run Step 2 once so `FORGE:DIFF_SIZE` records the trimmed numbers, set `trimmed: <N> file(s) -> <patch path>` and result `SCOPE_FLAGGED`.
 
 **Step 5 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `WS_LINES`, `REVIEW_WEIGHT`, `MODULES`, `ESTIMATE`, `SCOPE`, `REVIEW_DEPTH` and `RESULT` from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one). `diff_lines` stays the first field close.md and the protocol read:
 

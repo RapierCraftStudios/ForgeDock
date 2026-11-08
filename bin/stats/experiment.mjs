@@ -3,10 +3,11 @@
 /**
  * forge#4629: `forgedock stats --experiment <id>`. Finished runs tagged with the experiment id, grouped by arm; each metric
  * is null below the declared min n (release.mjs rule), a target is null when a value it needs is null, never a pass.
+ * forge#5206: `applied` per arm counts runs whose recorded arm_overrides match the arm's declared ones (a mismatch: the toggle did not apply).
  */
 import { aggregate } from "./aggregate.mjs";
 import { releaseMetrics } from "./release.mjs";
-import { benchRecord } from "../experiment.mjs";
+import { benchRecord, overridesText } from "../experiment.mjs";
 
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
 
@@ -26,7 +27,8 @@ export function experimentReport(runs, exp) {
     const g = aggregate({ runs: rs }, { minN: exp.minN }).groups[0];
     const m = g ? releaseMetrics([g], { minN: exp.minN }).versions[0] : null;
     byArm[arm] = Object.fromEntries(exp.metrics.map((k) => [k, m?.[k] ?? null]));
-    arms[arm] = { n: rs.length, ...byArm[arm] };
+    const expected = overridesText(exp.overrides?.[arm]) || "none";
+    arms[arm] = { n: rs.length, applied: rs.filter((r) => r.armOverrides === expected).length, ...byArm[arm] };
   }
   const targets = Object.fromEntries(exp.targets.map((t) => [t.text, evalTarget(t, byArm)]));
   const verdicts = Object.values(targets);
@@ -36,9 +38,9 @@ export function experimentReport(runs, exp) {
 
 const fmt = (v) => (v == null ? "n/a" : Number.isInteger(v) ? String(v) : v.toFixed(2));
 export function renderExperiment(r) {
-  const keys = Object.keys(Object.values(r.arms)[0] ?? {}).filter((k) => k !== "n");
+  const keys = Object.keys(Object.values(r.arms)[0] ?? {}).filter((k) => k !== "n" && k !== "applied");
   const line = (c) => `| ${c.join(" | ")} |`;
-  const rows = Object.entries(r.arms).map(([a, v]) => line([a, String(v.n), ...keys.map((k) => fmt(v[k]))]));
+  const rows = Object.entries(r.arms).map(([a, v]) => line([a, String(v.n), `${v.applied ?? 0}/${v.n}`, ...keys.map((k) => fmt(v[k]))]));
   const tg = Object.entries(r.targets).map(([t, v]) => `${t}: ${v.pass == null ? "n/a" : v.pass ? "met" : "missed"} (${fmt(v.value)} vs ${fmt(v.limit)})`);
-  return [`Experiment ${r.id} (min n ${r.minN}; n/a below it)`, line(["arm", "n", ...keys]), line(["---", "---", ...keys.map(() => "---")]), ...rows, ...tg, `targets met: ${r.targets_met}`].join("\n");
+  return [`Experiment ${r.id} (min n ${r.minN}; n/a below it)`, line(["arm", "n", "applied", ...keys]), line(["---", "---", "---", ...keys.map(() => "---")]), ...rows, ...tg, `targets met: ${r.targets_met}`].join("\n");
 }

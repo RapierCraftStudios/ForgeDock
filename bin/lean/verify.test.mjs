@@ -22,6 +22,12 @@ function fake(o = {}) {
 }
 
 describe("verify-by-CI config (#4167)", () => {
+  it("parseVerify: guard_block is on unless false, and the default adds no key (#5239)", () => {
+    assert.equal("guardBlock" in parseVerify({ invariants: ["x"] }), false);
+    assert.equal(parseVerify({ guard_block: "false" }).guardBlock, false);
+    assert.equal("guardBlock" in parseVerify({ guard_block: "true" }), false);
+  });
+
   it("parseVerify normalises guard_command extensions and drops empty values (#4792)", () => {
     assert.deepEqual(parseVerify({ guard_command: { PY: " scripts/pytest {path} ", ".js": "", "": "x" } }).guardCommand, { ".py": "scripts/pytest {path}" });
     assert.equal("guardCommand" in parseVerify({ guard_command: "nope" }), false);

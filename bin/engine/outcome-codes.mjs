@@ -37,6 +37,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   BACKEND_AUTH: "backend.auth", // forge#5168: the claude CLI login failed ("Failed to authenticate"); deferred under the account hold, never engine-error, never the breaker
+  QUOTA_EXHAUSTED: "quota.exhausted", // forge#5236: no account has capacity (every login at its ceiling); deferred until the earliest reset, never backend.auth
   HOST_BUSY: "host.busy",
   GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
   GH_AUTH: "gh.auth", // forge#4662: gh answered HTTP 401 and one token refresh did not fix it; run deferred, a rerun resumes
@@ -47,6 +48,7 @@ export const OUTCOME_CODES = Object.freeze({
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
   ENGINE_DCO_REWRITE: "engine.dco_rewrite", // forge#4997: the DCO sign-off rewrite of unpushed commits failed (git filter-branch); mechanical engine-error (not needs-human), relaunched by the batch runner
+  ENGINE_PUSH_DIVERGED: "engine.push_diverged", // forge#5202: the lane-branch push was rejected non-fast-forward, no other lane owns the branch, and the divergence is not the lane's own reconcilable checkpoints; mechanical engine-error (not needs-human), relaunched by the batch runner
   ENGINE_VALIDATE_RESULT_LOST: "engine.validate_result_lost", // forge#4708: a validate result recorded before a CI fix round is missing after it and could not be carried forward
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
@@ -59,6 +61,7 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start (a non-auth 4xx/config error or a non-HTTP start failure); needs-human, not relaunched
+  BASE_RED: "base.red", // forge#5239: a verify.invariants guard fails on the base too; the lane is deferred behind the introducing issue, never needs-human
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   SANDBOX_TRANSIENT: "sandbox.transient", // forge#5095: the sandbox provider answered a 5xx on launch (router/agent infrastructure); deferred with backoff, capped by max_deferrals, never needs-human
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human

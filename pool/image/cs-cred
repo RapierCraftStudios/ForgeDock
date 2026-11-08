@@ -2,9 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # cs-cred <github|claude>: prints a current credential, fetched through the agent and cached briefly.
+# cs-cred claude --limited [reset]: the lane hit a usage limit (#5205): drop the cache, report it (reset: epoch s or
+# unknown) so the router excludes that account until then, and fetch the next login's token as usual.
 set -euo pipefail
 kind="${1:?kind}"; ttl=240; [ "$kind" = claude ] && ttl=600
 cache="/tmp/.cs-cred-$kind"
+if [ "$kind" = claude ] && [ "${2:-}" = --limited ]; then
+  rm -f "$cache"
+  [ -n "${CS_CRED_BASE:-}" ] || { echo "no credential relay (CS_CRED_BASE)" >&2; exit 1; }
+  reset="${3:-}"; [[ "$reset" =~ ^[0-9]+$ ]] || reset=""
+  acct=$(cat "$cache.account" 2>/dev/null || true); [[ "$acct" =~ ^[0-9]+$ ]] || acct=""
+  curl -sS --max-time 30 -o /dev/null -X POST -H "authorization: Bearer ${CS_CRED_TOKEN}" -H "content-type: application/json" \
+    -d "{\"reset_at\":${reset:-null},\"account\":${acct:-null}}" "$CS_CRED_BASE/claude/limited" || true
+fi
 if [ -s "$cache" ] && [ $(( $(date +%s) - $(stat -c %Y "$cache") )) -lt $ttl ]; then cat "$cache"; exit 0; fi
 [ -n "${CS_CRED_BASE:-}" ] || { echo "no credential relay (CS_CRED_BASE)" >&2; exit 1; }
 body=$(mktemp); trap 'rm -f "$body"' EXIT
@@ -16,4 +26,7 @@ if [ "$code" = 429 ]; then
 fi
 tok=""; [ "$code" = 200 ] && tok=$(jq -r .token "$body" 2>/dev/null || true)
 [ -n "$tok" ] && [ "$tok" != null ] || { echo "credential fetch failed ($kind)" >&2; exit 1; }
-umask 077; printf '%s' "$tok" > "$cache"; printf '%s' "$tok"
+umask 077; printf '%s' "$tok" > "$cache"
+acct=""; [ "$code" = 200 ] && acct=$(jq -r '.account // empty' "$body" 2>/dev/null || true)
+if [[ "$acct" =~ ^[0-9]+$ ]]; then printf '%s' "$acct" > "$cache.account"; else rm -f "$cache.account"; fi
+printf '%s' "$tok"

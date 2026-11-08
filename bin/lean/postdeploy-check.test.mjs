@@ -6,6 +6,10 @@ import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE,
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const item = (id, why) => `- [ ] \`${id}: some quote here\` — post-deploy: ${why}`;
 const body = (items) => `## Acceptance Criteria\n\n${items.join("\n")}\n\n<!-- FORGE:DEFERRED_FROM: #40 -->\n`;
@@ -282,5 +286,40 @@ describe("rollout-blocked rows raise one owner ask per flag (#4769)", () => {
     const w = world({ file: checks, spawn: () => ({ code: 1, stdout: "boom", stderr: "" }) });
     const r = await run(w, rollup([item("R1", "[check:a] x")]));
     assert.equal(r.state, "fail"); assert.equal(asks(w).length, 0);
+  });
+});
+
+describe("R2-remote-hotspot-config check command (#5198)", () => {
+  const cmd = JSON.parse(readFileSync(new URL("../../.forge/post-deploy-checks.json", import.meta.url), "utf8"))["R2-remote-hotspot-config"].run;
+  // Stub gh: applies the --jq filter's two selects to the comments in comments.json and prints the per-page count.
+  const runCheck = (comments) => {
+    const dir = tmpDir("r2chk-");
+    writeFileSync(join(dir, "comments.json"), JSON.stringify(comments));
+    writeFileSync(join(dir, "gh"), `#!/usr/bin/env node
+const fs = require("fs"); const a = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(join(dir, "argv.log"))}, a.join(" ") + "\\n");
+if (a[0] !== "api") process.exit(2);
+const jq = a[a.indexOf("--jq") + 1];
+const start = (jq.match(/startswith\\("([^"]*)"\\)/) || [])[1];
+const has = (jq.match(/contains\\("([^"]*)"\\)/) || [])[1];
+const cs = JSON.parse(fs.readFileSync(${JSON.stringify(join(dir, "comments.json"))}, "utf8"));
+console.log(cs.filter((c) => c.body.startsWith(start) && c.body.includes(has)).length);
+`, { mode: 0o755 });
+    const r = spawnSync("bash", ["-c", cmd], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: "utf8" });
+    return { code: r.status, argv: readFileSync(join(dir, "argv.log"), "utf8") };
+  };
+  const traj = (anoms) => ({ id: 1, body: `<!-- FORGE:TRAJECTORY -->\n## Pipeline Trajectory\n\n**Anomalies**\n${anoms}\n` });
+
+  it("is repo-scoped (comments API, no gh search)", () => {
+    assert.doesNotMatch(cmd, /gh search/);
+    const r = runCheck([]);
+    assert.match(r.argv, /^api repos\/\{owner\}\/\{repo\}\/issues\/comments\?since=\d{4}-\d\d-\d\dT/);
+  });
+  it("passes with no comments", () => assert.equal(runCheck([]).code, 0));
+  it("fails on a trajectory comment carrying the anomaly bullet", () => {
+    assert.equal(runCheck([traj("- hotspot_config_missing: no forge.yaml readable")]).code, 1);
+  });
+  it("ignores prose that quotes the token", () => {
+    assert.equal(runCheck([{ id: 2, body: "Release notes: the `hotspot_config_missing` anomaly is recorded" }, traj("- none")]).code, 0);
   });
 });

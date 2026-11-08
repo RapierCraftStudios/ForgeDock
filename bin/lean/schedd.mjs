@@ -33,6 +33,12 @@
  * Exit reasons (#4503): every exit logs a line: `idle, exiting`, `exiting (<signal>|uncaught: …)`, `lost lock|socket …,
  * exiting` (checked every `lockCheckMs`: the lock no longer holds this pid, or the socket is gone; nothing it does not own
  * is removed), then `exited (code N)`. Taking over a dead owner's lock is logged, so a SIGKILLed daemon leaves a trace.
+ * Upgrade handover (#5204): the same `lockCheckMs` tick compares `installedVersion()` (the `version` of the package.json of
+ * this install) with the version loaded at start. When the install moved (`npm i -g`, `forgedock update`) it logs
+ * `schedd: install moved v<old> → v<new>; handing over` once, runs `close()` (no admission, lanes keep running, lock and
+ * socket released), then `respawn()`: a fresh daemon from the new install when no systemd unit runs it (`Restart=always`
+ * restarts an active unit). The new daemon resumes every batch; each lane it cannot adopt is requeued with an
+ * `interrupted: upgrade vX→vY` row (orchestrate.mjs).
  * `runBatch({argv, cwd, env, sink, keepBreaker, signal})` is injected (engine-cli `runBatch`); `sink` gets `batch(b)`, `row(r)`, `line(text)`.
  */
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
@@ -148,8 +154,10 @@ function takeLock(lock, pid, alive) {
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
   lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
-  hostLoad = liveOverload() } = {}) {
+  hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined } = {}) {
   const p = scheddPaths(dir);
+  // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
+  const respawnFn = respawn !== undefined ? respawn : () => { if (!["active", "activating"].includes(unitState())) defaultSpawn({ dir }); };
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
   if (lock?.took) log(`schedd: took over the lock of dead pid ${lock.took} (it exited without a clean shutdown)`);
@@ -176,7 +184,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const ac = new AbortController();
     const ent = { id: null, dir: null, subs: new Set(first ? [first] : []) };
     const emit = (m) => { for (const s of ent.subs) s(m); };
-    let started = false;
+    let started = false, endedClean = false;
     const sink = {
       batch: (b) => { ent.id = b.id; ent.dir = b.dir; hosted.set(b.id, ent); started = true; resolve(ent); },
       row: (row) => emit({ type: "row", row }),
@@ -186,12 +194,12 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const run = Promise.resolve().then(() => runBatch({ argv, cwd, env, sink, keepBreaker, signal: ac.signal })).then((result) => {
       const report = ent.dir ? openBatch(root, ent.id).readReport()?.report ?? null : null;
       emit({ type: "done", result, report });
-      if (ent.id) rehostLater(ent.id); // #4917
+      if (ent.id) { rehostLater(ent.id); endedClean = true; } // #4917
     }, (e) => {
       const message = e?.message ?? String(e);
       if (e?.code === "batch.stopped") { log(`schedd: batch ${ent.id ?? argv.join(" ")} stopped (lanes keep running; resumed by the next daemon)`); if (!started) reject(new Error(message)); return; }
       if (!started) reject(new Error(message)); else { log(`schedd: batch ${ent.id} failed: ${message}`); emit({ type: "error", message }); }
-    }).finally(() => { if (ent.id) hosted.delete(ent.id); ent.subs.clear(); runs.delete(run); touch(); });
+    }).finally(() => { if (ent.id) hosted.delete(ent.id); ent.subs.clear(); runs.delete(run); touch(); if (ent.id && endedClean) rehostUnrun(ent.id); });
     runs.set(run, ac);
   });
 
@@ -215,6 +223,29 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }, Math.min(60_000, Math.max(1000, at - Date.now())));
     t.unref?.();
     rehostTimers.add(t);
+  };
+
+  // #5242: an add/requeue that landed while the runner was past its dispatch loop (still "hosted", no longer draining) is
+  // dispatched by re-hosting the batch once the run has ended. Once per distinct set of unrun entries, so an add that cannot
+  // drain (a cancel, a tripped breaker) never loops.
+  const rehostedUnrun = new Map();
+  const rehostUnrun = (id) => {
+    if (closing || hosted.has(id) || starting.has(id)) return;
+    let sig;
+    try {
+      const b = openBatch(root, id);
+      if (b.readCancel()) return;
+      const st = b.store.load();
+      if (st?.breaker && !st.breaker.transport) return;
+      sig = JSON.stringify([b.unrunAdds(), b.unrunRequeues().map((e) => e.issue ?? e)]);
+      if (!b.unrunAdds().length && !b.unrunRequeues().length) { rehostedUnrun.delete(id); return; }
+    } catch { return; }
+    if (rehostedUnrun.get(id) === sig) return;
+    rehostedUnrun.set(id, sig);
+    log(`schedd: re-hosting batch ${id} (an add or requeue arrived after its runner stopped draining)`);
+    const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+    starting.set(id, started);
+    started.catch((e) => log(`schedd: re-host ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
   };
 
   /** #4775: wait for a batch start at most `admitMs`; the start itself goes on (a second host() would duplicate the batch). */
@@ -383,9 +414,18 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (!hosted.size && !conns.size && Date.now() - lastActive >= idleMs) { log("schedd: idle, exiting"); close(); }
   }, Math.min(idleMs, 30_000));
   idleTimer.unref?.();
+  // #5204: the version this daemon runs; an install that moves under it hands over on the next tick.
+  const versionOf = () => { try { return installedVersion?.() ?? null; } catch { return null; } };
+  const loadedVersion = versionOf();
   // #4503: a daemon whose lock or socket was taken stops (its batches stay resumable) instead of running unreachable.
   const lockTimer = setInterval(() => {
     if (closing) return;
+    const now = loadedVersion ? versionOf() : null;
+    if (now && now !== loadedVersion) {
+      log(`schedd: install moved v${loadedVersion} → v${now}; handing over`);
+      close().then(() => { try { respawnFn?.(); } catch (e) { log(`schedd: respawn failed: ${e?.message ?? e}`); } });
+      return;
+    }
     let owner = NaN;
     try { owner = parseInt(readFileSync(p.lock, "utf8"), 10); } catch { /* gone */ }
     if (owner !== pid) { keepSock = true; log(`schedd: lost lock (owner ${Number.isInteger(owner) ? `pid ${owner}` : "none"}), exiting`); close(); }
@@ -431,6 +471,11 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }
   }
   return { running: true, pid, sock: p.sock, close, closed };
+}
+
+/** #5204: `version` of the package.json of this install (../../package.json), null when it cannot be read. */
+export function readInstalledVersion({ file = fileURLToPath(new URL("../../package.json", import.meta.url)) } = {}) {
+  try { return String(JSON.parse(readFileSync(file, "utf8")).version ?? "") || null; } catch { return null; }
 }
 
 /**

@@ -242,6 +242,45 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
   });
 });
 
+describe("#5204: a remote lane saved without its handle is reattached or reaped through the sandbox ledger", () => {
+  const leftBy = (root, n, provider = "fake") => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_old", issue: n, host: HOST, pid: 999999 })
+    .register("sandbox", `fake-${n}`, { provider, handle: { provider, id: `fake-${n}`, issue: n, startedAt: 500 } });
+  it("a live sandbox is reattached (onLive, then its result) and torn down after", async () => {
+    const root = tmpDir("exec-5204-live-");
+    leftBy(root, 7);
+    const ledgerFor = ledgerIn(root);
+    const prov = fakeProvider();
+    prov.live.add(7);
+    let live = 0;
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1, now: () => 500, sleep: async () => { prov.results[7] = { terminalReason: "merged", pr: 4 }; prov.live.delete(7); } });
+    const r = await lanes.adopt(7, { startedAt: 1, remote: true }, { onLive: () => { live++; } });
+    assert.equal(live, 1, "reattached as a live lane");
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(r.pr, 4);
+    assert.ok(prov.calls.some((c) => c[0] === "teardown" && c[1] === "fake-7"));
+    assert.equal(ledgerFor(7).read(), null, "the ledger entry is released");
+  });
+  it("a gone sandbox is reaped (torn down, ledger released) and the adopt returns null so the lane is requeued", async () => {
+    const root = tmpDir("exec-5204-gone-");
+    leftBy(root, 8);
+    const ledgerFor = ledgerIn(root);
+    const prov = fakeProvider();
+    const r = await providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1 }).adopt(8, { startedAt: 1, remote: true });
+    assert.equal(r, null);
+    assert.ok(prov.calls.some((c) => c[0] === "teardown" && c[1] === "fake-8"), "reaped, never orphaned");
+    assert.equal(ledgerFor(8).read(), null);
+  });
+  it("another provider's ledger entry, or no entry, is not adopted", async () => {
+    const root = tmpDir("exec-5204-other-");
+    leftBy(root, 9, "other");
+    const prov = fakeProvider();
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1 });
+    assert.equal(await lanes.adopt(9, { remote: true }), null);
+    assert.equal(await lanes.adopt(10, { remote: true }), null);
+    assert.ok(!prov.calls.some((c) => c[0] === "teardown"));
+  });
+});
+
 describe("runner kill: a sandbox left by a dead dispatcher is reaped by gc --apply (#4253)", () => {
   it("lists the stale sandbox, removes the container, releases the ledger; a live one is only reported", async () => {
     const home = tmpDir("exec-gc-");

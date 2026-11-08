@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
+import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -79,7 +80,8 @@ function world(o = {}) {
   const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
   w.writeStages = writeStages;
   w.io = {
-    now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
+    credExec: () => ({ status: 1 }), now: () => w.clock, // #5205: never the host's real cs-cred (a sandbox sets CS_CRED_BASE)
+    sleep: async (ms) => { w.clock += ms; },
     gh: async (a, opts) => {
       const k = a.slice(0, 2).join(" ");
       if (opts?.env) (w.ghEnvs ??= []).push(opts.env);
@@ -141,7 +143,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
-      if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      if (a[0] === "diff") return w.diffText ?? "diff --git a/src/foo.js b/src/foo.js\n+fix";
       if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ([...(o.shipped ?? []), ...(o.unusedAncestors ?? [])].includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
@@ -409,7 +411,7 @@ describe("core work-on", () => {
   });
 
   it("a reviewer that judges a deferral unjustified gets the builder resumed to implement it; nothing is filed for it", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "new-issue" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "owner:rotate the key" }] };
     const rej = conf({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "deferred", deferral_ok: false, note: "one line in bar.js; do it now" }] }, k);
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [rej, rej] });
     const r = await run(w);
@@ -1089,6 +1091,16 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(traj(w).join("\n"), /left open \(follow-up pending\)/);
   });
 
+  it("#5240 an unticked acceptance box whose requirement the review marks implemented still closes as completed, with no partial note", async () => {
+    const body = "foo crashes on null input.\n\n- [ ] foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
+    const w = world({ contract: CONTRACT, body, claims: [{ id: "R1", status: "implemented" }], reviews: [conf()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.closed.length, 1);
+    assert.ok(!w.comments.some((c) => /Left open: partial/.test(c)));
+    assert.doesNotMatch(traj(w).join("\n"), /left open as partial/);
+  });
+
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });
@@ -1715,7 +1727,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
     assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
@@ -1748,8 +1760,16 @@ describe("conformance shadow mode (the default)", () => {
     assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
   });
 
-  it("#4398 #5152 an investigation whose question is deferred closes partial (completed), carried forward in the tracking issue", async () => {
+  it("#5207 shadow: an in-lane engineering deferral (bucket new-issue) resumes the builder once and is never filed", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k), conf({}, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unjustified_deferral"); assert.equal(w.followups.length, 0); assert.equal(w.merges.length, 0);
+    assert.match(builders(w)[2][4], /R2 is in-lane engineering work \(bucket new-issue\): deliver it/);
+  });
+
+  it("#4398 #5152 an investigation whose question is deferred closes partial (completed), carried forward in the tracking issue", async () => {
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     const r = await runShadow(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
@@ -1791,7 +1811,7 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.terminalReason, "merged"); assert.equal(ra.close, undefined);
     assert.deepEqual(a.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
     const b = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     await runShadow(b);
     assert.deepEqual(b.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
@@ -3532,6 +3552,127 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(sent.length, 1);
   });
 
+  // #5205: a rotator with pick() relaunches the limited phase pinned to another account (real claude + CLAUDE_CONFIG_DIR), no pause.
+  const smartRotator = (o = {}) => { const marked = [], picks = [];
+    return { ...fakeRotator({ accounts: [{ n: 1 }, { n: 2 }, { n: 3 }] }), marked, picks, accountOfPid: (pid) => pid - 100, realClaude: () => "/real/claude", configDir: (n) => `/h/.claude-${n}`,
+      markLimited: (n, until) => { marked.push([n, until]); return true; },
+      pick: ({ exclude }) => { picks.push([...exclude.keys()]); return o.none ? { account: null, earliestReset: o.none } : { account: [1, 2, 3].find((n) => !exclude.has(n)) ?? null, earliestReset: 7e6 }; } }; };
+  const spawnAs = (w, err, times) => { const orig = w.io.runner; const sent = []; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { const acct = c.env?.CLAUDE_CONFIG_DIR ? Number(c.env.CLAUDE_CONFIG_DIR.split("-").at(-1)) : 1;
+      c.onSpawn?.({ pid: 100 + acct }); sent.push({ prompt: c.prompt, resume: c.resume ?? null, bin: c.bin ?? null, dir: c.env?.CLAUDE_CONFIG_DIR ?? null }); if (n++ < times) throw err; } return orig(c); }; return sent; };
+
+  it("#5205 3 accounts, the first limited: the phase relaunches pinned to another account with no pause, rotations = 1", async () => {
+    const w = world(); const sleeps = []; const progress = []; const dir = tmpDir("core-");
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    const rot = smartRotator(); w.io.rotator = rot;
+    const r = await run(w, { dir, onProgress: (p) => progress.push(p) });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(r.rotations, 1);
+    assert.deepEqual(r.limited, [{ account: 1, until: 3 * 3600 * 1000 }]);
+    assert.deepEqual(rot.marked, [[1, 3 * 3600 * 1000]], "the limited account is marked");
+    assert.deepEqual(rot.picks[0], [], "#5236: the preflight pick before the first spawn");
+    assert.deepEqual(rot.picks[1], [1], "the limited account is excluded");
+    assert.deepEqual({ ...sent[1], bin: null, dir: null }, { ...sent[0], bin: null, dir: null }, "same prompt and resume");
+    assert.equal(sent[1].bin, "/real/claude"); assert.equal(sent[1].dir, "/h/.claude-2");
+    assert.equal(sleeps.includes(3 * 3600 * 1000), false);
+    assert.equal(progress.some((p) => p.event === "phase_paused"), false);
+    const log = readLog(dir, 7);
+    assert.equal(log.some((e) => e.event === "PHASE_RATE_LIMITED"), false);
+    assert.ok(log.some((e) => e.event === "PHASE_ACCOUNT_ROTATED" && e.from === 1 && e.to === 2));
+  });
+
+  it("#5268 the shim sets the account after exec: the first read at spawn is null, the limit-time re-read excludes the limited account", async () => {
+    const w = world(); const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    const rot = smartRotator(); let reads = 0; const real = rot.accountOfPid; rot.accountOfPid = (pid) => (++reads === 1 ? null : real(pid)); w.io.rotator = rot;
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(rot.marked, [[1, 3 * 3600 * 1000]], "the account read late is marked limited");
+    assert.deepEqual(rot.picks[1], [1], "and excluded from the next pick");
+    assert.equal(sent[1].dir, "/h/.claude-2");
+  });
+
+  it("#5205 every account limited: rotations stop at the account count; pick none defers with tokenbaton's earliest reset", async () => {
+    const w = world();
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w.io.rotator = smartRotator();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "quota.exhausted"); // #5236
+    assert.equal(sent.length, 3, "one call per account, never the limited one again");
+    assert.equal(r.resetAtEpochMs, 7e6, "held until the earliest reset pick() reports");
+    assert.equal(r.rotations, 2);
+    const w2 = world(); spawnAs(w2, limitErr({ resetAtEpochMs: 3600 * 1000 }), 99); w2.io.rotator = smartRotator({ none: 5 * 3600 * 1000 });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "quota.exhausted"); assert.equal(r2.resetAtEpochMs, 5 * 3600 * 1000, "not the limited account's own reset");
+  });
+
+  it("#5236 weekly limit with a reset >1h away re-picks and continues on an account with room, no pause", async () => {
+    const w = world(); const sleeps = []; const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 30 * 3600 * 1000, resetAt: "Nov 9, 2pm" }), 1);
+    w.io.rotator = smartRotator();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(sent[1].dir, "/h/.claude-2");
+    assert.equal(sleeps.includes(30 * 3600 * 1000), false);
+  });
+
+  it("#5236 no account has room: the lane never spawns, ends quota.exhausted (not backend.auth) with the earliest reset and a QUOTA_EXHAUSTED event", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    const sent = spawnAs(w, new Error("unused"), 0);
+    w.io.rotator = smartRotator({ none: 5 * 3600 * 1000 });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "quota.exhausted");
+    assert.equal(r.resetAtEpochMs, 5 * 3600 * 1000);
+    assert.equal(sent.length, 0, "no spawn through the shim (it would fall back to the default profile)");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "QUOTA_EXHAUSTED" && e.earliestReset === 5 * 3600 * 1000));
+  });
+
+  it("#5236 --pick fails (the rotator throws): the lane never falls back to the default profile, ends quota.exhausted", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    const sent = spawnAs(w, new Error("unused"), 0);
+    w.io.rotator = { ...smartRotator({ none: 0 }), pick: () => { throw new Error("pick failed"); } };
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "quota.exhausted");
+    assert.equal(sent.length, 0, "no spawn under the default profile");
+  });
+
+  it("#5236 a login failure while the pool is exhausted is quota.exhausted, not backend.auth; with room it stays backend.auth", async () => {
+    const mk = () => Object.assign(new Error("Failed to authenticate. API Error: 401"), { code: "CLI_BACKEND_FAILED", authFailure: true }); // fresh: the lane marks the error it defers
+    const w = world(); spawnAs(w, mk(), 99);
+    const rot = smartRotator(); let calls = 0; const pick = rot.pick;
+    rot.pick = (a) => (calls++ === 0 ? pick(a) : { account: null, earliestReset: 4 * 3600 * 1000 }); // room at the preflight, none after the failure
+    w.io.rotator = rot;
+    const r = await run(w);
+    assert.equal(r.code, "quota.exhausted");
+    const w2 = world(); spawnAs(w2, mk(), 99); w2.io.rotator = smartRotator();
+    assert.equal((await run(w2)).code, "backend.auth");
+  });
+
+  it("#5205 sandbox (CS_CRED_BASE, no rotator): cs-cred claude --limited reports the limit and re-sends at once; its failure defers as before", async () => {
+    const w = world(); const calls = [];
+    const sent = captureBuilders(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    w.io.rotator = null; w.io.env = { CS_CRED_BASE: "http://agent/sandboxes/x/creds" }; w.io.credExec = (a) => { calls.push(a); return { status: 0 }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.rotations, 1);
+    assert.deepEqual(calls, [["claude", "--limited", String(3 * 3600)]]);
+    assert.deepEqual(sent[1], sent[0]);
+    const w2 = world(); captureBuilders(w2, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
+    w2.io.rotator = null; w2.io.env = { CS_CRED_BASE: "x" }; let n = 0; w2.io.credExec = () => { n++; return { status: 1 }; };
+    const r2 = await run(w2);
+    assert.equal(r2.code, "rate_limited"); assert.equal(n, 1, "a 429 from the router falls through to the existing defer");
+  });
+
+  it("#5205 no rotator and no sandbox: the pause path is unchanged (no cs-cred, no rotation facts)", async () => {
+    const w = world(); const sleeps = []; let cred = 0;
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 90000, resetAt: "8:30pm" }));
+    w.io.rotator = null; w.io.env = {}; w.io.credExec = () => { cred++; return { status: 0 }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.ok(sleeps.includes(90000));
+    assert.equal(cred, 0); assert.equal(r.rotations, undefined); assert.equal(r.limited, undefined);
+  });
+
   it("#4101 a non-limit runner error is still engine-error", async () => {
     const w = world(); failFirstBuilder(w, new Error("boom"));
     assert.equal((await run(w)).terminalReason, "engine-error");
@@ -4224,8 +4365,12 @@ describe("batch robustness (#4112-#4115)", () => {
     const r = await run(w);
     assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
   });
-  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
-    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+  it("#5202 a non-ff push no other lane owns ends engine-error engine.push_diverged, never needs-human", async () => {
+    const r = await run(ownerProbe(world({ pushErrors: [NONFF] })));
+    assert.equal([r.terminalReason, r.code].join("/"), "engine-error/engine.push_diverged");
+    assert.match(r.detail, /non-fast-forward.*no other lane owns feat\/issue-7-lean/s);
+  });
+  it("#4920 any other permanent push rejection (protected branch) stays needs-human", async () => {
     assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
   });
   it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {
@@ -5422,6 +5567,37 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     w.io.runCommand = async () => (n++ ? { rc: 0, output: "" } : { rc: 1, output: "registry missing table x" });
     await run(w, { verify: { invariants: ["bash scripts/inv.sh"] } });
     assert.ok(n >= 2, "the invariant is rerun after the builder fix round");
+  });
+
+  it("#5239 a guard failing only on the lane tree blocks the merge (ci.red), never merges", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command, cwd }) => { ran.push(cwd); return /basered-/.test(cwd) ? { rc: 0, output: "" } : { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" }; };
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+    assert.equal(w.merges.length, 0);
+    assert.ok(ran.some((c) => /basered-/.test(c)), "the guard was also run on the base");
+  });
+
+  it("#5239 a guard that also fails on the base defers the lane (base.red), comments on the introducing issue, no needs-human", async () => {
+    const w = world(); const comments = [], gh = w.io.gh, git = w.io.git;
+    w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+    w.io.git = async (a, o) => (a[0] === "log" && a.includes("--format=%H%x1f%s%x1f%b") ? `${"a".repeat(40)}\x1ffeat: feeds (#39805)\x1f` : git(a, o));
+    w.io.gh = async (a, o) => {
+      if (a[0] === "issue" && a[1] === "view" && a[2] === "39805") return "OPEN";
+      if (a[0] === "issue" && a[1] === "comment" && a[2] === "39805") { comments.push(a.at(-1)); return ""; }
+      return gh(a, o);
+    };
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "base.red");
+    assert.equal(w.merges.length, 0);
+    assert.equal(comments.length, 1); assert.match(comments[0], /FORGE:BASE_RED/);
+    assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
+  });
+
+  it("#5239 verify.guard_block false keeps a failing invariant advisory", async () => {
+    const w = world(); w.io.runCommand = async () => ({ rc: 1, output: "x" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"], guardBlock: false } });
+    assert.notEqual(r.code, "base.red"); assert.notEqual(r.code, "ci.red");
   });
 
   it("pre-PR: a passing set adds no builder turn; no commands configured runs nothing", async () => {
@@ -6741,6 +6917,36 @@ describe("explorer subagent (#4391)", () => {
   });
 });
 
+describe("experiment arm overrides (#5206)", () => {
+  const capture = (w) => { const seen = []; const inner = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, agents: c.agents ?? null }); return inner(c); }; return seen; };
+  // issue 7 hashes to arm "on" under id x0 and to "off" under id x2 (assignArm, sha1 of id:issue)
+  const exp = (id) => parseExperiment({ id, arms: "on,off", "on.lean.explore": "on", "off.lean.explore": "off" });
+
+  it("R1/R3: the explorer runs only in the on arm; RUN_TERMINAL carries arm and the applied overrides", async () => {
+    assert.equal(assignArm(exp("x0"), 7), "on"); assert.equal(assignArm(exp("x2"), 7), "off");
+    const on = world(), seenOn = capture(on), dOn = tmpDir("core-");
+    assert.equal((await run(on, { dir: dOn, experiment: exp("x0"), explore: { model: "claude-haiku-5-5" } })).terminalReason, "merged");
+    assert.ok(seenOn.filter((s) => s.role === "builder").every((s) => s.agents?.explorer?.model === "claude-haiku-5-5"));
+    const tOn = readLog(dOn, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([tOn.experiment, tOn.arm, tOn.arm_overrides, tOn.explore], ["x0", "on", "lean.explore=on", "on"]);
+    const off = world(), seenOff = capture(off), dOff = tmpDir("core-");
+    assert.equal((await run(off, { dir: dOff, experiment: exp("x2"), explore: { mode: "on" } })).terminalReason, "merged");
+    assert.ok(seenOff.every((s) => s.agents === null));
+    const tOff = readLog(dOff, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([tOff.arm, tOff.arm_overrides, tOff.explore], ["off", "lean.explore=off", "off"]);
+    assert.ok(readLog(dOff, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE").every((e) => e.arm === "off" && e.arm_overrides === "lean.explore=off"));
+  });
+
+  it("R4: no experiment: prompts and RUN_TERMINAL carry no arm fields", async () => {
+    const w = world(), d = tmpDir("core-");
+    await run(w, { dir: d, explore: { mode: "off" } });
+    const t = readLog(d, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.ok(!("arm" in t) && !("arm_overrides" in t) && !("experiment" in t));
+    const x = world(); await run(x, { explore: { mode: "off" } });
+    assert.deepEqual(builders(w).map((c) => c[4]), builders(x).map((c) => c[4]));
+  });
+});
+
 describe("e2e merge gate (#4403)", () => {
   const SPECS = ["src/foo.js", "test/foo.test.js", "e2e/foo.spec.ts"];
   const RUN = "https://github.com/o/r/actions/runs/777/job/1";
@@ -7347,9 +7553,34 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const plan = w.calls.indexOf(builders(w)[1]);
     // each fake notes w.calls.length when called, i.e. the index the next call takes: <= plan means before the plan call
     assert.ok(w.over.hot.some((i) => i <= plan) && w.over.pack.some((i) => i <= plan), JSON.stringify({ plan, ...w.over }));
-    assert.ok(w.over.hot.every((i) => i > w.calls.indexOf(builders(w)[0])), "not before the light session");
+    const light = w.calls.indexOf(builders(w)[0]);
+    assert.equal(w.over.hot.filter((i) => i <= light).length, 1, "#5209: only the eligibility-signal call precedes the light session");
+    assert.ok(w.over.hot.some((i) => i > light && i <= plan), "the upgrade recomputes the plan facts after the light session");
     assert.ok(w.over.structure.length >= 1);
     assert.equal(events(dir, "RUN_TERMINAL")[0].light, false);
+  });
+  it("#5209 shadow mode: LIGHT_ELIGIBILITY carries signals and the hotspot reason; the lane keeps the full shape", async () => {
+    const w = lworld(), dir = tmpDir("light-5209-shadow-");
+    w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 2400, commits_90d: 25, over: true, excluded: false, growth: 0 }] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const e = events(dir, "LIGHT_ELIGIBILITY")[0];
+    assert.equal(e.mode, "shadow");
+    assert.equal(e.verdict, "ineligible");
+    assert.equal(e.light, false);
+    assert.ok(e.reasons.some((x) => x.code === "hotspot" && /src\/foo\.js \(2400 lines\)/.test(x.detail)), JSON.stringify(e.reasons));
+    const sig = e.signals.map((x) => x.code);
+    for (const c of ["repro", "files_named", "churn_high", "hotspot", "size_none"]) assert.ok(sig.includes(c), `${c} in ${sig}`);
+    assert.match(builders(w)[0][4], /PLANNING ONLY/, "plan call present");
+    assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+  it("#5209 mode on: an eligible light try still gets no hotspot build rule in its builder prompt", async () => {
+    const w = lworld(), dir = tmpDir("light-5209-on-");
+    w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 120, commits_90d: 3, over: false, excluded: false, growth: 0 }] });
+    await run(w, { dir, ...ON });
+    assert.equal(events(dir, "LIGHT_ELIGIBILITY")[0].verdict, "eligible");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1);
+    assert.ok(!/Don't grow a file over/.test(builders(w)[0][4]), "no hotspotBuildRule in the light prompt");
   });
   it("#4451 a full lane (light off) keeps its context-pack, structure and hotspot calls", async () => {
     const w = overhead(), dir = tmpDir("light-over-off-");
@@ -7495,5 +7726,54 @@ describe("prompt budgets (#4969)", () => {
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
     assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
+  });
+});
+
+describe("#5250 intake host triage", () => {
+  const hostBody = "## Acceptance Criteria\n\n- [ ] Measured clear rate on live production traffic is above 50%\n- [ ] Root-cause capture from a real browser is attached\n";
+  it("an issue whose criteria are all live-production or real-browser work ends host-task with no builder run", async () => {
+    const w = world({ body: hostBody });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "host-task");
+    assert.ok(w.edits.some((e) => e.includes("--add-label") && e.includes("host-task")), JSON.stringify(w.edits));
+    assert.ok(w.comments.some((c) => String(c.body ?? c).includes("FORGE:HOST_TASK")), "FORGE:HOST_TASK comment");
+    assert.equal(w.builderN, 0);
+  });
+  it("a code issue is unaffected", async () => {
+    const w = world({ body: "## Acceptance Criteria\n\n- [ ] foo no longer breaks\n" });
+    assert.notEqual((await run(w)).terminalReason, "host-task");
+  });
+});
+
+describe("#5237 relaxation gate", () => {
+  const rescue = "diff --git a/src/foo.js b/src/foo.js\n@@ -1,0 +5,1 @@\n+  if (looksThin(page)) return true; // rescue\n";
+  const negTest = "diff --git a/test/foo.test.js b/test/foo.test.js\n@@ -1,0 +1,1 @@\n+  assert.equal(isBenign(cookieChallenge), false);\n";
+  const withV = (w) => {
+    const orig = w.io.runner; w.vcalls = [];
+    w.io.runner = async (c) => {
+      if (c.role !== "verifier") return orig(c);
+      w.vcalls.push(c);
+      return { text: "```json\n{\"findings\":[]}\n```", sessionId: "ver", usage: { input_tokens: 3, output_tokens: 1 }, costUsd: 0.01, durationMs: 300, turns: 2, model: c.model };
+    };
+    return w;
+  };
+  it("relaxation without a negative test blocks (relaxation_untested) in a risk path", async () => {
+    const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf(), conf()] })); w.diffText = rescue;
+    const r = await run(w, { dir: tmpDir("relax-"), reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(w.merges.length, 0); assert.equal(r.code, "conformance.unimplemented");
+  });
+  it("a negative test lets it through, and the verifier runs even with review.verifier off, fed the hunk", async () => {
+    const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf()] })); w.diffText = rescue + negTest;
+    const dir = tmpDir("relax-");
+    const r = await run(w, { dir, reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.vcalls.length, 1);
+    assert.match(w.vcalls[0].prompt, /<relaxation_checks>[\s\S]*src\/foo\.js:5/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "RELAXATION_DETECTED"));
+  });
+  it("no declared risk glob: no relaxation check, no verifier", async () => {
+    const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf()] })); w.diffText = rescue;
+    assert.equal((await run(w, { dir: tmpDir("relax-") })).terminalReason, "merged");
+    assert.equal(w.vcalls.length, 0);
   });
 });

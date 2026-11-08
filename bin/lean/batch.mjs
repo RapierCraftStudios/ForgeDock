@@ -110,6 +110,39 @@ export function listBatches(root) {
   return names.filter((n) => ID_RE.test(n) && existsSync(join(root, n, "plan.json"))).sort();
 }
 
+/** #5241: a batch whose state has not moved for this long is not counted active (a killed host leaves no report). */
+export const ACTIVE_BATCH_STALE_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * #5241: the batches of `repo` that own `issue`: `cancelled` ones (a `cancel` file) and `active` ones (no report, not
+ * cancelled, state saved within `staleMs`) holding it pending or running. `exceptId` is never counted.
+ * @returns {Array<{id:string, cancelled:boolean, running:boolean}>}
+ */
+export function batchesOwning(root, repo, issue, { exceptId = null, now = Date.now(), staleMs = ACTIVE_BATCH_STALE_MS } = {}) {
+  const out = [];
+  for (const id of listBatches(root)) {
+    if (id === exceptId) continue;
+    let b, plan, st;
+    try { b = openBatch(root, id); plan = b.readPlan(); st = b.store.load(); } catch { continue; }
+    if (!plan || (repo && plan.repo && plan.repo !== repo) || !st) continue;
+    const inOrder = (st.order ?? []).includes(issue);
+    if (!inOrder) continue;
+    const running = st.running != null && Object.hasOwn(st.running, String(issue));
+    if (b.readCancel()) { out.push({ id, cancelled: true, running }); continue; }
+    const last = b.lastProgressMs();
+    const live = !b.readReport() && last !== null && now - last <= staleMs;
+    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue)))) out.push({ id, cancelled: false, running });
+  }
+  return out;
+}
+/** #5241: cancelled batches of `repo` that include `issue` and no live batch runs it (the lease holder is theirs). */
+export const cancelledOwners = (root, repo, issue, exceptId = null, opts = {}) => {
+  const all = batchesOwning(root, repo, issue, { ...opts, exceptId });
+  return all.some((o) => !o.cancelled && o.running) ? [] : all.filter((o) => o.cancelled).map((o) => o.id);
+};
+/** #5241: the id of an active (uncancelled) batch of `repo` already holding `issue`, else null. */
+export const activeBatchOf = (root, repo, issue, opts = {}) => batchesOwning(root, repo, issue, opts).find((o) => !o.cancelled)?.id ?? null;
+
 /** Handle on one batch directory. */
 export function openBatch(root, id) {
   if (!ID_RE.test(String(id ?? ""))) throw new Error(`invalid batch id ${JSON.stringify(id)}`);
@@ -177,7 +210,8 @@ export function openBatch(root, id) {
     },
     /**
      * `--requeue` (#4550): record that each issue returns to pending. Refused: not a positive integer, not in the batch's
-     * `order`, no terminal result yet (`not terminal`; a final `engine-error` is terminal, #5168), or already requeued and not yet applied. The needs-human label and
+     * `order`, no terminal result yet (`not terminal`; a final `engine-error` is terminal, #5168; a quota-paused pending issue is
+     * accepted and released, #5203), or already requeued and not yet applied. The needs-human label and
      * closed checks need GitHub and live in the CLI. @returns {{requeued:number[], refused:Array<{issue, reason}>}}
      */
     requeue: (list, { reason = "operator decision", by = "operator" } = {}) => {
@@ -185,13 +219,18 @@ export function openBatch(root, id) {
       const order = new Set(st.order ?? []), applied = new Set(st.requeueApplied ?? []);
       const entries = readRequeueFile(f("requeue"));
       const pend = new Set(entries.filter((e) => !applied.has(requeueKey(e))).map((e) => e.issue));
+      // #5203: a quota-paused issue (pending, no result, a `quota` entry) is released by --requeue: its notBefore is cleared
+      const quotaPaused = (n) => st.results?.[n] === undefined && Array.isArray(st.pending) && st.pending.includes(n) && !!st.quota?.[n];
+      // #5241: a pending issue waiting out a deferral (notBefore) whose lease a cancelled batch of the repo holds is released too
+      const leaseOrphaned = (n) => st.results?.[n] === undefined && Array.isArray(st.pending) && st.pending.includes(n) && Number.isFinite(st.notBefore?.[n])
+        && cancelledOwners(dirname(dir), readJson(f("plan.json"))?.repo, n, id).length > 0;
       const requeued = [], refused = [];
       for (const x of Array.isArray(list) ? list : []) {
         const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
         if (!Number.isSafeInteger(n) || n < 1) refused.push({ issue: x, reason: "not an integer" });
         else if (!order.has(n)) refused.push({ issue: n, reason: "not in batch" });
         else if (pend.has(n)) refused.push({ issue: n, reason: "already requeued" });
-        else if (!REQUEUABLE(st.results?.[n]?.outcome)) refused.push({ issue: n, reason: "not terminal" });
+        else if (!REQUEUABLE(st.results?.[n]?.outcome) && !quotaPaused(n) && !leaseOrphaned(n)) refused.push({ issue: n, reason: "not terminal" });
         else { pend.add(n); requeued.push(n); }
       }
       if (requeued.length) {

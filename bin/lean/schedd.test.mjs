@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -80,6 +80,8 @@ await d.closed;
   // (liveLaneCap derives the cap from them). Run the clients from h.work via h.inWork to use it.
   writeFileSync(join(work, "forge.yaml"), "engine:\n  admission_enabled: false\n");
   h.inWork = async (fn) => { const prev = process.cwd(); process.chdir(work); try { return await fn(); } finally { process.chdir(prev); } };
+  // #5204: a whole-test h.inWork for tests that start clients in the background (and a child client); cleanup restores the cwd.
+  h.enter = () => { h.prevCwd ??= process.cwd(); process.chdir(work); };
   h.launched = () => readFileSync(h.launches, "utf8").trim().split("\n").filter(Boolean).map(Number).sort();
   h.lanePids = () => listBatches(h.root).flatMap((id) => Object.values(openBatch(h.root, id).store.load()?.running ?? {}).map((r) => r.pid).filter(Boolean));
   h.stubPids = () => (existsSync(h.lanePidFile) ? readFileSync(h.lanePidFile, "utf8").trim().split("\n").filter(Boolean).map(Number) : []);
@@ -88,6 +90,7 @@ await d.closed;
     for (const pid of h.stubPids()) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
   };
   h.cleanup = async () => {
+    if (h.prevCwd) { process.chdir(h.prevCwd); h.prevCwd = undefined; }
     if (existsSync(h.work)) writeFileSync(h.release, "");
     h.reap();
     await until(() => h.stubPids().every((pid) => !isLaneAlive(pid, null)), 5000).catch(() => {});
@@ -145,7 +148,7 @@ describe("schedd host scheduler (#4192)", () => {
   });
 
   it("a client that disconnects does not stop the batch; --resume reattaches, and replays the report once done", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       await h.daemon();
       const clientScript = join(h.work, "client.mjs");
@@ -174,7 +177,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("a daemon restart resumes the batch from state and re-adopts its live lanes without duplicate launches", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       const d1 = await h.daemon();
       const first = capture(() => orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], h.client)).then(() => null, (e) => e);
@@ -303,7 +306,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       const d = await h.daemon();
       await withRoot(h, () => capture(async () => {
@@ -424,6 +427,43 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("#5242: an add that lands while the runner is past its dispatch loop is dispatched by a re-host, not left for a manual --resume", async () => {
+    for (const drains of [true, false]) {
+      const dir = tmpDir("schedd-tail-add-"), root = join(dir, "batches"), id = "b20261108-000000-5242";
+      const calls = [];
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const runBatch = async ({ argv, sink }) => {
+        calls.push(argv);
+        const b = openBatch(root, id);
+        if (argv[0] !== "--resume") {
+          b.writePlan({ daemon: true, repo: "o/r" });
+          b.store.save({ v: 1, order: [1], results: { 1: { issue: 1, outcome: "merged" } }, running: {}, pending: [] });
+          sink.batch({ id, dir: b.dir });
+          await gate; // the run's tail: hosted, no longer draining adds
+        } else {
+          sink.batch({ id, dir: b.dir });
+          if (drains) b.store.save({ ...b.store.load(), order: [1, 6], results: { 1: { issue: 1, outcome: "merged" }, 6: { issue: 6, outcome: "merged" } } });
+        }
+        return {};
+      };
+      const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+      try {
+        const submitted = request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} }).catch(() => {}); // streams until the run ends
+        await until(() => calls.length === 1 && openBatch(root, id).readPlan());
+        const res = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "add", id, issues: [6] });
+        assert.deepEqual(res.added, [6]);
+        assert.equal(res.reopened, false, "the runner still counts as hosted");
+        release();
+        await submitted;
+        await until(() => calls.length === 2, 8000);
+        assert.deepEqual(calls[1], ["--resume", id]);
+        await new Promise((r) => setTimeout(r, 300));
+        assert.equal(calls.length, 2, drains ? "drained: no further re-host" : "an add that cannot drain does not loop");
+      } finally { release(); await d.close(); }
+    }
+  });
+
   it("#4917: a resume that leaves the waiting issue unadmitted (breaker tripped, retry-at passed) is not re-hosted again", async () => {
     const dir = tmpDir("schedd-rehost-loop-"), root = join(dir, "batches"), id = "b20261031-000000-4918";
     const calls = [];
@@ -514,7 +554,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("#4454: kill -TERM stops both batches and exits 143 within the bound; lanes keep running; the next daemon resumes and adopts them", async () => {
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {
       const d1 = await h.daemon();
       const { lines } = await withRoot(h, () => capture(async () => {
@@ -593,6 +633,47 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.equal(existsSync(p.lock), false, "its own lock is released");
   });
 
+  it("#5204: an install that moves under the daemon hands over once: batches stop resumable, lock and socket released, then respawn starts the next daemon", async () => {
+    const dir = tmpDir("schedd-upgrade-"), p = scheddPaths(dir), root = join(dir, "batches"), lines = [];
+    let version = "1.51.0", stopped = false, d2 = null, lockAtRespawn = null, respawns = 0;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version,
+      runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => signal.addEventListener("abort", () => { stopped = true; rej(Object.assign(new Error("stopped"), { code: "batch.stopped" })); })); },
+      respawn: async () => { respawns++; lockAtRespawn = existsSync(p.lock); d2 = await startDaemon({ dir, root, runBatch: async () => ({}), log: () => {}, resumeOnStart: false, installedVersion: () => version }); } });
+    request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+    await until(() => lines.some((l) => l.includes("listening")));
+    await new Promise((r) => setTimeout(r, 90));
+    assert.ok(!lines.some((l) => l.includes("handing over")), "no handover while the install is unchanged");
+    version = "1.52.0";
+    await d.closed;
+    await until(() => d2 !== null);
+    try {
+      assert.equal(lines.filter((l) => l === "schedd: install moved v1.51.0 → v1.52.0; handing over").length, 1, lines.join("\n"));
+      assert.equal(stopped, true, "the hosted batch stopped resumable (no admission, lanes keep running)");
+      assert.equal(lockAtRespawn, false, "the lock was released before the respawn");
+      assert.equal(respawns, 1);
+      assert.equal(d2.running, true, "the next daemon took the lock");
+    } finally { await d2?.close?.(); }
+  });
+
+  it("#5204: readInstalledVersion reads this install's package.json version, null when unreadable", () => {
+    assert.equal(readInstalledVersion(), JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
+    const dir = tmpDir("schedd-ver-");
+    writeFileSync(join(dir, "package.json"), "{not json");
+    assert.equal(readInstalledVersion({ file: join(dir, "package.json") }), null);
+    assert.equal(readInstalledVersion({ file: join(dir, "missing.json") }), null);
+  });
+
+  it("#5204: an unreadable install version never hands over", async () => {
+    const dir = tmpDir("schedd-upgrade-null-"), lines = [];
+    let calls = 0;
+    const d = await startDaemon({ dir, root: join(dir, "batches"), runBatch: async () => ({}), log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 20,
+      installedVersion: () => (++calls === 1 ? "1.51.0" : null), respawn: () => assert.fail("no respawn") });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(calls > 1, "checked on the tick");
+    assert.ok(!lines.some((l) => l.includes("handing over")));
+    await d.close();
+  });
+
   it("#4503: a client whose daemon is SIGKILLed re-attaches to the next daemon and finishes, without relaunching a lane", async () => {
     const h = host();
     try {
@@ -616,7 +697,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   it("#4503: test runs never resolve ~/.forge/sched, and teardown leaves no live stub lane", async () => {
     assert.notEqual(schedDir(), join(homedir(), ".forge", "sched"));
     assert.ok(schedDir().startsWith(tmpdir()), schedDir());
-    const h = host();
+    const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     let pids = [], a;
     try {
       await h.daemon();

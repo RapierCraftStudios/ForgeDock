@@ -453,6 +453,7 @@ function usageRouter(accounts, { usage = true, ceiling } = {}) {
     const d = join(dir, `.claude-${n}`); mkdirSync(d); dirs.push(d);
     writeFileSync(join(d, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: `tok-${n}`, refreshToken: "refresh-SECRET", expiresAt: Date.now() + a.validH * 3600000 } }));
     if (usage && a.live) writeFileSync(join(src, `live.${n}`), a.live);
+    if (usage && a.used !== undefined) writeFileSync(join(src, `used.${n}`), `${a.used}\n`); // #5236: tokenbaton's polled figure
   }
   const log = { info: (m) => logs.info.push(String(m)), warn: (m) => logs.warn.push(String(m)), error() {} };
   const r = createRouter({ state_dir: dir, enroll_token: "enroll", forgedock_token: "fd", claude_config_dirs: dirs, usage_source: src, ...(ceiling ? { usage_ceiling_pct: ceiling } : {}) }, { fetchFn: async () => new Response("{}"), log });
@@ -460,9 +461,17 @@ function usageRouter(accounts, { usage = true, ceiling } = {}) {
   const get = () => new Promise((resolve) => {
     r.handle({ method: "GET", url: "/agent/creds/claude", headers: { authorization: "Bearer agent-secret" }, socket: {} }, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader(k, v) { (this.h ??= {})[k.toLowerCase()] = v; }, end(b) { resolve({ status: this.s, headers: this.h ?? {}, body: JSON.parse(String(b)) }); } });
   });
-  return { get, logs };
+  const post = (body, token = "agent-secret") => new Promise((resolve) => { // #5205
+    r.handle(jsonReq("POST", "/agent/creds/claude/limited", { authorization: `Bearer ${token}` }, body), { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(String(b)) }); } });
+  });
+  return { get, post, logs };
 }
 const inS = (s) => Math.floor((Date.now() + s * 1000) / 1000);
+/** A fake request carrying a JSON body (readJson iterates the request). */
+function jsonReq(method, url, headers, body) {
+  const buf = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+  return { method, url, headers, socket: {}, async *[Symbol.asyncIterator]() { yield* buf; } };
+}
 
 test("router hands out the lowest-usage Claude login, not the longest-valid one (#5165)", async () => {
   const { get, logs } = usageRouter({ 1: { validH: 6, live: `97 ${inS(3600)} 40 ${inS(86400)} 0` }, 2: { validH: 2, live: `20 ${inS(3600)} 10 ${inS(86400)} 0` } });
@@ -494,11 +503,11 @@ test("router without a usage source falls back to the longest-valid Claude login
   assert.ok(logs.warn.some((m) => /no usage source/.test(m)));
 });
 
-test("equal Claude login usage is broken by validity; a passed reset counts as 0; a custom ceiling applies (#5165)", async () => {
+test("equal Claude login usage is broken by validity; a passed reset is unknown, ranked after a fresh sample (#5205); a custom ceiling applies (#5165)", async () => {
   const tie = usageRouter({ 1: { validH: 2, live: `30 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 5, live: `30 ${inS(3600)} 0 ${inS(86400)} 0` } });
   assert.equal((await tie.get()).body.token, "tok-2");
   const reset = usageRouter({ 1: { validH: 2, live: `99 ${inS(-60)} 0 ${inS(86400)} 0` }, 2: { validH: 5, live: `50 ${inS(3600)} 0 ${inS(86400)} 0` } });
-  assert.equal((await reset.get()).body.token, "tok-1");
+  assert.equal((await reset.get()).body.token, "tok-2", "#5205: a stale 99% is unknown, not 0%: the fresh 50% ranks first");
   const ceil = usageRouter({ 1: { validH: 2, live: `60 ${inS(3600)} 0 ${inS(86400)} 0` } }, { ceiling: 50 });
   assert.equal((await ceil.get()).status, 429);
   const weekly = usageRouter({ 1: { validH: 2, live: `10 ${inS(3600)} 100 ${inS(86400)} 0` }, 2: { validH: 5, live: `80 ${inS(3600)} 0 ${inS(86400)} 0` } });
@@ -519,5 +528,104 @@ test("agent passes a router usage-limit 429 for Claude credentials through to th
     assert.equal(r.status, 429);
     assert.equal(r.body.reason, reason);
     assert.equal(r.headers["retry-after"], "120");
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("#5205 router: a fresh 47% account ranks over a stale 99% one whose reset passed; a stale-only pool still hands it out as unknown", async () => {
+  const { get, logs } = usageRouter({ 1: { validH: 8, live: `99 ${inS(-600)} 50 ${inS(86400)} 0` }, 4: { validH: 2, live: `47 ${inS(3600)} 10 ${inS(86400)} 0` } });
+  const r = await get();
+  assert.equal(r.body.token, "tok-4");
+  assert.equal(r.body.account, 4);
+  assert.match(logs.info.find((m) => /claude login selected/.test(m)), /account=4 usage=47%/);
+  const only = usageRouter({ 1: { validH: 8, live: `99 ${inS(-600)} 50 ${inS(86400)} 0` } });
+  const o = await only.get();
+  assert.equal(o.status, 200);
+  assert.match(only.logs.info.find((m) => /claude login selected/.test(m)), /account=1 usage=unknown% \(stale\)/);
+});
+
+test("#5236 router: weekly-exhausted account with an old-updated 5h sample is excluded; old samples rank after fresh ones", async () => {
+  const old = inS(-3 * 3600); // updated 3h ago, reset still in the future
+  const r = usageRouter({
+    1: { validH: 9, live: `0 ${inS(3600)} 100 ${inS(86400)} ${old}` }, // weekly 100: never handed out
+    2: { validH: 8, live: `0 ${inS(3600)} 10 ${inS(86400)} ${old}` }, // "0%" from a days-old sample: unknown
+    3: { validH: 2, live: `60 ${inS(3600)} 10 ${inS(86400)} ${inS(-60)}` },
+  });
+  const a = await r.get();
+  assert.equal(a.body.account, 3, "the fresh 60% ranks before the old 0%, and 1 is excluded");
+  const only = usageRouter({ 1: { validH: 9, live: `0 ${inS(3600)} 100 ${inS(86400)} ${old}` } });
+  const o = await only.get();
+  assert.equal(o.status, 429, "the weekly-exhausted account is the only one: typed 429 with its weekly reset");
+  assert.match(o.body.reset_at, /^\d{4}-/);
+});
+
+test("#5236 router: a newer polled used.N figure blocks an account whose live sample looks fine", async () => {
+  const fresh = inS(-60);
+  const r = usageRouter({
+    1: { validH: 9, live: `10 ${inS(3600)} 10 ${inS(86400)} ${fresh}`, used: 100 },
+    2: { validH: 2, live: `50 ${inS(3600)} 10 ${inS(86400)} ${fresh}` },
+  });
+  assert.equal((await r.get()).body.account, 2, "polled 100% (newer than the sample) excludes account 1");
+});
+
+test("#5205 router: a reported-limited account is skipped until its reset; all limited -> 429 with the earliest reset", async () => {
+  const late = inS(7200), early = inS(1800);
+  const { get, post, logs } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` }, 3: { validH: 6, live: `97 ${late} 0 ${inS(86400)} 0` } });
+  assert.equal((await get()).body.token, "tok-1");
+  assert.equal((await post({ reset_at: inS(3600), account: 1 }, "wrong")).status, 401);
+  const m = await post({ reset_at: inS(3600), account: 1 });
+  assert.equal(m.status, 200);
+  assert.equal(m.body.account, 1);
+  assert.ok(logs.info.some((l) => /claude login limited: account=1 agent=a1/.test(l)));
+  assert.equal((await get()).body.token, "tok-2", "the limited account is excluded");
+  await post({ reset_at: early, account: 2 });
+  const r = await get();
+  assert.equal(r.status, 429);
+  assert.equal(r.body.code, "rate_limited");
+  assert.equal(r.body.reset_at, new Date(early * 1000).toISOString(), "the earliest reset includes limited untils");
+  assert.ok(!logs.info.concat(logs.warn).join("\n").includes("tok-"), "the token is never logged");
+});
+
+test("#5267 router: reset_at is clamped to 7 days; the reported account (not the agent's last) is limited; a missing or foreign account is refused", async () => {
+  const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await get()).body.account, 1);
+  assert.equal((await post({ reset_at: inS(3600) })).status, 400, "no account in the report");
+  assert.equal((await post({ reset_at: inS(3600), account: 2 })).status, 404, "account 2 was never handed to this agent");
+  const far = await post({ reset_at: inS(365 * 86400), account: 1 });
+  assert.equal(far.status, 200);
+  assert.ok(Date.parse(far.body.until) <= Date.now() + 7 * 86400000 + 60000, "clamped to now+7d");
+  assert.ok(Date.parse(far.body.until) > Date.now() + 6 * 86400000, "still a long exclusion");
+  assert.equal((await get()).body.account, 2, "account 1 is excluded");
+  const other = await post({ reset_at: inS(60), account: 1 }); // sandbox B reports account 1 although the agent last got 2
+  assert.equal(other.body.account, 1, "attributed to the reported account, not the last handed");
+});
+
+test("#5205 router: a limited report with no reset excludes the account for an hour", async () => {
+  const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await post({ account: 1 })).status, 404, "no account handed to this agent yet");
+  await get();
+  const m = await post({ reset_at: null, account: 1 });
+  assert.ok(Math.abs(Date.parse(m.body.until) - (Date.now() + 3600000)) < 60000);
+  assert.equal((await get()).status, 429);
+});
+
+test("#5205 agent: the sandbox limited route drops the claude cache and forwards to the router", async () => {
+  const { agent } = agentFixture();
+  await agent.launch({ spec: spec("cl1"), cpus: 2, mem_gb: 3 });
+  const rec = Object.values(agent.store.data.sandboxes ?? {}).find((x) => x.id === "cl1") ?? agent.store.data.sandboxes?.cl1;
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => { calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : null }); return new Response(JSON.stringify(String(url).endsWith("/limited") ? { account: 1, until: "2026-11-07T12:00:00.000Z" } : { token: `t${calls.length}`, account: 1 }), { status: 200 }); };
+  const send = (req) => new Promise((resolve) => { agent.handle(req, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(String(b)) }); } }); });
+  const getCred = () => send({ method: "GET", url: "/sandboxes/cl1/creds/claude", headers: { authorization: `Bearer ${rec.credToken}` }, socket: {} });
+  try {
+    assert.equal((await getCred()).body.token, "t1");
+    assert.equal((await getCred()).body.token, "t1", "cached");
+    assert.equal((await getCred()).body.account, 1, "the sandbox learns its account");
+    assert.equal((await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: "Bearer nope" }, { reset_at: 1 }))).status, 401);
+    const r = await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: `Bearer ${rec.credToken}` }, { reset_at: 1800000000, account: 1, extra: "dropped" }));
+    assert.equal(r.status, 200);
+    const fwd = calls.find((c) => c.url.endsWith("/agent/creds/claude/limited"));
+    assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000, account: 1 }]);
+    assert.equal((await getCred()).body.token, "t3", "the cache was dropped: a fresh token");
   } finally { globalThis.fetch = realFetch; }
 });

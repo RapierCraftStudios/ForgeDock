@@ -110,8 +110,9 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 };
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {
-    const bin = resolveClaudeCliBinary(cwd) || "claude";
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null }) => {
+    // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
+    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
     const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
@@ -366,9 +367,12 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
       try { const out = String(await run("gh")(["run", "view", String(runId), "-R", repo, "--log-failed"])); return out.length > 64000 ? out.slice(-64000) : out; } catch { return ""; }
     },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
+    /** Finding lifecycle (#5254): needs-validation to validated / false-positive. */
+    async validateLabel(issue, verdict) { await pexec("bash", [script("transition-label.sh"), "--validate", verdict, String(issue), "-R", repo], { timeout: 60000 }); },
     /**
-     * File (or append to) the parent's ONE batched follow-up issue (scripts/file-deferred-followups.sh: trusted lookup,
-     * append, create, claim marker, duplicate re-check; one issue per class, #4664). items: [{key, why, class?}]; the key is the
+     * Append the parent's deferred items to the aggregates only (scripts/file-deferred-followups.sh: trusted lookup, append,
+     * create, duplicate re-check): the release rollup, the batch external aggregate and the batch host aggregate; never a
+     * per-parent issue, and an engineering item is rejected (exit 2, #5207). items: [{key, why, class?}]; the key is the
      * item's identity (column 5, column 1 is `-`). milestone / defaultMilestone: the parent's and forge.yaml followups.default_milestone; lane: the release lane of the post-deploy rollup (#4724).
      * batchId: the external aggregate's batch (FORGE_BATCH_ID); rollupLabel: forge.yaml followups.rollup_issue_label (FORGE_ROLLUP_LABEL) (#5078).
      * Returns {key: issueNumber}; throws on exit 2/3/4.

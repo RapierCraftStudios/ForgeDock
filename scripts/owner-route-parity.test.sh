@@ -5,7 +5,7 @@
 # bin/lean/conformance.mjs ownerRoute on every case, including the over-broad matches the review found.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-eval "$(sed -n '/^POSTPROM_ERE=/,/^}/p' "$ROOT/scripts/file-deferred-followups.sh")"
+eval "$(sed -n '/^ROUTE_CLI=/,/^host_route()/p' "$ROOT/scripts/file-deferred-followups.sh")"
 PASS=0; FAIL=0
 while IFS='|' read -r want why; do
   [ -z "$why" ] && continue
@@ -34,5 +34,21 @@ external|grant read-only prod access to the analyst
 external|alter the production query timeout
 post-deploy|verify the dashboard after release
 CASES
+# #5197: host_route goes through the same JS source as hostRoute; cases cover the pre-promotion and external-need guards.
+while IFS='|' read -r want why; do
+  [ -z "$why" ] && continue
+  sh=$(host_route "$why")
+  js=$(node -e 'import(process.argv[1]).then(m=>console.log(m.hostRoute({bucket:"host", why: process.argv[2]})))' "$ROOT/bin/lean/conformance.mjs" "$why")
+  if [ "$sh" = "$want" ] && [ "$js" = "$want" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL(host): '$why' want=$want sh=$sh js=$js"; fi
+done <<'CASES'
+post-deploy|verify the dashboard after release
+post-deploy|check the queue depth after promotion
+host|capture the queue depth before promotion
+host|read the logs pre-release, then promote
+host|provide the API key after release
+host|capture production logs
+CASES
+# The shell must not carry its own copy of the routing patterns.
+if grep -qE '^(POSTPROM|PREPROM|EXTNEED|ROPROD)_ERE=' "$ROOT/scripts/file-deferred-followups.sh"; then FAIL=$((FAIL+1)); echo "FAIL: file-deferred-followups.sh re-declares a routing ERE"; fi
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
