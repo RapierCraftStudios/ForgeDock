@@ -3608,6 +3608,15 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.ok(readLog(dir, 7).some((e) => e.event === "QUOTA_EXHAUSTED" && e.earliestReset === 5 * 3600 * 1000));
   });
 
+  it("#5236 --pick fails (the rotator throws): the lane never falls back to the default profile, ends quota.exhausted", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    const sent = spawnAs(w, new Error("unused"), 0);
+    w.io.rotator = { ...smartRotator({ none: 0 }), pick: () => { throw new Error("pick failed"); } };
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "quota.exhausted");
+    assert.equal(sent.length, 0, "no spawn under the default profile");
+  });
+
   it("#5236 a login failure while the pool is exhausted is quota.exhausted, not backend.auth; with room it stays backend.auth", async () => {
     const mk = () => Object.assign(new Error("Failed to authenticate. API Error: 401"), { code: "CLI_BACKEND_FAILED", authFailure: true }); // fresh: the lane marks the error it defers
     const w = world(); spawnAs(w, mk(), 99);

@@ -12,7 +12,7 @@ export const QUOTA_RETRY_SECONDS = 900;
 
 /**
  * `{earliestReset}` (epoch ms or null) when `rotator.pick` finds no account outside `exclude`; null when one has room,
- * there is no smart rotator, or the pick fails (never block a lane on a rotator fault).
+ * or there is no smart rotator. A pick that fails (throws) counts as exhausted: never spawn through the shim, which would fall back to the default profile.
  */
 export function poolExhausted(rotator, exclude) {
   try {
@@ -20,7 +20,7 @@ export function poolExhausted(rotator, exclude) {
     const p = rotator.pick({ exclude });
     if (!p || p.account !== null || p.account === undefined) return null;
     return { earliestReset: Number.isFinite(p.earliestReset) && p.earliestReset > 0 ? p.earliestReset : null };
-  } catch { return null; }
+  } catch { return { earliestReset: null }; }
 }
 
 /** `e` marked as a `quota.exhausted` deferral (handled through `deferCode`); `backendId` keys the batch's account hold. */

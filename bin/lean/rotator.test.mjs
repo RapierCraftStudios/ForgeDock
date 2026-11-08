@@ -175,6 +175,12 @@ describe("account rotator: detection, staleness, exclusion, pick (#5205)", () =>
     assert.equal(rot.current(), 2);
   });
 
+  it("#5236 --pick fails and the only account is at its weekly limit: no account is picked (never the default profile)", () => {
+    const b = baton(1, { 1: [10, T0 + H, 100, T0 + 9 * H] });
+    const rot = openRotator({ kind: "tokenbaton", home: b.home, env: {}, now: () => T0, exec: () => ({ status: 1, stdout: "" }) });
+    assert.equal(rot.pick().account, null);
+  });
+
   it("#5236 a sample older than the max age is unknown even with a future reset; a newer polled used.N replaces the 5h figure", () => {
     const b = baton(1, { 1: [10, T0 + H, 0, T0 + 90 * H], 2: [50, T0 + H, 0, T0 + 90 * H] });
     const dir = join(b.home, ".tokenbaton");
