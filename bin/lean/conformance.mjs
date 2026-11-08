@@ -822,7 +822,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, routeFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -892,6 +892,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
   for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
+  for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }

@@ -44,6 +44,7 @@ import { postMergeCommands } from "./postmerge.mjs";
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
+import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
@@ -1356,6 +1357,13 @@ export async function runCore(o) {
       const addedFiles = rules.some((r) => r.addedOnly) ? names(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")) : [];
       return coupledFailures({ rules, changedFiles: files, addedFiles });
     };
+    /** #5237: relaxed rules in declared review.risk_paths files ({relaxations, negatives}); empty when no glob matches or git fails */
+    let relaxations = [];
+    const relaxationsOf = async (files) => {
+      const empty = { relaxations: [], negatives: 0 };
+      if (!riskPathHits(files, riskPaths).length) return empty;
+      try { return analyzeRelaxations({ diff: String(await git(["diff", "-U0", `${base}...HEAD`])), riskPaths }); } catch { return empty; }
+    };
     /** #4364: the last `forgedock check` record vs the current tree: skipped|stale|red|green; any read or git error is skipped. */
     const selfCheckNow = async () => {
       try { return selfCheckState(JSON.parse(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)), await worktreeFingerprint({ git, base })); } catch { return "skipped"; }
@@ -2312,7 +2320,7 @@ export async function runCore(o) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
           prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
+            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
@@ -2337,7 +2345,7 @@ export async function runCore(o) {
       const head = String(await git(["rev-parse", "HEAD"])).trim();
       if (verifiedHeads.has(head)) return verifiedHeads.get(head);
       const diff = String(await git(["diff", `${base}...HEAD`]));
-      const run = { mode: verifierCfg.mode, head, findings: [], model: null, swapped: false, cost_usd: 0 };
+      const run = { mode: relaxations.length ? "enforce" : verifierCfg.mode, head, findings: [], model: null, swapped: false, cost_usd: 0 };
       if (!diff.trim()) run.skipped = "empty_diff";
       else {
         const bytes = Buffer.byteLength(diff, "utf-8");
@@ -2349,7 +2357,7 @@ export async function runCore(o) {
         try {
           await renew();
           const rr = await callRunner({ role: "verifier", issue, cwd: wt, model: run.model, resume: null, system: VERIFIER_SYSTEM, readOnly: true, maxMs, maxTurns,
-            prompt: verifierPrompt({ issue: iss, comments: trustedComments, contract: effective, diff, stat, base, files, callers }) });
+            prompt: verifierPrompt({ issue: iss, comments: trustedComments, contract: effective, diff, stat, base, files, callers, relaxations }) });
           await renew();
           await attempt("verify", ++verifyN, rr, null, "verifier");
           run.findings = parseVerifierFindings(rr?.text, { pathExists: (x) => listed.has(x) });
@@ -2360,7 +2368,7 @@ export async function runCore(o) {
           T.anomalies.push(`Independent verifier failed at ${head.slice(0, 12)}: ${run.error}`);
         }
       }
-      const failures = verifierCfg.mode === "enforce" ? findingsToFailures(run.findings) : [];
+      const failures = run.mode === "enforce" ? findingsToFailures(run.findings) : [];
       ev({ event: "VERIFIER", mode: run.mode, head, model: run.model, swapped: run.swapped, findings: run.findings.length, cost_usd: run.cost_usd, implement_cost_usd: impl.cost,
         ratio: impl.cost > 0 ? Math.round((run.cost_usd / impl.cost) * 1000) / 1000 : null, ...(run.skipped ? { skipped: run.skipped } : {}), ...(run.error ? { error: run.error } : {}) });
       if (run.findings.length) T.decisions.push(`Independent verifier (${run.mode}) found ${run.findings.length} defect(s): ${run.findings.slice(0, 3).map((f) => `${f.file}:${f.line}`).join(", ")}`);
@@ -2484,7 +2492,14 @@ export async function runCore(o) {
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
       const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
       const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), routeFailures, newOffKeys: await newOffKeysOf(), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const rx = await relaxationsOf(files); // #5237
+      relaxations = rx.relaxations;
+      if (relaxations.length) {
+        ev({ event: "RELAXATION_DETECTED", files: [...new Set(relaxations.map((r) => r.file))], count: relaxations.length, negatives: rx.negatives });
+        const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
+        if (!T.decisions.includes(note)) T.decisions.push(note);
+      }
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, newOffKeys: await newOffKeysOf(), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
@@ -2542,7 +2557,7 @@ export async function runCore(o) {
       }
       let d = await reviewOnce();
       // #4397: the verifier runs only on a change every gate and the reviewer passed; in enforce its findings block
-      if (verifierCfg.mode !== "off" && d.state === "conforms" && !pre.length) {
+      if ((verifierCfg.mode !== "off" || relaxations.length) && d.state === "conforms" && !pre.length) { // #5237: a relaxation lane always gets the independent second look
         const vf = await runVerifier();
         if (vf.length) d = { state: "nonconforming", failures: vf, by: "verifier" };
       }
