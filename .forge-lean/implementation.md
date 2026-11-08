@@ -20,3 +20,6 @@ Teach I4 and I6 of the doctor script about lean lanes: wider builder evidence pl
 
 ### Notes
 Grace uses the issue's updatedAt (same as I2), so with the default 48h an I4 finding only appears after 48h of inactivity. No repo formatter is configured for bash or mjs, so none was run.
+
+### Amendments
+- add-deliverable devdocs/index.yaml and devdocs/modules/lean.md: the dossier entry is required by scripts/check-devdocs-freshness.sh for a behaviour change under the script (passes).
