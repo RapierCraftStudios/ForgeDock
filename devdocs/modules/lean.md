@@ -2780,6 +2780,19 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `reproPlanNote` (`prompts.mjs`) requires a repro command's environment to come from the repo's lockfile or toolchain. `validateContract` (`conformance.mjs`, `guessedUvEnv`) rejects a `repro_test` or validate command of the form `uv run --offline --no-project --with <pkgs>` without `--with-requirements`: one plan-time correction, no LLM call. In `orchestrate.mjs`, a recovery attempt that ends with the same `env.repro_unrunnable` or `env.tool_missing` code and the same normalized detail (the command) as the run before it is not requeued (`REPEAT_ENV_CODES`); the row detail is prefixed "Environment defect" and the needs-human evidence names the command to run on the host. `env.validate_timeout` is excluded (load-dependent).
 
+## Entry 2026-11-08 — cancel confirms or reports each lane, releases its lease; dead-lease takeover; one batch per issue (#5241)
+
+`--cancel --stop-remote` no longer fires once and forgets. `orchestrate.mjs` `stop` records whether `stopLane` accepted the stop,
+re-sends a refused one every `stopRetryMs` (15 s) and, when a lane outlives `stopTimeoutMs` (120 s), posts a `cancelled` row and
+decision naming it and why (`rec.stopNote`, set by `providerLanes.stopLane` from `remoteProvider.stopReason`: no transport stop,
+404/405, error); the pass keeps polling while a stop is unconfirmed. When a lane of a cancelled batch settles, the `releaseLease`
+seam (engine-cli: `lanelock.clearLease` through the projector) clears the issue's lease unless a live lane of another batch runs the
+issue (`batch.batchesOwning`). A lane that never ends keeps its lease and is reported. `--requeue`/`--release` of a pending issue
+waiting out a deferral (`notBefore`) while a cancelled batch of the repo owns it (`batch.cancelledOwners`) is accepted: the lease is
+cleared, `drainRequeues` drops the wait and the next pass relaunches it. A fresh `orchestrate N...` skips each issue pending or
+running in another active batch of the repo (no report, no cancel, state saved within 3 h) with a line naming the batch, and refuses
+when none is left; `--force "<reason>"` starts them anyway. Cost: 0 LLM calls.
+
 ## Base red (#5239)
 
 `bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.

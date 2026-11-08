@@ -29,3 +29,17 @@ export async function otherLaneOwner({ gh, repo, issue, branch = `feat/issue-${i
   const other = Array.isArray(prs) ? prs.find((p) => Number.isInteger(p?.number) && p.number !== ownPr) : null;
   return other ? { kind: "pr", detail: `PR #${other.number} is open on ${branch} from another lane` } : null;
 }
+
+/**
+ * #5241: clear the lease on `issue`'s FORGE:STATE when `shouldClear(lease)` agrees (a cancelled lane's, once it ended).
+ * @param {{projector: {readState: Function, writeState: Function}, issue: number, shouldClear?: (lease: object) => boolean}} a
+ * @returns {Promise<boolean>} true when a lease was cleared; false when none, kept by the guard, or GitHub is unreadable (fail-safe)
+ */
+export async function clearLease({ projector, issue, shouldClear = () => true }) {
+  try {
+    const st = await projector.readState(issue);
+    if (!st?.lease || !shouldClear(st.lease)) return false;
+    await projector.writeState(issue, { ...st, lease: null });
+    return true;
+  } catch { return false; }
+}
