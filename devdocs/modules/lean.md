@@ -2784,6 +2784,19 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.
 
+## Entry 2026-11-08 — cancel confirms or reports each lane, releases its lease; dead-lease takeover; one batch per issue (#5241)
+
+`--cancel --stop-remote` no longer fires once and forgets. `orchestrate.mjs` `stop` records whether `stopLane` accepted the stop,
+re-sends a refused one every `stopRetryMs` (15 s) and, when a lane outlives `stopTimeoutMs` (120 s), posts a `cancelled` row and
+decision naming it and why (`rec.stopNote`, set by `providerLanes.stopLane` from `remoteProvider.stopReason`: no transport stop,
+404/405, error); the pass keeps polling while a stop is unconfirmed. When a lane of a cancelled batch settles, the `releaseLease`
+seam (engine-cli: `lanelock.clearLease` through the projector) clears the issue's lease unless a live lane of another batch runs the
+issue (`batch.batchesOwning`). A lane that never ends keeps its lease and is reported. `--requeue`/`--release` of a pending issue
+waiting out a deferral (`notBefore`) while a cancelled batch of the repo owns it (`batch.cancelledOwners`) is accepted: the lease is
+cleared, `drainRequeues` drops the wait and the next pass relaunches it. A fresh `orchestrate N...` skips each issue pending or
+running in another active batch of the repo (no report, no cancel, state saved within 3 h) with a line naming the batch, and refuses
+when none is left; `--force "<reason>"` starts them anyway. Cost: 0 LLM calls.
+
 ## Base red (#5239)
 
 `bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
@@ -2800,3 +2813,5 @@ coverage); a skipped review judges dispositions only; investigations keep their 
 `rollouts.files`) that the changed files name; a non-live mode (shadow/off) adds a trajectory decision "Inert in
 production" and a line in the partial note, so the production outcome is never claimed. Intake triage of
 live-measurement issues is not part of this change.
+
+**Relaxation gate (#5237).** `relaxation.mjs` `analyzeRelaxations` reads `git diff -U0 base...HEAD` when the lane touches a declared `review.risk_paths` glob (`riskPathHits`; built-in risk words do not count). In non-test risk files it flags added accept/rescue/allow branches (`class: accept`) and removed deny lines (`deny_removed`), and counts negative assertions added in changed test files. `relaxationFailures` is a blocking `conformance.unimplemented` (kind `relaxation_untested`, passed to `precheck` as `relaxationFailures`) when the diff adds fewer negative assertions than relaxed files. The detection is syntactic and per file, not per semantic rescue class. A relaxation lane also gets a `<relaxation_checks>` block in the reviewer and verifier prompts (counterexamples, negative corpus), and the independent verifier (#4397) runs in enforce for it even with `review.verifier: off`, which is the second reviewer. Run log: `RELAXATION_DETECTED {files, count, negatives}`. No new forge.yaml key; 0 LLM calls for detection.
