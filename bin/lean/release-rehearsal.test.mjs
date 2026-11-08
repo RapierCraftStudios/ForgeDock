@@ -86,7 +86,7 @@ describe("release rehearsal (#5253)", () => {
   });
 
   it("config parsing", () => {
-    assert.equal(readReleaseConfig("").rehearsal, null);
+    assert.ok(!("rehearsal" in readReleaseConfig("")));
     assert.equal(parseRehearsalConfig({ rehearsal_command: "  " }), null);
     assert.deepEqual(readReleaseConfig("release:\n  rehearsal_command: ./d.sh\n  rehearsal_timeout: 60\n  rehearsal_blocking: false\n").rehearsal, { command: "./d.sh", timeoutMs: 60000, blocking: false });
   });

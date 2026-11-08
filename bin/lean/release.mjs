@@ -48,8 +48,11 @@ export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, rehearsal: parseRehearsalConfig(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...rehearsalKey(r) };
 }
+
+/** `{rehearsal}` only when configured, so the config of a repo without it keeps its shape. */
+const rehearsalKey = (r) => { const rehearsal = parseRehearsalConfig(r); return rehearsal ? { rehearsal } : {}; };
 
 const json = (s) => JSON.parse(String(s || "null"));
 

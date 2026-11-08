@@ -144,8 +144,8 @@ describe("release job (#5211)", () => {
   });
 
   it("readReleaseConfig reads auto_merge / artifact_check / version_sync", () => {
-    assert.deepEqual(readReleaseConfig("release:\n  auto_merge: true\n  artifact_check: npm view x\n  version_sync: true\n"), { autoMerge: true, artifactCheck: "npm view x", versionSync: true, publishWorkflow: null, rehearsal: null });
-    assert.deepEqual(readReleaseConfig(""), { autoMerge: false, artifactCheck: null, versionSync: false, publishWorkflow: null, rehearsal: null });
+    assert.deepEqual(readReleaseConfig("release:\n  auto_merge: true\n  artifact_check: npm view x\n  version_sync: true\n"), { autoMerge: true, artifactCheck: "npm view x", versionSync: true, publishWorkflow: null });
+    assert.deepEqual(readReleaseConfig(""), { autoMerge: false, artifactCheck: null, versionSync: false, publishWorkflow: null });
     assert.equal(readReleaseConfig("release:\n  publish_workflow: pub.yml\n").publishWorkflow, "pub.yml");
   });
 
