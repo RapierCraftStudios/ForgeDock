@@ -37,6 +37,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   BACKEND_AUTH: "backend.auth", // forge#5168: the claude CLI login failed ("Failed to authenticate"); deferred under the account hold, never engine-error, never the breaker
+  QUOTA_EXHAUSTED: "quota.exhausted", // forge#5236: no account has capacity (every login at its ceiling); deferred until the earliest reset, never backend.auth
   HOST_BUSY: "host.busy",
   GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
   GH_AUTH: "gh.auth", // forge#4662: gh answered HTTP 401 and one token refresh did not fix it; run deferred, a rerun resumes

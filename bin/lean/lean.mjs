@@ -55,6 +55,7 @@ import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VER
 import { e2eSpecs, e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { openRotator, rotatorRetry } from "./rotator.mjs";
+import { poolExhausted, exhaustedDeferral, quotaFacts } from "./quota.mjs"; // #5236
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
@@ -660,10 +661,13 @@ export async function runCore(o) {
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator),
     deferDetail: `claude CLI authentication failed (login expired or invalid); held until the login is fixed: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
+  /** #5236: no account has room: the lane ends deferred `quota.exhausted` (earliest reset) and emits QUOTA_EXHAUSTED, never a spawn or a far pause. */
+  const exhaustedStop = (e, x, role) => { ev({ event: "QUOTA_EXHAUSTED", phase: role, earliestReset: x.earliestReset }); return exhaustedDeferral(e, { earliestReset: x.earliestReset, backendId: laneBackendId(process.env, rotator), now: now() }); };
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
   async function callRunner(args) {
     let pauses = 0, rotations = 0, pinned = null, credTries = 0;
     for (;;) {
+      if (smartRotator && !pinned) { const x = poolExhausted(rotator, laneLimited); if (x) throw exhaustedStop(new Error("no account has capacity"), x, args.role); } // #5236: the shim would fall back to the default profile
       // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
       const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
       // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
@@ -677,7 +681,7 @@ export async function runCore(o) {
       try { return await io.runner({ ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); }
       catch (e) {
         let epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
-        if (e?.authFailure === true && e.usageLimit !== true && epoch === null) throw authDeferral(e); // #5168: an account condition, never engine-error
+        if (e?.authFailure === true && e.usageLimit !== true && epoch === null) { const x = smartRotator ? poolExhausted(rotator, laneLimited) : null; throw x ? exhaustedStop(e, x, args.role) : authDeferral(e); } // #5236: an auth failure with no account room is exhaustion // #5168: an account condition, never engine-error
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
         if (smartRotator) { // #5205: exclude the limited account and relaunch the same args (resume kept) pinned to another, at once
           if (account !== null) { const until = epoch !== null && epoch > now() ? epoch : now() + DEFAULT_SESSION_LIMIT_WAIT_MS; laneLimited.set(account, until); try { rotator.markLimited(account, until); } catch { /* best effort */ } }
@@ -690,7 +694,7 @@ export async function runCore(o) {
             pinned = { account: next.account, bin: rotator.realClaude() ?? null, env: { CLAUDE_CONFIG_DIR: rotator.configDir(next.account) } };
             continue;
           }
-          if (next && next.account === null && Number.isFinite(next.earliestReset)) { epoch = next.earliestReset; e.resetAtEpochMs = epoch; e.resetAt = new Date(epoch).toISOString(); }
+          if (next && next.account === null) throw exhaustedStop(e, { earliestReset: Number.isFinite(next.earliestReset) ? next.earliestReset : null }, args.role); // #5236
         } else if (rotatorRetry(rotator, rotations)) { rotations++; laneRotations++; ev({ event: "PHASE_ACCOUNT_ROTATED", phase: args.role }); continue; } // #5094: same args (resume too), next account
         else if (!rotator && sandboxCred && credTries < SANDBOX_CRED_RETRIES) { // #5205: a sandbox reports the limit; the router hands another login
           credTries++;
@@ -3164,7 +3168,7 @@ export async function runCore(o) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env, rotator) }, OUTCOME_CODES.RATE_LIMITED);
     }
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}) }, e.deferCode); // #5168: backendId keys the account hold
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...quotaFacts(e) }, e.deferCode); // #5168: backendId keys the account hold; #5236 reset
     // #4505: a turn overrun is mechanical: a non-human end the batch recovers, needs-human only once a budget recovery failed too
     if (e?.laneCode === OUTCOME_CODES.BUDGET_EXCEEDED && !(recover?.final && recover.code === OUTCOME_CODES.BUDGET_EXCEEDED)) {
       return finish("budget-exceeded", e.message, { code: OUTCOME_CODES.BUDGET_EXCEEDED, branch, ...(recover ? { recovery: true } : {}) }, OUTCOME_CODES.BUDGET_EXCEEDED);

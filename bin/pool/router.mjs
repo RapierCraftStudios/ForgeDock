@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -391,13 +391,25 @@ export function usageSource(cfg, env = process.env) {
 export function parseLiveUsage(text) {
   const f = String(text ?? "").trim().split(/\s+/).map(Number);
   if (f.length < 4 || !f.slice(0, 4).every(Number.isFinite)) return null;
-  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000 };
+  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000, updatedMs: Number.isFinite(f[4]) && f[4] > 0 ? f[4] * 1000 : 0 };
 }
 
+/** #5236: a `live.<n>` sample older than this is unknown for the 5-hour window (updated 0 or absent: age unknown). */
+export const SAMPLE_MAX_AGE_MS = 30 * 60000;
+
 /** Map account n -> parsed `live.<n>` for the given accounts; unreadable or malformed files are left out. */
-export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8")) {
+export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8"), mtime = (p) => statSync(p).mtimeMs) {
   const out = new Map();
-  for (const n of ns) { try { const u = parseLiveUsage(readFile(join(dir, `live.${n}`))); if (u) out.set(n, u); } catch { /* no usage for n */ } }
+  for (const n of ns) {
+    let u = null;
+    try { u = parseLiveUsage(readFile(join(dir, `live.${n}`))); } catch { u = null; }
+    // #5236: tokenbaton's polled endpoint figure `used.<n>` (a percent; the file mtime is its age), feature-detected.
+    try {
+      const p = join(dir, `used.${n}`), pct = Number(String(readFile(p)).trim().split(/\s+/)[0]), at = mtime(p);
+      if (Number.isFinite(pct) && pct >= 0 && Number.isFinite(at)) u = { ...(u ?? {}), polledPct: pct, polledAtMs: at };
+    } catch { /* no polled figure for n */ }
+    if (u) out.set(n, u);
+  }
   return out;
 }
 
@@ -409,7 +421,7 @@ export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8")) {
  * `fallback: true`. Every candidate excluded: a typed 429 carrying the earliest reset (limited untils included).
  * @returns {{status: 200, login, pct, fallback, stale} | {status: 429, retryAfter, body} | {status: 503}}
  */
-export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited = new Map() }) {
+export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited = new Map(), maxAgeMs = SAMPLE_MAX_AGE_MS }) {
   const valid = logins.filter((l) => l.accessToken && l.expiresAt > now + 30 * 60000);
   if (!valid.length) return { status: 503 };
   const used = (pct, resetMs) => (resetMs <= now ? null : pct); // #5205: a passed reset is unknown
@@ -420,11 +432,18 @@ export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited =
     if (Number.isFinite(lim) && lim > now) { blocked.push(lim); continue; }
     const u = l.n !== null && l.n !== undefined ? usage.get(l.n) : undefined;
     if (!u) { unknown.push({ l, stale: false }); continue; }
-    const five = used(u.fiveHourPct, u.fiveHourResetMs), week = used(u.weeklyPct, u.weeklyResetMs);
-    if ((five !== null && five >= ceilingPct) || (week !== null && week >= 100)) {
+    // #5236: a 5-hour figure older than maxAgeMs is unknown (a future reset does not make an old sample fresh); the
+    // weekly figure holds until its reset. A newer polled `used.<n>` replaces the 5-hour figure.
+    const has = Number.isFinite(u.fiveHourPct) && Number.isFinite(u.weeklyPct);
+    const aged = has && u.updatedMs > 0 && now - u.updatedMs > maxAgeMs;
+    const polled = Number.isFinite(u.polledPct) && now - u.polledAtMs <= maxAgeMs && u.polledAtMs > (u.updatedMs ?? 0) ? u.polledPct : null;
+    const five = polled !== null ? polled : has && !aged ? used(u.fiveHourPct, u.fiveHourResetMs) : null;
+    const week = has ? used(u.weeklyPct, u.weeklyResetMs) : null;
+    const fiveFull = five !== null && five >= ceilingPct, weekFull = week !== null && week >= 100;
+    if (fiveFull || weekFull) {
       const r = [];
-      if (five !== null && five >= ceilingPct) r.push(u.fiveHourResetMs);
-      if (week !== null && week >= 100) r.push(u.weeklyResetMs);
+      if (fiveFull) r.push(has && u.fiveHourResetMs > now ? u.fiveHourResetMs : has && u.weeklyResetMs > now ? u.weeklyResetMs : now + 3600000);
+      if (weekFull) r.push(u.weeklyResetMs);
       blocked.push(Math.max(...r));
     } else if (five === null || week === null) unknown.push({ l, stale: true });
     else known.push({ l, pct: five });

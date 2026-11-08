@@ -11,7 +11,7 @@
  * relaunch pins an account picked here (tokenbaton#3 `--pick --json --exclude` when the CLI has it, else live.N).
  */
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { accessSync, constants, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 import { backendIdentity } from "../engine.mjs";
@@ -28,8 +28,11 @@ export const HEADROOM_PCT = 95;
 export function parseLive(text) {
   const f = String(text ?? "").trim().split(/\s+/).map(Number);
   if (f.length < 4 || !f.slice(0, 4).every(Number.isFinite)) return null;
-  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000 };
+  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000, updatedMs: Number.isFinite(f[4]) && f[4] > 0 ? f[4] * 1000 : 0 };
 }
+
+/** #5236: a sample older than this is unknown for the 5-hour window, whatever its reset says (0 or absent updated = age unknown). */
+export const SAMPLE_MAX_AGE_MS = 30 * 60000;
 
 const isExec = (p) => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } };
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };
@@ -89,7 +92,7 @@ const defaultExec = (cmd, args, { env, timeout = ROTATOR_CALL_TIMEOUT_MS } = {})
  * @returns {null | {kind, accounts, current(), headroom(exclude), resumeAt(exclude), pick({exclude}), markLimited(n, untilMs),
  *   accountOfPid(pid), realClaude(env), accountIdentity(n), currentIdentity(), isAccount(id)}}
  */
-export function openRotator({ kind, home = undefined, env = process.env, now = () => Date.now(), readFile = (p) => readFileSync(p, "utf8"), listDir = (d) => readdirSync(d), exec = defaultExec } = {}) {
+export function openRotator({ kind, home = undefined, env = process.env, now = () => Date.now(), readFile = (p) => readFileSync(p, "utf8"), listDir = (d) => readdirSync(d), exec = defaultExec, stat = (p) => statSync(p).mtimeMs } = {}) {
   if (!ROTATOR_KINDS.includes(kind)) return null;
   const dir = home === undefined && env?.TOKENBATON_HOME ? String(env.TOKENBATON_HOME) : join(home ?? homedir(), ".tokenbaton");
   const userHome = home ?? homedir();
@@ -103,14 +106,22 @@ export function openRotator({ kind, home = undefined, env = process.env, now = (
       if (!m) continue;
       let live = null;
       try { live = parseLive(readFile(join(dir, name))); } catch { live = null; }
-      if (live) out.push({ n: Number(m[1]), ...live, stale: live.fiveHourResetMs <= now() || live.weeklyResetMs <= now() });
+      if (!live) continue;
+      const aged = live.updatedMs > 0 && now() - live.updatedMs > SAMPLE_MAX_AGE_MS;
+      // #5236: the polled `used.N` percent, when newer than the sample and itself fresh, replaces the 5-hour figure.
+      let polled = null;
+      try {
+        const p = Number(String(readFile(join(dir, `used.${m[1]}`))).trim().split(/\s+/)[0]), at = stat(join(dir, `used.${m[1]}`));
+        if (Number.isFinite(p) && p >= 0 && Number.isFinite(at) && at > live.updatedMs && now() - at <= SAMPLE_MAX_AGE_MS) polled = p;
+      } catch { polled = null; }
+      out.push({ n: Number(m[1]), ...live, polledPct: polled, aged: aged && polled === null, stale: live.fiveHourResetMs <= now() || live.weeklyResetMs <= now() || (aged && polled === null) });
     }
     return out.sort((a, b) => a.n - b.n);
   };
   if (current() === null || !accounts().length) return null;
   // #5205: a window whose reset has passed is unknown (null), never 0%.
   const used = (pct, resetMs) => (resetMs <= now() ? null : pct);
-  const full = (a) => { const r = []; const f = used(a.fiveHourPct, a.fiveHourResetMs), w = used(a.weeklyPct, a.weeklyResetMs);
+  const full = (a) => { const r = []; const f = a.polledPct !== null && a.polledPct !== undefined ? a.polledPct : a.aged ? null : used(a.fiveHourPct, a.fiveHourResetMs), w = used(a.weeklyPct, a.weeklyResetMs);
     if (f !== null && f >= HEADROOM_PCT) r.push(a.fiveHourResetMs); if (w !== null && w >= 100) r.push(a.weeklyResetMs); return r; };
   /** "room" (fresh, under the caps), "stale" (a window unknown, none known full: worth one try), or "full". */
   const state = (a) => (full(a).length ? "full" : a.stale ? "stale" : "room");
@@ -124,7 +135,7 @@ export function openRotator({ kind, home = undefined, env = process.env, now = (
   };
   const localPick = (exclude) => {
     const ex = excludeMap(exclude), list = accounts().filter((a) => !ex.has(a.n));
-    const fresh = list.filter((a) => state(a) === "room").sort((a, b) => a.fiveHourPct - b.fiveHourPct || a.n - b.n);
+    const fresh = list.filter((a) => state(a) === "room").sort((a, b) => (a.polledPct ?? a.fiveHourPct) - (b.polledPct ?? b.fiveHourPct) || a.n - b.n);
     if (fresh.length) return { account: fresh[0].n, stale: false };
     const stale = list.filter((a) => state(a) === "stale");
     if (stale.length) return { account: stale[0].n, stale: true };

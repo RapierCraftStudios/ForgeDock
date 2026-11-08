@@ -3561,7 +3561,8 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(r.rotations, 1);
     assert.deepEqual(r.limited, [{ account: 1, until: 3 * 3600 * 1000 }]);
     assert.deepEqual(rot.marked, [[1, 3 * 3600 * 1000]], "the limited account is marked");
-    assert.deepEqual(rot.picks[0], [1], "the limited account is excluded");
+    assert.deepEqual(rot.picks[0], [], "#5236: the preflight pick before the first spawn");
+    assert.deepEqual(rot.picks[1], [1], "the limited account is excluded");
     assert.deepEqual({ ...sent[1], bin: null, dir: null }, { ...sent[0], bin: null, dir: null }, "same prompt and resume");
     assert.equal(sent[1].bin, "/real/claude"); assert.equal(sent[1].dir, "/h/.claude-2");
     assert.equal(sleeps.includes(3 * 3600 * 1000), false);
@@ -3576,13 +3577,47 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
     w.io.rotator = smartRotator();
     const r = await run(w);
-    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "quota.exhausted"); // #5236
     assert.equal(sent.length, 3, "one call per account, never the limited one again");
     assert.equal(r.resetAtEpochMs, 7e6, "held until the earliest reset pick() reports");
     assert.equal(r.rotations, 2);
     const w2 = world(); spawnAs(w2, limitErr({ resetAtEpochMs: 3600 * 1000 }), 99); w2.io.rotator = smartRotator({ none: 5 * 3600 * 1000 });
     const r2 = await run(w2);
-    assert.equal(r2.code, "rate_limited"); assert.equal(r2.resetAtEpochMs, 5 * 3600 * 1000, "not the limited account's own reset");
+    assert.equal(r2.code, "quota.exhausted"); assert.equal(r2.resetAtEpochMs, 5 * 3600 * 1000, "not the limited account's own reset");
+  });
+
+  it("#5236 weekly limit with a reset >1h away re-picks and continues on an account with room, no pause", async () => {
+    const w = world(); const sleeps = []; const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const sent = spawnAs(w, limitErr({ resetAtEpochMs: 30 * 3600 * 1000, resetAt: "Nov 9, 2pm" }), 1);
+    w.io.rotator = smartRotator();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(sent[1].dir, "/h/.claude-2");
+    assert.equal(sleeps.includes(30 * 3600 * 1000), false);
+  });
+
+  it("#5236 no account has room: the lane never spawns, ends quota.exhausted (not backend.auth) with the earliest reset and a QUOTA_EXHAUSTED event", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    const sent = spawnAs(w, new Error("unused"), 0);
+    w.io.rotator = smartRotator({ none: 5 * 3600 * 1000 });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "quota.exhausted");
+    assert.equal(r.resetAtEpochMs, 5 * 3600 * 1000);
+    assert.equal(sent.length, 0, "no spawn through the shim (it would fall back to the default profile)");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "QUOTA_EXHAUSTED" && e.earliestReset === 5 * 3600 * 1000));
+  });
+
+  it("#5236 a login failure while the pool is exhausted is quota.exhausted, not backend.auth; with room it stays backend.auth", async () => {
+    const mk = () => Object.assign(new Error("Failed to authenticate. API Error: 401"), { code: "CLI_BACKEND_FAILED", authFailure: true }); // fresh: the lane marks the error it defers
+    const w = world(); spawnAs(w, mk(), 99);
+    const rot = smartRotator(); let calls = 0; const pick = rot.pick;
+    rot.pick = (a) => (calls++ === 0 ? pick(a) : { account: null, earliestReset: 4 * 3600 * 1000 }); // room at the preflight, none after the failure
+    w.io.rotator = rot;
+    const r = await run(w);
+    assert.equal(r.code, "quota.exhausted");
+    const w2 = world(); spawnAs(w2, mk(), 99); w2.io.rotator = smartRotator();
+    assert.equal((await run(w2)).code, "backend.auth");
   });
 
   it("#5205 sandbox (CS_CRED_BASE, no rotator): cs-cred claude --limited reports the limit and re-sends at once; its failure defers as before", async () => {
