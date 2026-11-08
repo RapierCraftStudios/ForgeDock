@@ -31,6 +31,7 @@ function fakeIo(world = {}) {
       if (a[0] === "pr" && a[1] === "list" && a.includes("--state") && a[a.indexOf("--state") + 1] === "open") return JSON.stringify(a.includes("--head") ? w.releasePr : w.openStaging);
       if (a[0] === "pr" && a[1] === "list") return JSON.stringify([]);
       if (a[0] === "pr" && a[1] === "create") return "https://github.com/o/r/pull/9";
+      if (a[0] === "pr" && a[1] === "view" && j.includes("--json state,mergeCommit,headRefOid")) return JSON.stringify({ state: w.prState ?? "OPEN", mergeCommit: w.prState === "MERGED" ? { oid: "m".repeat(40) } : null, headRefOid: HEAD });
       if (j.includes("--json headRefOid")) return JSON.stringify({ headRefOid: HEAD });
       if (j.includes("--json comments")) return JSON.stringify({ comments: w.comments });
       if (a[0] === "api") return JSON.stringify(w.gate ? [{ name: "forge/deploy-gate", conclusion: w.gate }] : []);
@@ -72,6 +73,28 @@ describe("release job (#5211)", () => {
       assert.equal(b.out.status, "stopped", String(gate));
       assert.ok(!b.io.calls.some((c) => c[1] === "merge"));
     }
+  });
+
+  it("#5266: a release PR merged by hand moves to post-merge with the merge sha, without the opt-in stop", async () => {
+    const io = fakeIo({ prState: "MERGED" }), root = tmp(), id = newReleaseId();
+    const mod = await import("./release.mjs");
+    let seen = null;
+    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: {}, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": async (c) => { seen = c.state.steps.promotion.result; return {}; } }) });
+    assert.equal(out.status, "done");
+    assert.equal(seen.alreadyMerged, true);
+    assert.equal(seen.mergeCommit, "m".repeat(40));
+  });
+
+  it("#5266: --merge resume on an already-merged PR does not call gh pr merge", async () => {
+    const { io, out } = await promote({ prState: "MERGED" }, { opts: { merge: true } });
+    assert.equal(out.status, "done");
+    assert.ok(!io.calls.some((a) => a[0] === "pr" && a[1] === "merge"));
+  });
+
+  it("#5266: a release PR closed without merging stops", async () => {
+    const { io, out } = await promote({ prState: "CLOSED" }, { opts: { merge: true } });
+    assert.equal(out.status, "stopped");
+    assert.ok(!io.calls.some((a) => a[0] === "pr" && a[1] === "merge"));
   });
 
   it("R3: no GATE_PASS marker never merges", async () => {

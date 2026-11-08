@@ -118,8 +118,11 @@ export async function gateState({ io, repo, pr, head }) {
 async function promotionStep(ctx) {
   const { io, repo, state, opts } = ctx;
   const { pr } = state.steps["release-pr"].result;
-  const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid"]));
+  const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "state,mergeCommit,headRefOid"]));
   const head = view?.headRefOid;
+  // Already merged (by hand, or by a crashed --merge run): hand the merge sha to post-merge; never gate or merge again.
+  if (view?.state === "MERGED" && view?.mergeCommit?.oid) return { merged: true, alreadyMerged: true, mergeCommit: view.mergeCommit.oid, head };
+  if (view?.state === "CLOSED") return { stopped: true, why: `release PR #${pr} was closed without merging`, head };
   const gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
