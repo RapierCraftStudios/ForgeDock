@@ -59,6 +59,7 @@ import { e2eSpecs, e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.
 import { laneBackendId } from "./limits.mjs";
 import { openRotator, rotatorRetry } from "./rotator.mjs";
 import { poolExhausted, exhaustedDeferral, quotaFacts } from "./quota.mjs"; // #5236
+import { watchAccount } from "./account-watch.mjs"; // #5268
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
@@ -679,10 +680,12 @@ export async function runCore(o) {
       const system = lp === "lane" && !args.resume && !args.noTools ? [args.system, laneProfile.text].filter(Boolean).join("\n\n") : args.system;
       // #5205: capture the account the run uses (the shim exports it, then execs claude) and pin a rotation relaunch.
       let account = pinned?.account ?? null;
-      const spawnHook = smartRotator ? { onSpawn: (child, ...rest) => { if (account === null) { try { account = rotator.accountOfPid(child?.pid ?? child) ?? null; } catch { account = null; } } return args.onSpawn?.(child, ...rest); } } : {};
+      let watch = null; // #5268: the shim execs claude (same pid) after spawn, so keep reading until the account shows
+      const spawnHook = smartRotator ? { onSpawn: (child, ...rest) => { if (account === null && !watch) { const pid = child?.pid ?? child; watch = watchAccount(() => rotator.accountOfPid(pid), { onFound: (a) => { account = a; } }); } return args.onSpawn?.(child, ...rest); } } : {};
       const pin = pinned ? { ...(pinned.bin ? { bin: pinned.bin } : {}) } : {};
-      try { return await io.runner({ ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); }
+      try { const res = await io.runner({ ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); watch?.stop(); return res; }
       catch (e) {
+        watch?.stop(); watch?.refresh(); // #5268: the account the shim exec'd, read before the limited child is gone or now
         let epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
         if (e?.authFailure === true && e.usageLimit !== true && epoch === null) { const x = smartRotator ? poolExhausted(rotator, laneLimited) : null; throw x ? exhaustedStop(e, x, args.role) : authDeferral(e); } // #5236: an auth failure with no account room is exhaustion // #5168: an account condition, never engine-error
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
