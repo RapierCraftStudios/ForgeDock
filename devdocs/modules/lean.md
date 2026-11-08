@@ -93,7 +93,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the merge the rest is filed as one chained `refactor:split` issue.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
-   checks quotes against the issue and trusted comments; the engine freezes it
+   checks quotes against the issue and trusted comments (markdown, `...` elision and
+   punctuation-only differences are tolerated; a quote still missing snaps to the one
+   issue line or sentence holding at least 90% of its tokens, `snapQuotes`, original kept
+   as `requoted`, #5244); the engine freezes it
    (`FORGE:CONTRACT`, `contractHash`; the summary also records `issue S`, the
    hash of `scopeText`: title, body and trusted comments without HTML-comment
    blocks or `<!-- FORGE:` comments, #4265). `ISSUE_EDITED` fires only when that
