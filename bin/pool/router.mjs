@@ -97,7 +97,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // usage (validity breaks ties). Only the short-lived access token is shared; refresh tokens stay here, so this host
   // keeps refreshing its own sessions.
   // #5205: the account last handed to each agent, and accounts a lane reported limited (n -> until ms), excluded until then.
-  const lastAccount = new Map(), limited = new Map();
+  const handed = new Map(), limited = new Map(); // handed: agent -> accounts handed to it
+  const MAX_LIMIT_MS = 7 * 86400000; // a reported reset is clamped to now+7d
   function claudeToken(req = null) {
     const dirs = cfg.claude_config_dirs ?? readdirSync(homedir()).filter((d) => /^\.claude(-\d+)?$/.test(d)).map((d) => join(homedir(), d));
     const logins = [];
@@ -118,16 +119,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const { login, pct } = pick;
     log.info?.(`claude login selected: account=${login.n ?? "default"} usage=${pct ?? "unknown"}%${pick.stale ? " (stale)" : ""} expires_at=${new Date(login.expiresAt).toISOString()}`);
     const agent = req ? agentFor(req) : null;
-    if (agent) lastAccount.set(agent, login.n ?? null);
+    if (agent && login.n !== null) handed.set(agent, (handed.get(agent) ?? new Set()).add(login.n));
     return { status: 200, body: { token: login.accessToken, expires_at: new Date(login.expiresAt).toISOString(), account: login.n ?? null } };
   }
-  /** #5205: a lane on this agent hit a usage limit: its last account is excluded until reset_at (default now+1h). */
+  /** #5205: a sandbox on this agent hit a usage limit: the account it reports (one handed to this agent) is excluded until reset_at (default now+1h, at most now+7d). */
   function claudeLimited(req, body) {
-    const agent = agentFor(req), n = agent ? lastAccount.get(agent) : undefined;
-    if (n === undefined || n === null) return { status: 404, body: { error: "no claude account handed to this agent" } };
+    const agent = agentFor(req), n = body?.account;
+    if (!Number.isInteger(n)) return { status: 400, body: { error: "account required (the number from the credential response)" } };
+    if (!agent || !handed.get(agent)?.has(n)) return { status: 404, body: { error: "that claude account was not handed to this agent" } };
     const t = Date.parse(String(body?.reset_at ?? "")), e = Number(body?.reset_at);
     const at = body?.reset_at !== null && body?.reset_at !== "" && Number.isFinite(e) ? e * 1000 : t; // epoch s, or an ISO time
-    const until = Number.isFinite(at) && at > now() ? at : now() + 3600000;
+    const until = Number.isFinite(at) && at > now() ? Math.min(at, now() + MAX_LIMIT_MS) : now() + 3600000;
     limited.set(n, Math.max(until, limited.get(n) ?? 0));
     log.info?.(`claude login limited: account=${n} agent=${agent} until=${new Date(until).toISOString()}`);
     return { status: 200, body: { account: n, until: new Date(until).toISOString() } };

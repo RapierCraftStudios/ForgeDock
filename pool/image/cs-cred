@@ -11,8 +11,9 @@ if [ "$kind" = claude ] && [ "${2:-}" = --limited ]; then
   rm -f "$cache"
   [ -n "${CS_CRED_BASE:-}" ] || { echo "no credential relay (CS_CRED_BASE)" >&2; exit 1; }
   reset="${3:-}"; [[ "$reset" =~ ^[0-9]+$ ]] || reset=""
+  acct=$(cat "$cache.account" 2>/dev/null || true); [[ "$acct" =~ ^[0-9]+$ ]] || acct=""
   curl -sS --max-time 30 -o /dev/null -X POST -H "authorization: Bearer ${CS_CRED_TOKEN}" -H "content-type: application/json" \
-    -d "{\"reset_at\":${reset:-null}}" "$CS_CRED_BASE/claude/limited" || true
+    -d "{\"reset_at\":${reset:-null},\"account\":${acct:-null}}" "$CS_CRED_BASE/claude/limited" || true
 fi
 if [ -s "$cache" ] && [ $(( $(date +%s) - $(stat -c %Y "$cache") )) -lt $ttl ]; then cat "$cache"; exit 0; fi
 [ -n "${CS_CRED_BASE:-}" ] || { echo "no credential relay (CS_CRED_BASE)" >&2; exit 1; }
@@ -25,4 +26,7 @@ if [ "$code" = 429 ]; then
 fi
 tok=""; [ "$code" = 200 ] && tok=$(jq -r .token "$body" 2>/dev/null || true)
 [ -n "$tok" ] && [ "$tok" != null ] || { echo "credential fetch failed ($kind)" >&2; exit 1; }
-umask 077; printf '%s' "$tok" > "$cache"; printf '%s' "$tok"
+umask 077; printf '%s' "$tok" > "$cache"
+acct=""; [ "$code" = 200 ] && acct=$(jq -r '.account // empty' "$body" 2>/dev/null || true)
+if [[ "$acct" =~ ^[0-9]+$ ]]; then printf '%s' "$acct" > "$cache.account"; else rm -f "$cache.account"; fi
+printf '%s' "$tok"
