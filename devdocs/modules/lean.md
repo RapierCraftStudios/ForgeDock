@@ -2784,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 A batch run past its dispatch loop (probe/alert/report tail) still counts as hosted, so `add`/`requeue` answered `hosted:true` and nothing read the entry; `runBatch` then wrote `report.json` over it and `rehostLater` (#4917) skips reported batches, so the issue waited for a manual `--resume`. Now `runBatch` leaves no report while `unrunAdds()`/`unrunRequeues()` exist (unless cancelled), and the schedd (`rehostUnrun`, `schedd.mjs`) hosts `--resume` again once such a run ends, once per distinct set of unrun entries (no loop on a cancel or tripped breaker). The hosted line of `--add` says when the runner next passes.
 Cite: #5242, #5000, #4917.
 
+## Entry 2026-11-08 — intake host triage (#5250)
+
+`intakeHostWork` (`conformance.mjs`) reads the issue's `## Acceptance` checklist at intake. When it is non-empty and every item needs live production measurement or a real-browser capture (`LIVE_EVIDENCE_RE` or `READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match), `runCore` (`lean.mjs`, before the worktree step, skipped on resume or recovery) adds `host-task`, posts `FORGE:HOST_TASK` and ends `host-task`: no builder runs. One code-shaped item keeps the code lane, and backlog aggregates (`FORGE:DEFERRED_FROM` / `FORGE:BACKLOG_BATCH`) are exempt. Cost: 0 LLM calls.
+
 ## Entry 2026-11-08 — finding lifecycle resolved at close (#5254)
 
 `resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.

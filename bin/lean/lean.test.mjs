@@ -7675,6 +7675,22 @@ describe("prompt budgets (#4969)", () => {
   });
 });
 
+describe("#5250 intake host triage", () => {
+  const hostBody = "## Acceptance Criteria\n\n- [ ] Measured clear rate on live production traffic is above 50%\n- [ ] Root-cause capture from a real browser is attached\n";
+  it("an issue whose criteria are all live-production or real-browser work ends host-task with no builder run", async () => {
+    const w = world({ body: hostBody });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "host-task");
+    assert.ok(w.edits.some((e) => e.includes("--add-label") && e.includes("host-task")), JSON.stringify(w.edits));
+    assert.ok(w.comments.some((c) => String(c.body ?? c).includes("FORGE:HOST_TASK")), "FORGE:HOST_TASK comment");
+    assert.equal(w.builderN, 0);
+  });
+  it("a code issue is unaffected", async () => {
+    const w = world({ body: "## Acceptance Criteria\n\n- [ ] foo no longer breaks\n" });
+    assert.notEqual((await run(w)).terminalReason, "host-task");
+  });
+});
+
 describe("#5237 relaxation gate", () => {
   const rescue = "diff --git a/src/foo.js b/src/foo.js\n@@ -1,0 +5,1 @@\n+  if (looksThin(page)) return true; // rescue\n";
   const negTest = "diff --git a/test/foo.test.js b/test/foo.test.js\n@@ -1,0 +1,1 @@\n+  assert.equal(isBenign(cookieChallenge), false);\n";

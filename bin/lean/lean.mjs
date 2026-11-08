@@ -17,7 +17,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -1200,6 +1200,16 @@ export async function runCore(o) {
     if (resumed?.base && resumed.base !== lane) {
       return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
         isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
+    }
+    if (!resumed && !recover) { // #5250: every acceptance item needs live production measurement or a real-browser capture: host work, not a code lane
+      const hw = intakeHostWork(iss.body);
+      if (hw.host) {
+        T.decisions.push("Intake: every acceptance criterion needs live production measurement or a real-browser capture (host-task), no code lane");
+        const why = `Host-task: every acceptance criterion needs live production measurement or a real-browser capture:\n${hw.items.map((t) => `- ${t}`).join("\n")}\n\nNot a code lane: run it on the host with its read-only prod tools and real browser.`;
+        try { await post("FORGE:HOST_TASK", `## Host task\n${why}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+        try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "host-task"]); } catch { /* best effort */ }
+        return await finish("host-task", why, { code: OUTCOME_CODES.ENV_CAPABILITY_REMOTE }, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
+      }
     }
     // #4162: a run that died can leave its runner writing into this worktree, and uncommitted work in it. Stop the
     // processes and save the work before the worktree is removed; the lease above makes this run the only one doing so.
