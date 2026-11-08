@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -467,6 +467,20 @@ describe("conformance review: the engine computes the verdict from complete rows
       assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
     }
   });
+  it("#5232 a guessed offline uv --with environment is rejected for repro_test and validate; a requirements export passes", () => {
+    const bad = "cd w && uv run --offline --no-project --with pytest --with structlog python -m pytest -q t.py";
+    assert.equal(guessedUvEnv(bad), true);
+    assert.equal(guessedUvEnv("uv run --no-project --python 3.12 --with-requirements r.txt pytest -q t.py"), false);
+    assert.equal(guessedUvEnv("uv run --offline --no-project --with-requirements r.txt pytest"), false);
+    assert.equal(guessedUvEnv("pnpm vitest run x"), false);
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: bad } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: the command builds its environment from a hand-picked")), rt.problems.join("; "));
+    const v = validateContract({ ...C, validate: [{ id: "V1", command: bad }] }, ISSUE);
+    assert.ok(v.problems.some((x) => x.startsWith("V1: the command builds its environment")), v.problems.join("; "));
+    const ok = validateContract({ ...C, repro_test: { path: "t/x.py", command: "uv run --no-project --with-requirements r.txt pytest t/x.py" } }, ISSUE, { repro: true });
+    assert.ok(!ok.problems.some((x) => /hand-picked/.test(x)));
+  });
+
   it("#5230 tmpdirInputs counts venv, clone and worktree dirs as created", () => {
     assert.deepEqual(tmpdirInputs('uv venv -q "$TMPDIR/pv" && uv pip install --offline -q --python "$TMPDIR/pv/bin/python" pytest && "$TMPDIR/pv/bin/python" -m pytest -q x'), []);
     assert.deepEqual(tmpdirInputs("python3 -m venv $TMPDIR/v && $TMPDIR/v/bin/pip install x"), []);

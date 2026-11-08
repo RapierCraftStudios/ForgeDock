@@ -253,7 +253,7 @@ export function unrunnableValidateNote(testRunners = null) {
 
 export function reproPlanNote(on) {
   if (!on) return "";
-  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
+  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
 }
 
 /** forge#4519: the repo's generated, bot-owned globs (forge.yaml maintenance.generated_paths via hotspots.sh); "" when none. */

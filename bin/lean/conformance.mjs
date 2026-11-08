@@ -322,6 +322,16 @@ const INSTEAD_OF_RE = new RegExp(String.raw`\b${MOCKED_TERM}[^.;]{0,60}?\b(?:ins
 const PROBE_RE = /forge-probe|acceptance[- ]probe/i;
 const NEG_PROBE_RE = /\b(?:no|not|without|never)\b[^.;]{0,30}(?:forge-probe|acceptance[- ]probe)/i;
 /**
+ * #5232: a `uv run --no-project --offline` command whose dependencies are a hand-picked `--with` list (no
+ * `--with-requirements`) cannot import a project's full dependency set; true for such a command. The environment must come
+ * from the repo's lockfile or toolchain (`uv run --with-requirements <export>`, the project runner, forge.yaml validate.recipes).
+ */
+export function guessedUvEnv(command) {
+  const c = String(command ?? "");
+  return /\buv\s+run\b/.test(c) && /--no-project\b/.test(c) && /--offline\b/.test(c) && /--with(?:\s|=)/.test(c) && !/--with-requirements\b/.test(c);
+}
+const guessedUvProblem = (id) => `${id}: the command builds its environment from a hand-picked \`uv run --offline --no-project --with ...\` list, which cannot import the project's full dependency set (env.repro_unrunnable); derive it from the repo's lockfile or toolchain (\`--with-requirements\` of an export, the project runner, or a forge.yaml validate.recipes entry)`;
+/**
  * #5087: a plan decision whose effect is to drop an e2e/integration check for mocked tests ("no Playwright e2e; integration
  * coverage via route and component tests"). The #4726 rule keys on the `[type:e2e]` tag, which a reworded criterion
  * escapes. Exempt when an acceptance probe (#4399) is declared: in the decision itself, or by another row of the contract.
@@ -378,6 +388,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     const ref = movingBaseDiff(v.command);
     if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
     for (const p of tmpdirInputs(v.command)) problems.push(tmpInputProblem(v.id, p));
+    if (guessedUvEnv(v.command)) problems.push(guessedUvProblem(v.id));
     if (vitestQuietFlag(v.command)) problems.push(`${v.id}: vitest 3 rejects -q/--quiet (usage error before any test runs); use --reporter=dot`);
     const syn = shellSyntaxError(v.command);
     if (syn) problems.push(`${v.id}: the command is not valid shell (bash -n: ${syn}); keep notes out of the command`);
@@ -388,6 +399,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
+      if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));
       if (vitestQuietFlag(t.command)) problems.push("repro_test: vitest 3 rejects -q/--quiet; use --reporter=dot");
       const syn = shellSyntaxError(t.command);
       if (syn) problems.push(`repro_test: the command is not valid shell (bash -n: ${syn})`);

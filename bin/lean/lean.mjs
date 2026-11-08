@@ -2582,7 +2582,7 @@ export async function runCore(o) {
     async function envNeedsHuman(failures) {
       if (failures.every((f) => f.code === OUTCOME_CODES.ENV_REPRO_UNRUNNABLE)) {
         T.anomalies.push("Environment error: the repro harness could not run the repro test on head");
-        return await needsHuman(`Environment error (not a conformance failure): the repro harness could not run the repro test on head; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRun the repro command through the repo's own toolchain and installed dependencies, then rerun.`, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE);
+        return await needsHuman(`Environment error (not a conformance failure): the repro harness could not run the repro test on head; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nEnvironment defect: run the repro command above on the host with the project's real dependencies (its lockfile or toolchain), then rerun.`, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE);
       }
       if (failures.every((f) => f.code === ENV_VALIDATE_TIMEOUT)) { // #4906: the teardown below pushes the lane's commits, so CI and recovery still see them
         T.anomalies.push("Environment error: a validate command timed out on the engine's rerun (infra, exit 124)");
