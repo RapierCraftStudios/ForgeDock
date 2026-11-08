@@ -2,21 +2,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classify, namedPaths, issueOf, attribute, runOnBase, reportBaseRed } from "./basered.mjs";
+import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed } from "./basered.mjs";
 
 const SHA = "13834f1c51".padEnd(40, "0");
 
 describe("base red (#5239)", () => {
-  it("classify: base red only when the base run itself failed", () => {
+  it("classifyBaseRed: base red only when the base run itself failed", () => {
     const failed = [{ command: "a" }, { command: "b" }, { command: "c" }, { command: "d" }];
-    const r = classify({ failed, baseRuns: [{ command: "a", rc: 1 }, { command: "b", rc: 0 }, { command: "c", rc: 124 }] });
+    const r = classifyBaseRed({ failed, baseRuns: [{ command: "a", rc: 1 }, { command: "b", rc: 0 }, { command: "c", rc: 124 }] });
     assert.deepEqual(r.baseRed.map((f) => f.command), ["a"]);
     assert.deepEqual(r.laneOwn.map((f) => f.command), ["b", "c", "d"]);
-    assert.deepEqual(classify({ failed, baseRuns: [] }).baseRed, [], "no base run: the failure stays the lane's");
+    assert.deepEqual(classifyBaseRed({ failed, baseRuns: [] }).baseRed, [], "no base run: the failure stays the lane's");
   });
 
-  it("namedPaths lists the guarded code before the guard's own test file", () => {
-    const p = namedPaths([{ command: "pytest services/api/tests/test_rate_limit_rejection_sites_guard.py", output: "bare 429 at services/api/app/routers/listing_feeds.py:41" }]);
+  it("baseRedPaths lists the guarded code before the guard's own test file", () => {
+    const p = baseRedPaths([{ command: "pytest services/api/tests/test_rate_limit_rejection_sites_guard.py", output: "bare 429 at services/api/app/routers/listing_feeds.py:41" }]);
     assert.deepEqual(p.src, ["services/api/app/routers/listing_feeds.py"]);
     assert.deepEqual(p.tests, ["services/api/tests/test_rate_limit_rejection_sites_guard.py"]);
   });

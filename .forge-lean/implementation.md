@@ -30,3 +30,6 @@
 
 ### Stale-list fix
 - Inspected the 10 cited tests at the cited lines: none enumerates lean modules/symbols; recorded `basered` as a non-member of each in result.json `not_members`. No test edits needed.
+
+### Export collision fix
+- Renamed basered exports `classify` -> `classifyBaseRed` and `namedPaths` -> `baseRedPaths` (collided with decision-engine.mjs and prefilter.mjs); updated lean.mjs, basered.test.mjs, devdocs. Validate commands pass.

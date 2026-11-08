@@ -15,7 +15,7 @@ const FILE_RE = /(?:^|[\s"'`(=:])((?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+\.(?:py|mjs
 const TEST_RE = /(?:^|[/_.-])(?:tests?|spec)(?:[/_.-]|$)/i;
 
 /** Split failed `{command, rc}` rows by their base run `{command, rc}`: base red only when the base run itself failed (a timeout or missing runner is no evidence, so the failure stays the lane's). */
-export function classify({ failed = [], baseRuns = [] } = {}) {
+export function classifyBaseRed({ failed = [], baseRuns = [] } = {}) {
   const byCmd = new Map((baseRuns ?? []).map((b) => [b?.command, b]));
   const laneOwn = [], baseRed = [];
   for (const f of failed ?? []) {
@@ -26,7 +26,7 @@ export function classify({ failed = [], baseRuns = [] } = {}) {
 }
 
 /** Repo-relative file paths named in a command and its failure output, non-test paths first (the guarded code, not the guard). */
-export function namedPaths(rows = []) {
+export function baseRedPaths(rows = []) {
   const seen = new Set(), src = [], tests = [];
   for (const r of rows) {
     for (const text of [r?.command, String(r?.output ?? "").slice(-20000)]) {
@@ -54,7 +54,7 @@ export function issueOf(subject = "", body = "") {
 /** The newest commit on `base` touching a file the failures name (guarded code first, else the tests): {sha, subject, issue, files} or null. Never throws. */
 export async function attribute({ failed = [], git, base } = {}) {
   try {
-    const { src, tests } = namedPaths(failed);
+    const { src, tests } = baseRedPaths(failed);
     for (const files of [src, tests]) {
       if (!files.length) continue;
       const out = String(await git(["log", "-1", "--format=%H%x1f%s%x1f%b", base, "--", ...files]).catch(() => "")).trim();
