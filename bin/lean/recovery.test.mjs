@@ -33,6 +33,16 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
   const NH = (code, detail = `ended ${code}`, more = {}) => ({ terminalReason: "needs-human", code, detail, ...more });
   const byIssue = (rows) => Object.fromEntries(rows.map((r) => [r.issue, r]));
 
+  it("#5232: a recovery attempt repeating the same env.repro_unrunnable is not rebuilt again; a different signature still recovers", async () => {
+    const same = NH("env.repro_unrunnable", "repro test t (`uv run --with x pytest t.py`): could not run");
+    const r = await batch({ 1: [same, same] }, {}, { recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 } });
+    assert.deepEqual(r.calls.map((c) => c.recover?.attempt ?? 0), [0, 1]);
+    assert.match(byIssue(r.rows)[1].detail, /Environment defect.*uv run --with x pytest/s);
+    assert.ok(r.decisions.some((d) => /no further recovery for env\.repro_unrunnable/.test(d.what)));
+    const d = await batch({ 2: [NH("env.repro_unrunnable", "cmd A"), NH("env.repro_unrunnable", "cmd B"), { terminalReason: "merged" }] }, {}, { recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 } });
+    assert.deepEqual(d.calls.map((c) => c.recover?.attempt ?? 0), [0, 1, 2]);
+  });
+
   it("#4725: mechanical codes get their own budget (2), apart from the conformance one; an open-PR base conflict is not parked while it remains", async () => {
     const { rows, calls } = await batch({ 1: [NH("base.conflict", "conflicts", { pr: 50 }), NH("base.conflict", "conflicts", { pr: 50 }), { terminalReason: "merged", pr: 50 }] },
       {}, { recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 } });

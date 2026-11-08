@@ -2770,3 +2770,7 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 ## Entry 2026-11-07 — issue-watch release mode starts the release job (#5214)
 
 `releaseTick` (`issuewatch-release.mjs`) hands the deploy PR it opens or reuses to `io.release.start({repo, pr, tag})` once per release (`rel.job`; a failed start sets `rel.jobError` and never throws, so claims are not stranded). The real io (`issuewatch.mjs`) spawns `forgedock release --repo R` detached, never with `--merge`: promotion stays opt-in via `release.auto_merge`. `commands/review-pr-staging.md` now names `forgedock release` as the default path; the manual spec stays the fallback.
+
+## Entry 2026-11-08 — repro command environment rule and repeat-signature stop (#5232)
+
+`reproPlanNote` (`prompts.mjs`) requires a repro command's environment to come from the repo's lockfile or toolchain. `validateContract` (`conformance.mjs`, `guessedUvEnv`) rejects a `repro_test` or validate command of the form `uv run --offline --no-project --with <pkgs>` without `--with-requirements`: one plan-time correction, no LLM call. In `orchestrate.mjs`, a recovery attempt that ends with the same `env.repro_unrunnable` or `env.tool_missing` code and the same normalized detail (the command) as the run before it is not requeued (`REPEAT_ENV_CODES`); the row detail is prefixed "Environment defect" and the needs-human evidence names the command to run on the host. `env.validate_timeout` is excluded (load-dependent).
