@@ -731,7 +731,12 @@ release:
   artifact_check: ""
   version_sync: false
   publish_workflow: publish.yml
+  rehearsal_command: ""
+  rehearsal_timeout: 1200
+  rehearsal_blocking: true
 ```
+
+The forge.yaml reader handles two levels, so the rehearsal block is written as the flat keys `rehearsal_command`, `rehearsal_timeout` and `rehearsal_blocking`.
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
@@ -739,6 +744,12 @@ release:
 | `artifact_check` | string | No | Shell command that confirms the published artifact (e.g. `npm view pkg@1.2.3 version`). Post-merge retries it with a bounded exponential backoff (npm propagation delay) and blocks when it keeps failing. Default: none. |
 | `version_sync` | boolean | No | The repo pushes a `chore/sync-version-<VERSION>` branch after a release. Post-merge opens its PR to `branches.staging` if missing and merges it with `--match-head-commit` once its checks are green (no checks, or a red one, blocks the job). Default: `false`. |
 | `publish_workflow` | string | No | Workflow file post-merge looks for (and dispatches when no run appears) for the merge commit. Default: `publish.yml`. |
+
+| `rehearsal_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout, on the release-PR head after review and before promotion (#5253). Wire the project's deploy dry-run here: bundle build, env load and the trusted-runtime closure check, e.g. `rehearsal_command: ./scripts/deploy-dry-run.sh` where the script builds the release bundle, loads the production env file in check mode and verifies the trusted-runtime closure, exiting non-zero on the first failure. Unset: no rehearsal, release behavior is unchanged. |
+| `rehearsal_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
+| `rehearsal_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per release head (a re-run at the same head comments on it) with the output tail and the head SHA, and stops the job before promotion; fix it and `--resume <id>`. `false`: the failure is recorded and promotion goes on. |
+
+The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
 
 **Commands that use this section**: `forgedock release`
 
