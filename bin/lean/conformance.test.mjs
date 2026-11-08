@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -466,6 +466,37 @@ describe("conformance review: the engine computes the verdict from complete rows
     for (const ok of ["uv export > $TMPDIR/r.txt && uv run --with-requirements $TMPDIR/r.txt pytest", "pytest --basetemp=$TMPDIR/pt --junitxml $TMPDIR/j.xml", "mkdir -p \"$TMPDIR/d\" && cp a $TMPDIR/d/a && cat $TMPDIR/d/a", "X=$TMPDIR/cache npm test", "echo hi | tee $TMPDIR/l; grep hi $TMPDIR/l", "node --test test/leak.test.js"]) {
       assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
     }
+  });
+  it("#5234 project-dir paths and pytest exit 4", () => {
+    const poetry = "poetry -C services/api run pytest -q services/api/tests/test_x.py services/api/tests/test_y.py";
+    assert.deepEqual(projectDirPathMiss(poetry), { dir: "services/api", paths: ["services/api/tests/test_x.py", "services/api/tests/test_y.py"] });
+    assert.equal(rewriteProjectDirCommand(poetry), "cd services/api && poetry run pytest -q tests/test_x.py tests/test_y.py");
+    const uv = "uv run --project services/api pytest services/api/tests/x.py -k foo";
+    assert.equal(rewriteProjectDirCommand(uv), "cd services/api && uv run pytest tests/x.py -k foo");
+    assert.equal(rewriteProjectDirCommand("poetry --directory=./services/api run pytest services/api/tests/x.py"), "cd services/api && poetry run pytest tests/x.py");
+    const mixed = "poetry -C services/api run pytest services/api/tests/x.py tests/hands_conformance";
+    assert.equal(rewriteProjectDirCommand(mixed), mixed);
+    const chained = "poetry -C services/api run pytest services/api/tests/x.py && echo ok";
+    assert.equal(rewriteProjectDirCommand(chained), chained);
+    for (const fine of ["cd services/api && poetry run pytest ../../services/api/tests/x.py", "poetry -C services/api run pytest tests/x.py", "poetry run pytest services/api/tests/x.py"]) {
+      assert.equal(projectDirPathMiss(fine), null, fine);
+      assert.equal(rewriteProjectDirCommand(fine), fine);
+    }
+    for (const cmd of [poetry, uv, mixed]) {
+      const v = validateContract({ ...C, validate: [{ id: "V1", command: cmd }] }, ISSUE);
+      assert.ok(v.problems.some((x) => x.startsWith("V1: the command moves its cwd to `services/api`")), v.problems.join("; "));
+    }
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: uv } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: the command moves its cwd")), rt.problems.join("; "));
+    // pytest exit 4 is a defect of the frozen command: contract.invalid_command, and a substitute is judged ok
+    const exit4 = { rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py\n\nno tests ran in 0.01s" };
+    assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py" }));
+    assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: not found: /repo/tests/x.py::t" }));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed, 2 passed" }));
+    assert.equal(substituteVerdict(exit4), "ok");
+    const contract = { requirements: [], deliverables: [], validate: [{ id: "V1", command: poetry }] };
+    const p = precheck({ contract, result: { validation: [{ id: "V1", exit: 4 }] }, changedFiles: [], validateRuns: { V1: exit4 } });
+    assert.deepEqual(p.failures.map((f) => [f.code, f.kind]), [["contract.invalid_command", "validate_command_invalid"]]);
   });
   it("#5232 a guessed offline uv --with environment is rejected for repro_test and validate; a requirements export passes", () => {
     const bad = "cd w && uv run --offline --no-project --with pytest --with structlog python -m pytest -q t.py";

@@ -16,7 +16,7 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -1526,6 +1526,12 @@ export async function runCore(o) {
     /** #5020: forge.yaml validate.recipes rewrite frozen commands; a check-less post-deploy requirement becomes a defer to the orchestrator. */
     function freezeRewrites(c) {
       const r = applyValidateRecipes(c, validateRecipes);
+      const pd = (id, cmd) => { const to = rewriteProjectDirCommand(cmd); if (to !== cmd) T.decisions.push(`project-dir rewrite of ${id}: \`${cmd}\` -> \`${to}\``); return to; };
+      if (r.contract && typeof r.contract === "object") { // #5234
+        if (Array.isArray(r.contract.validate)) r.contract = { ...r.contract, validate: r.contract.validate.map((v) => (v && typeof v.command === "string" ? { ...v, command: pd(v.id, v.command) } : v)) };
+        const t = r.contract.repro_test;
+        if (t && typeof t === "object" && typeof t.command === "string") r.contract = { ...r.contract, repro_test: { ...t, command: pd("repro_test", t.command) } };
+      }
       for (const x of r.applied) T.decisions.push(`validate recipe rewrote ${x.id}: \`${x.from}\` -> \`${x.to}\``);
       const d = deferChecklessPostDeploy(r.contract);
       if (d.converted.length) T.decisions.push(`Post-deploy with no registered check deferred to the orchestrator: ${d.converted.join(", ")}`);
