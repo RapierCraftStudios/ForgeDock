@@ -7633,3 +7633,19 @@ describe("prompt budgets (#4969)", () => {
     assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
   });
 });
+
+describe("#5250 intake host triage", () => {
+  const hostBody = "## Acceptance Criteria\n\n- [ ] Measured clear rate on live production traffic is above 50%\n- [ ] Root-cause capture from a real browser is attached\n";
+  it("an issue whose criteria are all live-production or real-browser work ends host-task with no builder run", async () => {
+    const w = world({ body: hostBody });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "host-task");
+    assert.ok(w.edits.some((e) => e.includes("--add-label") && e.includes("host-task")), JSON.stringify(w.edits));
+    assert.ok(w.comments.some((c) => String(c.body ?? c).includes("FORGE:HOST_TASK")), "FORGE:HOST_TASK comment");
+    assert.equal(w.builderN, 0);
+  });
+  it("a code issue is unaffected", async () => {
+    const w = world({ body: "## Acceptance Criteria\n\n- [ ] foo no longer breaks\n" });
+    assert.notEqual((await run(w)).terminalReason, "host-task");
+  });
+});

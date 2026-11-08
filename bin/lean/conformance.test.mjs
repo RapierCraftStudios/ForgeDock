@@ -1532,3 +1532,24 @@ describe("#5197 hostRoute is exported as the single host-route source", () => {
     assert.equal(hostRoute5197({ bucket: "host", why: "provide the API key after release" }), "host");
   });
 });
+
+import { intakeHostWork } from "./conformance.mjs";
+describe("#5250 intakeHostWork", () => {
+  const body = (...items) => `## Problem\nx\n\n## Acceptance Criteria\n\n${items.map((t) => `- [ ] ${t}`).join("\n")}\n`;
+  it("matches when every criterion needs live production measurement or a real-browser capture", () => {
+    const r = intakeHostWork(body("Measured clear rate on live production traffic is above 50%", "Root-cause capture from a real browser is attached"));
+    assert.equal(r.host, true); assert.equal(r.items.length, 2);
+  });
+  it("one code-shaped criterion keeps a code lane", () => {
+    assert.equal(intakeHostWork(body("Measured clear rate on live production traffic is above 50%", "The retry guard stops after a rejection")).host, false);
+  });
+  it("code-only, credential-needing, checklist-less and empty bodies do not match", () => {
+    assert.equal(intakeHostWork(body("The retry guard stops after a rejection")).host, false);
+    assert.equal(intakeHostWork(body("Measure live production latency using the API key")).host, false);
+    assert.equal(intakeHostWork("## Acceptance\nmeasured on live production").host, false);
+    assert.equal(intakeHostWork("").host, false); assert.equal(intakeHostWork(null).host, false);
+  });
+  it("a backlog aggregate that merely quotes such text is not host work", () => {
+    assert.equal(intakeHostWork("## Acceptance Criteria\n\n### #5240\n<!-- FORGE:DEFERRED_FROM: #5240 -->\n\n- [ ] classify issues whose acceptance requires live production measurement or real-browser captures as host work\n").host, false);
+  });
+});

@@ -1326,6 +1326,21 @@ export function ownerRoute(r) {
   if (POST_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text)) return "post-deploy";
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
 }
+/** #5250: an acceptance criterion that can only be met by measuring live production or capturing in a real browser. */
+const LIVE_EVIDENCE_RE = /\b(?:measur\w*|capture\w*)\b[^.\n]{0,60}\b(?:production|prod|live)\b|\b(?:production|prod|live)\b[^.\n]{0,40}\b(?:measur\w*|capture\w*|clear rate|success rate|latency|traffic)\b|\breal[- ](?:browser|chrome|device)s?\b|\b(?:real|headless)[- ]browser\b[^.\n]{0,40}\bcaptures?\b/i;
+/**
+ * #5250: intake triage. `{host:true, items}` when the issue's acceptance checklist is non-empty and EVERY item needs live
+ * production measurement or a real-browser capture (and none needs a credential, spend or write: EXTERNAL_NEED_RE). One
+ * code-shaped item keeps it a code lane. Backlog aggregates (FORGE:DEFERRED_FROM / BACKLOG_BATCH) only quote such text and are never host work.
+ */
+export function intakeHostWork(body) {
+  const text = String(body ?? "");
+  if (/FORGE:(?:DEFERRED_FROM|BACKLOG_BATCH)/.test(text)) return { host: false, items: [] };
+  const section = text.replace(/<!--[\s\S]*?-->/g, "").split(/^#{1,2}\s+(?=\S)/m).find((s) => /^acceptance\b/i.test(s)) ?? "";
+  const items = [...section.matchAll(/^\s*[-*]\s+\[[ xX]\]\s+(.+)$/gm)].map((m) => m[1].trim());
+  const host = items.length > 0 && items.every((t) => (LIVE_EVIDENCE_RE.test(t) || READONLY_PROD_RE.test(t)) && !EXTERNAL_NEED_RE.test(t));
+  return { host, items: host ? items : [] };
+}
 const PRE_PROMOTION_RE = /(?:before|pre)[- ]?(?:promotion|release|deploy)/i;
 /** #5186: an explicit host deferral that is post-promotion text (and needs nothing external) joins the release rollup; work needed before promotion stays host. Single source for scripts/file-deferred-followups.sh host_route (#5197). */
 export function hostRoute(r) {
