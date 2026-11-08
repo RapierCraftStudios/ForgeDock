@@ -5505,6 +5505,37 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(n >= 2, "the invariant is rerun after the builder fix round");
   });
 
+  it("#5239 a guard failing only on the lane tree blocks the merge (ci.red), never merges", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command, cwd }) => { ran.push(cwd); return /basered-/.test(cwd) ? { rc: 0, output: "" } : { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" }; };
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+    assert.equal(w.merges.length, 0);
+    assert.ok(ran.some((c) => /basered-/.test(c)), "the guard was also run on the base");
+  });
+
+  it("#5239 a guard that also fails on the base defers the lane (base.red), comments on the introducing issue, no needs-human", async () => {
+    const w = world(); const comments = [], gh = w.io.gh, git = w.io.git;
+    w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+    w.io.git = async (a, o) => (a[0] === "log" && a.includes("--format=%H%x1f%s%x1f%b") ? `${"a".repeat(40)}\x1ffeat: feeds (#39805)\x1f` : git(a, o));
+    w.io.gh = async (a, o) => {
+      if (a[0] === "issue" && a[1] === "view" && a[2] === "39805") return "OPEN";
+      if (a[0] === "issue" && a[1] === "comment" && a[2] === "39805") { comments.push(a.at(-1)); return ""; }
+      return gh(a, o);
+    };
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "base.red");
+    assert.equal(w.merges.length, 0);
+    assert.equal(comments.length, 1); assert.match(comments[0], /FORGE:BASE_RED/);
+    assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
+  });
+
+  it("#5239 verify.guard_block false keeps a failing invariant advisory", async () => {
+    const w = world(); w.io.runCommand = async () => ({ rc: 1, output: "x" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"], guardBlock: false } });
+    assert.notEqual(r.code, "base.red"); assert.notEqual(r.code, "ci.red");
+  });
+
   it("pre-PR: a passing set adds no builder turn; no commands configured runs nothing", async () => {
     const w = world(); let n = 0;
     w.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };

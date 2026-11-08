@@ -418,7 +418,7 @@ export function readMergeWait(cwd = process.cwd()) {
 /**
  * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
  * `  skip_paths` comma-separated, `  max_rounds`, `  check_run: true` (#4270)) for the core path; undefined when the
- * section is absent or unreadable.
+ * section is absent or unreadable. `  guard_block: false` (#5239) lets verify.invariants fail without blocking the merge.
  */
 export function readVerify(cwd = process.cwd()) {
   try {
