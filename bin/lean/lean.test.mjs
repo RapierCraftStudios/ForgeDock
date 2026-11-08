@@ -3582,6 +3582,16 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.ok(log.some((e) => e.event === "PHASE_ACCOUNT_ROTATED" && e.from === 1 && e.to === 2));
   });
 
+  it("#5268 the shim sets the account after exec: the first read at spawn is null, the limit-time re-read excludes the limited account", async () => {
+    const w = world(); const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 1);
+    const rot = smartRotator(); let reads = 0; const real = rot.accountOfPid; rot.accountOfPid = (pid) => (++reads === 1 ? null : real(pid)); w.io.rotator = rot;
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(rot.marked, [[1, 3 * 3600 * 1000]], "the account read late is marked limited");
+    assert.deepEqual(rot.picks[1], [1], "and excluded from the next pick");
+    assert.equal(sent[1].dir, "/h/.claude-2");
+  });
+
   it("#5205 every account limited: rotations stop at the account count; pick none defers with tokenbaton's earliest reset", async () => {
     const w = world();
     const sent = spawnAs(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }), 99);
