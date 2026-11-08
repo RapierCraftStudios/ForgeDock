@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch } from "./batch.mjs";
 import { DEFAULT_HEALTH, parseHealthConfig, rootsOf, evaluateHealth, formatAlert, runCheck, scheduleChecks, scheduleLine, runNotify, deliverAlert,
-  recordRefusal, readRefusals, statusLines, REFUSAL_KEEP } from "./batch-health.mjs";
+  resolvedOnGithub, recordRefusal, readRefusals, statusLines, REFUSAL_KEEP } from "./batch-health.mjs";
 
 // #1 and #3 are roots; #2 depends on #1, #4 on #3.
 const base = (results, extra = {}) => ({ order: [1, 2, 3, 4], deps: { 2: [1], 4: [3] }, results, running: {}, pending: [], ...extra });
@@ -152,5 +152,38 @@ describe("#5167 channels and refusals", () => {
     assert.match(statusLines(root, { now }).at(-1), /^ {2}LAUNCH REFUSED 2026-01-01T00:00:22.000Z: refused 22$/);
     assert.equal(statusLines(root, { now: now + 2 * 86400000 }).length, 0);
     assert.ok(existsSync(join(root, "refusals.json")));
+  });
+});
+
+describe("#5243 health re-reads GitHub before declaring root-failed", () => {
+  const st = base({ 1: { outcome: "needs-human" }, 2: { outcome: "skipped" }, 3: { outcome: "merged" }, 4: { outcome: "merged" } });
+  const mkBatch = () => { const dir = tmpDir("bh5243-"); return { id: "b1", dir, store: { load: () => st } }; };
+
+  it("a root merged by hand is resolved: healthy, no requeue suggestion", async () => {
+    const r = await runCheck({ batch: mkBatch(), checkpoint: "T+60", resolve: async (c) => c.map((x) => x.issue) });
+    assert.equal(r.healthy, true);
+    assert.equal(r.alerted, false);
+    assert.ok(!r.recovery.some((x) => /requeue/.test(x)));
+  });
+
+  it("an unresolved root, or a failing resolver, still alerts with the requeue command", async () => {
+    for (const resolve of [async () => [], async () => { throw new Error("gh down"); }]) {
+      const r = await runCheck({ batch: mkBatch(), checkpoint: "T+60", resolve });
+      assert.equal(r.healthy, false);
+      assert.ok(r.recovery.some((x) => /--requeue b1 1/.test(x)));
+    }
+  });
+
+  it("resolvedOnGithub: closed with merged PR, or needs-human label removed with a FORGE:DECISION", async () => {
+    const views = {
+      1: { state: "CLOSED", labels: [], comments: [], closedByPullRequestsReferences: [{ number: 9 }] },
+      2: { state: "CLOSED", labels: [], comments: [], closedByPullRequestsReferences: [{ number: 10 }] },
+      3: { state: "OPEN", labels: [], comments: [{ body: "<!-- FORGE:DECISION x -->" }] },
+      4: { state: "OPEN", labels: [{ name: "needs-human" }], comments: [{ body: "<!-- FORGE:DECISION x -->" }] },
+      5: { state: "OPEN", labels: [], comments: [] },
+    };
+    const gh = async (a) => { if (a[0] === "pr") return JSON.stringify({ state: a[2] === "9" ? "MERGED" : "CLOSED" }); if (a[2] === "6") throw new Error("boom"); return JSON.stringify(views[a[2]]); };
+    const cands = [1, 2, 3, 4, 5, 6].map((issue) => ({ issue, outcome: "needs-human" }));
+    assert.deepEqual(await resolvedOnGithub(cands, gh, "o/r"), [1, 3]);
   });
 });
