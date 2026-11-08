@@ -2784,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `intakeHostWork` (`conformance.mjs`) reads the issue's `## Acceptance` checklist at intake. When it is non-empty and every item needs live production measurement or a real-browser capture (`LIVE_EVIDENCE_RE` or `READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match), `runCore` (`lean.mjs`, before the worktree step, skipped on resume or recovery) adds `host-task`, posts `FORGE:HOST_TASK` and ends `host-task`: no builder runs. One code-shaped item keeps the code lane, and backlog aggregates (`FORGE:DEFERRED_FROM` / `FORGE:BACKLOG_BATCH`) are exempt. Cost: 0 LLM calls.
 
+## Entry 2026-11-08 — release rehearsal step (#5253)
+
+`release.mjs` runs `RELEASE_STEPS` preflight, release-pr, review, fixes, **rehearsal**, promotion, post-merge. `release-rehearsal.mjs` `rehearsalStep` runs forge.yaml `release.rehearsal_command` (flat keys `rehearsal_command`/`_timeout` seconds/`_blocking`, `parseRehearsalConfig`; the forge.yaml parser reads two levels) through `io.rehearse` (host `sh -c`, captured output, configurable timeout) on the release-PR head. Unset: the step is skipped with no `gh` calls. A failure files one open `release-blocker` issue per head (dedup by the hidden `FORGE:RELEASE_BLOCKER head=<sha>` marker; a rerun comments) with the output tail and head SHA, and returns `{stopped:true}` so promotion is held and `--resume` retries; `blocking: false` only records. The result lands in `state.steps.rehearsal` and a `FORGE:REHEARSAL` section of the release PR body. Config: `docs/CONFIG.md` `release`.
+
 ## Entry 2026-11-08 — cancel confirms or reports each lane, releases its lease; dead-lease takeover; one batch per issue (#5241)
 
 `--cancel --stop-remote` no longer fires once and forgets. `orchestrate.mjs` `stop` records whether `stopLane` accepted the stop,
