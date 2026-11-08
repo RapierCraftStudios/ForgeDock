@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { reserveForBuild, sequenceBuildNote, revalidate } from "./seqreserve.mjs";
-import { sequenceCollisions, renumberLane } from "./sequence.mjs";
+import { sequenceCollisions, renumberLane, snapshotLane, verifyRenumber } from "./sequence.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { sequenceBuildRule } from "./prompts.mjs";
 
@@ -88,6 +88,15 @@ describe("versioned class collisions and renumber (#5235)", () => {
     assert.match(readFileSync(join(d, "src/version.ts"), "utf8"), /VERSION = 24/);
     assert.ok(existsSync(join(d, "db/0617_lane.sql")));
     assert.deepEqual(await sequenceCollisions({ git: gitIn(d), base: "main", versioned: VERSIONED }), []);
+  });
+  it("e2e: the hand-off gate (check, snapshot, renumber, verify) passes on the replay, so no needs-human", async () => {
+    const d = replay(), git = gitIn(d);
+    assert.ok((await sequenceCollisions({ git, base: "main", versioned: VERSIONED })).length >= 2);
+    const before = await snapshotLane({ git, base: "main" });
+    const r = await renumberLane({ git, base: "main", cwd: d, versioned: VERSIONED, reserve: null });
+    assert.ok(r.ok && r.moves.length >= 2, JSON.stringify(r));
+    const v = await verifyRenumber({ git, base: "main", before, moves: r.moves.filter((m) => !m.versioned), versioned: VERSIONED });
+    assert.ok(v.ok, JSON.stringify(v));
   });
   it("without versioned config nothing versioned is touched", async () => {
     const d = replay();

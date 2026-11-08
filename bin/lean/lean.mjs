@@ -2027,9 +2027,9 @@ export async function runCore(o) {
      * sees its tip. #4386: the engine renumbers first (no builder, no session); the builder only when that is unsupported.
      * `laneRef`: the pre-merge lane head after a base-sync took the base side of sequence-only conflicts.
      */
-    /** #5235: a renumber after a base-sync reruns the frozen validates (one fix round on failure, then an anomaly) before the merge. */
+    /** #5235: a renumber (hand-off or base-sync) reruns the frozen validates (one fix round on failure, then an anomaly) before the merge. */
     async function revalidateRenumbered(trigger) {
-      if (!String(trigger).startsWith("base-sync") || !io.runCommand || !frozen?.validate?.length) return;
+      if (!io.runCommand || !frozen?.validate?.length) return;
       const env = laneEnv();
       const runAll = () => revalidate({ validates: frozen.validate, runOne: async (v) => { const x = (await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r)) ?? {}; return { rc: x.rc, output: x.output }; } });
       let bad = await runAll();
