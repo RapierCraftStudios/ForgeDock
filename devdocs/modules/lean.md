@@ -2784,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 
 `resolveFindingLabel` (`findinglabel.mjs`) runs after `label("merged")` (not when kept open) and after an `invalid` close in `lean.mjs`: a `review-finding` issue goes `needs-validation` → `validated` (merged) or `false-positive` (INVALID) through `io.validateLabel` (`effects.mjs`, `transition-label.sh --validate`). Best effort: a failure is a `T.anomalies` entry. `scripts/backfill-finding-labels.mjs` applies the same mapping to old closed findings (`workflow:merged` → validated; `workflow:invalid` or not planned → false-positive); dry run unless `--apply`.
 
+## Entry 2026-11-08 — release rehearsal step (#5253)
+
+`release.mjs` runs `RELEASE_STEPS` preflight, release-pr, review, fixes, **rehearsal**, promotion, post-merge. `release-rehearsal.mjs` `rehearsalStep` runs forge.yaml `release.rehearsal_command` (flat keys `rehearsal_command`/`_timeout` seconds/`_blocking`, `parseRehearsalConfig`; the forge.yaml parser reads two levels) through `io.rehearse` (host `sh -c`, captured output, configurable timeout) on the release-PR head. Unset: the step is skipped with no `gh` calls. A failure files one open `release-blocker` issue per head (dedup by the hidden `FORGE:RELEASE_BLOCKER head=<sha>` marker; a rerun comments) with the output tail and head SHA, and returns `{stopped:true}` so promotion is held and `--resume` retries; `blocking: false` only records. The result lands in `state.steps.rehearsal` and a `FORGE:REHEARSAL` section of the release PR body. Config: `docs/CONFIG.md` `release`.
+
 ## Entry 2026-11-08 — cancel confirms or reports each lane, releases its lease; dead-lease takeover; one batch per issue (#5241)
 
 `--cancel --stop-remote` no longer fires once and forgets. `orchestrate.mjs` `stop` records whether `stopLane` accepted the stop,
