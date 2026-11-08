@@ -549,6 +549,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 
    Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
 
+   Project-dir paths (#5234): `poetry -C D run pytest D/x.py` / `uv run --project D pytest D/x.py` name repo-root paths that do not exist from `D` (pytest exit 4). `freezeRewrites` rewrites the single-segment, all-`D/`-prefixed case to `cd D && poetry run pytest x.py` (`rewriteProjectDirCommand`, logged in decisions); `validateContract` rejects any other (`projectDirPathMiss`). `UNRUNNABLE_RE` also matches pytest's `ERROR: file or directory not found`, and `unrunnableValidate(run, command)` treats pytest exit 4 or 5 of a pytest command as unrunnable whatever the output, so such a rerun is `contract.invalid_command` (not `conformance.unimplemented`) and a substitute-validate for it is judged ok.
+
 ## Host parallelism (#4182)
 
 Every runner call gets `FORGE_HOST_PARALLELISM` in its env, next to the
@@ -2781,6 +2783,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 ## Entry 2026-11-08 — doctor I4/I6 stop flagging lean lanes, lane PRs and dependency bots (#5255)
 
 `scripts/doctor-pipeline-state.sh` I4 counts `FORGE:BUILDER|CONTRACT|PLAN|WORK-ON` as builder evidence (lean lanes never write `FORGE:BUILDER`) and skips `workflow:building` issues updated within `--stuck-hours`, so a fresh lane is never CRITICAL. I6 fetches `author,headRefName` and skips PRs whose head is `feat|fix/issue-N-lean`, whose author is the pipeline app (`rapiercraft-forgedock`) or a dependency bot (`dependabot`, `renovate`); a hand-made PR with no `FORGE:` marker still warns. Output shape, exit codes and fail-open `add_skip` are unchanged. Tests: `bin/tests/doctor-pipeline-state.test.mjs` (fake `gh` on PATH).
+
+## Base red (#5239)
+
+`bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
 
 ## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
 
