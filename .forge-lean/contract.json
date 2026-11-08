@@ -1,0 +1,167 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "Repos declare a **pre-merge guard set** (`forge.yaml`, e.g. \"all `test_*guard*.py`, contract tests\"): fast static tests that apply to every change. Every lane runs them on the merged result before merging; failure blocks the merge.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "When a lane hits a base failure, attribute it to the commit that introduced it (here `13834f1c51` from #39805) and file or reopen against that issue automatically, instead of escalating the unrelated lane to needs-human.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "With a guard set configured, a lane whose change breaks a guard test cannot merge.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "A base failure is attributed to its introducing merge/issue, and the blocked lane is deferred behind the fix, not sent to needs-human.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/basered.mjs",
+   "change": "New pure module: classify failed guard commands as lane-own vs base-red from a base run; attribute base red to the introducing commit and issue number via git log on the failing test path and (#N)/Closes #N parsing.",
+   "requirements": [
+    "R2",
+    "R4"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/basered.test.mjs",
+   "change": "Unit tests for classify and attribute (lane-own, base-red, unattributable, issue parsing).",
+   "requirements": [
+    "R2",
+    "R4"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/lean.mjs",
+   "change": "In the precheck failure branch, after the fix round, run still-failing guard/invariant commands on base via io.preflightRun: base-red -> comment/reopen introducing issue and end deferred with base.red; lane-own -> block (ci.red). Rerun invariants on the base-synced merged tree before merge if not already done.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R4"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/verify.mjs",
+   "change": "Parse the guard blocking switch (verify.guard_block, default on when invariants is non-empty).",
+   "requirements": [
+    "R1",
+    "R3"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/engine/outcome-codes.mjs",
+   "change": "Add BASE_RED 'base.red' as a deferred (non-needs-human, non-breaker) outcome code.",
+   "requirements": [
+    "R4"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/engine-cli.mjs",
+   "change": "Pass the guard_block key through readVerify; map base.red to a deferred requeue.",
+   "requirements": [
+    "R1",
+    "R4"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "Lane tests: failing invariant blocks the merge; same failure on base defers with base.red, comments on the introducing issue and does not go needs-human.",
+   "requirements": [
+    "R3",
+    "R4"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/lean/verify.test.mjs",
+   "change": "Parse test for guard_block.",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "docs/CONFIG.md",
+   "change": "Document guard_block, invariants as the pre-merge guard set, and base.red.",
+   "requirements": [
+    "R1",
+    "R4"
+   ]
+  },
+  {
+   "id": "D10",
+   "path": "devdocs/modules/lean.md",
+   "change": "Document basered.mjs and the base.red flow.",
+   "requirements": [
+    "R4"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "verify.invariants semantics: never scoped away by the test map, deduped, budgeted (bin/lean/precheck.mjs:133-141)"
+  },
+  {
+   "id": "P2",
+   "what": "verify.precheck_block opt-in behaviour for non-invariant declared checks (bin/lean/lean.mjs:1933)"
+  },
+  {
+   "id": "P3",
+   "what": "Guard gate #4693/#4968 (bin/lean/guardgate.mjs) and conformance.guard_broken unchanged"
+  },
+  {
+   "id": "P4",
+   "what": "A repo with no invariants configured behaves exactly as before"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/basered.test.mjs bin/lean/verify.test.mjs bin/lean/precheck.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-name-pattern='base.red|guard' bin/lean/lean.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Reuse verify.invariants as the guard set instead of adding a parallel key",
+   "justification": "It already runs unscoped in every verify mode (bin/lean/precheck.mjs:129-141, docs/CONFIG.md:1005); the gap is blocking and base attribution, not declaration",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Deterministic attribution via git log + (#N) parsing, no LLM",
+   "justification": "NORTHSTAR non-negotiable 1 (deterministic first); commit subjects carry (#N) in this repo's history",
+   "source": "doc"
+  },
+  {
+   "id": "K3",
+   "choice": "Run the base comparison through the existing io.preflightRun seam",
+   "justification": "bin/lean/lean.mjs:1524-1560 already runs commands on a base worktree",
+   "source": "precedent"
+  }
+ ]
+}
