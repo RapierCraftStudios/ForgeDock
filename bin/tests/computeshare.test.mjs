@@ -571,13 +571,13 @@ test("#5205 router: a reported-limited account is skipped until its reset; all l
   const late = inS(7200), early = inS(1800);
   const { get, post, logs } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` }, 3: { validH: 6, live: `97 ${late} 0 ${inS(86400)} 0` } });
   assert.equal((await get()).body.token, "tok-1");
-  assert.equal((await post({ reset_at: inS(3600) }, "wrong")).status, 401);
-  const m = await post({ reset_at: inS(3600) });
+  assert.equal((await post({ reset_at: inS(3600), account: 1 }, "wrong")).status, 401);
+  const m = await post({ reset_at: inS(3600), account: 1 });
   assert.equal(m.status, 200);
   assert.equal(m.body.account, 1);
   assert.ok(logs.info.some((l) => /claude login limited: account=1 agent=a1/.test(l)));
   assert.equal((await get()).body.token, "tok-2", "the limited account is excluded");
-  await post({ reset_at: early });
+  await post({ reset_at: early, account: 2 });
   const r = await get();
   assert.equal(r.status, 429);
   assert.equal(r.body.code, "rate_limited");
@@ -585,11 +585,25 @@ test("#5205 router: a reported-limited account is skipped until its reset; all l
   assert.ok(!logs.info.concat(logs.warn).join("\n").includes("tok-"), "the token is never logged");
 });
 
+test("#5267 router: reset_at is clamped to 7 days; the reported account (not the agent's last) is limited; a missing or foreign account is refused", async () => {
+  const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await get()).body.account, 1);
+  assert.equal((await post({ reset_at: inS(3600) })).status, 400, "no account in the report");
+  assert.equal((await post({ reset_at: inS(3600), account: 2 })).status, 404, "account 2 was never handed to this agent");
+  const far = await post({ reset_at: inS(365 * 86400), account: 1 });
+  assert.equal(far.status, 200);
+  assert.ok(Date.parse(far.body.until) <= Date.now() + 7 * 86400000 + 60000, "clamped to now+7d");
+  assert.ok(Date.parse(far.body.until) > Date.now() + 6 * 86400000, "still a long exclusion");
+  assert.equal((await get()).body.account, 2, "account 1 is excluded");
+  const other = await post({ reset_at: inS(60), account: 1 }); // sandbox B reports account 1 although the agent last got 2
+  assert.equal(other.body.account, 1, "attributed to the reported account, not the last handed");
+});
+
 test("#5205 router: a limited report with no reset excludes the account for an hour", async () => {
   const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` } });
-  assert.equal((await post({})).status, 404, "no account handed to this agent yet");
+  assert.equal((await post({ account: 1 })).status, 404, "no account handed to this agent yet");
   await get();
-  const m = await post({ reset_at: null });
+  const m = await post({ reset_at: null, account: 1 });
   assert.ok(Math.abs(Date.parse(m.body.until) - (Date.now() + 3600000)) < 60000);
   assert.equal((await get()).status, 429);
 });
@@ -600,17 +614,18 @@ test("#5205 agent: the sandbox limited route drops the claude cache and forwards
   const rec = Object.values(agent.store.data.sandboxes ?? {}).find((x) => x.id === "cl1") ?? agent.store.data.sandboxes?.cl1;
   const calls = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init = {}) => { calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : null }); return new Response(JSON.stringify(String(url).endsWith("/limited") ? { account: 1, until: "2026-11-07T12:00:00.000Z" } : { token: `t${calls.length}` }), { status: 200 }); };
+  globalThis.fetch = async (url, init = {}) => { calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : null }); return new Response(JSON.stringify(String(url).endsWith("/limited") ? { account: 1, until: "2026-11-07T12:00:00.000Z" } : { token: `t${calls.length}`, account: 1 }), { status: 200 }); };
   const send = (req) => new Promise((resolve) => { agent.handle(req, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(String(b)) }); } }); });
   const getCred = () => send({ method: "GET", url: "/sandboxes/cl1/creds/claude", headers: { authorization: `Bearer ${rec.credToken}` }, socket: {} });
   try {
     assert.equal((await getCred()).body.token, "t1");
     assert.equal((await getCred()).body.token, "t1", "cached");
+    assert.equal((await getCred()).body.account, 1, "the sandbox learns its account");
     assert.equal((await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: "Bearer nope" }, { reset_at: 1 }))).status, 401);
-    const r = await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: `Bearer ${rec.credToken}` }, { reset_at: 1800000000 }));
+    const r = await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: `Bearer ${rec.credToken}` }, { reset_at: 1800000000, account: 1, extra: "dropped" }));
     assert.equal(r.status, 200);
     const fwd = calls.find((c) => c.url.endsWith("/agent/creds/claude/limited"));
-    assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000 }]);
+    assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000, account: 1 }]);
     assert.equal((await getCred()).body.token, "t3", "the cache was dropped: a fresh token");
   } finally { globalThis.fetch = realFetch; }
 });
