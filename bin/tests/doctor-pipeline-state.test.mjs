@@ -1,16 +1,16 @@
 // scripts/doctor-pipeline-state.sh I4/I6 (#5255): lean lanes and lane/bot PRs are not findings.
-import { describe, it, before, after } from "node:test";
+import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 
 const SCRIPT = resolve(import.meta.dirname, "../../scripts/doctor-pipeline-state.sh");
 let dir;
 
 before(() => {
-  dir = mkdtempSync(join(tmpdir(), "doctor-"));
+  dir = tmpDir("doctor-");
   // Fake gh: `issue list` -> GH_BUILDING for workflow:building else []; `issue view` -> GH_COMMENTS; `pr list` -> GH_PRS.
   writeFileSync(join(dir, "gh"), `#!/bin/bash
 args="$*"
@@ -24,7 +24,6 @@ esac
 `);
   chmodSync(join(dir, "gh"), 0o755);
 });
-after(() => rmSync(dir, { recursive: true, force: true }));
 
 const ago = (h) => new Date(Date.now() - h * 3600e3).toISOString();
 const run = (env) => {
