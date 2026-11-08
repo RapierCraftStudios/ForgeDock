@@ -627,6 +627,22 @@ describe("close plan and follow-up items", () => {
     assert.deepEqual(closePlan(d, { title, review: { requirements: [{ id: "R1", status: "implemented" }] } }).open.map((r) => r.id), ["R2"], "a missing row is not an answer");
     assert.equal(closePlan(d, { title, review: null }).reason, "completed", "a skipped review judges dispositions only");
   });
+  it("#5240 an unticked acceptance box with an undelivered or untracked requirement closes partial for any title", () => {
+    const issueText = "## Acceptance\n\n- [ ] Replaying the incident keeps the issue open with a partial outcome\n- [ ] The gate mode is recorded in the trajectory notes\n";
+    const reqs = [
+      { id: "R1", quote: "- [ ] Replaying the incident keeps the issue open with a partial outcome", disposition: "deliver" },
+      { id: "R2", quote: "- [ ] The gate mode is recorded in the trajectory notes", disposition: "defer", tracked: "#9" },
+    ];
+    const rows = (s1) => ({ requirements: [{ id: "R1", status: s1 }, { id: "R2", status: "deferred" }] });
+    const p = closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial"), issueText });
+    assert.equal(p.reason, "partial"); assert.equal(p.checklist, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R1"]); assert.deepEqual(p.unticked, ["Replaying the incident keeps the issue open with a partial outcome"]);
+    assert.deepEqual(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("implemented"), issueText }), { reason: "completed", tracked: ["#9"] });
+    const untracked = closePlan({ requirements: [reqs[0], { ...reqs[1], tracked: undefined }] }, { title: "fix: x", review: rows("implemented"), issueText });
+    assert.deepEqual(untracked.open.map((r) => r.id), ["R2"]);
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial") }).reason, "completed", "no issue text: unchanged");
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: null, issueText }).reason, "completed", "skipped review judges dispositions only");
+  });
   it("#4398 formatShadowSummary: shadow would-block and false-block shares, risk-enforced lanes; null without conformance rows", () => {
     assert.equal(formatShadowSummary([{ issue: 1 }]), null); assert.equal(formatShadowSummary(undefined), null);
     const rows = [{ conformance: { mode: "shadow", would: "conforms", risk: false } }, { conformance: { mode: "shadow", would: "nonconforming", risk: false } },

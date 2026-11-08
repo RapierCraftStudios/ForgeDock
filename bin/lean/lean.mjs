@@ -6,7 +6,7 @@
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
@@ -20,7 +20,7 @@ import { applyValidateRecipes, deferChecklessPostDeploy, reproEnvMiss, resolveFo
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
-import { readRollouts, detectNewOffKeys } from "./activation.mjs";
+import { readRollouts, detectNewOffKeys, rolloutModes } from "./activation.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -2675,8 +2675,13 @@ export async function runCore(o) {
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });
-    const closing = closePlan(effective, { title: iss.title, review });
-    if (closing.reason === "partial") { // #4398: an investigation whose question is not answered carries it forward
+    const closing = closePlan(effective, { title: iss.title, review, issueText });
+    // #5240: a delivered change behind a rollout that is not live (shadow/off) is inert in production: say so, never claim the outcome
+    const rcfg = readRollouts(wt);
+    const inert = (rcfg ? rolloutModes(rcfg, files, (f) => readFileSync(join(wt, f), "utf8")) : []).filter((m) => !m.live);
+    if (inert.length) T.decisions.push(`Inert in production: the change touches rollout ${inert.map((m) => `${m.flag} (mode ${m.mode})`).join(", ")}; the issue's production outcome is not claimed (#5240)`);
+    if (closing.checklist) T.decisions.push(`Unticked acceptance criteria unmet (${closing.open.map((r) => r.id).join(", ")}): issue left open as partial (#5240)`);
+    if (closing.reason === "partial" && !closing.checklist) { // #4398: an investigation whose question is not answered carries it forward
       const untracked = closing.open.filter((r) => !r.tracked);
       if (untracked.length) {
         const carried = untracked.map((r) => ({ ...r, disposition: "defer", class: "ops", why: "investigation question not answered" })); // #5207: the batch aggregate
@@ -3135,9 +3140,12 @@ export async function runCore(o) {
       }
     }
     const partial = closing.reason === "partial";
+    if (closing.checklist) keepOpen = true; // #5240: an unmet acceptance checkbox is not closed as completed
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
     if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
-    if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is
+    if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
+      try { await post("FORGE:TRACKED", `## Left open: partial\nMerged by PR #${pr}, but these acceptance criteria are not met by it:\n${closing.unticked.map((u) => `- [ ] ${u}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}${inert.length ? `\n\nInert in production: the change takes effect only behind ${inert.map((m) => `\`${m.flag}\` (mode: ${m.mode})`).join(", ")}; the production outcome is not claimed.` : ""}`); } catch { /* the PR body and FORGE:STATE carry them */ }
+    } else if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is
       if (partial || closing.tracked.length) try { await post("FORGE:TRACKED", `## Left open: follow-up pending\nMerged by PR #${pr}; the issue stays open until the pending follow-up is filed (FORGE:FOLLOWUP_PENDING).${partial ? " The investigation's stated question is not answered in this change." : ""}${closing.tracked.length ? ` Already tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body links them too */ }
     } else if (partial) {
       try { await post("FORGE:TRACKED", `## Closed as partial\nClosed as completed by PR #${pr}; the investigation's stated question is not answered in this change and is carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
