@@ -241,6 +241,9 @@ For each named volume found: determine its container mount point. Named volumes 
 **Severity**: HIGH — filesystem writes fail silently at runtime with `PermissionError`; no startup crash, so the failure only surfaces when the code path executes.
 **Evidence**: When a container's runtime user changes from root to a non-root UID, Docker named volumes retain their existing ownership (root:root). Any code path that writes to a path under a named volume mount point will fail with `[Errno 13] Permission denied`. The fix is to add `chown -R <user>:<group> <mount_point>` to the entrypoint script before the privilege-drop `exec` call. <!-- Added: forge#323 -->
 
+### Step 2.10: Production side effects × frequency
+If the diff adds or changes code that creates, mutates, deletes or sends production resources (accounts, payments, emails, DNS, side-effecting external calls) and it runs from a loop, cron, `schedule:`, probe/monitor or retry, state: (a) runs/day derived from the schedule; (b) downstream effects (metrics, emails, credits, billing); (c) idempotent or rate-bounded? Per-cycle or unbounded without explicit justification, or cleanup that leaves downstream effects: CONFIRMED HIGH, blocking.
+
 ## Step 3: Code Quality Scan
 1. **Error handling**: Exceptions swallowed silently, generic except clauses
 2. **Resource leaks**: Unclosed connections, files, async tasks not awaited
@@ -392,6 +395,7 @@ EOF
 | XSS | Step 2.6 | COVERED | |
 | Token privilege confusion | Step 2.7 | COVERED | |
 | Unbounded resource consumption | Step 2.8 | COVERED | |
+| Per-cycle production side effects | Step 2.10 | COVERED | #5238 |
 | API information disclosure | Step 2.9 (a/b/c) | COVERED | #302 |
 | Port bind address exposure | Step 2.5A | COVERED | #296 |
 | Missing container USER directive | Step 2.5B | COVERED | #296 |

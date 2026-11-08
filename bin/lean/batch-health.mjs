@@ -45,9 +45,10 @@ export function rootsOf(state) {
 
 /**
  * `{healthy, causes:[{code, issues, detail}], recovery:[cmd]}` for one batch state. `held`: operator-held issues (not a
- * stall); `refused`: a refusal record (the launch never started). Pure.
+ * stall); `refused`: a refusal record (the launch never started); `resolved` (#5243): issues already
+ * resolved on GitHub (merged by hand), counted as good ends. Pure.
  */
-export function evaluateHealth(state, { held = [], refused = null, config = DEFAULT_HEALTH, batchId = "<id>", repo = null } = {}) {
+export function evaluateHealth(state, { held = [], refused = null, config = DEFAULT_HEALTH, batchId = "<id>", repo = null, resolved = [] } = {}) {
   const causes = [], recovery = [];
   if (refused) {
     causes.push({ code: "refused", issues: refused.issues ?? [], detail: refused.message ?? "launch refused" });
@@ -61,7 +62,8 @@ export function evaluateHealth(state, { held = [], refused = null, config = DEFA
   const results = state?.results ?? {};
   const outcomeOf = (n) => results[n]?.outcome;
   // Terminal and not good: a final row not running and not waiting again (a held row stays pending but counts).
-  const bad = (n) => { const o = outcomeOf(n); return o !== undefined && !GOOD_END.has(o) && !running.has(n) && (!pending.has(n) || o === "held"); };
+  const done = new Set([...resolved].map(Number));
+  const bad = (n) => { const o = outcomeOf(n); return o !== undefined && !done.has(n) && !GOOD_END.has(o) && !running.has(n) && (!pending.has(n) || o === "held"); };
   const merged = order.filter((n) => outcomeOf(n) === "merged").length;
   const failedRoots = rootsOf(state).filter(bad);
   if (config.rootFailed && failedRoots.length) causes.push({ code: "root-failed", issues: failedRoots, detail: `root ${failedRoots.map((n) => `#${n} ${outcomeOf(n)}`).join(", ")}` });
@@ -109,14 +111,21 @@ export function scheduleLine(batchId, created, checksMin = DEFAULT_HEALTH.checks
  * One checkpoint: evaluate the batch, persist it, and call `alert(text, health)` on the first unhealthy result only.
  * @returns the evaluation, plus `alerted` when this call raised the alert
  */
-export async function runCheck({ batch, checkpoint, config = DEFAULT_HEALTH, repo = null, now = () => Date.now(), alert = async () => {} }) {
+export async function runCheck({ batch, checkpoint, config = DEFAULT_HEALTH, repo = null, now = () => Date.now(), alert = async () => {}, resolve = null }) {
   const state = batch.store.load() ?? {};
   let held = [];
   try { held = batch.readHeld?.() ?? []; } catch { held = []; }
-  const health = evaluateHealth(state, { held, config, batchId: batch.id, repo });
+  // #5243: the local rows are a cache; a failed row whose issue GitHub shows as merged by hand is resolved, not failed.
+  let resolved = [];
+  if (resolve) {
+    const res = state.results ?? {}, run = new Set(Object.keys(state.running ?? {}).map(Number));
+    const cand = (state.order ?? []).map(Number).filter((n) => res[n]?.outcome !== undefined && !GOOD_END.has(res[n].outcome) && !run.has(n)).map((n) => ({ issue: n, outcome: res[n].outcome }));
+    try { if (cand.length) resolved = (await resolve(cand) ?? []).map(Number); } catch { resolved = []; }
+  }
+  const health = evaluateHealth(state, { held, config, batchId: batch.id, repo, resolved });
   const prev = readHealth(batch.dir) ?? {};
   const at = new Date(now()).toISOString();
-  const next = { ...prev, checks: { ...(prev.checks ?? {}), [checkpoint]: at }, last: { at, checkpoint, healthy: health.healthy, causes: health.causes, recovery: health.recovery } };
+  const next = { ...prev, checks: { ...(prev.checks ?? {}), [checkpoint]: at }, last: { at, checkpoint, healthy: health.healthy, ...(resolved.length ? { resolved } : {}), causes: health.causes, recovery: health.recovery } };
   const fire = !health.healthy && !prev.alertedAt;
   if (fire) Object.assign(next, { alertedAt: at, alert: formatAlert({ batchId: batch.id, checkpoint, health }) });
   try { writeHealth(batch.dir, next); } catch { /* health is advisory */ }
@@ -215,5 +224,30 @@ export function statusLines(root, { now = Date.now(), batch = null } = {}) {
     } catch { /* an unreadable batch has no line */ }
   }
   for (const r of readRefusals(root, { now })) out.push(`  LAUNCH REFUSED ${r.at}: ${String(r.message ?? "").slice(0, 300)}`);
+  return out;
+}
+
+/**
+ * #5243: which `[{issue, outcome}]` rows GitHub shows as resolved: the issue is CLOSED with a MERGED closing PR, or a
+ * `needs-human` row whose label was removed with a `FORGE:DECISION` comment. Any read failure leaves the row unresolved.
+ * @returns issue numbers
+ */
+export async function resolvedOnGithub(cands, gh, repo) {
+  const out = [];
+  for (const { issue, outcome } of cands) {
+    try {
+      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,labels,comments,closedByPullRequestsReferences"]));
+      let ok = false;
+      if (String(v.state).toUpperCase() === "CLOSED") {
+        for (const ref of v.closedByPullRequestsReferences ?? []) {
+          const pr = JSON.parse(await gh(["pr", "view", String(ref.number), "-R", repo, "--json", "state"]));
+          if (String(pr.state).toUpperCase() === "MERGED") { ok = true; break; }
+        }
+      } else if (outcome === "needs-human") {
+        ok = !(v.labels ?? []).some((l) => l.name === "needs-human") && (v.comments ?? []).some((c) => /<!--\s*FORGE:DECISION/.test(c.body ?? ""));
+      }
+      if (ok) out.push(issue);
+    } catch { /* unresolved */ }
+  }
   return out;
 }
