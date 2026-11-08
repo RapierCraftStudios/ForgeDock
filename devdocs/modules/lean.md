@@ -549,6 +549,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 
    Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
 
+   Project-dir paths (#5234): `poetry -C D run pytest D/x.py` / `uv run --project D pytest D/x.py` name repo-root paths that do not exist from `D` (pytest exit 4). `freezeRewrites` rewrites the single-segment, all-`D/`-prefixed case to `cd D && poetry run pytest x.py` (`rewriteProjectDirCommand`, logged in decisions); `validateContract` rejects any other (`projectDirPathMiss`). `UNRUNNABLE_RE` also matches pytest's `ERROR: file or directory not found`, and `unrunnableValidate(run, command)` treats pytest exit 4 or 5 of a pytest command as unrunnable whatever the output, so such a rerun is `contract.invalid_command` (not `conformance.unimplemented`) and a substitute-validate for it is judged ok.
+
 ## Host parallelism (#4182)
 
 Every runner call gets `FORGE_HOST_PARALLELISM` in its env, next to the
@@ -2782,6 +2784,10 @@ A forge.yaml `experiment:` may carry `<arm>.<key>: <value>` overrides. The allow
 A batch run past its dispatch loop (probe/alert/report tail) still counts as hosted, so `add`/`requeue` answered `hosted:true` and nothing read the entry; `runBatch` then wrote `report.json` over it and `rehostLater` (#4917) skips reported batches, so the issue waited for a manual `--resume`. Now `runBatch` leaves no report while `unrunAdds()`/`unrunRequeues()` exist (unless cancelled), and the schedd (`rehostUnrun`, `schedd.mjs`) hosts `--resume` again once such a run ends, once per distinct set of unrun entries (no loop on a cancel or tripped breaker). The hosted line of `--add` says when the runner next passes.
 Cite: #5242, #5000, #4917.
 
+## Base red (#5239)
+
+`bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
+
 ## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
 
 `closePlan(contract, {title, review, issueText})` now also judges the issue's unticked `- [ ]` items for non-investigation
@@ -2794,3 +2800,5 @@ coverage); a skipped review judges dispositions only; investigations keep their 
 `rollouts.files`) that the changed files name; a non-live mode (shadow/off) adds a trajectory decision "Inert in
 production" and a line in the partial note, so the production outcome is never claimed. Intake triage of
 live-measurement issues is not part of this change.
+
+**Relaxation gate (#5237).** `relaxation.mjs` `analyzeRelaxations` reads `git diff -U0 base...HEAD` when the lane touches a declared `review.risk_paths` glob (`riskPathHits`; built-in risk words do not count). In non-test risk files it flags added accept/rescue/allow branches (`class: accept`) and removed deny lines (`deny_removed`), and counts negative assertions added in changed test files. `relaxationFailures` is a blocking `conformance.unimplemented` (kind `relaxation_untested`, passed to `precheck` as `relaxationFailures`) when the diff adds fewer negative assertions than relaxed files. The detection is syntactic and per file, not per semantic rescue class. A relaxation lane also gets a `<relaxation_checks>` block in the reviewer and verifier prompts (counterexamples, negative corpus), and the independent verifier (#4397) runs in enforce for it even with `review.verifier: off`, which is the second reviewer. Run log: `RELAXATION_DETECTED {files, count, negatives}`. No new forge.yaml key; 0 LLM calls for detection.

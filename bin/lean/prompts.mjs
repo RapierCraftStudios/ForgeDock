@@ -7,6 +7,7 @@ import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
+import { relaxationBlock } from "./relaxation.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
@@ -248,7 +249,7 @@ export function contextPackNote(pack) {
 /** #4857: validate-command rules for the plan prompt (the implement session resumes it), kept out of the shared templates (their token caps are guarded). */
 export function unrunnableValidateNote(testRunners = null) {
   const map = testRunners && typeof testRunners === "object" ? Object.entries(testRunners).map(([k, v]) => `${k}/ -> ${v}`).join("; ") : "";
-  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments. A post-deploy requirement needs a registered check id; one that is a manual or production-credential action with no runnable check is disposition "defer" with bucket "owner:<action>" only when it needs credentials, spend, an account, a third party or a customer; read-only prod data is "host". forge.yaml validate.recipes rewrite matching commands at freeze.`;
+  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd (never combine \`poetry -C <dir>\` or \`uv run --project <dir>\` with repo-root-relative paths: use \`cd <dir> && poetry run pytest <dir-relative paths>\`)${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments. A post-deploy requirement needs a registered check id; one that is a manual or production-credential action with no runnable check is disposition "defer" with bucket "owner:<action>" only when it needs credentials, spend, an account, a third party or a customer; read-only prod data is "host". forge.yaml validate.recipes rewrite matching commands at freeze.`;
 }
 
 export function reproPlanNote(on) {
@@ -476,12 +477,12 @@ export function domainChecksBlock(domains = []) {
   return `\n<domain_checks>\nThis diff touches these review domains. Report every finding below as a regressions row with path:line (it blocks the merge).\n${lines.join("\n")}\n</domain_checks>`;
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [] }) {
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [] }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}${relaxationBlock(relaxations)}`;
 }
 
 /**
