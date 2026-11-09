@@ -13,6 +13,9 @@ import { versionOf } from "./version.mjs";
 
 const run = promisify(execFile);
 
+/** #5274: an agent destroy (docker rm, volume rm, wipe) outlasts the 15s call default; DELETE would 502 while the destroy still succeeded. */
+const DESTROY_TIMEOUT_MS = 180000;
+
 /**
  * Router: the endpoint ForgeDock's remote provider talks to (POST /sandboxes, GET /sandboxes/:id[/logs|/result|/usage],
  * DELETE /sandboxes/:id). It places each sandbox on the enrolled agent with the most free reserved CPU, forwards every
@@ -211,13 +214,13 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return { status: 404, body: { error: "no warm sandbox ready" } };
   }
 
-  async function forward(id, method, path) {
+  async function forward(id, method, path, timeoutMs) {
     const s = own(sbx(), id);
     const a = s && own(agents(), s.agent);
     if (!a) return { status: 404, body: { state: "gone" } };
     s.touched = now(); store.save();
     try {
-      const r = await agentCall(a, method, path);
+      const r = await agentCall(a, method, path, undefined, timeoutMs);
       if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; relayQ.delete(id); store.save(); }
       return { status: r.status, body: agentBody(r, s.agent) };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
@@ -231,7 +234,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       if (!a) { delete sbx()[id]; continue; }
       try {
         if (now() - s.touched > abandonMs) {
-          const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`);
+          const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, undefined, DESTROY_TIMEOUT_MS);
           if (r.ok || r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
         } else {
           const r = await agentCall(a, "POST", `/sandboxes/${encodeURIComponent(id)}/lease`);
@@ -308,7 +311,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     })],
     [route("GET", "/sandboxes/:id/relay"), fd(async ({ id }) => ({ status: 200, body: { requests: [...(relayQ.get(id) ?? new Map())].filter(([, r]) => !r.done).map(([rid, r]) => ({ rid, argv: r.argv })) } }))],
     [route("POST", "/sandboxes/:id/relay/:rid"), fd(async (p, body) => relayAnswer(p, body))],
-    [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`))],
+    [route("POST", "/sandboxes/:id/stop"), fd(async ({ id }) => forward(id, "POST", `/sandboxes/${encodeURIComponent(id)}/stop`))], // #5274
+    [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, DESTROY_TIMEOUT_MS))],
     [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],

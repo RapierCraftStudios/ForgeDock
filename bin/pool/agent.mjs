@@ -397,6 +397,15 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
     [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
     [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
+    // #5274: SIGTERM the lane (PID 1) so its teardown checkpoints and reports deferred run.interrupted; the sandbox is kept, never destroyed.
+    [route("POST", "/sandboxes/:id/stop"), async ({ id }) => {
+      const r = own(id);
+      if (!r) return { status: 404, body: { state: "gone" } };
+      await refresh(r);
+      if (r.state === "exited") return { status: 200, body: { ok: true, state: "exited" } };
+      await docker.kill(r.name, "TERM");
+      return { status: 202, body: { ok: true, state: "stopping" } };
+    }],
     [route("GET", "/usage-history"), async () => {
       let rows = [];
       try { rows = readFileSync(join(stateDir, "usage-history.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }

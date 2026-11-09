@@ -17,6 +17,8 @@ function fakeDocker() {
     async run(args) { const name = args[args.indexOf("--name") + 1]; this.runs.push(args); containers.set(name, { running: true, exitCode: 0, startedAt: new Date().toISOString(), finishedAt: "" }); return "cid"; },
     async inspect(name) { return containers.get(name) ?? null; },
     async remove(name) { containers.delete(name); },
+    kills: [],
+    async kill(name, signal) { const c = containers.get(name); if (!c?.running) return false; this.kills.push([name, signal]); c.running = false; c.exitCode = 143; c.finishedAt = new Date().toISOString(); return true; },
     async listLabelled() { return [...containers.keys()]; },
     async wipe() {},
     volumes: new Set(),
@@ -628,4 +630,44 @@ test("#5205 agent: the sandbox limited route drops the claude cache and forwards
     assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000, account: 1 }]);
     assert.equal((await getCred()).body.token, "t3", "the cache was dropped: a fresh token");
   } finally { globalThis.fetch = realFetch; }
+});
+
+// #5274: POST /sandboxes/:id/stop signals the lane (teardown checkpoints) and keeps the sandbox; DELETE no longer 502s on a slow destroy.
+const httpCall = (target, method, url, token) => new Promise((resolve) => {
+  const req = { method, url, headers: { authorization: `Bearer ${token}` }, socket: {}, async *[Symbol.asyncIterator]() {} };
+  target.handle(req, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ status: this.s, body: b ? JSON.parse(b) : null }); } });
+});
+
+test("agent stop SIGTERMs a running lane and keeps the sandbox; unknown 404, exited 200 (#5274)", async () => {
+  const { agent, docker } = agentFixture();
+  await agent.launch({ spec: spec("s1"), cpus: 1, mem_gb: 1 });
+  const r = await httpCall(agent, "POST", "/sandboxes/s1/stop", "agent-token");
+  assert.equal(r.status, 202);
+  assert.deepEqual(docker.kills, [[safeName("s1"), "TERM"]]);
+  assert.ok(agent.store.data.sandboxes.s1, "stop must not destroy the sandbox");
+  assert.equal((await httpCall(agent, "POST", "/sandboxes/s1/stop", "agent-token")).status, 200);
+  assert.equal(docker.kills.length, 1);
+  assert.equal((await httpCall(agent, "POST", "/sandboxes/nope/stop", "agent-token")).status, 404);
+});
+
+test("router forwards stop to the owning agent without dropping the sandbox (#5274)", async () => {
+  const { router, calls } = routerFixture({ big: { cpus_free: 8, mem_free_gb: 16 } });
+  await router.launch(spec("s2"));
+  const r = await httpCall(router, "POST", "/sandboxes/s2/stop", "fd");
+  assert.equal(r.status, 200);
+  assert.ok(calls.includes("POST big/sandboxes/s2/stop"));
+  assert.ok(router.store.data.sandboxes.s2);
+});
+
+test("router DELETE of a live sandbox waits past the 15s default and returns 2xx (#5274)", async () => {
+  const { router, calls } = routerFixture({ big: { cpus_free: 8, mem_free_gb: 16 } });
+  await router.launch(spec("s3"));
+  const timeouts = [], orig = AbortSignal.timeout;
+  AbortSignal.timeout = (ms) => { timeouts.push(ms); return orig.call(AbortSignal, ms); };
+  let r;
+  try { r = await httpCall(router, "DELETE", "/sandboxes/s3", "fd"); } finally { AbortSignal.timeout = orig; }
+  assert.equal(r.status, 200);
+  assert.ok(calls.includes("DELETE big/sandboxes/s3"));
+  assert.ok(timeouts.length && timeouts.every((ms) => ms >= 120000), `destroy timeout must exceed docker rm + volume rm: ${timeouts}`);
+  assert.equal(router.store.data.sandboxes.s3, undefined);
 });
