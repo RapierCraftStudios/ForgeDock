@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
+import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
 function fakeDocker() {
@@ -670,4 +671,32 @@ test("router DELETE of a live sandbox waits past the 15s default and returns 2xx
   assert.ok(calls.includes("DELETE big/sandboxes/s3"));
   assert.ok(timeouts.length && timeouts.every((ms) => ms >= 120000), `destroy timeout must exceed docker rm + volume rm: ${timeouts}`);
   assert.equal(router.store.data.sandboxes.s3, undefined);
+});
+
+// #5274 integration: the real remote transport -> router -> agent chain (in-process HTTP bridge, fake docker) for `--cancel --stop-remote`.
+test("transport.stop through router and agent signals the lane; it exits interrupted with its checkpoint kept (#5274)", async () => {
+  const { agent, docker } = agentFixture();
+  const serve = (target) => (url, init) => new Promise((resolve) => {
+    const u = new URL(url), chunks = init.body ? [Buffer.from(init.body)] : [];
+    const req = { method: init.method, url: u.pathname + u.search, headers: Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])), socket: {}, async *[Symbol.asyncIterator]() { yield* chunks; } };
+    target.handle(req, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve(new Response(b || "{}", { status: this.s, headers: { "content-type": "application/json" } })); } });
+  });
+  // The router reaches the agent through the same bridge.
+  const bridged = createRouter({ state_dir: tmpDir("cs-router-i-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd", abandon_after_s: 1800 },
+    { fetchFn: serve(agent), now: () => Date.now(), log: quiet });
+  bridged.store.data.agents.a1 = { url: "http://a1:7711", token: "agent-token" };
+  const transport = httpTransport({ endpoint: "http://pool", token: "fd", fetchFn: serve(bridged) });
+
+  await transport.launch(spec("i1", { cpus: 1, mem_gb: 1 }));
+  assert.equal(await transport.status("i1"), "running");
+  assert.equal(await transport.stop("i1"), true, "pool must support stop, not 404/405");
+  assert.deepEqual(docker.kills, [[safeName("i1"), "TERM"]]);
+  // The lane's SIGTERM teardown writes its result and the container exits 143.
+  const sb = agent.store.data.sandboxes.i1;
+  mkdirSync(join(sb.dir, "result"), { recursive: true });
+  writeFileSync(join(sb.dir, "result", "1.json"), JSON.stringify({ outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" }));
+  assert.equal(await transport.status("i1"), "exited");
+  assert.deepEqual(await transport.result("i1"), { outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" });
+  assert.ok(agent.store.data.sandboxes.i1, "stop keeps the sandbox (checkpoint) until the dispatcher destroys it");
+  assert.equal(await transport.destroy("i1"), true);
 });
