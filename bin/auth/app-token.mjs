@@ -16,6 +16,8 @@ import { homedir } from "node:os";
 import { PIPELINE_PERMISSIONS, API, mintInstallationToken, findInstallation, buildAppManifest, convertManifestCode, receiveManifestCode } from "./app-manifest.mjs";
 
 export const REFRESH_BEFORE_MS = 10 * 60 * 1000;
+// Commands that run long enough to outlive an installation token (1h, adopted with as little as REFRESH_BEFORE_MS left): they start startAuthRefresh.
+export const AUTH_REFRESH_COMMANDS = new Set(["orchestrate", "schedd", "watch", "issue-watch", "prod-watch", "run-issue", "resume-stalled", "run", "bootstrap", "release"]);
 const UA = { "User-Agent": "forgedock", Accept: "application/json", "Content-Type": "application/json" };
 
 const homeDir = (env) => env.FORGE_HOME_DIR || join(homedir(), ".forge");
