@@ -44,7 +44,7 @@ describe("router", () => {
   });
 
   it("help lists the union of journey + engine commands — no phantom commands", () => {
-    const res = runCli(["help"], { home: tmpDir("fd-h-") });
+    const res = runCli(["help", "--all"], { home: tmpDir("fd-h-") });
     assert.equal(res.status, 0);
     // Journey/onboarding surface
     assert.match(res.stdout, /install/);
@@ -908,7 +908,7 @@ describe("version command / --version, -v flags (#1981)", () => {
   });
 
   it("help lists the version command and flag", () => {
-    const res = runCli(["help"], { home: tmpDir("fd-ver-help-") });
+    const res = runCli(["help", "--all"], { home: tmpDir("fd-ver-help-") });
     assert.equal(res.status, 0);
     assert.match(res.stdout, /npx forgedock version/);
     assert.match(res.stdout, /--version/);
