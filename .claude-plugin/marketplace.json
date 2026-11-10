@@ -19,7 +19,14 @@
       "repository": "https://github.com/RapierCraftStudios/ForgeDock",
       "license": "AGPL-3.0",
       "category": "dev-workflow",
-      "tags": ["ai-agents", "autonomous", "github", "pipeline", "code-review", "claude-code"]
+      "tags": [
+        "ai-agents",
+        "autonomous",
+        "github",
+        "pipeline",
+        "code-review",
+        "claude-code"
+      ]
     },
     {
       "name": "forgedock-splash",
