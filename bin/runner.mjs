@@ -1564,8 +1564,13 @@ export const CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024;
  */
 export const CLI_ARGV_PROMPT_MAX_BYTES_WIN32 = 16 * 1024;
 
-/** forge#4763: true when the prompt must go over stdin: prompt bytes plus the other argv bytes exceed the platform bound. */
+/**
+ * forge#4763: true when the prompt must go over stdin: prompt bytes plus the other argv bytes exceed the platform bound.
+ * Also when the prompt starts with `-` (e.g. a brief opening with `---` front matter): as an argv word the CLI would
+ * parse it as an option and exit 1 ("unknown option '---'").
+ */
 export function promptGoesViaStdin(prompt, otherArgs = [], platform = process.platform) {
+  if (/^\s*-/.test(String(prompt ?? ""))) return true;
   const max = platform === "win32" ? CLI_ARGV_PROMPT_MAX_BYTES_WIN32 : CLI_ARGV_PROMPT_MAX_BYTES;
   const rest = platform === "win32" ? otherArgs.reduce((n, a) => n + Buffer.byteLength(String(a), "utf-8") + 1, 0) : 0;
   return Buffer.byteLength(String(prompt ?? ""), "utf-8") + rest > max;
