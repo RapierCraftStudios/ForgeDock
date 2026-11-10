@@ -307,6 +307,7 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
     saveCache(repo, { ...emptyCache(), watermark: extend ? (pending.size > 0 ? scanResume() : cap(watermark)) : cache.watermark, coveredFrom: extend ? newFloor : cache.coveredFrom, items }, env);
   };
   try {
+    const t0 = now();
     const telemetry = [...await scanWindowComments(call, repo, crawlFrom, env, (p) => onProgress({ phase: "comments", done: p, total: null }))];
     // A telemetry run spans several comment parts and the window holds only the touched ones, so each such issue's full
     // comment list is re-read once (bounded pool) and replaces its records.
@@ -316,7 +317,8 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
     await pool(telemetry, concurrency, async (n) => {
       recordsOf.set(n, parseTelemetryComments(parsePages(await call(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])), env));
       fetched++;
-      onProgress({ phase: "telemetry", done: ++done, total: telemetry.length });
+      done++;
+      onProgress({ phase: "telemetry", done, total: telemetry.length, etaMs: done < telemetry.length ? Math.round(((now() - t0) / done) * (telemetry.length - done)) : 0 });
     });
     const listed = new Set();
     let processed = 0;

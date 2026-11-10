@@ -405,6 +405,25 @@ describe("cache", () => {
     assert.ok(events.some((e) => e.phase === "telemetry" && e.total === 2));
     assert.throws(() => readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
   });
+  it("--conformance-outcomes crawls only the joined PR and closing-issue numbers (#5363)", async () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      if (/issues\/\d+\/comments/.test(args.join(" "))) return "[]";
+      const m = /issues\/(\d+)$/.exec(args.join(" "));
+      return m ? JSON.stringify({ number: Number(m[1]), state: "closed", labels: [], created_at: ts(1), updated_at: ts(2) }) : "[]";
+    };
+    const input = { prs: [{ number: 9, closingIssues: [{ number: 3 }] }, { number: 4, closingIssues: [] }] };
+    await buildReport({ repo: "o/r", conformanceOutcomes: true, local: false, cache: false, minN: 10, since: "2026-10-01" },
+      { gh, env: ENV, releaseTimes: [], gatherConformanceOutcomes: async () => input, now: () => Date.UTC(2026, 10, 10), git: null });
+    const crawl = calls.filter((c) => /issues/.test(c));
+    assert.ok(crawl.length > 0 && crawl.every((c) => /issues\/(3|4|9)(\/comments)?$/.test(c)), crawl.join(","));
+  });
+  it("progress printer shows an ETA when one is known (#5363)", () => {
+    const out = [];
+    makeProgressPrinter((x) => out.push(x), () => 0)({ phase: "telemetry", done: 1, total: 4, etaMs: 3000 });
+    assert.match(out[0], /1\/4 \(eta 3s\)/);
+  });
   it("never skips an item updated mid-crawl (keyset crawl, not page-number pagination)", async () => {
     const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-midcrawl") };
     const ts = (n) => new Date(Date.UTC(2026, 9, 1) + n * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
