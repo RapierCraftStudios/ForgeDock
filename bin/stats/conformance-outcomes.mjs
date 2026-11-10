@@ -230,16 +230,23 @@ export function prsOfPage(data, repo) {
  * reverts and fixes inside the window are in the candidate set. Exactly one `gh api graphql` search call per page of 100 PRs.
  * GitHub search returns at most 1000 results: `capped` reports when that bound was hit.
  */
+const MIN_PAGE_SIZE = 25;
 export async function gatherConformanceOutcomes({ repo, gh, since = null, now = Date.now() }) {
   const from = (since ? new Date(ms(since) ?? now - DEFAULT_LOOKBACK_DAYS * DAY) : new Date(now - DEFAULT_LOOKBACK_DAYS * DAY)).toISOString().slice(0, 10);
   const q = `repo:${repo} is:pr is:merged merged:>=${from}`;
   const prs = [];
-  let after = null, calls = 0, capped = false;
+  let after = null, calls = 0, capped = false, size = PAGE_SIZE;
   for (;;) {
-    const args = ["api", "graphql", "-f", `query=${QUERY}`, "-f", `q=${q}`, "-F", `first=${PAGE_SIZE}`, ...(after ? ["-f", `after=${after}`] : [])];
-    calls++;
-    const raw = await gh(args);
-    const data = JSON.parse(String(raw ?? "").trim() || "{}");
+    let data;
+    for (;;) { // #5363: a 502/timeout retries the same cursor with half the page (100 -> 50 -> 25), then fails
+      const args = ["api", "graphql", "-f", `query=${QUERY}`, "-f", `q=${q}`, "-F", `first=${size}`, ...(after ? ["-f", `after=${after}`] : [])];
+      calls++;
+      try { data = JSON.parse(String(await gh(args) ?? "").trim() || "{}"); break; } catch (err) {
+        if (!/\b50[234]\b|bad gateway|timed? ?out|timeout|ETIMEDOUT/i.test(String(err?.message ?? err))) throw err;
+        if (size <= MIN_PAGE_SIZE) throw new Error(`GitHub keeps failing the PR search at first=${size} (${String(err?.message ?? err).split("\n")[0]}); retry with a narrower --since`);
+        size = Math.max(MIN_PAGE_SIZE, Math.floor(size / 2));
+      }
+    }
     if (Array.isArray(data.errors) && data.errors.length && !data.data) throw new Error(`GraphQL: ${data.errors.map((e) => e?.message).join("; ")}`);
     prs.push(...prsOfPage(data, repo));
     const pi = data?.data?.search?.pageInfo;

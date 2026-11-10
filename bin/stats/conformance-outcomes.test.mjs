@@ -179,6 +179,20 @@ describe("conformance outcomes: read only (#5210 R3)", () => {
       { gh: graphqlGh(0), env: {}, now: () => NOW, git: null, releaseTimes: [], onProgress: () => {} });
     assert.equal(r.query.conformance_outcomes.min_n, 3);
   });
+  it("a 502 at first=100 retries the same page smaller and completes (#5363)", async () => {
+    const calls = [];
+    const inner = graphqlGh(150, calls);
+    const gh = async (args) => {
+      if (args.includes("first=100")) throw new Error("gh: HTTP 502: Bad Gateway");
+      return inner(args);
+    };
+    const out = await gatherConformanceOutcomes({ repo: "o/r", gh, since: at(0), now: NOW });
+    assert.ok(out.prs.length > 0);
+    assert.ok(calls.some((a) => a.includes("first=50")));
+  });
+  it("a persistent 502 fails naming a narrower --since (#5363)", async () => {
+    await assert.rejects(gatherConformanceOutcomes({ repo: "o/r", gh: async () => { throw new Error("HTTP 502"); }, since: at(0), now: NOW }), /narrower --since/);
+  });
   it("flag parsing", () => {
     assert.equal(parseArgs(["--conformance-outcomes"]).conformanceOutcomes, true);
     assert.equal(parseArgs(["--conformance-outcomes", "--window-days", "14"]).windowDays, 14);

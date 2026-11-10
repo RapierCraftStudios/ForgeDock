@@ -419,6 +419,20 @@ describe("cache", () => {
     const crawl = calls.filter((c) => /issues/.test(c));
     assert.ok(crawl.length > 0 && crawl.every((c) => /issues\/(3|4|9)(\/comments)?$/.test(c)), crawl.join(","));
   });
+  it("budget: AlterLab-scale conformance crawl costs two calls per joined issue, no comments scan or listing (#5363, R1 instrumentation)", async () => {
+    let n = 0;
+    const gh = (args) => {
+      const a = args.join(" "); n++;
+      if (/issues\/\d+\/comments/.test(a)) return "[]";
+      const m = /issues\/(\d+)$/.exec(a);
+      if (m) return JSON.stringify({ number: Number(m[1]), state: "closed", labels: [], created_at: ts(1), updated_at: ts(2) });
+      throw new Error(`unexpected call: ${a}`);
+    };
+    const prs = Array.from({ length: 400 }, (_, i) => ({ number: 5000 + i, closingIssues: [{ number: 100 + i }] }));
+    await buildReport({ repo: "o/r", conformanceOutcomes: true, local: false, cache: false, minN: 10, since: "2026-10-01" },
+      { gh, env: ENV, releaseTimes: [], gatherConformanceOutcomes: async () => ({ prs }), now: () => Date.UTC(2026, 10, 10), git: null });
+    assert.ok(n <= 2 * 800, `calls ${n}`);
+  });
   it("progress printer shows an ETA when one is known (#5363)", () => {
     const out = [];
     makeProgressPrinter((x) => out.push(x), () => 0)({ phase: "telemetry", done: 1, total: 4, etaMs: 3000 });
