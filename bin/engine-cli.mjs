@@ -36,6 +36,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
@@ -916,10 +917,10 @@ export async function runFromCli(argv, deps = {}) {
   if (pathFlag && !ENGINE_PATHS.includes(pathFlag)) throw new Error(`--path must be one of ${ENGINE_PATHS.join("|")}`);
   const enginePath = pathFlag ?? readEnginePath() ?? "core";
   if (enginePath !== "full" && (retry || waitLease)) {
-    throw new Error("--retry and --wait-lease are not supported with the core path (a rerun resumes from the open PR or remote branch automatically); use --path full for them");
+    throw new Error(USER_ERRORS.retryUnsupported);
   }
   // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
-  if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
+  if (enginePath === "full" && !lane) throw new Error(USER_ERRORS.laneRequired);
   // #4298: recovery lanes (#4267) exist only on the core path; the legacy full path would silently ignore --recover.
   if (enginePath === "full" && argv.includes("--recover")) throw new Error("--recover is not supported with --path full (recovery lanes run on the core path only)");
   const io = deps.io ?? makeIo();
@@ -976,7 +977,7 @@ export async function runFromCli(argv, deps = {}) {
   if (enginePath !== "full") {
     // Core work-on (lean): one builder session, one reviewer, GitHub as the register.
     const leanRepo = logRepo;
-    if (!leanRepo) throw new Error("core path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+    if (!leanRepo) throw new Error(USER_ERRORS.noRepo);
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
     // #4121: a batch lane reports its result through --result-file (written atomically, also for a thrown run).
