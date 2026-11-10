@@ -119,8 +119,9 @@ describe("#4402 efficiencyMetrics", () => {
   });
   it("renders n/a, never NaN, for an empty cohort", () => {
     const lines = formatEfficiencyLines(efficiencyMetrics({}));
-    assert.equal(lines.length, 10);
+    assert.equal(lines.length, 11);
     assert.equal(lines[9], "implement wall p50 n/a, merge rate n/a, conformance pass n/a"); // #4491, appended
+    assert.equal(lines[10], "wait (non-model time): n/a"); // #5349
     assert.ok(!lines.some((l) => /NaN|undefined/.test(l)), lines.join("\n"));
     assert.match(lines[0], /^efficiency: merged 0, n\/a\/merge/);
     assert.equal(lines[6], "acceptance (7d after promotion): n/a");
@@ -374,5 +375,24 @@ describe("#5347 calls/turn alert", () => {
     assert.ok(!lines(2.1, 5).some((l) => l.startsWith("ALERT")));
     assert.ok(!lines(1.03, 1).some((l) => l.startsWith("ALERT")));
     assert.ok(!lines(null, 0).some((l) => l.startsWith("ALERT")));
+  });
+});
+
+describe("#5349 wait attribution in the efficiency report", () => {
+  const phases = { plan: { ms: 600000, model_ms: 200000, wait: { heavy_queue: 100000, command: 300000 } }, implement: { ms: 300000, model_ms: 300000 } };
+  const logs = new Map([[1, [start("2026-10-22T10:00:00Z"), term("merged", null, { phases })]], [2, [start("2026-10-22T11:00:00Z"), term("merged", null)]]]);
+  const row = (issue) => ({ row: { issue, outcome: "merged" }, settleAt: null });
+  it("sums non-model time by phase and cause over merged lanes that carry a breakdown", () => {
+    const m = efficiencyMetrics({ entries: [row(1), row(2)], logs });
+    assert.equal(m.wait.n, 1);
+    assert.deepEqual(m.wait.phases.plan.wait, { heavy_queue: 100000, command: 300000 });
+    const out = formatEfficiencyLines(m).filter((l) => /wait/.test(l));
+    assert.match(out[0], /wait \(non-model time, 1 merged lane\): 6\.7m of 15\.0m wall \(44%\); heavy_queue 1\.7m, command 5\.0m/);
+    assert.match(out[1], /wait plan: 6\.7m of 10\.0m \(heavy_queue 1\.7m, command 5\.0m\)/);
+  });
+  it("reports n/a for runs recorded before the breakdown existed", () => {
+    const m = efficiencyMetrics({ entries: [row(2)], logs });
+    assert.equal(m.wait.n, 0);
+    assert.ok(formatEfficiencyLines(m).includes("wait (non-model time): n/a"));
   });
 });
