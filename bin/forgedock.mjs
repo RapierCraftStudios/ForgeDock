@@ -89,6 +89,7 @@ import {
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
 import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
+import { applyAuthEnv, doctorAppAuth } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
   classifyCommandChanges,
@@ -3318,7 +3319,11 @@ async function doctor(fix = false) {
   // token) — this check exists so that state is surfaced instead of silent.
   // See docs/CONFIG.md "GitHub App Install" and forge#1890.
   const botTok = botTokenStatus(); // #4662: lifetime from the refresh stamp; no stamp means no refresher is installed
-  if (botTok.configured) {
+  const appAuth = await doctorAppAuth(); // #5301: broker/BYO App login: identity, source, rate limit
+  if (appAuth.configured) {
+    if (appAuth.status === "pass") pass("GitHub App / bot token", appAuth.detail);
+    else warn("GitHub App / bot token", appAuth.detail);
+  } else if (botTok.configured) {
     const min = (ms) => Math.round(ms / 60000);
     const detail = botTok.remainingMs != null ? `${min(botTok.remainingMs)} min left, refreshed ${min(botTok.ageMs)} min ago (${botTok.refreshedAt})` : botTok.reason;
     if (botTok.ok) pass("GitHub App / bot token", detail);
@@ -4007,12 +4012,14 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
 let exitCode = 0;
+// #5301: an App login puts a scoped installation token in this process's env (GH_TOKEN) for child gh calls; no login, no change.
+if (command !== "auth") await applyAuthEnv();
 switch (command) {
   case "install": {
     const c = ctx();
@@ -4454,6 +4461,11 @@ switch (command) {
   case "demo":
     await demo();
     break;
+  case "auth": {
+    const { authFromCli } = await import("./auth/app-token.mjs");
+    exitCode = await authFromCli(restArgs);
+    break;
+  }
   case "doctor":
     if (restArgs.includes("--lanes")) {
       // #4866: the lane preflight on demand: every check with pass/fail; exit 1 when any fails
