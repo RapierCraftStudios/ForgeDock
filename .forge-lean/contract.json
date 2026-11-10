@@ -1,0 +1,202 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "A stage file stamped for another issue is not posted; covered by a test that reproduces the stash-pop case.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "`git stash pop` in a lane worktree is denied with a message naming the alternative.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "Two sessions cannot commit to the same lane branch concurrently; covered by a test.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "No session starts in, or continues in, a deleted worktree.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "Over 7 days of AlterLab batches: zero FORGE:IMPLEMENTATION comments whose listed files are disjoint from the PR's files.",
+   "disposition": "post-deploy",
+   "why": "Measured over 7 days of production AlterLab batches after release; needs a registered post-deploy check.",
+   "bucket": "post-deploy",
+   "check": "implementation-comment-file-overlap"
+  },
+  {
+   "id": "R6",
+   "quote": "Stamp `.forge-lean/*` stage files with the issue number and contract hash; refuse to post a stage note whose stamp does not match the run, and re-read it after the builder's final turn.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Deny `git stash push|pop|apply|drop` in lane worktrees (list/show stay allowed), and tell the builder to use a WIP commit instead.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R8",
+   "quote": "One writer per lane branch: a fix-up session waits for, or is run inside, the active session.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R9",
+   "quote": "Remove a worktree only after its builder process group has exited.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/stagestamp.mjs",
+   "change": "new pure helpers: stamp line build/parse/verify (issue number + contractHash)",
+   "requirements": [
+    "R1",
+    "R6"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/stagestamp.test.mjs",
+   "change": "tests incl. stash-pop case: a stage file stamped for another issue is rejected and not posted",
+   "requirements": [
+    "R1",
+    "R6"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/lean.mjs",
+   "change": "wiring only (import+calls, hotspot: stay under +150 lines): readStage verifies stamp, re-read after builder final turn, branch lock around builder sessions, worktree-exists check before builder start/resume, teardown waits for builder pgid exit before worktree remove, lane env marker for the hook",
+   "requirements": [
+    "R1",
+    "R3",
+    "R4",
+    "R6",
+    "R8",
+    "R9"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/prompts.mjs",
+   "change": "builder prompt: write stamp header on stage files; use a WIP commit, never git stash",
+   "requirements": [
+    "R6",
+    "R7"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/hooks/pre-tool-use.mjs",
+   "change": "wiring only: deny git stash push|pop|apply|drop|save|clear in lane worktrees (list/show allowed), message names WIP commit",
+   "requirements": [
+    "R2",
+    "R7"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/tests/pre-tool-use.test.mjs",
+   "change": "tests: stash pop denied in lane worktree with alternative named; list/show allowed",
+   "requirements": [
+    "R2",
+    "R7"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/branchlock.mjs",
+   "change": "new per-branch writer lock in the shared git common dir (atomic create, pid liveness, stale takeover, wait/timeout)",
+   "requirements": [
+    "R3",
+    "R8"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/lean/branchlock.test.mjs",
+   "change": "tests: second acquirer cannot hold the same branch concurrently; released/stale lock can be taken",
+   "requirements": [
+    "R3",
+    "R8"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "tests: stamp mismatch not posted; teardown waits for builder exit; no builder start in a deleted worktree",
+   "requirements": [
+    "R1",
+    "R4",
+    "R9"
+   ]
+  },
+  {
+   "id": "D10",
+   "path": ".forge/post-deploy-checks.json",
+   "change": "register check implementation-comment-file-overlap (7d: no FORGE:IMPLEMENTATION comment whose listed files are disjoint from its PR's files)",
+   "requirements": [
+    "R5"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "Main-checkout stash deny and git list/show allowance in bin/hooks/pre-tool-use.mjs checkMainCheckoutMutation"
+  },
+  {
+   "id": "P2",
+   "what": "Existing stage note posting (investigation/implementation comments) for correctly stamped or legacy-unstamped-from-result.json fallback in bin/lean/lean.mjs STAGES"
+  },
+  {
+   "id": "P3",
+   "what": "Teardown checkpoint/salvage and ledger semantics (bin/lean/lean.mjs teardown, bin/lean/ledger.mjs)"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test --test-reporter=dot --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/stagestamp.test.mjs bin/lean/branchlock.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-reporter=dot --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/tests/pre-tool-use.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-reporter=dot --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/lean.test.mjs bin/lean/ledger.test.mjs bin/lean/execution.test.mjs"
+  },
+  {
+   "id": "V4",
+   "command": "node --test --test-reporter=dot --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch-health.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/ci-budget.test.mjs bin/lean/conformance.test.mjs bin/lean/conformance.e2e.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.e2e.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "New logic in new modules stagestamp.mjs and branchlock.mjs; lean.mjs and pre-tool-use.mjs get wiring only",
+   "justification": "Hotspot rule: lean.mjs 3283 lines, pre-tool-use.mjs 2079 lines (scripts/hotspots.sh); precedent quota.mjs in #5264",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Branch lock lives in the shared git common dir, not GitHub",
+   "justification": "Stash and worktrees are host-local; a git-common-dir file is atomic and visible to every worktree of the repo; lanelock.mjs:20 covers only cross-host lease",
+   "source": "precedent"
+  }
+ ]
+}
