@@ -68,7 +68,8 @@ import { applyArmOverrides } from "../experiment.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { readDecisionIndex, withDecisionRows, recordDecisions } from "./decisions.mjs";
-import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
+import { claimSurfaces, parseSharedSurfaces, generatorNote } from "./surfaces.mjs";
+import { parseContextPackConfig, resolveContextMode, parentOf, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
@@ -358,7 +359,14 @@ export async function runCore(o) {
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
   const ctxBase = parseContextPackConfig(o.contextPack ?? {});
   const ctxArm = contextArm({ mode: ctxBase.mode, repo, issue }); // #4444: ab picks a stable on|shadow arm per issue
-  const ctxCfg = { ...ctxBase, mode: ctxArm.mode };
+  let ctxCfg = { ...ctxBase, mode: ctxArm.mode }; // #5340: re-resolved once the issue is read (milestone/parent default)
+  let surfaceClaim = null; // #5340: the shared-surface slots held from contract freeze to teardown
+  const claimSurfaceSlots = async (frozen) => { // every path that settles `frozen` (light, fresh, recovered) calls this once; idempotent
+    const surfaces = parseSharedSurfaces(o.sharedSurfaces);
+    if (!surfaces.length || !io.sequenceLease || surfaceClaim || !frozen) return;
+    surfaceClaim = await claimSurfaces({ lease: io.sequenceLease, repo, issue, surfaces, paths: (frozen.deliverables ?? []).map((d) => d.path), maxWaitS: ciMaxMinutes * 60 }).catch(() => null);
+    if (surfaceClaim?.names.length) T.decisions.push(surfaceClaim.timedOut ? `Shared surface slot ${surfaceClaim.names.join(", ")} timed out (fail-open)` : `Shared surface slot held: ${surfaceClaim.names.join(", ")} (waited ${Math.round(surfaceClaim.waitMs / 1000)}s)`);
+  };
   const ctxAb = ctxArm.ab ? { context_ab: true } : {};
   if (ctxArm.ab) T.decisions.push(`Context pack A/B (#4444): arm ${ctxArm.mode}`);
   const exploreCfg = parseExploreConfig(o.explore ?? {}); // #4391
@@ -489,6 +497,9 @@ export async function runCore(o) {
     await flushInflight(); // #5334: a signal mid-attempt: the session's usage so far is recorded before RUN_TERMINAL
     try { seqLease?.release(); } catch { /* fail-open */ }
     seqLease = null;
+    try { surfaceClaim?.release(); } catch { /* fail-open */ }
+    surfaceClaim = null;
+    try { await io.sequenceLease?.undeclare?.({ repo, issue }); } catch { /* fail-open (#5340) */ }
     try { await io.sequenceLease?.unreserve?.({ repo, lane, issue }); } catch { /* fail-open (#4526) */ }
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
@@ -1455,6 +1466,7 @@ export async function runCore(o) {
     factsSeen = trustedComments.map((c) => c?.body);
     let issueText = textOf(iss, trustedComments);
     let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
+    { const m = resolveContextMode(o.contextPack, ctxCfg, { milestone, parent: parentOf(iss.body ?? "") }); if (m !== ctxCfg.mode) { ctxCfg = { ...ctxCfg, mode: m }; T.decisions.push(`Context pack (${m}): lane has a milestone or parent epic (#5340)`); } }
     ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
     /**
      * forge#4275: compile (or read from the cache) the context pack, log CONTEXT_PACK and post FORGE:CONTEXT. Off, no
@@ -1468,7 +1480,7 @@ export async function runCore(o) {
         // #4316: linked-issue states are part of the key; a failed lookup only drops them from it
         const links = await linkStateStamp({ gh: ghc, repo, issue, body: iss.body }).catch(() => "");
         const r = await contextPackFor({ cfg: ctxCfg, issue, repo, headSha, cacheDir: dir, fs: io.fs, stamp: { scope: scopeHash, attempts: priorAttempts(iss.body, trustedComments), links, pitfalls: pits.map((x) => x.sig) },
-          gather: () => io.contextFacts({ repo, issue, iss, comments: trustedComments, cwd: wt, checkout: cwd, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now(), pitfalls: pits }) });
+          gather: () => io.contextFacts({ milestone, repo, issue, iss, comments: trustedComments, cwd: wt, checkout: cwd, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now(), pitfalls: pits }) });
         const p = r.pack;
         const inPack = Array.isArray(p.pitfalls) ? p.pitfalls : [];
         pitMatched = inPack.filter((x) => x.match === "files").length;
@@ -1807,6 +1819,7 @@ export async function runCore(o) {
           let body = renderContract(frozen, hash, { scope: scopeHash });
           if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
+          await claimSurfaceSlots(frozen);
           ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
           await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
           ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro, cost_usd: usage.cost_usd });
@@ -1927,7 +1940,8 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
+      await claimSurfaceSlots(frozen); // #5340: the full and recovered paths reach the builder here with the contract settled
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
       stage = "implement"; phaseLedger.enter("implement");
       if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
@@ -3164,7 +3178,7 @@ export async function runCore(o) {
         }
         if (seqLease) {
           try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
-          const late = (await io.sequenceCheck({ cwd: wt, base }).catch(() => null)) ?? [];
+          const late = (await io.sequenceCheck({ cwd: wt, base, extraBases: defaults.filter((d) => d && `origin/${d}` !== base).map((d) => `origin/${d}`) }).catch(() => null)) ?? [];
           if (late.length) {
             ev({ event: "SEQUENCE_LATE_BIND", pr, files: late.map((c) => c.lane) });
             const r = await baseSync("merge gate: sequence number taken"); if (r) return r;

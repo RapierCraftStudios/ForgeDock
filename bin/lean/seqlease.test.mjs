@@ -55,6 +55,21 @@ describe("sequence lease (#4386)", () => {
   });
 });
 
+describe("#5340 surface declarations", () => {
+  it("declare/declared/undeclare per repo, dead holders dropped, never throws", async () => {
+    const dead = new Set();
+    const io = makeSequenceLeaseIo({ dir: tmpDir("seqlease-"), declDir: tmpDir("decl-"), pollMs: 20, alive: (pid) => !dead.has(pid) });
+    await io.declare({ repo: "o/r", issue: 1, surfaces: ["api"], paths: ["api/a.ts"], pid: 11 });
+    await io.declare({ repo: "o/r", issue: 2, surfaces: ["api"], paths: ["api/b.ts"], pid: 12 });
+    await io.declare({ repo: "o/x", issue: 3, surfaces: ["api"], pid: 13 });
+    assert.deepEqual((await io.declared({ repo: "o/r", except: 2 })).map((d) => d.issue), [1]);
+    dead.add(11);
+    assert.deepEqual((await io.declared({ repo: "o/r" })).map((d) => d.issue), [2]);
+    await io.undeclare({ repo: "o/r", issue: 2 });
+    assert.deepEqual(await io.declared({ repo: "o/r" }), []);
+  });
+});
+
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
 const gitIn = (cwd) => async (a) => sh(cwd, ...a);
