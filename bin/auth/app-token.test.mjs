@@ -167,3 +167,66 @@ test("BYO manifest state is 32 hex chars from crypto, not Math.random", () => {
   assert.match(src, /randomBytes\(16\)\.toString\("hex"\)/);
   assert.ok(!/Math\.random/.test(src));
 });
+
+// #5392: a child process (auto-spawned schedd) inherits the App GH_TOKEN plus its fingerprint marker and must keep refreshing it.
+const CHILD = `
+import { applyAuthEnv, startAuthRefresh } from ${JSON.stringify(new URL("./app-token.mjs", import.meta.url).href)};
+const NOW = ${NOW};
+const iso = (ms) => new Date(NOW + ms).toISOString();
+const env = process.env;
+const out = { before: env.GH_TOKEN };
+const r = await applyAuthEnv({ env, now: NOW, fetch: async () => { throw new Error("no network"); }, warn: (m) => { out.warning = m; } });
+out.source = r.source; out.operator = Boolean(r.operator); out.afterApply = env.GH_TOKEN ?? null; out.fp = env.FORGEDOCK_APP_TOKEN_FP ?? null;
+let clock = NOW; const timers = [];
+const fetch = async () => ({ ok: true, status: 200, json: async () => ({ token: "ghs_FRESH", expires_at: iso(2 * 3600000) }) });
+const stop = startAuthRefresh({ env, now: () => clock, fetch, setTimer: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; }, clearTimer: () => {} });
+out.timers = timers.length;
+if (timers.length) { clock = NOW + 31 * 60000; await timers[0].fn(); }
+out.afterRefresh = env.GH_TOKEN ?? null;
+stop();
+process.stdout.write(JSON.stringify(out));
+`;
+async function runChild(childEnv) {
+  const { execFileSync } = await import("node:child_process");
+  const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "GH_TOKEN" && k !== "FORGEDOCK_APP_TOKEN_FP" && k !== "FORGEDOCK_NO_APP_AUTH"));
+  return JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", CHILD], { env: { ...base, ...childEnv }, encoding: "utf8" }));
+}
+
+test("an inherited App token (child process, e.g. auto-spawned schedd) is adopted and refreshed, not treated as operator-owned", async () => {
+  const env = mkEnv();
+  writeState(brokerState({ token: "ghs_OLD", expiresAt: iso(30 * 60000) }), env);
+  await applyAuthEnv({ env, now: NOW, fetch: () => assert.fail("no network") });
+  assert.equal(env.GH_TOKEN, "ghs_OLD");
+  assert.match(env.FORGEDOCK_APP_TOKEN_FP, /^[0-9a-f]{16}$/);
+  assert.notEqual(env.FORGEDOCK_APP_TOKEN_FP, "ghs_OLD");
+  const out = await runChild({ ...env }); // what schedd.mjs defaultSpawn hands the daemon: the parent's env
+  assert.equal(out.operator, false);
+  assert.equal(out.source, "broker");
+  assert.equal(out.afterApply, "ghs_OLD");
+  assert.equal(out.timers, 1);
+  assert.equal(out.afterRefresh, "ghs_FRESH");
+});
+
+test("a GH_TOKEN exported over the App token (fingerprint mismatch) is still never overridden in a child", async () => {
+  const env = mkEnv();
+  writeState(brokerState({ token: "ghs_OLD", expiresAt: iso(30 * 60000) }), env);
+  await applyAuthEnv({ env, now: NOW, fetch: () => assert.fail("no network") });
+  const out = await runChild({ ...env, GH_TOKEN: "operator" });
+  assert.equal(out.operator, true);
+  assert.equal(out.afterApply, "operator");
+  assert.equal(out.timers, 0);
+  assert.equal(out.afterRefresh, "operator");
+});
+
+test("an inherited App token whose login was removed is dropped with its marker (falls back to own gh auth)", async () => {
+  const env = mkEnv();
+  writeState(brokerState({ token: "ghs_OLD", expiresAt: iso(30 * 60000) }), env);
+  await applyAuthEnv({ env, now: NOW, fetch: () => assert.fail("no network") });
+  clearState(env);
+  const out = await runChild({ ...env });
+  assert.equal(out.operator, false);
+  assert.equal(out.source, "personal");
+  assert.equal(out.afterApply, null);
+  assert.equal(out.fp, null);
+  assert.equal(out.timers, 0);
+});
