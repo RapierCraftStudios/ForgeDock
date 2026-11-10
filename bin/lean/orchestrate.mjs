@@ -121,7 +121,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
-import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
@@ -387,6 +387,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
     if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
+    if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
     { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
       const lk = lackedTools(remote.contractOf?.(n), remote.lacks);
       if (lk.tools.length) return { where: "local", reason: `host tool: sandbox lacks ${lk.tools.join(", ")}` };
@@ -929,7 +931,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         classUsed.set(`${n}:${cls}`, attempt);
         // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
         recoveries.set(n, (recoveries.get(n) ?? 0) + 1); recovering.set(n, { code, attempt, max, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
-          detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
+          detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.placement?.where ? { where: row.placement.where } : {}), ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
         decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${max}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });

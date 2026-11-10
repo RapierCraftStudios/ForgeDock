@@ -730,6 +730,24 @@ const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportErro
 const NODE_MISSING_RE = /Cannot find (?:module|package) '([^']+)'/;
 const POETRY_NOT_FOUND_RE = /^\s*Command not found: (\S+)/m;
 const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /([^\s:'"`]+): not found\b/;
+// #5371: exit-1 failures that are the executor's environment (no Docker daemon, a bind-mount source that is absent where the step runs,
+// no Playwright browser, no network for npm), never a failing assertion of the change
+const ENV_SIGNATURES = [
+  [/Cannot connect to the Docker daemon|docker\.sock|error during connect|Is the docker daemon running/i, "Docker daemon"],
+  [/invalid mount config for type "bind"|bind source path does not exist|error while creating mount source path|mounts denied/i, "Docker bind-mount source"],
+  [/Executable doesn't exist at|npx playwright install|browserType\.launch: Executable/i, "Playwright browser"],
+  [/\bENOTFOUND\b|\bEAI_AGAIN\b|npm (?:ERR!|error) network|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)/i, "network access for npm"],
+];
+const envSignature = (out) => { const hit = ENV_SIGNATURES.find(([re]) => re.test(out)); return hit ? { tool: hit[1], kind: "environment" } : null; };
+const SECRET_PAIR_RE = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)\S+/gi;
+const SECRET_SHAPE_RE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b|Bearer\s+[A-Za-z0-9._~+/=-]{12,}/g;
+/** #5371: the last `lines` lines of a command's output with secret-looking values redacted, as an indented block for a failure detail ("" when empty). */
+export function outputTail(output, lines = 40) {
+  const t = String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());
+  while (t.length && !t[t.length - 1]) t.pop();
+  const tail = t.slice(-lines).join("\n").replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]").slice(-4000);
+  return tail ? `\n  output tail (last ${Math.min(lines, t.length)} lines):\n${tail.split("\n").map((l) => `    ${l}`).join("\n")}` : "";
+}
 /** #4857: why a command is not valid bash (`bash -n`), or null when it parses (or bash is unavailable). Catches prose left on a command. */
 export function shellSyntaxError(command) {
   const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
@@ -891,7 +909,7 @@ export function resolveForgedockPaths(command, { exists = () => true, checksCli,
     return here && !exists(tok) ? here : tok;
   });
 }
-const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
+const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
  * (or rc 127), python "No module named x" (top-level package), node "Cannot find module|package 'x'" (bare specifiers only).
@@ -914,7 +932,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const po = POETRY_NOT_FOUND_RE.exec(out)?.[1]; // #5020: `poetry run pytest` in an env that was never installed
   if (po) return local(po) ? null : { tool: po, kind: "command" };
   const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? String(command).trim().split(/\s+/)[0] : null);
-  if (!cmd || cmd.includes("/") || local(cmd)) return null;
+  if (!cmd || cmd.includes("/") || local(cmd)) return envSignature(out); // #5371
   return { tool: cmd, kind: "command" };
 }
 
@@ -966,7 +984,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
       const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
-      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check` }); continue; }
+      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -987,9 +1005,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) { ciCovered.push(v.id); continue; }
-      if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
+      if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
