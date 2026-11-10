@@ -9,7 +9,7 @@ The branch already carried the full implementation; this session re-verified it 
 
 ### Acceptance Criteria Status
 - R1 ✅ bin/stats/card.mjs:17-40
-- R1b ⏸ deferred (PNG), documented docs/STATS.md
+- R1b ❌ PNG not delivered; typed defer amendment in result.json (rasterizer dependency needed); SVG+Markdown ship, documented in docs/STATS.md
 - R2 ✅ card.mjs:30-34, card.test.mjs:35-57
 - R3 ✅ card.mjs:38, card.test.mjs:45
 - R4 ✅ index.mjs runStats card branch; card.test.mjs:65
