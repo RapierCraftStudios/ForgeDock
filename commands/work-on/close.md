@@ -859,7 +859,7 @@ OPEN_SUBS=${OPEN_SUBS:-0}
 
 If `OPEN_SUBS == 0` (all sub-issues done), branch on the parent's `state` <!-- Added: forge#3736 -->. An OPEN parent is closed and transitioned to `merged` with the same tiered dispatch and FULL remove list as C2. A CLOSED parent (closed at decomposition by `decomposition.close_parent`) is never closed a second time and never reopened: post the completion comment (once) and set `merged`:
 ```bash
-# forge#5336: an epic closes only when its journeys are green; post-deploy journeys keep it open and labelled.
+# forge#5336: an epic closes only when its journeys are green; post-deploy journeys keep it open and labelled. Requirements transferred from lanes (#5339) count too.
 if [ "$OPEN_SUBS" -eq 0 ] && gh issue view "$PARENT_REF" {GH_FLAG} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx epic; then
   _MS=$(gh issue view "$PARENT_REF" {GH_FLAG} --json milestone --jq '.milestone.title // empty' 2>/dev/null)
   if [ -n "$_MS" ] && ! npx forgedock acceptance gate --milestone "$_MS" --stage close --repo "{GH_REPO}"; then
