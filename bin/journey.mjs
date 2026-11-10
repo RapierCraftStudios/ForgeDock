@@ -3056,6 +3056,27 @@ export async function maybeOfferDemo(ctx) {
   }
 }
 
+/**
+ * #5290: offer the guided first run (propose small issues on this repo, run one to a PR). Default no; skipped
+ * without a TTY or with --fast. Best-effort: never fails the install.
+ */
+export async function maybeOfferFirstRun(ctx) {
+  const isTTY = ctx.isTTY ?? process.stdin.isTTY === true;
+  if (!isTTY || ctx.argv.includes("--fast")) return { offered: false };
+  try {
+    if (!(await ctx.confirmFn("Find 3 small issues in this repo and run one to a PR now?", false))) {
+      ctx.stdout.write("  " + dimLine(ctx, "Skipped, try it anytime: npx forgedock first-run") + "\n");
+      return { offered: true, ran: false };
+    }
+    const runFirstRunFn = ctx.runFirstRunFn ?? (async (o) => (await import("./first-run.mjs")).runFirstRun(o));
+    const { runFromCli } = await import("./engine-cli.mjs");
+    await runFirstRunFn({ cwd: ctx.cwd, exec: ctx.exec, confirmFn: ctx.confirmFn, runIssueFn: (n) => runFromCli([String(n)]), startedMs: ctx.startedAt });
+    return { offered: true, ran: true };
+  } catch {
+    return { offered: true, ran: false };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The full journey (Task 8)
 // ---------------------------------------------------------------------------
@@ -3102,6 +3123,7 @@ export async function runJourney(ctx) {
     celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
     await writeInstallReceipt(ctx, { forged });
     if (!reviewed.aborted) await maybeOfferDemo(ctx);
+    if (!reviewed.aborted) await maybeOfferFirstRun(ctx);
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);

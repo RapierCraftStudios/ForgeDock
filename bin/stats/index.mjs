@@ -22,6 +22,7 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
+import { firstMergeReport, gatherFirstRunIssues, renderFirstMerge } from "./firstmerge.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
@@ -35,6 +36,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --first-merge [--repo <owner/repo>] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --conformance-outcomes [--repo <owner/repo>] [--since <date>] [--window-days 7] [--min-n 20] [--json]
@@ -95,6 +97,7 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
   --offline             skip the GitHub crawl for merged issues (issue quality and acceptance print n/a)
 
 Self-filed issues (#5207; GitHub issues only):
+  --first-merge         setup start to first merged PR on a first-run repo, against the 15 min target (#5290)
   --self-filed          share of new issues the pipeline filed itself, by kind (follow-up, review-finding, staging-review,
                         rollup), against the 15% target; --since <date> bounds the window (default: the last 30 days)
 
@@ -135,7 +138,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -156,6 +159,7 @@ export function parseArgs(argv) {
     else if (name === "--tiers") o.tiers = true;
     else if (name === "--compounding") o.compounding = true;
     else if (name === "--self-filed") o.selfFiled = true;
+    else if (name === "--first-merge") o.firstMerge = true;
     else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
@@ -306,6 +310,10 @@ export function readAlertConfig(cwd = process.cwd()) {
 export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
   const repo = opts.repo;
+  if (opts.firstMerge) { // #5290: GitHub issues + closing PRs only
+    const issues = await gatherFirstRunIssues({ gh: deps.gh ?? defaultGh, repo });
+    return { repo, query: { first_merge: firstMergeReport({ issues, repo }) } };
+  }
   if (opts.selfFiled) { // #5207: GitHub issues only, no telemetry crawl
     const p = parseSince(opts.since);
     if (p.sinceVersion) throw new Error("--self-filed: --since must be a date (YYYY-MM-DD)");
@@ -427,6 +435,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.conformance_outcomes && !opts.json) { process.stdout.write(`${renderConformanceOutcomes(report.query.conformance_outcomes)}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
+    if (report.query?.first_merge && !opts.json) { process.stdout.write(`${renderFirstMerge(report.query.first_merge)}\n`); return 0; }
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
