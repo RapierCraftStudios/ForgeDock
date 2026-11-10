@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
+import { requiredChecksFor } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
@@ -140,7 +141,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, extraRequiredChecks: Array.isArray(cfg.gate?.required_checks) ? cfg.gate.required_checks.map((x) => String(x).trim()).filter(Boolean) : [], sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -489,9 +490,24 @@ export const CI_EXCLUDED_CHECKS = ["forgedock/verify", "forge/deploy-gate", "Che
 
 const parseChecks = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
 
+const isRed = (k) => k?.bucket === "fail" || k?.bucket === "cancel";
+
+/**
+ * Red checks outside CI_EXCLUDED_CHECKS, split by whether they block. With a non-empty `required` set (branch protection,
+ * rulesets and forge.yaml gate.required_checks) only required red checks block and the rest are warnings. An empty set
+ * (no protection, or a failed read: indistinguishable) keeps every red check blocking (fail closed).
+ */
+export function classifyChecks(checks, required = []) {
+  const red = checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && isRed(k));
+  const req = new Set(required);
+  if (!req.size) return { blocking: red.length, warnings: [] };
+  const hit = red.filter((k) => req.has(k.name));
+  return { blocking: hit.length, warnings: [...new Set(red.filter((k) => !req.has(k.name)).map((k) => String(k.name)))] };
+}
+
 /** Failing (fail/cancel) checks outside CI_EXCLUDED_CHECKS. */
 export function countFailingChecks(checks) {
-  return checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && (k?.bucket === "fail" || k?.bucket === "cancel")).length;
+  return classifyChecks(checks).blocking;
 }
 
 /** Phase 8 verdict from the deterministic inputs (CI, test gate, CONFIRMED CRITICAL/HIGH). */
@@ -516,7 +532,11 @@ async function summary(a, io) {
   let ciFailing = 1;
   const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket"], { env, cwd: io.cwd });
   const checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
-  if (checks) ciFailing = countFailingChecks(checks);
+  let warnings = [];
+  if (checks) {
+    const required = [...new Set([...(await requiredChecksFor({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch })), ...c.extraRequiredChecks])];
+    ({ blocking: ciFailing, warnings } = classifyChecks(checks, required));
+  }
 
   const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
   const pass = v.verdict === "APPROVE FOR DEPLOY";
@@ -542,7 +562,7 @@ async function summary(a, io) {
     "### Risk Matrix",
     "| Domain | Result | Notes |",
     "|--------|--------|-------|",
-    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded |`,
+    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded${warnings.length ? `; ${warnings.length} non-required check(s) red, non-blocking warning: ${warnings.join(", ")}` : ""} |`,
     `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
     "",
@@ -570,8 +590,8 @@ async function summary(a, io) {
   } catch (e) {
     throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not post the Phase 8 summary and gate marker (${e.message})`, BLOCK_DEPLOY]);
   }
-  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, testGate: tg.verdict, filed: a.filed }));
-  else io.out([`VERDICT: ${v.verdict} (${v.why})`, `GATE: ${marker} posted on PR #${pr}`, ...(pass ? [] : [BLOCK_DEPLOY])].join("\n"));
+  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, warnings, testGate: tg.verdict, filed: a.filed }));
+  else io.out([`VERDICT: ${v.verdict} (${v.why})`, ...(warnings.length ? [`WARNING: ${warnings.length} non-required check(s) red, non-blocking: ${warnings.join(", ")}`] : []), `GATE: ${marker} posted on PR #${pr}`, ...(pass ? [] : [BLOCK_DEPLOY])].join("\n"));
   return pass ? 0 : 1;
 }
 

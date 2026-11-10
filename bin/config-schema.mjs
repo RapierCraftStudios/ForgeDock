@@ -11,7 +11,7 @@ export const TOP_LEVEL = [
   "hygiene", "pipeline", "execution", "engine", "prod_watch", "selftest", "release", "issue_watch", "followups", "rollouts",
   "post_deploy", "events", "lean", "stats", "verify", "ci", "env", "build", "decomposition", "services", "review", "devdocs",
   "verification", "billing", "adaptive_scripts", "branding", "marketing", "acceptance_probe", "attribution", "autopilot",
-  "deploy", "experiment", "learned", "maintenance", "milestones", "pattern_feeds", "topology", "validate",
+  "deploy", "gate", "experiment", "learned", "maintenance", "milestones", "pattern_feeds", "topology", "validate",
 ];
 
 /** Sections whose direct children are a closed set: another child is an unknown key. */
