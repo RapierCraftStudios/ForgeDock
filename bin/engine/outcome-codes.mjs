@@ -68,6 +68,7 @@ export const OUTCOME_CODES = Object.freeze({
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
+  DESIGN_INVALIDATED: "design.invalidated", // forge#5342: a lane found the plan wrong; one spike amendment filed, siblings held; the rework-share rollup counts it
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   DEPENDENCY_BLOCKED: "dependency.blocked",
   // Lane resolution refusals (#4125): before any lease, comment or worktree; terminal reason `lane-refused`.

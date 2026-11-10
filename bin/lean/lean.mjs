@@ -1104,7 +1104,7 @@ export async function runCore(o) {
       T.decisions.push(`Builder block: design invalidated (${b.decision}); amendment #${f.amendment} ${f.created ? "filed" : "joined"}, held ${refs(f.held)}`);
       try { await post(REPLAN_MARKER, `## Design invalidated\n${b.decision}\n\nWhy: ${b.why}\n\nAmendment: #${f.amendment}; held until it merges: ${refs(f.held)}.\n\n${s}`); } catch { /* best effort */ }
       if (b.paths.length) try { await recordDecisions([{ choice: `${b.decision} no longer holds; replaced by the amendment`, why: b.why, anchors: b.paths, ...(b.supersedes ? { supersedes: b.supersedes } : {}) }], { issue: f.amendment, repo, post }); } catch { /* the register is best effort */ }
-      return await finish("dependency-open", `design invalidated; waiting on amendment #${f.amendment}`, { code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: [f.amendment], amendment: f.amendment, epic }, OUTCOME_CODES.DEPENDENCY_OPEN);
+      return await finish("dependency-open", `design invalidated; waiting on amendment #${f.amendment}`, { code: OUTCOME_CODES.DESIGN_INVALIDATED, dependencies: [f.amendment], amendment: f.amendment, epic }, OUTCOME_CODES.DESIGN_INVALIDATED);
     }
     if (b.kind === "split") {
       const filed = [];

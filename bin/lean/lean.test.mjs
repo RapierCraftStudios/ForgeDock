@@ -665,6 +665,7 @@ describe("core work-on", () => {
     };
     const r = await run(w);
     assert.equal(r.terminalReason, "dependency-open");
+    assert.equal(r.code, "design.invalidated");
     assert.equal(w.created.length, 1);
     assert.match(w.created[0][w.created[0].indexOf("--title") + 1], /^spike amendment: replay_store is optional/);
     const held = w.edits.filter((e) => e[1] === "edit" && e.includes("--body")).map((e) => [e[2], e[e.indexOf("--body") + 1]]);

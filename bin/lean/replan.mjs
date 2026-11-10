@@ -72,6 +72,8 @@ export function holdEdge(body, amendment) {
   const b = String(body ?? "");
   return holdRe(amendment).test(b) ? b : `${b.replace(/\s+$/, "")}\n\n${dependsLine(amendment)}\n`;
 }
+/** The hold edges for a set of bodies: `{n: body}` with the edge on `amendment` added to each. */
+export const holdEdges = (bodies, amendment) => Object.fromEntries(Object.entries(bodies).map(([n, b]) => [n, holdEdge(b, amendment)]));
 /** `body` without the hold edge on `amendment`. */
 export const releaseEdge = (body, amendment) => String(body ?? "").replace(holdRe(amendment), "").replace(/\s+$/, "") + "\n";
 
