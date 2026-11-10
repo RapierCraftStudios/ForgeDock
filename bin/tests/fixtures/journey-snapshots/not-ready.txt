@@ -1,0 +1,13 @@
+exit codes: banner=0 help=0 doctor=1 errors=1
+files written:
+./forge.yaml
+~/.claude/forgedock/
+~/.claude/settings.json
+~/.forge/bin/
+~/.forge/commands/
+~/.forge/install-receipt.json
+~/.forge/package.json
+~/.forge/sched/
+~/.forge/scripts/
+~/.forge/templates/
+~/.forge/version

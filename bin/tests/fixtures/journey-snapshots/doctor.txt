@@ -1,0 +1,40 @@
+ForgeDock · <ver>
+inspecting the anvil
+
+ForgeDock Doctor — Installation Health Check
+
+  Mode: global (~/.claude)
+  Source: <path> (<ver>)
+
+  ✗  Command files
+       Fix: Run: npx forgedock doctor --fix  (or: npx forgedock install)  (42/42 broken: bootstrap.md (missing), deploy-pr.md (missing), fix-ci.md (missing)…)
+  ✗  gh CLI
+       Fix: Install the GitHub CLI: https://cli.github.com/
+  ✗  git config
+       Fix: Run: git config --global user.name "Your Name"  and  git config --global user.email "you@example.com"  (missing: user.name, user.email)
+  ⚠  forge.yaml
+       Note: No forge.yaml in current directory. Run: npx forgedock init
+  ✗  SessionStart hook
+       Fix: Run: npx forgedock doctor --fix  (or: npx forgedock install)  (writes hook entry to ~/.claude/settings.json)
+  ⚠  Version-gated features
+       Note: claude CLI not detected — cannot assess 2026 feature availability. Install or add claude to PATH.
+  ✔  SessionStart hook script path  skipped — no registered hook entry (see SessionStart hook check above)
+  ⚠  Persisted toolset home (~/.forge)
+       Note: not yet created — run: npx forgedock install  (or npx forgedock update)
+  ✔  CLAUDE.md legacy block  no CLAUDE.md found — session context comes from the SessionStart hook
+  ⚠  GitHub workflow labels
+       Note: Skipped — could not resolve owner/repo from forge.yaml
+  ⚠  FORGE_HOME env var
+       Note: not exported — only affects orchestrate's legacy classify-lane script fallback (tracked as a follow-up). Not required for normal use.
+  ⚠  Playwright MCP
+       Note: No MCP servers file found (~/.claude/mcp_servers.json). Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest
+  ✗  yq
+       Fix: Install the YAML processor (used to read forge.yaml): https://github.com/mikefarah/yq#install
+  ⚠  Claude Code
+       Note: `claude` CLI not found on PATH (need >= <ver>). If you run Claude Code without the CLI on PATH this is fine; otherwise install it: https://docs.anthropic.com/en/docs/claude-code
+  ⚠  GitHub App / bot token
+       Note: pipeline commands use your active `gh auth` (personal token, unless you've manually configured a bot token). Installing the GitHub App alone does not create one — see docs/CONFIG.md "GitHub App Install".
+  ✔  Resource hygiene  owned: none; 0 reclaimable
+
+5 check(s) failed, 8 warning(s). See fix hints above.
+  Some of these may be auto-fixable: run npx forgedock doctor --fix

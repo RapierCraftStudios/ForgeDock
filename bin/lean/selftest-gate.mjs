@@ -44,3 +44,25 @@ export async function readMarkerComments(gh, repo, pr) {
 export async function postMarker(gh, repo, pr, m) {
   await gh(["pr", "comment", String(pr), "-R", repo, "--body", `${buildMarker(m)}\nLive selftest: ${m.result}${m.step ? ` (step ${m.step})` : ""}`]);
 }
+
+// FORGE:JOURNEY marker (#5305): the new-user journey result, posted next to GATE_PASS. Informational: the release gate
+// above never reads it, and it is a separate marker so it cannot replace the FORGE:SELFTEST result.
+const JOURNEY_RE = /^\s*<!--\s*FORGE:JOURNEY\s+([^>]*?)\s*-->/;
+
+/** @param {{result:"pass"|"fail", sha:string, step?:string|null, ttfm?:number|null}} m ttfm: seconds to the first merged PR */
+export function buildJourneyMarker({ result, sha, step, ttfm }) {
+  return `<!-- FORGE:JOURNEY result=${result} sha=${sha} step=${step || "none"} ttfm=${ttfm ?? "na"} -->`;
+}
+
+/** @returns {{result:string, sha:string, step:string, ttfm:number|null}|null} */
+export function parseJourneyMarker(body) {
+  const m = JOURNEY_RE.exec(String(body ?? ""));
+  if (!m) return null;
+  const kv = Object.fromEntries(m[1].split(/\s+/).map((p) => p.split("=")).filter((p) => p.length === 2));
+  if (!/^(pass|fail)$/.test(kv.result ?? "") || !/^[0-9a-f]{40}$/.test(kv.sha ?? "")) return null;
+  return { result: kv.result, sha: kv.sha, step: kv.step ?? "none", ttfm: /^\d+$/.test(kv.ttfm ?? "") ? Number(kv.ttfm) : null };
+}
+
+export async function postJourneyMarker(gh, repo, pr, m) {
+  await gh(["pr", "comment", String(pr), "-R", repo, "--body", `${buildJourneyMarker(m)}\nNew-user journey: ${m.result}${m.step ? ` (step ${m.step})` : ""}${m.ttfm != null ? `, first merged PR in ${m.ttfm}s` : ""}`]);
+}
