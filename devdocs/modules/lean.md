@@ -136,6 +136,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    #5020: environment defects of frozen commands are recoverable. forge.yaml `validate.recipes` (block map `{regex: replacement}`) rewrite validate and `repro_test` commands at freeze (`applyValidateRecipes`, wired by `readEnvConfig` → `validateRecipes`; the rewrite is recorded as a decision). Freeze preflight probes/runs `repro_test.command` too (`contractCommands`); Poetry's `Command not found: X` (an uninstalled env) is `env.tool_missing` via `missingTool`, and a repro head that fails on a missing tool is `env.repro_unrunnable` (`reproEnvMiss`), not `repro_red_green`. A post-deploy requirement (or amendment) with no check id becomes `defer` with bucket `owner:orchestrator` (`deferChecklessPostDeploy`); a named but unregistered check still fails `check_unknown`. A substitute-validate is re-checked with `substituteShellProblem` (fails closed when `bash -n` cannot run) when applied and in `precheck`; the `FORGE:AMENDMENT` post is retried by `ghw` and a still-failing post is an anomaly, never an engine-error.
    #4987: an `unrelated-ci-failure` amendment (builder note that a red check is outside the diff) is an informational no-op in `applyAmendments` (no problem, no contract change, listed in `applied`); it is not a valid kind, and `ciFailurePrompt` tells the builder to put such a check in `implementation.md` instead.
    #4594: `amend-requirement` with `text` + `why` keeps the requirement `deliver` and sets `amendment`; the reviewer judges it against that text, and a failing row reads `amendment not accepted` so the one builder resume is the correction turn (without `text` it is still the `defer` slip).
+   #5365: `applyAmendments` renumbers an `add-requirement` whose id is already taken to the next free `R<n>` (recorded in `applied` as `R2 -> R5`, never a problem). `authorizationOf` returns `coupled` for a file in the `COUPLED_PATHS` map (`docs/OUTCOME-CODES.md` when `bin/engine/outcome-codes.mjs` is a deliverable; a parity test reads both), so it is not `scope_creep` in `precheck` or `decide`. `decide` turns a `defer`/`post-deploy` row the review marks `implemented` into `converted[]` instead of `unjustified_deferral`; `lean.mjs` applies `convertDelivered` so the requirement is judged as `deliver` (original kept in `amended_from`). A deferral the reviewer does not find implemented still fails (#5207).
    SEC-31/SPEC-33 (#4996): an `amend-requirement` that flips a `defer`/`post-deploy` requirement to `deliver` records the original quote, disposition, why, bucket, check and tracked in `amended_from` (the reviewer prompt compares it with `amendment.text`); when the original has a check id or a filed tracking issue the amendment is rejected unless its why or text names that check or issue.
    contract already lists appends its why to that deliverable's `change`, so it
    can declare a package edge on an already-listed package.json (#4159).
@@ -181,6 +182,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    < 60K chars). The fresh session never adopts its session id; when it makes no commit, one resume of the build
    session follows in the same round. `PHASE_ATTEMPT_USAGE` gains `mode: fresh|resume` on fix rounds (run log only).
    Block/contract corrections, CI-unavailable and base-sync conflict resolution still resume; round gates unchanged.
+   #5348 narrow fixes: the enumerating and duplicate-export gates first apply the change the detector names with no model
+   (`mechfix.mjs` `applyEnumerating` writes the missing entry into the test's string list, `renameDuplicates` renames an
+   export only its declaring file mentions to `<App><Name>`), commit it (`MECHANICAL_FIX` event) and re-run the detector.
+   What is left goes to one narrow session per stage: the enumerating round also carries the pending duplicate-export and
+   English-copy findings (`mergeNarrowTasks`; their gates re-check). The session runs profile `narrow` (no lane text,
+   CLAUDE.md off, `prompts.mjs` `narrowFixPrompt`: contract excerpt, failure output and named files, `NARROW_PROMPT_MAX`
+   chars, under `NARROW_BASELINE_TOKENS`); `PHASE_ATTEMPT_USAGE.lane_profile` is `narrow` and `stats --efficiency`
+   prints baseline tokens per profile.
    #4362: every `PHASE_ATTEMPT_USAGE` carries `trigger` (`fixround.mjs` `TRIGGERS`): plan call `plan`, implement
    `build`, untyped-block resume `block_correction`, contract correction `contract_correction`, `fixRound(kind, task,
    failures, trigger)` with `precheck`/`structure`/`docs`/`enumerating`/`sequence`/`conformance`/`review`, CI verify
@@ -2772,6 +2781,12 @@ Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs`
 - Promotion rule (#5052): treatment = light|upgraded lanes, control = eligible full lanes in the same size buckets; cost ratio <= 1.2, wall/model <= 1.3, defect rate <= control; any cell under `--min-n` (10) is `insufficient data`. Flipping `lean.light.mode: on` stays a config decision.
 Tests: `light.test.mjs` "#5209", `lean.test.mjs` "#4450 light lane" (#5209 cases), `bin/stats/depth.test.mjs`.
 
+## Entry 2026-11-10 — `stats --depth` defect signal is line-level (#5364)
+
+- The #5209 rule (a later `fix*`/`bug` PR sharing any non-test file within 7 days) flagged 47-80% of AlterLab merges on hot shared files. `bin/stats/depth.mjs` now uses the conformance-outcomes signals, imported from `conformance-outcomes.mjs` (`reverts`, `cites`, `sameHunks`, `isFix`), not copied: reverted, reopened, cited, `same_hunks` (blame of the later fix's old-side lines to the lane's merge commit, via `gitProbes`).
+- Merge shas come from `repos/{repo}/pulls/N` (cached); `same_hunks` is null without a local clone, and `defect` is then null (n/a, counted in `defects_unresolved`) unless another signal is true. Defect cache version 2 drops the file-overlap values.
+- The #5209 entry above describes the old rule and is history. Tests: `bin/stats/depth.test.mjs`.
+
 ## Conformance outcomes (#5210)
 
 `forgedock stats --conformance-outcomes` (`bin/stats/conformance-outcomes.mjs`) reads whether the conformance gate earns its
@@ -2933,6 +2948,17 @@ middle tier) and flagged `cost_estimated: true`. A kill that streamed nothing ca
 Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issue>.jsonl` (`runLogPath`); the bare
 `<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
 does, and take the repo from the RUN_START slice, never from the number alone.
+
+## Clean first review (#5345)
+
+`forgedock check` also runs `selfreview.mjs` `selfReviewFindings` (the deterministic subset of `precheck()`, plus a
+preserve-touch check): findings land in the `review` section of `.forge-lean/self-check.json`, make `ok` false, and a
+fixed result with a red record gets one builder resume (`SELF_CHECK_RED`) before any reviewer runs. An incomplete reviewer
+reply whose gaps are row ids (`reaskable()`) is repaired in place by `mergeReviewRows`, never a new review round.
+`RUN_TERMINAL` carries `first_review` (first gate state, finding kinds, rounds, `incomplete`, change type, risk surfaces);
+`forgedock stats --first-review` reports the clean rate by repo, change type and risk surface, maps finding kinds to
+contract sections, and flags long-clean cells as light-lane candidates (never a risk surface, #5283). Recurring finding
+classes reach the builder as `FINDING_PITFALLS` in the implement prompt.
 
 ## Sibling awareness (#5340)
 

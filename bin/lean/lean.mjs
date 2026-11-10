@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
-import { readSelfReview, compareSelfReview } from "./selfreview.mjs";
+import { readSelfReview, compareSelfReview, firstReviewRecord, selfCheckFailures } from "./selfreview.mjs";
 import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
@@ -19,7 +19,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -44,7 +44,7 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, buildOpeningNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, buildOpeningNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -53,11 +53,12 @@ import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
-import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
+import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
+import { applyEnumerating, renameDuplicates } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
 import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, NO_TRIGGER } from "./e2e.mjs";
@@ -314,7 +315,7 @@ export async function runCore(o) {
     if (killed && !r?.usage) usageUnknown = true;
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: est ?? num(r?.costUsd), cost_usd_delta: c.delta, ...(est != null ? { cost_estimated: true } : {}), ...(killed && !r?.usage ? { usage_unknown: true } : {}), cost_usd_session: c.session, model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
-      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: laneProfile.name, ...expTag }; // #4410, #4629
+      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: r?.laneProfile ?? laneProfile.name, ...expTag }; // #4410, #4629
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
@@ -384,6 +385,7 @@ export async function runCore(o) {
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   const kinds = normalizeKindModes(conformanceKinds); // engine.conformance_kinds: a failure code's own mode
   let domains = [], domainsLogged = null; // #5099: review domains the diff touches (review-roster.sh path triggers)
+  let firstReview = null; // #5345: the first gate judgement and review.incomplete of the first reply, on RUN_TERMINAL
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   let light = false, modelMs = 0; // #4451: the light lane finished without an upgrade (the same structure/hotspot gates as the full lane, #4502); summed session time
@@ -518,7 +520,7 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
-      conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
+      conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
@@ -720,7 +722,7 @@ export async function runCore(o) {
       const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
       // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
       const heavy = heavyEnv ? { ...heavyEnv, FORGE_LANE_PHASE: args.role === "builder" ? stage : String(args.role ?? "step"), FORGE_LANE_ISSUE: String(issue), FORGE_LANE_PRIORITY: String(lanePriority()) } : {};
-      const lp = laneProfile.name, profEnv = lp === "full" ? {} : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1", ...(lp === "lane" ? { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : {}) };
+      const lp = args.profile === "narrow" && laneProfile.name !== "full" ? "narrow" : laneProfile.name, profEnv = lp === "full" ? {} : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1", ...(lp === "lane" || lp === "narrow" ? { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : {}) };
       const system = lp === "lane" && !args.resume && !args.noTools ? [args.system, laneProfile.text].filter(Boolean).join("\n\n") : args.system;
       // #5205: capture the account the run uses (the shim exports it, then execs claude) and pin a rotation relaunch.
       let account = pinned?.account ?? null;
@@ -943,7 +945,7 @@ export async function runCore(o) {
   }
 
   /** opts (#4363): {model, mode, keepSession, trigger and restartOf (#4362)}; a fresh fix session keeps the build session id for a fallback resume. */
-  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null, contextMax = 0, turnMax = 0 } = {}) {
+  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null, contextMax = 0, turnMax = 0, profile = null } = {}) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
     if (wtCreated && io.fs.exists && !(await io.fs.exists(wt))) throw Object.assign(new Error("lane worktree is gone"), { deferCode: OUTCOME_CODES.RUN_INTERRUPTED, deferDetail: `worktree ${wt} no longer exists; no builder session starts in it, a rerun recreates it` }); // #5333
@@ -955,7 +957,7 @@ export async function runCore(o) {
     let spawned = null;
     const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
     const session = {}, cur = inflight = { n, session, at: now(), flushed: false, opts: { model, mode, trigger, restartOf } };
-    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? laneModel(), resume, system: "", prompt, control, onSpawn, session, agents: explorerAgents(exploreCfg), rereadNudge: true,
+    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? laneModel(), resume, system: "", prompt, control, ...(profile ? { profile } : {}), onSpawn, session, agents: explorerAgents(exploreCfg), rereadNudge: true,
       idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}),
       busy: sessionBusy, busyMs: Math.round(cliBusyMinutes * 60000),
       onIdleExtend: (info) => ev({ event: "CLI_IDLE_EXTENDED", children: info.children, heavyQueue: info.heavyQueue }) }));
@@ -979,7 +981,7 @@ export async function runCore(o) {
     await renew();
     await registerReported();
     if (r?.sessionId && !keepSession) sessionId = r.sessionId;
-    await attempt("implement", n, r, mode, trigger, restartOf, resume);
+    await attempt("implement", n, profile && r ? { ...r, laneProfile: profile === "narrow" && laneProfile.name === "full" ? "full" : profile } : r, mode, trigger, restartOf, resume);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
     }
@@ -1797,16 +1799,39 @@ export async function runCore(o) {
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
-    async function fixRound(kind, task, failures, trigger, failureText = "") {
+    async function fixRound(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
       await notePitfall(trigger, failureText); await escalateOn(trigger); // #4375: learned once the same gate passes; #4394
       if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
-      const ex = [".", `:!${LEAN_DIR}`], diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => "")), stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
-      const prompt = fixSessionPrompt({ task, diff, stat, base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
-      const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: escalated ? null : fixModel ?? reviewerModel, mode: "fresh", keepSession: true, trigger });
+      const ex = [".", `:!${LEAN_DIR}`], diff = narrow ? "" : String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => "")), stat = narrow ? "" : String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
+      const prompt = narrow ? narrowFixPrompt({ task, contract: frozen, files: narrow.files }) : fixSessionPrompt({ task, diff, stat, base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
+      const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: escalated ? null : fixModel ?? reviewerModel, mode: "fresh", keepSession: true, ...(narrow ? { profile: "narrow" } : {}), trigger });
       if (!sessionId || String(await git(["rev-parse", "HEAD"])).trim() !== before) return r;
       T.decisions.push(`Fresh ${kind} fix session made no commit; builder session resumed once`);
       return await builder(++attemptN, task, sessionId, false, undefined, { mode: "resume", trigger });
+    }
+    /** #5348: commit what the engine applied without a model (only the files it wrote); the findings it fixed were named by a detector. */
+    async function mechCommit(gate, applied, paths) {
+      if (!applied.length) return 0;
+      ev({ event: "MECHANICAL_FIX", gate, count: applied.length });
+      T.decisions.push(`Mechanical ${gate} fix applied without a model session: ${applied.slice(0, 5).map((x) => x.symbol).join(", ")}`);
+      try { await git(["add", "--", ...new Set(paths)]); await git(["commit", "--no-verify", "-m", `fix(forge): ${gate} fix applied by the engine, no model session (#5348)`]); } catch { /* the detector re-run decides */ }
+      files = await changedFiles();
+      return applied.length;
+    }
+    const mech = io.mechFix ?? { applyEnumerating, renameDuplicates }; // #5348: a test seam; the engine uses mechfix.mjs
+    let dupMech = 0; // #5348: duplicate renames the last dupsResidual() applied
+    /** Duplicate-export findings that still need a model: the detector, then the deterministic rename, then the detector again. */
+    async function dupsResidual() {
+      const found = async () => (await io.duplicateExports({ cwd: wt, base }).catch(() => null)) ?? [];
+      let dups = await found();
+      dupMech = 0;
+      if (dups.length) {
+        const m = await mech.renameDuplicates({ dups, cwd: wt, git: (a) => git(a) });
+        dupMech = await mechCommit("duplicate", m.applied, m.applied.map((d) => d.path));
+        if (dupMech) dups = await found();
+      }
+      return dups;
     }
     if (isSplit) {
       // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
@@ -2034,6 +2059,13 @@ export async function runCore(o) {
       }
       // #4364: a builder that writes fixed without a green `forgedock check` on its final tree; recorded, never a failure
       if (result?.status === "fixed") { const state = await selfCheckNow(); if (state !== "green") ev({ event: "SELF_CHECK_MISSING", state }); }
+      if (result?.status === "fixed" && sessionId && !result.amendments?.length) { // #5345: a red self-check on the final tree is fixed before any reviewer runs
+        let rec = null; try { rec = JSON.parse(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)); } catch { /* none recorded */ }
+        const red = (await selfCheckNow()) === "red" ? selfCheckFailures(rec) : [];
+        if (red.length) ev({ event: "SELF_CHECK_RED", codes: red.map((f) => f.code) });
+        if (red.length) await fixRound("conformance", conformanceResumePrompt(red, vcfg.mode, lane), red, "conformance", failureLog(red));
+        if (red.length) result = (await readResult()) ?? result;
+      }
       {
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
@@ -2165,10 +2197,20 @@ export async function runCore(o) {
     if (io.enumeratingMissing && !isSplit) {
       const missingNow = async () => unjustified((await io.enumeratingMissing({ cwd: wt, base }).catch(() => null)) ?? [], result?.not_members);
       let missing = await missingNow();
+      if (missing.length) { // #5348: the detector names the list entry: write it, then re-check; a session only for the rest
+        const m = await mech.applyEnumerating({ missing, cwd: wt });
+        if (await mechCommit("enumerating", m.applied, m.applied.map((x) => x.test))) missing = await missingNow();
+      }
       if (missing.length && sessionId) {
         ev({ event: "ENUMERATING_MISSING", count: missing.length });
         T.decisions.push(`Enumerating test(s) miss new symbol(s): ${missing.slice(0, 5).map((m) => `${m.symbol} → ${m.test}`).join(", ")}; builder resumed once`);
-        await fixRound("enumerating", missingEntriesPrompt(missing, vcfg.mode), [], "enumerating", missing.map((m) => `enumerating test ${m.test} misses new member \`${m.symbol}\``).join("\n"));
+        // #5348: one narrow session per stage: pending duplicate-export and English-copy findings ride along (their gates re-check)
+        const pend = [];
+        if (io.duplicateExports && vcfg.duplicateExports !== false) { const d = await dupsResidual(); if (d.length) pend.push({ title: "Duplicate exports", text: duplicateExportsPrompt(d, vcfg.mode), files: d.flatMap((x) => [x.path, ...(x.others ?? [])]) }); }
+        if (io.englishCopies) { const c = (await io.englishCopies({ cwd: wt, base }).catch(() => null)) ?? []; if (c.length) pend.push({ title: "English copies", text: i18nCopiesPrompt(c, vcfg.mode), files: c.map((x) => x.path) }); }
+        const task = pend.length ? mergeNarrowTasks([{ title: "Enumerating tests", text: missingEntriesPrompt(missing, vcfg.mode) }, ...pend]) : missingEntriesPrompt(missing, vcfg.mode);
+        if (pend.length) T.decisions.push(`Batched narrow fix: enumerating tests with ${pend.map((x) => x.title.toLowerCase()).join(", ")} in one session`);
+        await fixRound("enumerating", String(task), [], "enumerating", missing.map((m) => `enumerating test ${m.test} misses new member \`${m.symbol}\``).join("\n") + pend.map((x) => `\n${x.text}`).join(""), { files: [...new Set([...missing.map((m) => m.test), ...pend.flatMap((x) => x.files)])] });
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         missing = await missingNow();
@@ -2233,13 +2275,14 @@ export async function runCore(o) {
     async function duplicateGate(trigger) {
       if (!io.duplicateExports || isSplit || vcfg.duplicateExports === false) return false;
       const found = async () => (await io.duplicateExports({ cwd: wt, base }).catch(() => null)) ?? [];
-      let dups = await found();
+      let dups = await dupsResidual(); // #5348: the deterministic rename first
+      const mech = dupMech > 0;
       if (dups.length && sessionId) {
         const text = dups.map((d) => `duplicate export \`${d.symbol}\`: ${d.path} and ${(d.others ?? []).join(", ")}`).join("\n");
         ev({ event: "DUPLICATE_EXPORTS", trigger, count: dups.length });
         T.decisions.push(`Duplicate export(s) (${trigger}): ${dups.slice(0, 5).map((d) => `${d.symbol} in ${d.path} vs ${(d.others ?? []).join(", ")}`).join("; ")}; builder resumed once`);
         engineWhy = `engine-demanded rename: duplicate export(s) ${dups.slice(0, 5).map((d) => d.symbol).join(", ")} (${trigger})`;
-        await fixRound("duplicate", duplicateExportsPrompt(dups, vcfg.mode), [], "duplicate", text);
+        await fixRound("duplicate", duplicateExportsPrompt(dups, vcfg.mode), [], "duplicate", text, { files: dups.flatMap((d) => [d.path, ...(d.others ?? [])]) });
         result = (await readResult()) ?? result;
         files = await changedFiles();
         dups = await found();
@@ -2248,7 +2291,8 @@ export async function runCore(o) {
         return true;
       }
       if (dups.length) T.anomalies.push(`Duplicate export(s) (${trigger}): ${dups.slice(0, 5).map((d) => `${d.symbol} in ${d.path}`).join("; ")}`);
-      return false;
+      else if (mech) await gatePassed("duplicate");
+      return mech;
     }
     await duplicateGate("hand-off");
     /** #4591: lane-added migrations the repo's generator did not produce: one builder round (stage "sequence"), then an anomaly. */
@@ -2446,7 +2490,7 @@ export async function runCore(o) {
     let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
-    let pendingDecisions = [];
+    let pendingDecisions = [], firstRounds = null, firstReply = null;
     let baseTree = null; // #4695: the base file list, read once and only when a decision amendment needs it
     let genPaths = null; // forge#4519: maintenance.generated_paths from hotspots.sh (plan facts; one config-only call without them, never on light lanes)
     async function amend() {
@@ -2484,7 +2528,7 @@ export async function runCore(o) {
         // #4327/#5164: a third run only when the repaired reply is incomplete solely by reviewer slips (unresolved evidence paths, coverage misquotes).
         if (t === 2) {
           if (d.state !== "review.incomplete" || !reaskable(d.failures.map((f) => f.detail))) break;
-          T.decisions.push(`Review incomplete only by unresolved evidence paths or coverage misquotes (${(d.missing ?? []).join(", ")}); reviewer re-asked once more`);
+          T.decisions.push(`Review incomplete only by row gaps, unresolved evidence paths or coverage misquotes (${(d.missing ?? []).join(", ")}); reviewer re-asked once more`);
         }
         // #4160: a reply with rows missing is re-asked for those ids only; an unparseable one gets the full prompt again.
         const repair = first && (d.state === "review.incomplete" || d.state === "review.inconsistent");
@@ -2498,6 +2542,8 @@ export async function runCore(o) {
         review = repair ? mergeReviewRows(first, parsed) : parsed;
         first = review;
         d = decide(review, ctx);
+        if (d.converted?.length) effective = convertDelivered(effective, d.converted); // #5365: a defer row the review found delivered is judged as deliver
+        firstReply ??= d.state;
         if (d.review) review = d.review;
         ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
         const cmp = selfReviewCompared ? null : compareSelfReview(readSelfReview(result), d); // #4374: once, on the first judgement
@@ -2810,6 +2856,8 @@ export async function runCore(o) {
         if (remoteVerify) { const v = await ciVerify("build"); if (v.done) return v.done; }
         const outcome = await gate();
         verdict = outcome;
+        (firstRounds ??= []).push({ state: outcome.state, failures: (outcome.failures ?? []).map((f) => f?.code) });
+        firstReview = firstReviewRecord({ rounds: firstRounds, firstReply, labels: iss?.labels, files });
         for (const f of [...(outcome.failures ?? []), ...(outcome.wouldFail ?? [])]) if (f?.code) failureClasses.add(f.code);
         if (outcome.state === "conforms") { await gatePassed("conformance"); break; }
         const explained = explainFailures(outcome.failures, effective); // #4265: name the unmet requirement, not only the code

@@ -2458,7 +2458,9 @@ export async function checkFromCli(argv, deps = {}) {
   const picked = pre.planPrecheck({ testMap, files, learned, maxMinutes, verify });
   const par = String(env.FORGE_HOST_PARALLELISM ?? "").trim(), pinned = /^\d+$/.test(par) && Number(par) > 0;
   const runCommand = deps.runCommand ?? (await import("./lean/effects.mjs")).runCheckCommand;
-  const r = await pre.selfCheck({ contract, plan: { mode: verify.mode, commands: picked.commands, budgetMs: picked.budgetMs, perCommandMs: picked.perCommandMs },
+  const { selfReviewFindings } = await import("./lean/selfreview.mjs"); // #5345: the reviewer's deterministic checks, before any reviewer
+  const review = selfReviewFindings({ contract, result: await readJson(".forge-lean/result.json"), changedFiles: files });
+  const r = await pre.selfCheck({ review, contract, plan: { mode: verify.mode, commands: picked.commands, budgetMs: picked.budgetMs, perCommandMs: picked.perCommandMs },
     parallelism: pinned ? Number(par) : 1, now: deps.now,
     run: ({ command, timeoutMs, workers }) => runCommand({ command, cwd: repo, timeoutMs, env: pinned ? { FORGE_HOST_PARALLELISM: String(workers) } : null }) });
   // #4390: each failure's full output goes to .forge-lean/logs/ (git-excluded); the table shows its tail, ids and the path
@@ -2476,7 +2478,7 @@ export async function checkFromCli(argv, deps = {}) {
   let fingerprint = null;
   try { fingerprint = await pre.worktreeFingerprint({ git, base }); } catch { /* recorded without one: the engine reads it as skipped */ }
   const strip = (x) => (x.status ? { ...(x.id ? { id: x.id } : {}), command: x.command, status: x.status } : { ...(x.id ? { id: x.id } : {}), command: x.command, rc: x.rc, ms: x.ms });
-  const record = { v: 1, at: new Date((deps.now ?? Date.now)()).toISOString(), base, fingerprint, ok: r.ok, validate: r.validate.map(strip), commands: [...r.commands.map(strip), ...r.deferred.map((command) => ({ command, status: "deferred-to-ci" }))] };
+  const record = { v: 1, at: new Date((deps.now ?? Date.now)()).toISOString(), base, fingerprint, ok: r.ok, ...(r.review?.length ? { review: r.review.map((f) => ({ code: f.code, detail: f.detail })) } : {}), validate: r.validate.map(strip), commands: [...r.commands.map(strip), ...r.deferred.map((command) => ({ command, status: "deferred-to-ci" }))] };
   try { await (deps.writeFile ?? ((p, t) => fsp.writeFile(p, t)))(join(repo, pre.SELF_CHECK_FILE), `${JSON.stringify(record)}\n`); } catch { /* .forge-lean missing: still print */ }
   try { // #5278: parity row for the local green -> remote red hit rate; the attested status in ci.mode local-attested
     const suites = [...record.validate, ...record.commands].filter((x) => !x.status).map((x) => ({ name: x.id ?? x.command, ok: x.rc === 0 }));

@@ -1160,7 +1160,7 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(dir, ".git", "info", "exclude"), ".forge-lean/\nforge.yaml\n");
     writeFileSync(join(dir, "a.js"), "2\n"); g(["commit", "-qam", "work"]);
     mkdirSync(join(dir, ".forge-lean"));
-    writeFileSync(join(dir, ".forge-lean", "contract.json"), JSON.stringify({ validate: [{ id: "V1", command: "node --test a.test.mjs" }] }));
+    writeFileSync(join(dir, ".forge-lean", "contract.json"), JSON.stringify({ deliverables: [{ id: "D1", path: "a.js", change: "edit" }], validate: [{ id: "V1", command: "node --test a.test.mjs" }] }));
     if (plan) writeFileSync(join(dir, ".forge-lean", "check-plan.json"), JSON.stringify(plan));
     if (forgeYaml) writeFileSync(join(dir, "forge.yaml"), forgeYaml);
     return { dir, git: async (a, cwd) => execFileSync("git", a, { cwd, encoding: "utf8", env: GIT_ENV }) };

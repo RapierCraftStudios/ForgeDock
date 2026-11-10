@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -580,8 +580,10 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.match(problems[0], /nearest criterion line: "The scrape route must release/);
     assert.ok(reaskable(problems));
     assert.ok(reaskable(["R1: evidence path /layout.tsx does not exist"]), "#4327 evidence paths stay re-askable");
-    assert.ok(!reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]));
-    assert.ok(!reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]), "#5345 a missing row is repaired in place");
+    assert.ok(reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(!reaskable(["requirements rows are missing"]), "a whole absent section keeps the two-run limit");
+    assert.ok(!reaskable([...problems, "something else is wrong"]));
     assert.ok(!reaskable([]));
     assert.deepEqual(fillEngineRows(good, ctx).issue_coverage, good.issue_coverage, "verbatim rows are untouched");
   });
@@ -1650,6 +1652,14 @@ describe("contract quote snapping (#5244)", () => {
   });
 });
 
+describe("#5345 an incomplete reviewer reply is repaired in place", () => {
+  it("every row-level gap is re-askable and the repaired rows merge into the first reply (no new review round)", () => {
+    for (const p of ["R2: status invalid: maybe", "R1: a defer requirement needs deferral_ok true|false (is deferring it justified?)", "changed file a.js has no scope row", "preserve P1 needs a row with status intact|violated|unverified", "verdict must be CONFORMS or NONCONFORMING"]) assert.ok(reaskable([p]), p);
+    const merged = mergeReviewRows({ verdict: "CONFORMS", requirements: [{ id: "R1", status: "implemented" }] }, { requirements: [{ id: "R2", status: "implemented" }] });
+    assert.deepEqual(merged.requirements.map((r) => r.id), ["R1", "R2"]);
+  });
+});
+
 describe("#5339 a faked or deferred e2e/manual requirement is not met", () => {
   const Q = "Users can render the launch film end to end [type:e2e]";
   const mk = (cmd, quote, extra = {}, disposition = "deliver") => {
@@ -1683,5 +1693,35 @@ describe("#5339 a faked or deferred e2e/manual requirement is not met", () => {
     assert.equal(p.transferred, true);
     assert.deepEqual(p.open.map((r) => r.id), ["R1"]);
     assert.equal(closePlan({ requirements: [{ id: "R1", quote: "A plain thing [type:unit]", disposition: "post-deploy" }] }).reason, "completed");
+  });
+  it("#5365 add-requirement id collision is renumbered to the next free R<n> and recorded, never a problem", () => {
+    const add = (id) => ({ kind: "add-requirement", requirement: { id, quote: "Billing pricing is unchanged.", disposition: "deliver" }, why: "missed" });
+    const a = applyAmendments(C, [add("R2"), add("R2")], ISSUE);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.contract.requirements.map((r) => r.id), ["R1", "R2", "R3", "R4"]);
+    assert.ok(a.applied.some((x) => x.target === "R2 -> R3") && a.applied.some((x) => x.target === "R2 -> R4"));
+    assert.equal(applyAmendments(C, [add("R9")], ISSUE).applied[0].target, "R9");
+  });
+  it("#5365 a file coupled to a deliverable (outcome-codes.mjs <-> docs/OUTCOME-CODES.md) is not scope creep; an unrelated doc still is", () => {
+    const k = { ...C, deliverables: [{ id: "D1", path: "bin/engine/outcome-codes.mjs" }] };
+    const run = (f) => precheck({ contract: k, result: { requirements: [], validation: [{ id: "V1", exit: 0 }] }, changedFiles: ["bin/engine/outcome-codes.mjs", f] }).failures.map((x) => x.kind);
+    assert.equal(run("docs/OUTCOME-CODES.md").includes("scope_creep"), false);
+    assert.ok(run("docs/OTHER.md").includes("scope_creep"));
+    const none = precheck({ contract: C, result: { requirements: [], validation: [] }, changedFiles: ["docs/OUTCOME-CODES.md"] }).failures.map((x) => x.kind);
+    assert.ok(none.includes("scope_creep"), "coupling needs the paired deliverable");
+    const dctx = { ...ctx, contract: k, changedFiles: ["bin/engine/outcome-codes.mjs", "docs/OUTCOME-CODES.md"] };
+    const kr = { ...good, requirements: [good.requirements[0], good.requirements[1]], scope: [{ file: "bin/engine/outcome-codes.mjs", authorized_by: "D1" }, { file: "docs/OUTCOME-CODES.md", authorized_by: "none" }] };
+    assert.ok(!decide(kr, dctx).failures.some((f) => f.code === "conformance.scope_creep"));
+  });
+  it("#5365 a defer row the review finds implemented converts to deliver instead of unjustified_deferral; an undelivered one still fails", () => {
+    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
+    const c2 = { ...ctx, contract: k };
+    const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", ...extra }] });
+    const d = decide(rv({ status: "implemented", evidence: "src/search.js:7", validated_by: "V1", deferral_ok: false, note: "replay already ships" }), c2);
+    assert.deepEqual(codes(d), []);
+    assert.deepEqual(d.converted, [{ id: "R2", evidence: "src/search.js:7" }]);
+    const conv = convertDelivered(k, d.converted).requirements[1];
+    assert.equal(conv.disposition, "deliver"); assert.equal(conv.bucket, undefined); assert.equal(conv.amended_from.disposition, "defer");
+    assert.deepEqual(codes(decide(rv({ status: "deferred", deferral_ok: false }), c2)), ["conformance.unjustified_deferral"]);
   });
 });

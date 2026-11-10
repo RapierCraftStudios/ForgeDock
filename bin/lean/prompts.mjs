@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
-import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
+import { capText, FIX_CAPS, FIX_PROMPT_MAX, NARROW_CAPS, NARROW_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
 import { stampRule } from "./stagestamp.mjs";
+import { FINDING_PITFALLS, PLANNER_TIGHTENING } from "./selfreview.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
@@ -182,6 +183,8 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one "bucket": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
+First reviews most often find defects in:
+${Object.entries(PLANNER_TIGHTENING).map(([k, x]) => `- ${k}: ${x}`).join("\n")}
 A new default-off flag or rollout key needs an activation row: defer, bucket \`owner:promote:<flag>\`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
 A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
@@ -233,6 +236,8 @@ A new workspace-package dependency in a package.json no deliverable names is blo
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
+A \`FAIL review\` line from check is a finding the reviewer would raise; fix it. Also:
+${Object.values(FINDING_PITFALLS).map((x) => `- ${x}`).join("\n")}
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -394,6 +399,24 @@ export function fixSessionPrompt({ task, diff = "", stat = "", base = "", contra
   const contractText = capText(typeof contract === "string" ? contract : JSON.stringify(contract ?? {}, null, 1), FIX_CAPS.contract);
   const p = `${HOST_RULES}\n\nYou are fixing one failure on an existing branch in this worktree. You have no earlier session: the issue, the frozen contract and the branch's diff against ${base || "the lane base"} are below; read any file you need.\n\n## Issue: ${String(title).slice(0, 300)}\n${capText(summary, FIX_CAPS.summary)}\n\n## Frozen contract (${CONTRACT_FILE})\n\`\`\`json\n${contractText}\n\`\`\`\n\n## Diff (\`git diff ${base || "<base>"}...HEAD\`)\n\`\`\`diff\n${boundDiff(diff, { stat, base, maxBytes: FIX_CAPS.diff })}\n\`\`\`\n\n## The failure to fix\n${capText(task, FIX_CAPS.task)}`;
   return capText(p, FIX_PROMPT_MAX - 100);
+}
+
+/** The frozen contract reduced to what a narrow fix needs: deliverable paths with their change, preserve items, validate commands. */
+function contractExcerpt(contract) {
+  const c = typeof contract === "string" ? (() => { try { return JSON.parse(contract); } catch { return null; } })() : contract;
+  if (!c || typeof c !== "object") return capText(typeof contract === "string" ? contract : "", NARROW_CAPS.contract);
+  const pick = (xs, keys) => (Array.isArray(xs) ? xs.map((x) => Object.fromEntries(keys.filter((k) => x?.[k] != null).map((k) => [k, x[k]]))) : []);
+  return capText(JSON.stringify({ deliverables: pick(c.deliverables, ["path", "change"]), preserve: pick(c.preserve, ["what"]), validate: pick(c.validate, ["command"]) }), NARROW_CAPS.contract);
+}
+
+/**
+ * #5348: the narrow-fix prompt: a contract excerpt, the failing check output and the files it names. No diff, issue summary,
+ * context pack, structure delta or hotspot rules. Under NARROW_PROMPT_MAX characters.
+ */
+export function narrowFixPrompt({ task, contract = null, files = [] }) {
+  const list = capText((files ?? []).map((f) => `- ${f}`).join("\n") || "- (none named: read what the failure cites)", NARROW_CAPS.files);
+  const p = `${HOST_RULES}\n\nYou are fixing one narrow, mechanical failure on an existing branch in this worktree. You have no earlier session. Edit only the files named below (and any file the failure output names), as a minimal diff.\n\n## Contract excerpt (${CONTRACT_FILE})\n${contractExcerpt(contract)}\n\n## Files named by the failure\n${list}\n\n## The failure to fix\n${capText(task, NARROW_CAPS.task)}\n\nRe-run the check that failed (the scoped command), commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return capText(p, NARROW_PROMPT_MAX - 100);
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
