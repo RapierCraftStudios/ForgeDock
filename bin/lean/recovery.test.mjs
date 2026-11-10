@@ -409,7 +409,7 @@ describe("#4298 staging-review follow-ups: recovery", () => {
 
   it("run-issue rejects --recover on the legacy --path full", async () => {
     await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "full", "--recover", "ci.red"], { dir: tmpDir("core-rec-"), emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" } }),
-      /--recover is not supported with --path full/);
+      /--recover only works with the default pipeline/);
   });
 
   it("/orchestrate spec describes terminal non-human needs-human rows, --recover scope and the schedd resume scope", () => {

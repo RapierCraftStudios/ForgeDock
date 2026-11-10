@@ -2657,7 +2657,7 @@ describe("run-issue routing", () => {
 
   it("bad --path errors; --retry is rejected on the core path", async () => {
     await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "bogus"], mk()), /--path must be/);
-    await assert.rejects(runFromCli(["7", "--lane", "staging", "--repo", "o/r", "--retry"], mk()), /not supported with the core path/);
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--repo", "o/r", "--retry"], mk()), /only works with the legacy pipeline/);
     assert.deepEqual(ENGINE_PATHS, ["core", "full", "lean", "auto"]);
   });
 });
