@@ -14,7 +14,7 @@ import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-so
 import { readLanes, readLocalLaneRuns, readLocalRuns, runsDir } from "./local-source.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { buildCard, renderCardMarkdown, renderCardSvg } from "./card.mjs";
+import { buildCard, renderCardMarkdown, renderCardPng, renderCardSvg } from "./card.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, compareEfficiency, formatEfficiencyLines, formatCompareLines, parseWindows } from "./efficiency.mjs";
 import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics } from "./release.mjs";
@@ -56,7 +56,7 @@ delta against the previous version and a low-n flag for samples under 10. Missin
   --since <v|date>      only versions >= <v> (e.g. 1.16.0) or activity on/after <date> (YYYY-MM-DD);
                         also bounds the GitHub crawl to that window
   --repo <owner/repo>   target repo (default: forge.yaml project, else the git origin remote)
-  --card                shareable aggregate-only card (Markdown on stdout, or stats-card.svg + stats-card.md in --out);
+  --card                shareable aggregate-only card (Markdown on stdout, or stats-card.svg + .png + .md in --out);
                         --week/--month bound it to the last 7/30 days; --include-repo-names adds the repo name;
                         --public-repo (repo is public) also adds a run-history link
   --json                machine-readable output
@@ -508,6 +508,7 @@ export async function runStats(argv, deps = {}) {
       if (opts.out) {
         mkdirSync(opts.out, { recursive: true });
         writeFileSync(join(opts.out, "stats-card.svg"), `${renderCardSvg(card)}\n`);
+        writeFileSync(join(opts.out, "stats-card.png"), renderCardPng(card));
         writeFileSync(join(opts.out, "stats-card.md"), `${renderCardMarkdown(card)}\n`);
       }
       process.stdout.write(`${opts.json ? renderJson(card) : renderCardMarkdown(card)}\n`);

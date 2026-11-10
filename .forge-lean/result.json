@@ -1,0 +1,97 @@
+{
+ "status": "fixed",
+ "summary": "stats --card (SVG+Markdown, aggregate-only) verified against contract; PNG deferred via typed amendment",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/stats/card.mjs:15"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/stats/card.mjs:30"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/stats/card.mjs:38"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/stats/index.mjs runStats card branch"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/stats/card.test.mjs"
+  },
+  {
+   "id": "R1b",
+   "status": "implemented",
+   "evidence": "bin/stats/card.mjs renderCardPng; bin/stats/index.mjs writes stats-card.png; bin/stats/card.test.mjs PNG tests"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/stats/card.test.mjs bin/stats/stats.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/stats/card.test.mjs bin/stats/stats.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R5 delivered; R1b deferred by amendment"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "stats.test.mjs passes; non-card paths untouched"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "V1 exit 0; forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "diff touches only card.mjs, card.test.mjs, index.mjs, docs/STATS.md"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "decision",
+   "decision": {
+    "choice": "Ship PNG via a dependency-free encoder (node:zlib + built-in 5x7 bitmap font) alongside SVG and Markdown",
+    "anchors": [
+     "bin/stats/card.mjs"
+    ],
+    "supersedes": "K1"
+   },
+   "why": "The reviewer found the issue wording \"SVG/PNG + Markdown\" narrowed; PNG is delivered without a new dependency, so K1s no-dependency intent holds and R1b is no longer deferred."
+  }
+ ],
+ "not_members": [
+  {
+   "symbol": "card",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "batch runner kill/resume integration test; lists lane/batch behaviours, not stats modules"
+  },
+  {
+   "symbol": "card",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "covers parseExecution/placement config; no list of stats modules"
+  }
+ ]
+}

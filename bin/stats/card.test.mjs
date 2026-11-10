@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildCard, renderCardMarkdown, renderCardSvg } from "./card.mjs";
+import { buildCard, renderCardMarkdown, renderCardPng, renderCardSvg } from "./card.mjs";
 import { parseArgs, runStats } from "./index.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +56,13 @@ describe("stats card (forge#5291)", () => {
     assert.match(renderCardSvg(c), /Run history: https:\/\/github.com\/secret-org/);
     assert.throws(() => parseArgs(["--public-repo"]), /need --card/);
   });
+  it("renders a valid PNG with deterministic size and an inflatable pixel stream", async () => {
+    const { inflateSync } = await import("node:zlib");
+    const png = renderCardPng(buildCard({ groups: [] }));
+    const h = png.readUInt32BE(20), idatLen = png.readUInt32BE(33);
+    assert.equal(inflateSync(png.subarray(41, 41 + idatLen)).length, (900 * 3 + 1) * h);
+    assert.deepEqual([...png.subarray(png.length - 8, png.length - 4)], [73, 69, 78, 68]);
+  });
   it("validates flags", () => {
     assert.equal(parseArgs(["--card", "--week", "--include-repo-names", "--out", "x"]).card, true);
     assert.throws(() => parseArgs(["--week"]), /need --card/);
@@ -76,6 +83,10 @@ describe("stats card (forge#5291)", () => {
       assert.ok(!text.includes(TITLE) && !text.includes("private-repo"));
     }
     assert.ok(existsSync(join(td, "stats-card.svg")));
+    const png = readFileSync(join(td, "stats-card.png"));
+    assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+    assert.equal(png.readUInt32BE(16), 900);
+    assert.ok(!png.includes(Buffer.from(TITLE)));
     assert.match(stdout, /last 30 days/);
   });
 });
