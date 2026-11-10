@@ -536,6 +536,13 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     { event: "RUN_TERMINAL", reason, code: "x", context_pack: mode, lane_type: lt },
   ];
 
+  it("#5334 summariseLog counts an interrupted run's killed-attempt usage (turns, tokens, estimated cost)", () => {
+    const s = summariseLog([{ event: "RUN_START", issue: 3 },
+      { event: "PHASE_ATTEMPT_USAGE", phase: "implement", turns: 41, usage: { output_tokens: 900, cache_read_input_tokens: 7e6 }, cost_usd: 1.5, cost_usd_delta: 1.5, cost_estimated: true, duration_ms: 60000 },
+      { event: "RUN_TERMINAL", reason: "deferred", code: "run.interrupted", model_ms: 60000 }]);
+    assert.equal(s.costUsd, 1.5); assert.equal(s.builderTurns, 41); assert.equal(s.cacheReadTokens, 7e6); assert.equal(s.usageEvents, 1);
+  });
+
   it("summariseLog carries mode, lane type, builder turns, cache tokens, cost and first-pass", () => {
     const s = summariseLog(log("on", "child"));
     assert.deepEqual(s.contextPack, { mode: "on", laneType: "child", ab: false, light: false });

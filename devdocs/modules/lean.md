@@ -2894,3 +2894,20 @@ and the runner's auto-add stay soft.
 ## Entry 2026-11-10 — feature-level acceptance: every epic carries a runnable journey (#5336)
 
 `acceptance.mjs` is deterministic (no model call). An epic declares a top-level ```` ```forge-acceptance ```` block: `journey:` sections with probe keys `run`, `pass`, `timeout` and `when: milestone|post-deploy` (`parseAcceptance`, `validateEpic` = the creation gate behind `forgedock acceptance check`; `probe.mjs` exports `fencedBlocks` for the shared fence scan, and the declarer is `isProbeDeclarer`, fail closed). `runMilestoneJourneys` runs the milestone journeys on the branch head and posts `FORGE:ACCEPTANCE` on each epic (head, time, site, per-journey result). `gateMilestone`/`gateByRef` (`forgedock acceptance gate --stage ship|close`) block on a red journey, a journey never run on the current head, an epic with no journey, or (close) a post-deploy journey not yet passed; a milestone without an epic is not gated. `review-staging --summary` calls it for a `milestone/<slug>` release PR (`acceptanceBlock`): blocked journeys, or a test-gate SKIP on a milestone with an epic, is BLOCK DEPLOY. `makeIntegration({journeys})` runs `makeJourneyRunner` (detached worktree of the milestone branch) after each child merge; `engine-cli` wires it for real runs only. The close.md C3 parent close and the `milestone` ship/close specs call the gate.
+
+## Entry 2026-11-10 — Interrupted runs record the usage they streamed (#5334)
+
+A builder session cut off before its `result` line (host kill, idle kill, timeout, lane limit, or an engine SIGTERM
+mid-call) used to record nothing: `RUN_TERMINAL` showed `model_ms: 0` and no turns. Now `runCliBackendAsync` attaches the
+streamed `usage`, `turns` and `toolUses` to every stream kill (`CLI_IDLE`, `CLI_TIMEOUT`, a host kill's
+`CLI_BACKEND_FAILED`) and fills the caller's `session.snapshot()`. `lean.mjs` records one `PHASE_ATTEMPT_USAGE` per
+killed session (`killedAttempt`): from the error on a kill branch, or from `flushInflight()` at the start of `finish`
+on a signal, always before `RUN_TERMINAL`; `err.usageRecorded` prevents a double count. A killed stream has no CLI
+cost, so `cost_usd` is estimated from tokens (`runner.mjs` `estimateCostUsd`, per model family; unnamed model = the
+middle tier) and flagged `cost_estimated: true`. A kill that streamed nothing carries `usage_unknown: true` (turns
+`null`), and `RUN_TERMINAL` copies the flag; never a silent 0. `forgedock stats` needs no change: it sums
+`PHASE_ATTEMPT_USAGE` rows.
+
+Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issue>.jsonl` (`runLogPath`); the bare
+`<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
+does, and take the repo from the RUN_START slice, never from the number alone.

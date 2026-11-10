@@ -2074,9 +2074,11 @@ export function readScopeLimitEvents(pid, { procRoot = "/proc", cgroupRoot = "/s
  * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
  * #4410: a stream result (and a CLI_TURNS / CLI_CONTEXT error) carries `toolUses`, [{msg, name, path, cmd}] per tool_use
  * (deduped by tool_use id, capped at TOOL_USES_MAX), for bin/lean/toolstats.mjs; absent on the non-stream path.
+ * #5334: every stream kill (CLI_IDLE, CLI_TIMEOUT, a host kill's CLI_BACKEND_FAILED) carries the usage, `turns` and `toolUses`
+ * seen so far, and `session` (an object the caller owns) gets `snapshot()` -> {usage, turns, toolUses} for the in-flight call.
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, limitProbe = readScopeLimitEvents, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, session = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, limitProbe = readScopeLimitEvents, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -2106,6 +2108,9 @@ export async function runCliBackendAsync(opts) {
   let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
   const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
   const toolUses = new Map(); // #4410: tool_use id -> {msg, name, path, cmd}
+  const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
+  const streamUsage = () => (msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null);
+  if (session) session.snapshot = () => ({ usage: streamUsage(), turns: msgUsage.size, toolUses: [...toolUses.values()] }); // #5334
   try {
     collected = await new Promise((resolveP) => {
       let stdout = "", stderr = "", settled = false, timedOut = false, paused = false;
@@ -2200,8 +2205,6 @@ export async function runCliBackendAsync(opts) {
       });
     });
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
-  const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
-  const streamUsage = () => (msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null);
   if (limitInfo) {
     const err = new Error(`claude CLI lane hit its scope ${limitInfo.limit} limit (${limitInfo.unit}) and was stopped`);
     err.code = "CLI_LANE_LIMIT"; err.limit = limitInfo.limit; err.unit = limitInfo.unit; err.events = limitInfo.events; err.toolUses = [...toolUses.values()];
@@ -2223,9 +2226,15 @@ export async function runCliBackendAsync(opts) {
     const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle${idleInfo.extended ? ", after the busy extension" : ""}). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);
     err.code = "CLI_IDLE"; err.lastTool = idleInfo.lastTool; err.children = idleInfo.children; err.idleMs = idleInfo.idleMs;
     err.extended = idleInfo.extended; err.heavyQueue = idleInfo.heavyQueue;
+    err.usage = streamUsage(); err.turns = msgUsage.size; err.toolUses = [...toolUses.values()]; // #5334
     throw err;
   }
-  const r = runCliBackend({ ...rest, spawnFn: () => collected });
+  let r;
+  try { r = runCliBackend({ ...rest, spawnFn: () => collected }); } catch (err) {
+    // #5334: a killed stream (CLI_TIMEOUT, host kill) never reached its result line: keep what the stream showed
+    if (stream && msgUsage.size && err && typeof err === "object") { err.usage ??= streamUsage(); err.turns ??= msgUsage.size; err.toolUses ??= [...toolUses.values()]; }
+    throw err;
+  }
   // #4395: the session baseline is the first assistant turn's context (system prompt, tools, instructions, first prompt).
   const first = msgUsage.values().next().value;
   if (stream && toolUses.size && r && typeof r === "object") r.toolUses = [...toolUses.values()];
@@ -3288,4 +3297,17 @@ export async function runCommand(opts = {}) {
     model,
     backend: "api",
   };
+}
+
+/**
+ * #5334: USD per million tokens by model family [input, output, cache read, cache write], for sessions killed before the
+ * CLI's `result` line (the only place it reports a cost). An estimate: callers flag it `cost_estimated`.
+ */
+const TOKEN_PRICES = { opus: [15, 75, 1.5, 18.75], sonnet: [3, 15, 0.3, 3.75], haiku: [1, 5, 0.1, 1.25] };
+export function estimateCostUsd(usage, model = null) {
+  if (!usage || typeof usage !== "object") return null;
+  const fam = /opus|haiku|sonnet/i.exec(String(model ?? ""))?.[0]?.toLowerCase() ?? "sonnet"; // unnamed/"default" model: the middle tier
+  const [i, o, cr, cw] = TOKEN_PRICES[fam];
+  const t = (k) => toFiniteUsageNumber(usage[k]);
+  return Math.round(((t("input_tokens") * i + t("output_tokens") * o + t("cache_read_input_tokens") * cr + t("cache_creation_input_tokens") * cw) / 1e6) * 1e6) / 1e6;
 }

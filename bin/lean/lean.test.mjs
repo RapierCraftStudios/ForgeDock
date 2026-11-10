@@ -5306,6 +5306,46 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
       tornDown(w, sig);
     }
   });
+
+  // ---- #5334: a killed session still records the usage it streamed ----
+  const KILLED = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 100000, cache_creation_input_tokens: 10000 }; // sonnet tier: $0.1005
+  const attemptsOf = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+  it("#5334 SIGTERM mid-attempt: PHASE_ATTEMPT_USAGE with the session's turns and an estimated cost lands before RUN_TERMINAL; no turns 0 / model_ms 0", async () => {
+    let td = null; const dir = tmpDir("core-sig-usage-");
+    const w = ledgered({ dirty: true, during: async (w2, c) => { if (!/PLANNING ONLY/.test(c.prompt) && td) { c.session.snapshot = () => ({ usage: KILLED, turns: 7, toolUses: [] }); await new Promise((r) => setTimeout(r, 5)); await td("SIGTERM"); } } });
+    const r = await run(w, { dir, onTeardown: (fn) => { td = fn; } });
+    assert.equal(r.code, "run.interrupted");
+    const log = readLog(dir, 7), a = attemptsOf(dir).filter((e) => e.turns === 7);
+    assert.equal(a.length, 1, "one attempt for the interrupted session, not double counted by the builder's own catch");
+    assert.equal(a[0].turns, 7); assert.deepEqual(a[0].usage, KILLED);
+    assert.ok(Math.abs(a[0].cost_usd - 0.1005) / 0.1005 < 0.05, String(a[0].cost_usd)); assert.equal(a[0].cost_estimated, true);
+    const term = log.find((e) => e.event === "RUN_TERMINAL");
+    assert.ok(log.indexOf(a[0]) < log.indexOf(term));
+    assert.ok(term.model_ms > 0, "model_ms is the session's time, not 0");
+  });
+
+  it("#5334 a host kill and an idle kill each record the killed session's usage (turns, cost) before the retry", async () => {
+    for (const kill of [{ code: "CLI_BACKEND_FAILED", signal: "SIGTERM", status: null }, { code: "CLI_IDLE", lastTool: null, children: [] }]) {
+      const w = world({ dirty: true }); const dir = tmpDir("core-kill-usage-");
+      const orig = w.io.runner; let n = 0;
+      w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("killed"), kill, { usage: KILLED, turns: 5 }); return orig(c); };
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      const k = attemptsOf(dir).find((e) => e.turns === 5);
+      assert.ok(k, kill.code); assert.deepEqual(k.usage, KILLED);
+      assert.ok(Math.abs(k.cost_usd - 0.1005) / 0.1005 < 0.05, String(k.cost_usd));
+      assert.equal(k.cost_usd_delta, k.cost_usd);
+    }
+  });
+
+  it("#5334 a kill that streamed nothing is marked usage_unknown, never recorded as 0 turns", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-kill-unknown-");
+    const orig = w.io.runner; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("idle"), { code: "CLI_IDLE", lastTool: null, children: [] }); return orig(c); };
+    await run(w, { dir });
+    const u = attemptsOf(dir).find((e) => e.usage_unknown === true);
+    assert.ok(u); assert.equal(u.turns, null);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").usage_unknown, true);
+  });
 });
 
 describe("two repos with the same issue number on one host (#4432)", () => {
@@ -6677,7 +6717,7 @@ describe("#4362 attempt triggers", () => {
     w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("idle"), { code: "CLI_IDLE" }); return orig(c); };
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
-    assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "timeout_restart", "build"]]);
+    assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "build", null], [2, "timeout_restart", "build"]]); // #5334: the killed session is its own attempt row
     assert.equal(r.firstPass, true);
   });
 
