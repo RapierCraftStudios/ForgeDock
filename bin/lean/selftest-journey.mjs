@@ -133,7 +133,7 @@ async function cleanup2(ctx, errors) {
 }
 
 /** Run both stages; the first failure stops them, cleanup always runs. */
-export async function runJourney({ repo, io, snapshotDir = SNAPSHOT_DIR, update = false }) {
+export async function runNewUserJourney({ repo, io, snapshotDir = SNAPSHOT_DIR, update = false }) {
   const ctx = { io, repo, snapshotDir, update, notes: [], prompts: [], ttfmMs: null, dir: null, startedStage2: null };
   let out = { ok: true, step: null, message: null };
   try {
@@ -221,7 +221,7 @@ export async function journeyFromCli(argv, deps = {}) {
     head = String(await io.gh(["pr", "view", String(pr), "-R", releaseRepo, "--json", "headRefOid", "--jq", ".headRefOid"])).trim();
   }
   let r;
-  try { r = await runJourney({ repo, io, update: argv.includes("--update-snapshots"), ...(deps.snapshotDir ? { snapshotDir: deps.snapshotDir } : {}) }); } finally { io.dispose?.(); }
+  try { r = await runNewUserJourney({ repo, io, update: argv.includes("--update-snapshots"), ...(deps.snapshotDir ? { snapshotDir: deps.snapshotDir } : {}) }); } finally { io.dispose?.(); }
   for (const n of r.notes) print(n);
   for (const e of r.cleanupErrors) print(`cleanup: ${e}`);
   if (r.ttfmMs != null) print(`journey: time to first merged PR ${Math.round(r.ttfmMs / 1000)}s; prompts shown: ${r.prompts.length ? r.prompts.join(" | ") : "none"}`);

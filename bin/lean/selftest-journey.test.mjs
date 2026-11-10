@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { scrub, assertStage1, compareSnapshots, runJourney, parseCleanOutput, journeyFromCli, CASES } from "./selftest-journey.mjs";
+import { scrub, assertStage1, compareSnapshots, runNewUserJourney, parseCleanOutput, journeyFromCli, CASES } from "./selftest-journey.mjs";
 import { selftestFromCli } from "./selftest-live.mjs";
 
 const GOOD = {
@@ -25,7 +25,7 @@ const io2 = (over = {}) => ({
   gh: async (a) => (a[0] === "pr" ? JSON.stringify([{ number: 1, mergedAt: new Date(5000).toISOString() }]) : "[]"),
   ...over,
 });
-const run = (io, o = {}) => { const dir = mkdtempSync(join(tmpdir(), "jt-")); return runJourney({ repo: "o/sandbox", io, snapshotDir: dir, update: true, ...o }).then(() => runJourney({ repo: "o/sandbox", io, snapshotDir: dir, ...o, update: false })); };
+const run = (io, o = {}) => { const dir = mkdtempSync(join(tmpdir(), "jt-")); return runNewUserJourney({ repo: "o/sandbox", io, snapshotDir: dir, update: true, ...o }).then(() => runNewUserJourney({ repo: "o/sandbox", io, snapshotDir: dir, ...o, update: false })); };
 
 describe("journey scrub", () => {
   it("removes paths, versions, ansi and timings", () => {
@@ -65,7 +65,7 @@ describe("snapshots", () => {
   });
 });
 
-describe("runJourney", () => {
+describe("runNewUserJourney", () => {
   it("passes both stages and records time to first merge and the prompts", async () => {
     const r = await run({ ...stage1Io(), ...io2() });
     assert.equal(r.ok, true, r.message);
@@ -74,8 +74,8 @@ describe("runJourney", () => {
   });
   it("fails stage 1 on a wording regression against the snapshot", async () => {
     const dir = mkdtempSync(join(tmpdir(), "jt-"));
-    await runJourney({ repo: "o/s", io: { ...stage1Io(), ...io2() }, snapshotDir: dir, update: true });
-    const r = await runJourney({ repo: "o/s", io: { ...stage1Io({ help: { code: 0, output: "Usage: forgedock <thing>\n" } }), ...io2() }, snapshotDir: dir });
+    await runNewUserJourney({ repo: "o/s", io: { ...stage1Io(), ...io2() }, snapshotDir: dir, update: true });
+    const r = await runNewUserJourney({ repo: "o/s", io: { ...stage1Io({ help: { code: 0, output: "Usage: forgedock <thing>\n" } }), ...io2() }, snapshotDir: dir });
     assert.equal(r.ok, false);
     assert.match(r.message, /help\.txt changed/);
     assert.equal(r.step, "snapshot");
@@ -119,7 +119,7 @@ describe("clean output parsing and the CLI", () => {
     const calls = [], out = [], head = "c".repeat(40), dir = mkdtempSync(join(tmpdir(), "jt-"));
     const gh = async (a) => { calls.push(a); return a[0] === "pr" && a[1] === "view" ? head : a[0] === "pr" ? JSON.stringify([]) : "[]"; };
     const io = { ...stage1Io(), ...io2({ gh }) };
-    await runJourney({ repo: "o/s", io, snapshotDir: dir, update: true });
+    await runNewUserJourney({ repo: "o/s", io, snapshotDir: dir, update: true });
     const r = await journeyFromCli(["--journey", "--repo", "o/sandbox", "--pr", "9", "--release-repo", "o/rel"], { cwd: "/nonexistent", print: (l) => out.push(l), io, snapshotDir: dir });
     assert.equal(r.ok, false);
     assert.equal(r.step, "first-merge");

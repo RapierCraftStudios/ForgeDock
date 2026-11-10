@@ -35,3 +35,5 @@
 - Env: `FORGE_JOURNEY_IMAGE` (default `node:22`), `FORGE_DOCKER_LABELS`.
 
 Sibling-list check: the 10 flagged tests (telemetry-seam, batch-health, batch, checks, ci-budget, conformance(.e2e), context, drift, execution.e2e) enumerate no selftest-* modules or bin/lean files; recorded as not_members in result.json.
+
+Rename: the journey entry point is now `runNewUserJourney` (was `runJourney`) to avoid colliding with the onboarding `runJourney` exported by bin/journey.mjs. Updated selftest-journey.mjs and its test; V1 and V2 pass.
