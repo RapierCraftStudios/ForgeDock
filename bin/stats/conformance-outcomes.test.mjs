@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, joinedNumbers, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, joinedNumbers, wilson, cites, reverts, sameHunks, warmSameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, verdictOf } from "./query.mjs";
 import { summariseLog } from "./local-source.mjs";
 import { buildReport, parseArgs, runStats } from "./index.mjs";
@@ -246,4 +246,29 @@ describe("joinedNumbers (#5363)", () => {
     assert.deepEqual(joinedNumbers([{ number: 9, closingIssues: [{ number: 3 }, { number: 5 }] }, { number: 4, closingIssues: [{ number: 3 }] }]), [3, 4, 5, 9]);
     assert.deepEqual(joinedNumbers(), []);
   });
+});
+
+it("same-hunks blames each fix PR once (#5372)", () => {
+  const at = (d) => new Date(Date.UTC(2026, 0, 1 + d)).toISOString();
+  const NOW2 = Date.parse(at(60));
+  const lanes = Array.from({ length: 10 }, (_, i) => ({ repo: "o/r", number: 100 + i, title: `feat: ${i}`, body: "", mergedAt: at(i), mergeSha: `lane${i}`, closingIssues: [{ number: 200 + i }] }));
+  const fixes = Array.from({ length: 3 }, (_, i) => ({ repo: "o/r", number: 300 + i, title: `fix: ${i}`, body: "", mergedAt: at(i + 3), mergeSha: `fix${i}`, closingIssues: [] }));
+  const calls = { ranges: 0, blame: 0 };
+  const git = { oldRanges: () => { calls.ranges++; return [{ file: "a", start: 1, end: 2 }, { file: "b", start: 1, end: 2 }]; }, blame: (rev) => { calls.blame++; return rev === "fix1^" ? ["lane0"] : []; } };
+  const verdicts = new Map(lanes.map((l, i) => [`pr:${l.number}`, { state: "conforms", issue: 200 + i, kinds: [] }]));
+  const events = [];
+  const r = conformanceOutcomes({ prs: [...lanes, ...fixes], verdicts, now: NOW2, git, minN: 1, onProgress: (e) => events.push(e) });
+  assert.equal(calls.ranges, 3, "oldRanges once per fix PR");
+  assert.equal(calls.blame, 6, "blame calls are fix PRs x hunks");
+  assert.equal(r.prs.find((x) => x.pr === 100).signals.same_hunks, true);
+  assert.equal(r.prs.find((x) => x.pr === 101).signals.same_hunks, false);
+  assert.deepEqual(events.map((e) => [e.phase, e.done, e.total]), [["same-hunks", 1, 3], ["same-hunks", 2, 3], ["same-hunks", 3, 3]]);
+  warmSameHunks(fixes, git);
+  assert.equal(calls.blame, 6, "a second warm reuses the memo");
+});
+
+it("same-hunks keeps a hit when another range of the fix PR is unresolved (#5372)", () => {
+  const git = { oldRanges: () => [{ file: "a", start: 1, end: 2 }, { file: "b", start: 1, end: 2 }], blame: (_r, f) => (f === "a" ? null : ["lane0"]) };
+  assert.equal(sameHunks({ mergeSha: "lane0" }, [{ mergeSha: "fixU" }], git), true);
+  assert.equal(sameHunks({ mergeSha: "other" }, [{ mergeSha: "fixU" }], git), null);
 });

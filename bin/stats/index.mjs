@@ -432,7 +432,7 @@ export async function buildReport(opts, deps = {}) {
       batchRows: opts.local ? (deps.batchRows ?? readBatchRows({ batchRoot: deps.batchRoot ?? batchRoot(env), repo })) : [] });
     const git = deps.git !== undefined ? deps.git : resolveRepo(null)?.toLowerCase() === repo.toLowerCase() ? gitProbes(process.cwd()) : null;
     const report = conformanceOutcomes({ prs: input.prs, verdicts, minN: opts.minNSet ? opts.minN : DEFAULT_OUTCOME_MIN_N, windowDays: opts.windowDays ?? DEFAULT_WINDOW_DAYS,
-      now, git, graphqlCalls: input.graphqlCalls, since: input.since });
+      now, git, graphqlCalls: input.graphqlCalls, since: input.since, onProgress: deps.onProgress });
     if (input.capped) report.sources.capped = true;
     if (opts.replay) report.replay = replayPrs({ prs: input.prs, verdicts, numbers: opts.replay, enforceDomains: opts.enforceDomains ?? "", riskPaths: opts.riskPaths ?? "" });
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { conformance_outcomes: report } };

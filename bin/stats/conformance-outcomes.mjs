@@ -79,22 +79,52 @@ export function cites(q, p) {
   return false;
 }
 
+const blameMemo = new WeakMap();
+
+/** Merge shas that a fix PR's old-side lines blame to, computed once per fix sha per git probe object (#5372); null when unresolved. */
+function blamedBy(q, git) {
+  let memo = blameMemo.get(git);
+  if (!memo) blameMemo.set(git, (memo = new Map()));
+  if (memo.has(q.mergeSha)) return memo.get(q.mergeSha);
+  const ranges = q.mergeSha ? git.oldRanges(q.mergeSha) : null;
+  let entry = null;
+  if (ranges) {
+    entry = { shas: new Set(), unresolved: false };
+    for (const r of ranges) {
+      const shas = git.blame(`${q.mergeSha}^`, r.file, r.start, r.end);
+      if (shas == null) { entry.unresolved = true; continue; }
+      for (const s of shas) entry.shas.add(s);
+    }
+  }
+  memo.set(q.mergeSha, entry);
+  return entry;
+}
+
+/** Blame each fix PR once up front, reporting {phase: "same-hunks", done, total, etaMs} so a long run is not silent. */
+export function warmSameHunks(fixes, git, onProgress, now = Date.now) {
+  const todo = fixes.filter((q) => q.mergeSha);
+  const t0 = now();
+  todo.forEach((q, i) => {
+    blamedBy(q, git);
+    const done = i + 1;
+    onProgress?.({ phase: "same-hunks", done, total: todo.length, etaMs: done < todo.length ? ((now() - t0) / done) * (todo.length - done) : 0 });
+  });
+}
+
 /**
  * Same-hunks: a later fix PR whose old-side lines blame to `p`'s merge commit. true on a hit, false when every later fix PR
- * resolved without one (or there is none), null when git is missing or a needed probe could not resolve.
+ * resolved without one (or there is none), null when git is missing or a needed probe could not resolve. Each fix PR is
+ * blamed once per git probe object, not once per lane PR.
  */
 export function sameHunks(p, laterFixes, git) {
   if (!laterFixes.length) return false;
   if (!git || !p.mergeSha) return null;
   let unresolved = false;
   for (const q of laterFixes) {
-    const ranges = q.mergeSha ? git.oldRanges(q.mergeSha) : null;
-    if (!ranges) { unresolved = true; continue; }
-    for (const r of ranges) {
-      const shas = git.blame(`${q.mergeSha}^`, r.file, r.start, r.end);
-      if (shas == null) { unresolved = true; continue; }
-      if (shas.includes(p.mergeSha)) return true;
-    }
+    const entry = blamedBy(q, git);
+    if (!entry) { unresolved = true; continue; }
+    if (entry.shas.has(p.mergeSha)) return true;
+    if (entry.unresolved) unresolved = true;
   }
   return unresolved ? null : false;
 }
@@ -104,10 +134,11 @@ export function sameHunks(p, laterFixes, git) {
  * verdicts: Map from conformanceVerdicts (keys pr:N, issue:N). A PR whose window has not elapsed by `now` is pending and left
  * out of the cells. A PR with no verdict is not a lane PR.
  */
-export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEFAULT_OUTCOME_MIN_N, windowDays = DEFAULT_WINDOW_DAYS, now = Date.now(), git = null, graphqlCalls = null, since = null, surfacesOf = surfacesOfFiles }) {
+export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEFAULT_OUTCOME_MIN_N, windowDays = DEFAULT_WINDOW_DAYS, now = Date.now(), git = null, graphqlCalls = null, since = null, surfacesOf = surfacesOfFiles, onProgress = null }) {
   const win = windowDays * DAY;
   const merged = prs.filter((p) => ms(p.mergedAt) != null).sort((a, b) => ms(a.mergedAt) - ms(b.mergedAt));
   const sinceMs = ms(since);
+  if (git) warmSameHunks(merged.filter((q) => isFix(q) && (sinceMs == null || ms(q.mergedAt) >= sinceMs)), git, onProgress);
   const rows = [];
   let unjoined = 0, pending = 0, unresolved = 0;
   for (const p of merged) {

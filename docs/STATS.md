@@ -127,7 +127,8 @@ time, review findings per lane (conformance failures + verifier findings) and th
 failure rate, and the post-merge defect rate over merged lanes with known defect data. A defect is any of the
 `--conformance-outcomes` signals within 7 days (#5364): reverted, reopened, cited (a later PR names the PR or issue as
 the cause), or `same_hunks` (a later fix PR's old-side lines git-blame to the lane's merge commit). `same_hunks` needs a
-local clone of the repo (run from it); without one a lane with no other signal is n/a, counted as unresolved.
+local clone of the repo (run from it); without one a lane with no other signal is n/a, counted as unresolved. Each fix PR
+is blamed once per run (`same-hunks i/N` progress goes to stderr).
 
 Cells are grouped by verdict (eligible, ambiguous, ineligible) and by every reason and signal code (`hotspot`,
 `churn_high`, `label_docs`, `size_S`, ...), so outcomes can be attributed to each signal.
