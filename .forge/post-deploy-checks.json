@@ -22,5 +22,17 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "ceiling-ab-posted": {
+    "run": "test \"$(gh issue view 5346 --json comments --jq '[.comments[]|select(.body|contains(\"FORGE:CEILING_AB\"))]|length')\" -ge 1",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
+  },
+  "ceiling-default-set": {
+    "run": "git fetch -q origin staging && test \"$(git log origin/staging --grep='ceiling default (#5346)' --format=%H | wc -l)\" -ge 1",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
   }
 }

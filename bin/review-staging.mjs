@@ -27,6 +27,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
+import { gateByRef } from "./lean/acceptance.mjs";
+import { DEFAULT_FEATURE_PATTERN } from "./lean/lane.mjs";
 import { requiredChecksFor } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -146,7 +148,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, extraRequiredChecks: Array.isArray(cfg.gate?.required_checks) ? cfg.gate.required_checks.map((x) => String(x).trim()).filter(Boolean) : [], sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", featurePattern: typeof cfg.branches?.feature_pattern === "string" && cfg.branches.feature_pattern.includes("{slug}") ? cfg.branches.feature_pattern : null, configPath: path, extraRequiredChecks: Array.isArray(cfg.gate?.required_checks) ? cfg.gate.required_checks.map((x) => String(x).trim()).filter(Boolean) : [], sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -543,12 +545,30 @@ export function countFailingChecks(checks) {
 }
 
 /** Phase 8 verdict from the deterministic inputs (CI, test gate, CONFIRMED CRITICAL/HIGH). */
-export function stagingVerdict({ ciFailing, testGateInvalid, confirmedCritical, confirmedHigh }) {
+export function stagingVerdict({ ciFailing, testGateInvalid, acceptanceBlocked = null, confirmedCritical, confirmedHigh }) {
+  if (acceptanceBlocked) return { verdict: "BLOCK DEPLOY", why: `feature acceptance blocked: ${acceptanceBlocked}` };
   if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify, forge/deploy-gate and the gate-marker check excluded)` };
   if (testGateInvalid) return { verdict: "BLOCK DEPLOY", why: "test-gate result missing/invalid (fail closed)" };
   if (confirmedCritical > 0) return { verdict: "BLOCK DEPLOY", why: `${confirmedCritical} CONFIRMED CRITICAL finding(s)` };
   if (confirmedHigh > 0) return { verdict: "NEEDS FIXES FIRST", why: `${confirmedHigh} CONFIRMED HIGH finding(s)` };
   return { verdict: "APPROVE FOR DEPLOY", why: "no CI failure, no blocking test gate, no CONFIRMED CRITICAL/HIGH finding" };
+}
+
+/**
+ * #5336: the feature-acceptance gate of a milestone release PR (head ref `milestone/<slug>` by the feature pattern). A milestone
+ * with an epic is blocked by a red or never-run journey, and a SKIP test gate is a blocking finding there, not a pass.
+ * Returns the blocking reason or null. A PR that is not from a milestone branch is not gated; an unreadable read fails closed.
+ */
+async function acceptanceBlock(io, c, pr, tg) {
+  let branch = "";
+  try { branch = (await io.gh(["pr", "view", String(pr), "-R", c.ghRepo, "--json", "headRefName", "--jq", ".headRefName"])).trim(); } catch { return null; }
+  const [pre, post = ""] = String(c.featurePattern ?? DEFAULT_FEATURE_PATTERN).split("{slug}");
+  if (!pre || !branch.startsWith(pre) || !branch.endsWith(post) || branch.length <= pre.length + post.length) return null;
+  let g;
+  try { g = await gateByRef({ io, repo: c.ghRepo, branch, stage: "ship", pattern: c.featurePattern ?? DEFAULT_FEATURE_PATTERN }); } catch (e) { return `journey gate unreadable (${String(e?.message ?? e).slice(0, 120)}; fail closed)`; }
+  if (!g.gated) return null;
+  if (!g.ok) return g.reasons.join("; ");
+  return tg.verdict === "SKIP" ? "Test Gate SKIP (verification.integration_tests not configured) on a milestone with an epic" : null;
 }
 
 /** --summary: Phase 8 verdict + summary comment ending in exactly one gate marker kind. Never merges. */
@@ -570,7 +590,8 @@ async function summary(a, io) {
     ({ blocking: ciFailing, warnings } = classifyChecks(checks, required));
   }
 
-  const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
+  const acceptanceBlocked = await acceptanceBlock(io, c, pr, tg);
+  const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, acceptanceBlocked, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
   const pass = v.verdict === "APPROVE FOR DEPLOY";
   const marker = pass ? "FORGE:GATE_PASS" : "FORGE:GATE_FAILURE";
   const bundle = (st.bundle ?? []).join(" ");
@@ -597,6 +618,7 @@ async function summary(a, io) {
     `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded${warnings.length ? `; ${warnings.length} non-required check(s) red, non-blocking warning: ${warnings.join(", ")}` : ""} |`,
     `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
+    ...(acceptanceBlocked ? [`| **Feature acceptance** | \`BLOCK\` | ${acceptanceBlocked.replace(/\|/g, "/")} |`] : []),
     "",
     (TEST_GATE_NOTE[tg.verdict] ?? TEST_GATE_NOTE.BLOCK)(tg.reason),
     "",

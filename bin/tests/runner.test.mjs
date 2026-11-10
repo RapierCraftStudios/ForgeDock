@@ -20,6 +20,7 @@ import { tmpDir } from "./_tmp.mjs";
 import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
+  mkdtempSync,
   mkdirSync,
   writeFileSync,
   rmSync,
@@ -4378,5 +4379,66 @@ describe("readScopeLimitEvents (forge#4690)", () => {
       writeFileSync(join(root, "proc", "7", "cgroup"), "0::/user.slice/x.service\n");
       assert.equal(readScopeLimitEvents(7, o), null);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("#5334 a killed stream session carries the usage it streamed", () => {
+  const msg = (id, out) => `echo '{"type":"assistant","message":{"id":"${id}","usage":{"input_tokens":10,"output_tokens":${out},"cache_read_input_tokens":100,"cache_creation_input_tokens":5},"content":[{"type":"tool_use","name":"Bash","input":{"command":"x"}}]}}'`;
+  const fake = (body) => {
+    const d = mkdtempSync(join(os.tmpdir(), "fd-5334-")); const bin = join(d, "claude");
+    writeFileSync(bin, `#!/bin/sh\n${body}\n`); chmodSync(bin, 0o755);
+    return { d, bin };
+  };
+  const go = async (o, body) => { const { d, bin } = fake(body); const { runCliBackendAsync } = await import("../runner.mjs"); return runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, ...o }); };
+  const want = { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 10, cache_read_input_tokens: 200 };
+
+  it("CLI_IDLE and CLI_TIMEOUT errors carry usage, turns and toolUses; the session snapshot matches", async () => {
+    for (const [o, code] of [[{ idleMs: 500, maxMs: 20000 }, "CLI_IDLE"], [{ idleMs: 0, maxMs: 700 }, "CLI_TIMEOUT"]]) {
+      const session = {};
+      await assert.rejects(go({ ...o, session }, `${msg("a", 10)}\n${msg("b", 20)}\nsleep 30`), (e) => {
+        assert.equal(e.code, code); assert.deepEqual(e.usage, want); assert.equal(e.turns, 2); assert.equal(e.toolUses.length, 2);
+        assert.deepEqual(session.snapshot().usage, want); assert.equal(session.snapshot().turns, 2);
+        return true;
+      });
+    }
+  });
+
+  it("a host kill (SIGTERM from outside) carries the usage streamed so far", async () => {
+    await assert.rejects(go({ idleMs: 20000, maxMs: 20000 }, `${msg("a", 10)}\n${msg("b", 20)}\nkill -TERM $$`), (e) => {
+      assert.equal(e.code, "CLI_BACKEND_FAILED"); assert.deepEqual(e.usage, want); assert.equal(e.turns, 2);
+      return true;
+    });
+  });
+
+  it("estimateCostUsd prices by model family and is null without usage", async () => {
+    const { estimateCostUsd } = await import("../runner.mjs");
+    const u = { input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 1e6, cache_creation_input_tokens: 1e6 };
+    assert.equal(estimateCostUsd(u, "claude-opus-5-5"), 110.25); assert.equal(estimateCostUsd(u, "default"), 22.05); assert.equal(estimateCostUsd(u, "haiku"), 7.35);
+    assert.equal(estimateCostUsd(null), null);
+  });
+});
+
+describe("runCliBackendAsync context ceiling never stops mid-edit (#5346)", () => {
+  const asst = (id, ctx, tool) => JSON.stringify({ type: "assistant", message: { id, content: tool ? [{ type: "tool_use", id: `t-${id}`, name: tool, input: { file_path: "a.js" } }] : [{ type: "text", text: "x" }], usage: { input_tokens: ctx, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } });
+  const res = (id) => JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: `t-${id}`, content: "ok" }] } });
+  const run = async (lines, contextMax) => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const d = tmpDir("core-ctxedit-");
+    writeFileSync(`${d}/fake`, `#!/bin/sh\n${lines.map((l) => (l === "SLEEP" ? "sleep 2" : `echo '${l}'`)).join("\n")}\nexec sleep 30\n`); chmodSync(`${d}/fake`, 0o755);
+    return runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true, contextMax });
+  };
+  it("a ceiling crossed with an Edit pending stops only after that edit's tool_result", async () => {
+    const t0 = Date.now();
+    await assert.rejects(run([asst("m1", 50), asst("m2", 120, "Edit"), "SLEEP", res("m2"), asst("m3", 130)], 100), (e) => {
+      assert.equal(e.code, "CLI_CONTEXT"); assert.equal(e.context, 120, "the context at the crossing, stopped at the safe point"); return true;
+    });
+    assert.ok(Date.now() - t0 >= 1800, "the kill waited for the edit's tool_result");
+  });
+  it("a ceiling crossed by a non-edit tool stops at once", async () => {
+    await assert.rejects(run([asst("m1", 120, "Read"), asst("m2", 130, "Read")], 100), (e) => { assert.equal(e.context, 120); return true; });
+  });
+  it("the hard cap (1.25x) stops even with an edit still pending", async () => {
+    await assert.rejects(run([asst("m1", 120, "Edit"), asst("m2", 126, "Edit")], 100), (e) => { assert.equal(e.context, 126); return true; });
   });
 });

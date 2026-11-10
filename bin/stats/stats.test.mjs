@@ -536,6 +536,13 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     { event: "RUN_TERMINAL", reason, code: "x", context_pack: mode, lane_type: lt },
   ];
 
+  it("#5334 summariseLog counts an interrupted run's killed-attempt usage (turns, tokens, estimated cost)", () => {
+    const s = summariseLog([{ event: "RUN_START", issue: 3 },
+      { event: "PHASE_ATTEMPT_USAGE", phase: "implement", turns: 41, usage: { output_tokens: 900, cache_read_input_tokens: 7e6 }, cost_usd: 1.5, cost_usd_delta: 1.5, cost_estimated: true, duration_ms: 60000 },
+      { event: "RUN_TERMINAL", reason: "deferred", code: "run.interrupted", model_ms: 60000 }]);
+    assert.equal(s.costUsd, 1.5); assert.equal(s.builderTurns, 41); assert.equal(s.cacheReadTokens, 7e6); assert.equal(s.usageEvents, 1);
+  });
+
   it("summariseLog carries mode, lane type, builder turns, cache tokens, cost and first-pass", () => {
     const s = summariseLog(log("on", "child"));
     assert.deepEqual(s.contextPack, { mode: "on", laneType: "child", ab: false, light: false });
@@ -971,5 +978,16 @@ describe("env.tool_missing per release (forge#4414)", () => {
     assert.deepEqual(after.groups.map((g) => g.version), ["1.31.0"]);
     assert.equal(codesOf(after.groups[0])["env.tool_missing"], undefined);
     assert.equal(after.groups[0].flow.codesN, 2);
+  });
+});
+
+describe("merged vs verified (#5339)", () => {
+  const run = (n, extra) => ({ source: "local", repo: "o/r", version: "2.0.0", issue: n, run: `r${n}`, finished: true, hydrated: false, usageEvents: 1, reason: "merged", code: null, remediated: false, startTs: null, endTs: null, wallMs: 1, phases: {}, ...extra });
+  it("a merged lane with a transferred requirement is merged but not verified; milestones are split; older runs count as verified", () => {
+    const runs = [run(1, { milestone: "M1", verified: true }), run(2, { milestone: "M1", verified: false }), run(3, { milestone: "M2" }), run(4, { reason: "needs-human" })];
+    const g = aggregate({ runs }, { releaseTimes: [] }).groups.find((x) => x.version === "2.0.0");
+    assert.equal(g.flow.mergedPct, 0.75);
+    assert.equal(g.flow.verifiedPct, 0.5);
+    assert.deepEqual(g.flow.milestones, [{ milestone: "M1", merged: 2, verified: 1 }, { milestone: "M2", merged: 1, verified: 1 }]);
   });
 });
