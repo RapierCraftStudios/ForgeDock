@@ -388,7 +388,7 @@ describe("#5349 wait attribution in the efficiency report", () => {
     assert.deepEqual(m.wait.phases.plan.wait, { heavy_queue: 100000, command: 300000 });
     const out = formatEfficiencyLines(m).filter((l) => /wait/.test(l));
     assert.match(out[0], /wait \(non-model time, 1 merged lane\): 6\.7m of 15\.0m wall \(44%\); heavy_queue 1\.7m, command 5\.0m/);
-    assert.match(out[1], /wait plan: 6\.7m of 10\.0m \(heavy_queue 1\.7m, command 5\.0m\)/);
+    assert.match(out[1], /wait plan: 6\.7m of 10\.0m \(heavy_queue 1\.7m, command 5\.0m; p50\/p90 heavy_queue 1\.7m\/1\.7m/);
   });
   it("reports n/a for runs recorded before the breakdown existed", () => {
     const m = efficiencyMetrics({ entries: [row(2)], logs });

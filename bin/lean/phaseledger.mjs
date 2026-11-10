@@ -132,14 +132,16 @@ export function summarizePhases(list) {
  */
 export function summarizeWaits(list) {
   const lanes = (list ?? []).filter((p) => p && typeof p === "object" && Object.values(p).some((v) => v?.wait && typeof v.wait === "object"));
-  const phases = {}, total = { ms: 0, model_ms: 0, wait: {} };
+  const phases = {}, total = { ms: 0, model_ms: 0, wait: {} }, per = {}; // per[id][cause]: one value per lane, for p50/p90
   for (const p of lanes) for (const [id, v] of Object.entries(p)) {
     if (!LANE_PHASES.includes(id) || !isNum(v?.ms) || id === "queue_wait") continue;
     const g = (phases[id] ??= { ms: 0, model_ms: 0, wait: {} });
+    for (const c of WAIT_CAUSES) if (isNum(v.wait?.[c])) ((per[id] ??= {})[c] ??= []).push(v.wait[c]);
     g.ms += v.ms; total.ms += v.ms;
     if (isNum(v.model_ms)) { g.model_ms += v.model_ms; total.model_ms += v.model_ms; }
     for (const c of WAIT_CAUSES) if (isNum(v.wait?.[c])) { g.wait[c] = (g.wait[c] ?? 0) + v.wait[c]; total.wait[c] = (total.wait[c] ?? 0) + v.wait[c]; }
   }
+  for (const [id, byCause] of Object.entries(per)) phases[id].pct = Object.fromEntries(Object.entries(byCause).map(([c, vs]) => [c, { p50: pct(vs, 50), p90: pct(vs, 90) }]));
   return { n: lanes.length, phases, total };
 }
 

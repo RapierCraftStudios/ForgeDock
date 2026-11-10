@@ -95,5 +95,7 @@ describe("phase ledger (#4908)", () => {
     assert.equal(s.n, 1);
     assert.deepEqual(s.total, { ms: 17, model_ms: 4, wait: { heavy_queue: 3, command: 3 } });
     assert.equal(summarizeWaits([{ plan: { ms: 5 } }]).n, 0);
+    const q = summarizeWaits([1, 2, 3, 4].map((n) => ({ plan: { ms: 10 * n, wait: { heavy_queue: n * 1000 } } })));
+    assert.deepEqual(q.phases.plan.pct.heavy_queue, { p50: 2500, p90: 4000 });
   });
 });

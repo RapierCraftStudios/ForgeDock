@@ -416,7 +416,7 @@ function waitLines(w) {
   const mins = (ms) => `${(ms / 60000).toFixed(1)}m`, causes = (c) => Object.entries(c).map(([k, v]) => `${k} ${mins(v)}`).join(", ") || "none";
   const waiting = Math.max(0, w.total.ms - w.total.model_ms);
   return [`wait (non-model time, ${w.n} merged lane${w.n === 1 ? "" : "s"}): ${mins(waiting)} of ${mins(w.total.ms)} wall (${w.total.ms > 0 ? Math.round((waiting / w.total.ms) * 100) : 0}%); ${causes(w.total.wait)}`,
-    ...Object.entries(w.phases).map(([id, g]) => `  wait ${id}: ${mins(Math.max(0, g.ms - g.model_ms))} of ${mins(g.ms)} (${causes(g.wait)})`)];
+    ...Object.entries(w.phases).map(([id, g]) => `  wait ${id}: ${mins(Math.max(0, g.ms - g.model_ms))} of ${mins(g.ms)} (${causes(g.wait)}${Object.keys(g.pct ?? {}).length ? `; p50/p90 ${Object.entries(g.pct).map(([k, q]) => `${k} ${mins(q.p50)}/${mins(q.p90)}`).join(", ")}` : ""})`)];
 }
 
 const pct = (x) => (num(x) == null ? "n/a" : `${Math.round(x * 100)}%`);
