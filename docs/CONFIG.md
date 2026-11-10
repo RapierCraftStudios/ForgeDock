@@ -1820,21 +1820,28 @@ systemctl --user daemon-reload && systemctl --user enable --now forgedock-bot-to
 
 ## GitHub App Install
 
-During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`) on your account or org.
+During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`). Installing alone changes nothing; to run the pipeline as the App's bot (its own API budget, `<app>[bot]` authorship) sign in with `forgedock auth login`. Without a login, every pipeline `gh` call uses your own `gh auth`, exactly as before.
 
-**What installing it does today**: registers the app against the account/org you choose. That's it.
+### Broker sign-in
 
-**What it does NOT do (yet)**:
-- It does **not** create a bot token. GitHub App *installation* tokens can only be minted with the app's private key, and that key is held solely by RapierCraft Studios (the app's owner) — your installation grants *your* installation ID against *RapierCraft's* app, not a key you can use yourself.
-- It does **not** auto-refresh anything, and there is no background process managing token expiry.
-- It does **not** change which `gh` auth context pipeline commands (`/work-on`, `/orchestrate`, etc.) use. Every pipeline `gh` call always uses whatever auth is currently active in your shell — your personal token unless you've manually configured something else.
-- It does **not** wire up webhook-driven "automatic pipeline triggers" — no webhook receiver exists yet.
+```
+forgedock auth login --broker-url https://<broker> --client-id <App client id> [--installation N]
+forgedock auth status
+forgedock auth logout
+```
 
-**Why this matters**: GitHub App installation tokens get materially higher API rate limits than a personal access token, and actions taken with them are attributed to the bot (`rapiercraft-forgedock[bot]`) rather than your personal account. Those benefits are real, but delivering them to arbitrary installers requires a hosted token-minting backend service that doesn't exist yet (tracked as forge#1890). Installing the app today is safe and free, but on its own changes nothing about how the pipeline authenticates.
+- Login uses the GitHub App **device flow** (client ID only; no secret on your machine). The CLI stores the user token and installation under `~/.forge/app-auth.json` (mode 0600; `FORGE_HOME_DIR` overrides the directory). `FORGEDOCK_BROKER_URL` and `FORGEDOCK_APP_CLIENT_ID` can replace the flags.
+- On every CLI start the stored login yields a short-lived installation token, scoped to your repository ids and the permissions the pipeline uses, which is set as `GH_TOKEN` in the CLI process env only. It is not a global credential: no `gh auth login`, no git credential helper (#4565). It is refreshed when under 10 minutes remain.
+- If the broker is unreachable or refuses, one warning line is printed and the pipeline continues on your own `gh` auth. `FORGEDOCK_NO_APP_AUTH=1` skips the App identity.
+- Broker contract (client side): `POST {broker}/v1/token` with `Authorization: Bearer <user token>` and body `{installation_id, repository_ids, permissions}`, answering `{token, expires_at}`. The broker server, quotas, mint logs, revocation and security page live on the platform side.
 
-`npx forgedock doctor` reports this status explicitly (Check 12: "GitHub App / bot token") so you aren't left guessing whether a bot token is active.
+### Bring your own App
 
-**If you want bot-token behavior today**: you'd need to register your own GitHub App (with your own private key), and drive your own token-refresh loop (mint an installation token via the app's `/app/installations/{id}/access_tokens` API, then `gh auth login --with-token`, repeating before the ~1-hour expiry). This is an advanced, self-hosted setup — ForgeDock does not package a generic version of this for you.
+`forgedock auth login --byo [--org ORG] [--installation N]` runs GitHub's App manifest flow through a loopback page, stores the App id and private key (`~/.forge/app-byo.pem`, 0600) and mints installation tokens locally. No third-party broker is involved.
+
+### Doctor
+
+`npx forgedock doctor` (Check 12, "GitHub App / bot token") shows the active identity, its source (`broker`, `byo` or personal fallback) and the `core.limit` of the active token. Without a login it keeps the earlier messages, including the refresh-stamp check for the self-hosted `scripts/refresh-bot-token.sh` setup.
 
 ---
 
