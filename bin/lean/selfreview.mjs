@@ -81,7 +81,8 @@ export function selfReviewFindings({ contract: frozen, result = null, changedFil
   const contract = Array.isArray(result?.amendments) && result.amendments.length ? applyAmendments(frozen, result.amendments).contract : frozen;
   const reported = Array.isArray(result?.requirements);
   const pc = precheck({ contract: { ...contract, validate: [] }, result: reported ? result : null, changedFiles, ignore, hotspots, ciVerified: true });
-  const out = pc.failures.filter((f) => reported || !NEEDS_RESULT.has(f.kind)).map((f) => ({ code: f.code, kind: f.kind ?? null, detail: f.detail, section: sectionOfKind(f.code) }));
+  // no result.json yet: the builder cannot have amended an extra file in, so scope_creep is not judged until one exists
+  const out = pc.failures.filter((f) => (reported || !NEEDS_RESULT.has(f.kind)) && (result || f.code !== "conformance.scope_creep")).map((f) => ({ code: f.code, kind: f.kind ?? null, detail: f.detail, section: sectionOfKind(f.code) }));
   out.push(...preserveTouched(contract, changedFiles, ignore));
   return out;
 }
