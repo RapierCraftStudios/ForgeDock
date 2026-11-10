@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, backupForgeYaml, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 // The installer, doctor and status resolve the Claude config dir from
@@ -229,6 +229,22 @@ describe("backfillForgeYaml (#1982)", () => {
     );
     backfillForgeYaml(dir);
     assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after a successful backfill");
+  });
+});
+
+describe("backupForgeYaml (#5315)", () => {
+  it("returns null when the file does not exist", () => {
+    assert.equal(backupForgeYaml(join(dir, "forge.yaml"), "x"), null);
+  });
+  it("records a config-history version and leaves no .bak in the repo", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(out, "x", "utf-8");
+    process.env.FORGE_CONFIG_HISTORY_DIR = join(dir, "history");
+    try { backupForgeYaml(out, "test"); } finally { delete process.env.FORGE_CONFIG_HISTORY_DIR; }
+    assert.ok(!existsSync(out));
+    assert.ok(!existsSync(join(dir, "forge.yaml.bak")));
+    const repos = readdirSync(join(dir, "history"));
+    assert.equal(readFileSync(join(dir, "history", repos[0], "1.yaml"), "utf-8"), "x");
   });
 });
 
