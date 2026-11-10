@@ -822,6 +822,16 @@ describe("core work-on", () => {
     assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
   });
 
+  it("#5331 a remote lane whose sandbox lacks a validate tool ends env.tool_missing before building; local placement is unchanged", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: tmpDir("lean-5331-"), ...remote });
+    assert.equal(r.code, "env.tool_missing");
+    const l = world({ contract }); l.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    assert.notEqual((await run(l, { placement: { where: "local", reason: "x" } })).code, "env.tool_missing");
+  });
+
   it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
     const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
