@@ -2985,3 +2985,10 @@ path is authorized (#5380).
 - **Admission.** `makeIntegration({skeleton})` (on for real runs in `engine-cli`) loads open `skeleton` issues in `prime()`; `holds(n,{lane})` refuses every sibling of the lane until the skeleton merges. The `holds` signature is unchanged.
 - **Journey gate.** `makeJourneyRunner` resolves `{summary, red, ran, head}` (a string when nothing ran). A red result files or updates ONE `integration-red` issue (marker `FORGE:INTEGRATION:journey:<slug>`) naming the last merged PR and the PRs since the last green run, and holds admission; a green run closes it. `prime()` reloads that hold. A red journey before the skeleton merges files nothing.
 - **Metric.** `firstMergeAt` and `firstJourneyGreenAt` are stored in the milestone's `FORGE:INTEGRATION` block and shown by `integration status`.
+
+## Release #5379 review follow-ups (#5382)
+
+- **Journey hold exit.** `holds(n,{lane})` admits the open `integration-red` issue itself (it is the fix); a merge that lands while a journey run is in flight queues one rerun (`journeyAgain`) so a green rerun clears the hold.
+- **Epic transfer.** `closePlan` with `liveBlocks` also reports `transferred` and `transfer` (the e2e/manual post-deploy rows); `lean.mjs` transfers `closing.transfer ?? closing.open`.
+- **Protection read.** `requiredChecksRead` returns `{checks, unreadable}` (non-404 failure = unreadable); `review-staging` `requiredSet` then yields `[]`, so every red check blocks (fail closed). `requiredChecksFor` still returns the names.
+- **Cleanup.** `formatSelfReview` and `holdEdges` removed (no callers); `budgetAlerts({facts, seen})`; shared `runMinutes` in `ci-budget.mjs`.

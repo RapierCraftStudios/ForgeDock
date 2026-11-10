@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { statSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { resolveAuth, applyAuthEnv, startAuthRefresh, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, authFromCli, doctorAppAuth, clearState } from "./app-token.mjs";
+import { resolveAuth, applyAuthEnv, startAuthRefresh, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, assertSecureBroker, authFromCli, doctorAppAuth, clearState } from "./app-token.mjs";
 
 const mkEnv = (extra = {}) => ({ FORGE_HOME_DIR: tmpDir("app-auth-"), ...extra });
 const NOW = Date.parse("2026-01-01T00:00:00Z");
@@ -116,6 +116,20 @@ test("doctorAppAuth reports bot identity and rate limit; warns on fallback; unco
   assert.equal(bad.status, "warn");
   assert.match(bad.detail, /personal gh auth as me/);
   clearState(env);
+});
+
+test("a broker URL that is not https is refused before the user token is sent (loopback http allowed)", async () => {
+  let called = false;
+  await assert.rejects(mintViaBroker({ brokerUrl: "http://broker.example", userToken: "u", installationId: 1, fetch: async () => { called = true; return json({}); } }), /must be https/);
+  assert.equal(called, false);
+  assert.doesNotThrow(() => assertSecureBroker("https://broker.test"));
+  assert.doesNotThrow(() => assertSecureBroker("http://127.0.0.1:8787"));
+  assert.throws(() => assertSecureBroker("ftp://x"), /must be https/);
+  const env = mkEnv();
+  const lines = [];
+  const code = await authFromCli(["login", "--broker-url", "http://broker.example", "--client-id", "c"], { env, fetch: async () => { throw new Error("no network"); }, out: (m) => lines.push(m) });
+  assert.equal(code, 1);
+  assert.match(lines.join("\n"), /must be https/);
 });
 
 test("startAuthRefresh refreshes env.GH_TOKEN past expiry with a fake clock", async () => {

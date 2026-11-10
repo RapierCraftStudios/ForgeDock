@@ -120,9 +120,9 @@ test("recordHostCheck appends a parity row and posts the attested status only in
 test("alerts: projected overage and a new burn source; digest lists repos", () => {
   const usage = sumUsage({ usageItems: [item(9000), item(4000, { repositoryName: "Flipped" })] });
   const facts = { budget: 20000, projected: 39000, usage, mtd: 13000, owner: "Acme" };
-  const alerts = budgetAlerts({ facts, res: {}, seen: ["AlterLab"] });
+  const alerts = budgetAlerts({ facts, seen: ["AlterLab"] });
   assert.ok(alerts.some((a) => /projected overage/.test(a))); assert.ok(alerts.some((a) => /new burn source: Flipped/.test(a)));
-  assert.equal(budgetAlerts({ facts, res: {}, seen: null }).some((a) => /new burn/.test(a)), false);
+  assert.equal(budgetAlerts({ facts, seen: null }).some((a) => /new burn/.test(a)), false);
   assert.match(formatDigest(facts), /AlterLab: 9\.0k min/);
 });
 

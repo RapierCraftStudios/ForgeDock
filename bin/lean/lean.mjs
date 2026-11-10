@@ -2967,11 +2967,12 @@ export async function runCore(o) {
     const closing = closePlan(effective, { title: iss.title, review, issueText, liveBlocks });
     if (closing.liveBlocked) T.decisions.push(`Default-on rollout with live acceptance deferred (${liveBlocks.map((b) => `${b.id} on ${b.flag}`).join(", ")}): issue left open as partial (#5285)`);
     if (inert.length) T.decisions.push(`Inert in production: the change touches rollout ${inert.map((m) => `${m.flag} (mode ${m.mode})`).join(", ")}; the issue's production outcome is not claimed (#5240)`);
+    const xfer = closing.transfer ?? closing.open; // #5382: a liveBlocked plan carries its transferred rows apart from the live-blocked ones
     if (closing.transferred) { // #5339: unrun e2e/manual requirements go to the epic's acceptance; the issue records them transferred, not met
       let epicNo = null;
-      try { epicNo = await transferToEpic({ io: { gh: ghc }, repo, milestoneTitle: milestone, issue, reqs: closing.open }); } catch (e) { T.anomalies.push(`transfer to the epic failed: ${String(e?.message ?? e).slice(0, 120)}`); }
-      for (const r of closing.open) r.transferred = epicNo ?? false;
-      T.decisions.push(epicNo ? `Requirements ${closing.open.map((r) => r.id).join(", ")} transferred to epic #${epicNo} (post-deploy journey): not met, issue left open as partial (#5339)` : `Requirements ${closing.open.map((r) => r.id).join(", ")} need a real run and no epic exists to take them: issue left open as partial (#5339)`);
+      try { epicNo = await transferToEpic({ io: { gh: ghc }, repo, milestoneTitle: milestone, issue, reqs: xfer }); } catch (e) { T.anomalies.push(`transfer to the epic failed: ${String(e?.message ?? e).slice(0, 120)}`); }
+      for (const r of xfer) r.transferred = epicNo ?? false;
+      T.decisions.push(epicNo ? `Requirements ${xfer.map((r) => r.id).join(", ")} transferred to epic #${epicNo} (post-deploy journey): not met, issue left open as partial (#5339)` : `Requirements ${xfer.map((r) => r.id).join(", ")} need a real run and no epic exists to take them: issue left open as partial (#5339)`);
     }
     verifiedLane = !closing.transferred && !closing.liveBlocked && !closing.checklist;
     if (closing.checklist) T.decisions.push(`Unticked acceptance criteria unmet (${closing.open.map((r) => r.id).join(", ")}): issue left open as partial (#5240)`);
@@ -3442,7 +3443,7 @@ export async function runCore(o) {
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
     if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     if (closing.transferred) { // #5339: record what is transferred, not met
-      try { await post("FORGE:TRACKED", `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${closing.open.map((r) => `- ${r.id}: ${r.transferred ? `transferred to epic #${r.transferred} (post-deploy journey)` : "no epic to take it"}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body carries them too */ }
+      try { await post("FORGE:TRACKED", `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${(closing.transfer ?? closing.open).map((r) => `- ${r.id}: ${r.transferred ? `transferred to epic #${r.transferred} (post-deploy journey)` : "no epic to take it"}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body carries them too */ }
     } else if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
       try { await post("FORGE:TRACKED", `## Left open: partial\nMerged by PR #${pr}, but these acceptance criteria are not met by it:\n${closing.unticked.map((u) => `- [ ] ${u}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}${inert.length ? `\n\nInert in production: the change takes effect only behind ${inert.map((m) => `\`${m.flag}\` (mode: ${m.mode})`).join(", ")}; the production outcome is not claimed.` : ""}`); } catch { /* the PR body and FORGE:STATE carry them */ }
     } else if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is

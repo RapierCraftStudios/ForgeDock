@@ -136,6 +136,9 @@ export function formatBudgetLine({ res, facts, release = null }) {
   return parts.join("; ");
 }
 
+/** A workflow run's duration in minutes (0 when its timestamps are missing or inverted). */
+const runMinutes = (r) => { const ms = Date.parse(r.updated_at) - Date.parse(r.run_started_at ?? r.created_at); return ms > 0 ? ms / 60000 : 0; };
+
 /** Actions runs since `sinceMs` on the repo: {runs, minutes} from run durations (best effort, null on failure). */
 export async function releaseRuns({ gh, repo, sinceMs, branch = null }) {
   const since = new Date(sinceMs).toISOString();
@@ -143,7 +146,7 @@ export async function releaseRuns({ gh, repo, sinceMs, branch = null }) {
   const j = await ghJson(gh, ["api", q]);
   if (!j || !Array.isArray(j.workflow_runs)) return null;
   let minutes = 0;
-  for (const r of j.workflow_runs) { const ms = Date.parse(r.updated_at) - Date.parse(r.run_started_at ?? r.created_at); if (ms > 0) minutes += ms / 60000; }
+  for (const r of j.workflow_runs) minutes += runMinutes(r);
   return { runs: j.workflow_runs.length, minutes };
 }
 
@@ -248,7 +251,7 @@ const defaultGh = (args) => execFileSync("gh", args, { encoding: "utf8", maxBuff
 
 // ---- alerts and digest -----------------------------------------------------------------------------------------------
 /** Alerts: projected overage and repos burning minutes that were not seen in the previous digest (e.g. a repo flipped private). */
-export function budgetAlerts({ facts, res, seen = null }) {
+export function budgetAlerts({ facts, seen = null }) {
   const out = [];
   if (facts?.budget && facts.projected !== null && facts.projected > facts.budget) out.push(`ALERT projected overage: ${kmin(facts.projected)} > ${kmin(facts.budget)} included minutes`);
   if (seen && facts?.usage) for (const [r, m] of Object.entries(facts.usage.byRepo)) if (!seen.includes(r) && m > 0) out.push(`ALERT new burn source: ${r} used ${kmin(m)} min this month (new or flipped private)`);
@@ -271,7 +274,7 @@ export async function workflowDigest({ gh, repo, now = Date.now() }) {
   const d = new Date(now), since = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
   const j = await ghJson(gh, ["api", `repos/${repo}/actions/runs?per_page=100&created=>=${since}`]);
   const by = {};
-  for (const r of Array.isArray(j?.workflow_runs) ? j.workflow_runs : []) { const ms = Date.parse(r.updated_at) - Date.parse(r.run_started_at ?? r.created_at); if (ms > 0) by[r.name] = (by[r.name] ?? 0) + ms / 60000; }
+  for (const r of Array.isArray(j?.workflow_runs) ? j.workflow_runs : []) by[r.name] = (by[r.name] ?? 0) + runMinutes(r);
   return Object.entries(by).sort((a, b) => b[1] - a[1]);
 }
 
@@ -331,7 +334,7 @@ export async function ciFromCli(argv, deps = {}) {
   const res = resolveCiMode({ policy, facts });
   writeEffective({ cwd, res, now, dir });
   const seen = readSeen(facts.owner, dir);
-  const alerts = budgetAlerts({ facts, res, seen });
+  const alerts = budgetAlerts({ facts, seen });
   if (facts.usage) writeSeen(facts.owner, Object.keys(facts.usage.byRepo), dir);
   const rates = hitRates(await pairParity({ gh, repo, rows: readParity(dir).slice(-50) }));
   if (rest.includes("--json")) { out(JSON.stringify({ repo, plan: facts.plan, includedMinutes: facts.included, budget: facts.budget, public: facts.isPublic, monthToDate: facts.mtd, projected: facts.projected, mode: res.effective, configured: res.configured, switched: res.switched, reason: res.reason, alerts, parity: rates }, null, 2)); return 0; }

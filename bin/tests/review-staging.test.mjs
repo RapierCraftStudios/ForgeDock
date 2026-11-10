@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, requiredSet, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -293,6 +293,8 @@ function postWorld(o = {}) {
       if (k === "pr view") return a.includes("headRefName") ? "staging\n" : `${o.head ?? HEAD}\n`;
       if (k === "pr comment") { if (o.commentFails) throw new Error("boom"); return ""; }
       if (k === "label create") return "";
+      if (o.protectionErr && a[0] === "api") throw new Error(o.protectionErr);
+      if (a[0] === "api" && a.includes("--paginate")) return ""; // rulesets: none
       if (k === "api repos/o/r/branches/main/protection/required_status_checks" && o.required) return JSON.stringify({ contexts: o.required });
       if (k === "pr list") return "42\n";
       throw new Error(`unexpected gh ${a.join(" ")}`);
@@ -543,6 +545,19 @@ describe("review-staging --summary", () => {
     assert.match(posted(w2)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
     const w3 = await finalized({ ci: red("lighthouse-hands") });
     assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1, "no readable required set: every red check blocks");
+  });
+
+  it("fails closed when the protection read is unreadable and gate.required_checks is set", async () => {
+    const ck = [{ name: "CI", bucket: "pass" }, { name: "protected-e2e", bucket: "fail" }];
+    // unreadable (403): the forge.yaml set alone must not demote the protection-required red check to a warning
+    assert.deepEqual(classifyChecks(ck, requiredSet({ checks: [], unreadable: true }, ["CI"])), { blocking: 1, warnings: [] });
+    // readable (a 404 is an answer): the union decides, other red checks stay warnings
+    assert.deepEqual(classifyChecks(ck, requiredSet({ checks: [], unreadable: false }, ["CI"])), { blocking: 0, warnings: ["protected-e2e"] });
+    // end to end: a 403 on the protection read still blocks a red check
+    const red = JSON.stringify(ck);
+    const w = await finalized({ ci: red, protectionErr: "gh: Resource not accessible by integration (HTTP 403)" });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 1);
+    assert.match(posted(w)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
   });
 
   it("forge.yaml gate.required_checks adds required checks", () => {

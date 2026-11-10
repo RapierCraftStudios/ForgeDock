@@ -213,6 +213,7 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
   const streaks = new Map(); // lane -> consecutive red runs
   const running = new Set();
   const journeyRunning = new Set();
+  const journeyAgain = new Map(); // milestone title -> the last merge that landed during a running journey run (#5382)
   const skeletons = new Map(); // lane -> number of its open skeleton issue (#5337: no sibling is admitted until it merges)
   const journeyHeld = new Map(); // lane -> number of the open journey integration-red issue (#5337)
   const journeyPrs = new Map(); // milestone title -> lane PRs merged since the last green journey run
@@ -254,6 +255,20 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
     }
   }
 
+  /** #5336: run the epic's journeys once; when a merge arrived meanwhile (#5382), run once more so a red hold can clear. */
+  function startJourneys(issue, full, title, number) {
+    journeyRunning.add(title);
+    const jp = Promise.resolve().then(() => journeys({ title, branch: lane(title), number }))
+      .then(async (r) => { onEvent({ issue, detail: `journeys: ${title} ${r?.summary ?? r ?? "done"}` }); await judge(issue, full, title, r); })
+      .catch((e) => onEvent({ issue, detail: `journey run failed: ${String(e?.message ?? e).slice(0, 200)}` }))
+      .finally(() => {
+        journeyRunning.delete(title); pending.delete(jp);
+        const again = journeyAgain.get(title);
+        if (again) { journeyAgain.delete(title); startJourneys(again.issue, again.full, title, number); }
+      });
+    pending.add(jp);
+  }
+
   async function count(issue, result) {
     const title = result?.milestone;
     if (!title) return;
@@ -264,13 +279,10 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
     if (result.pr != null) journeyPrs.set(title, [...(journeyPrs.get(title) ?? []), result.pr].slice(-MAX_PRS));
     if (journeys || skeleton) { const st = await stamp(full, "firstMergeAt"); if (st) full = { ...full, description: st.description }; }
     // #5336: after each child merge, run the epic's journeys on the milestone branch (the runner skips milestones with no journey yet).
-    if (journeys && !journeyRunning.has(title)) {
-      journeyRunning.add(title);
-      const jp = Promise.resolve().then(() => journeys({ title, branch: lane(title), number: ms.number }))
-        .then(async (r) => { onEvent({ issue, detail: `journeys: ${title} ${r?.summary ?? r ?? "done"}` }); await judge(issue, full, title, r); })
-        .catch((e) => onEvent({ issue, detail: `journey run failed: ${String(e?.message ?? e).slice(0, 200)}` }))
-        .finally(() => { journeyRunning.delete(title); pending.delete(jp); });
-      pending.add(jp);
+    // #5382: a merge that lands while a run is in flight queues one rerun (the run may have started before that merge).
+    if (journeys) {
+      if (journeyRunning.has(title)) journeyAgain.set(title, { issue, full });
+      else startJourneys(issue, full, title, ms.number);
     }
     if (!cfg) return;
     const s = parseIntegrationState(full.description) ?? emptyState();
@@ -299,7 +311,8 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
       const sk = skeletons.get(key);
       if (sk && Number(issue) !== sk) return `skeleton issue #${sk} of ${key} has not merged`;
       const red = journeyHeld.get(key);
-      if (red) return `epic journey red on ${key} (integration-red #${red})`;
+      // #5382: the integration-red issue is the fix for the hold: admitting it is the only exit, its merge reruns the journeys.
+      if (red && Number(issue) !== red) return `epic journey red on ${key} (integration-red #${red})`;
       if (!cfg?.blockAdmissionAfter) return null;
       const n = streaks.get(key);
       return n >= cfg.blockAdmissionAfter ? `${n} consecutive red integration runs on ${l}` : null;

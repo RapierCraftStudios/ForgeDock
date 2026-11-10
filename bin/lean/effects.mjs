@@ -243,9 +243,10 @@ export function makeHostProbe() {
 /**
  * Required status checks for `lane` (#4158): the union of classic branch protection (contexts + checks) and the
  * repository rulesets that apply to the branch (`rules/branches/{lane}`, type required_status_checks). Each source
- * fails independently to [] (404, no protection, no rulesets, bad JSON), so one never hides the other.
+ * fails independently to [] (so one never hides the other); `unreadable` is set when a source failed for a reason other than a 404 (#5382).
+ * `requiredChecksFor` is the names only.
  */
-export async function requiredChecksFor({ gh, repo, lane }) {
+export async function requiredChecksRead({ gh, repo, lane }) {
   const classic = async () => {
     const j = JSON.parse(String(await gh(["api", `repos/${repo}/branches/${lane}/protection/required_status_checks`])));
     return [...(j.contexts ?? []), ...(j.checks ?? []).map((c) => c?.context)];
@@ -256,10 +257,14 @@ export async function requiredChecksFor({ gh, repo, lane }) {
       "--jq", '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context']));
     return out.split("\n").map((x) => x.trim());
   };
-  const safe = async (f) => { try { const v = await f(); return Array.isArray(v) ? v : []; } catch { return []; } };
+  // A 404 is an answer (no protection, no rulesets); any other failure (403 for a non-admin token, network) is an unreadable source.
+  let unreadable = false;
+  const safe = async (f) => { try { const v = await f(); return Array.isArray(v) ? v : []; } catch (e) { if (!/\b404\b|not found|not protected/i.test(String(e?.message ?? e))) unreadable = true; return []; } };
   const all = [...(await safe(classic)), ...(await safe(rulesets))];
-  return [...new Set(all.filter((x) => typeof x === "string" && x))];
+  return { checks: [...new Set(all.filter((x) => typeof x === "string" && x))], unreadable };
 }
+
+export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;

@@ -22,7 +22,7 @@ import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
 // #4432: the run log is keyed by repo + issue; every lane in this file runs in repo o/r.
 const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
-import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, requiredChecksRead, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
@@ -3262,6 +3262,12 @@ describe("requiredChecksFor: classic protection + rulesets (#4158)", () => {
   it("both sources failing yields [] and never throws", async () => {
     const { gh } = stub({ classic: new Error("HTTP 404"), rules: new Error("HTTP 404") });
     assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), []);
+  });
+  it("requiredChecksRead flags a non-404 failure as unreadable and a 404 as an answer (#5382)", async () => {
+    const e403 = stub({ classic: new Error("gh: Resource not accessible (HTTP 403)"), rules: [] });
+    assert.deepEqual(await requiredChecksRead({ gh: e403.gh, repo: "o/r", lane: "staging" }), { checks: [], unreadable: true });
+    const e404 = stub({ classic: new Error("HTTP 404: Branch not protected"), rules: new Error("HTTP 404") });
+    assert.deepEqual(await requiredChecksRead({ gh: e404.gh, repo: "o/r", lane: "staging" }), { checks: [], unreadable: false });
   });
   it("a ruleset-derived required check is polled before the merge", async () => {
     const w = world();
