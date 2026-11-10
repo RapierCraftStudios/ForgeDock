@@ -25,6 +25,7 @@ import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
+import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -250,7 +251,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -853,14 +854,15 @@ export async function runCore(o) {
     try { await killedAttempt(cur.n, snap ?? {}, cur.opts, cur.at); } catch { /* telemetry never blocks the teardown */ }
   }
   /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
+  let laneCeiling = contextCeilingTokens; // #5346: set to the lane size's ceiling once the contract is frozen
   const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
     let timeoutRetries = 0, contextRestarts = 0, p = prompt;
     opts = { ...opts };
-    const ceiled = contextCeilingTokens > 0 && !UNCEILED.includes(opts.trigger);
+    const ceiled = laneCeiling > 0 && !opts.noCeiling && !UNCEILED.includes(opts.trigger); // #5346: per-size ceiling; noCeiling = a restart is certain
     for (;;) {
       // after CONTEXT_RESTARTS_MAX restarts the call runs uncapped: a loop guard, never a refusal of work
-      opts.contextMax = ceiled && contextRestarts < CONTEXT_RESTARTS_MAX ? contextCeilingTokens : 0;
+      opts.contextMax = ceiled && contextRestarts < CONTEXT_RESTARTS_MAX ? laneCeiling : 0;
       const budgeted = stage === "implement" && tb.on(); // #4392: the build and its restarts spend the implement turn budget
       if (budgeted && tb.remaining() <= 0) return await budgetWrapup(n, opts);
       opts.turnMax = budgeted ? tb.remaining() : 0;
@@ -871,11 +873,11 @@ export async function runCore(o) {
         }
         if (e?.code === "CLI_CONTEXT") {
           contextRestarts++;
-          ev({ event: "CONTEXT_CEILING", context_tokens: e.context ?? null, ceiling: contextCeilingTokens, turns: e.turns ?? null, trigger: opts.trigger ?? null, restart: contextRestarts });
+          ev({ event: "CONTEXT_CEILING", context_tokens: e.context ?? null, ceiling: laneCeiling, turns: e.turns ?? null, trigger: opts.trigger ?? null, restart: contextRestarts, last_tool: e.lastTool?.name ?? null });
           await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, tools: toolStats(e.toolUses), costUsd: null, model: opts.model ?? laneModel() ?? null }, opts.mode, opts.trigger, opts.restartOf);
           await checkpoint("context ceiling");
-          T.decisions.push(`Builder session reached ${e.context ?? "?"} context tokens (ceiling ${contextCeilingTokens}): checkpointed, restarted fresh from the contract, diff and last validate result`);
-          p = restart() + await contextRestartNote(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
+          T.decisions.push(`Builder session reached ${e.context ?? "?"} context tokens (ceiling ${laneCeiling}): checkpointed, restarted fresh from the contract, diff and last validate result`);
+          p = restart() + await contextRestartNote(handoffFacts(e.toolUses, e.lastTool)); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
           continue;
         }
         if (["CLI_LANE_LIMIT", "CLI_IDLE", "CLI_TIMEOUT"].includes(e?.code) || isExternalKill(e)) { // #5334: a kill still spent tokens: record them before the checkpoint and retry
@@ -956,7 +958,13 @@ export async function runCore(o) {
     try { check = String(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)); } catch { /* none recorded */ }
     return { stat, diff, base, check };
   }
-  const contextRestartNote = async () => contextRestartPrompt({ ...await restartFacts(), ceiling: contextCeilingTokens });
+  /** #5346: bytes of the contract's deliverable files that exist in the worktree (capped at 60 files); 0 for the rest. */
+  const namedFileBytes = async (c) => {
+    let n = 0;
+    for (const d of [...new Set((c?.deliverables ?? []).map((x) => x?.path).filter((x) => typeof x === "string" && x))].slice(0, 60)) { try { n += Buffer.byteLength(String(await io.fs.read(`${wt}/${d}`) ?? "")); } catch { /* new file */ } }
+    return n;
+  };
+  const contextRestartNote = async (established = null) => contextRestartPrompt({ ...await restartFacts(), ceiling: laneCeiling, established });
   /**
    * #4392: the implement turn budget is spent. Checkpoint, then one fresh session of `wrapupGrant` turns either finishes
    * (its result flows on as usual) or stops with a digest; a stop or an overrun ends the non-human `budget-exceeded` reason
@@ -1930,6 +1938,7 @@ export async function runCore(o) {
       { // #4392, #4505: next size on a budget recovery; #4587: a big L contract and an L recovery get extra turns
         const sz = recoverySize(laneSize({ contract: frozen, labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover);
         tb.setSize(sz, scaledExtra({ size: sz, contract: frozen, recover, base: (turnBudgets ?? {}).L ?? TURN_BUDGET_DEFAULTS.L }));
+        laneCeiling = ceilingFor(sz, { tokens: contextCeilingTokens, bySize: contextCeilingBySize }); // #5346
       }
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       // #4364: what `forgedock check` needs from the operator's forge.yaml (gitignored, so not in the worktree)
@@ -1944,7 +1953,17 @@ export async function runCore(o) {
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
       stage = "implement"; phaseLedger.enter("implement");
-      if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
+      let buildPrompt = implementPrompt, buildOpts = { trigger: "build" };
+      if (!lightDone) { // #5346: a session certain to restart is narrowed (or, when the named files alone exceed the ceiling, left uncapped) before it starts
+        const pred = predictRestart({ ceiling: laneCeiling, promptBytes: Buffer.byteLength(implementPrompt), fileBytes: await namedFileBytes(frozen) });
+        if (pred.predicted) {
+          buildPrompt = implementPrompt.replace(exploreBuildRule(exploreCfg), "") + NARROW_NOTE;
+          if (pred.certain) buildOpts = { ...buildOpts, noCeiling: true };
+          ev({ event: "CONTEXT_PREDICT", estimate_tokens: pred.estimate, ceiling: pred.ceiling, certain: pred.certain });
+          T.decisions.push(`Build predicted to restart (about ${pred.estimate} of ${pred.ceiling} context tokens at start): context narrowed${pred.certain ? "; the named files alone exceed the ceiling, so this build runs without it" : ""}`);
+        }
+        await builder(++attemptN, buildPrompt, planned ? sessionId : null, true, undefined, buildOpts);
+      }
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
       { // #4374: the builder's self-review against the shared rubric, log only

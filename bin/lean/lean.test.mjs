@@ -6786,6 +6786,55 @@ describe("#4362 attempt triggers", () => {
     assert.equal((await run(off, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 0 })).terminalReason, "merged");
     assert.ok(offCaps.every((x) => x === 0));
   });
+
+  it("#5346: a lane whose start is at 60% of the ceiling is narrowed before the build; named files alone over the ceiling run uncapped", async () => {
+    const big = (bytes, ceil) => {
+      const w = world({ dirty: true }); const seen = []; const orig = w.io.runner;
+      w.files[`${WT}/src/foo.js`] = "x".repeat(bytes);
+      w.io.runner = async (c) => { if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, prompt: c.prompt }); return orig(c); };
+      return { w, seen, go: () => run(w, { dir: tmpDir("core-pred-"), contextCeilingTokens: ceil }) };
+    };
+    const near = big(500_000, 200000); // about 125000 tokens of named files: over 60% of 200000, under the ceiling
+    assert.equal((await near.go()).terminalReason, "merged");
+    assert.equal(near.seen[1].contextMax, 200000, "predicted, not certain: the ceiling stays");
+    assert.match(near.seen[1].prompt, /Context is tight on this lane/);
+    const certain = big(2_000_000, 120000); // 500000 tokens of named files: a restart is certain
+    const rc = await certain.go();
+    assert.equal(rc.terminalReason, "merged");
+    assert.equal(certain.seen[1].contextMax, 0, "certain restart: the build runs without the ceiling");
+    assert.match(certain.seen[1].prompt, /Context is tight on this lane/);
+    const small = big(400, 120000);
+    await small.go();
+    assert.doesNotMatch(small.seen[1].prompt, /Context is tight on this lane/, "a small lane is untouched");
+    assert.equal(small.seen[1].contextMax, 120000);
+  });
+
+  it("#5346: the restart prompt carries the files the stopped session read and edited, and its last tool", async () => {
+    const w = world({ dirty: true }); const orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push(c.prompt);
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 9, usage: null,
+        toolUses: [{ msg: "m1", name: "Read", path: "src/read-me.js" }, { msg: "m2", name: "Edit", path: "src/foo.js" }], lastTool: { name: "Edit", input: "{\"file_path\":\"src/foo.js\"}" } });
+      return orig(c);
+    };
+    assert.equal((await run(w, { dir: tmpDir("core-hand-"), contextCeilingTokens: 120000 })).terminalReason, "merged");
+    const restart = seen[2];
+    assert.match(restart, /<established>/);
+    assert.match(restart, /Files the previous session edited:\n- src\/foo\.js/);
+    assert.match(restart, /do not re-read them unless you must edit them\):\n- src\/read-me\.js/);
+    assert.match(restart, /Its last tool call: Edit /);
+  });
+
+  it("#5346: engine.context_ceiling_by_size sets the ceiling per lane size (size S here), the global one otherwise", async () => {
+    const w = world({ dirty: true }); const caps = []; const orig = w.io.runner;
+    w.io.runner = async (c) => { if (c.role === "builder") caps.push(c.contextMax ?? 0); return orig(c); };
+    await run(w, { dir: tmpDir("core-size-"), contextCeilingTokens: 120000, contextCeilingBySize: { S: 90000 } });
+    assert.equal(caps[1], 90000);
+    const m = world({ dirty: true }); const mcaps = []; const o2 = m.io.runner;
+    m.io.runner = async (c) => { if (c.role === "builder") mcaps.push(c.contextMax ?? 0); return o2(c); };
+    await run(m, { dir: tmpDir("core-size-"), contextCeilingTokens: 120000, contextCeilingBySize: { L: 90000 } });
+    assert.equal(mcaps[1], 120000, "no entry for the lane's size: the global ceiling");
+  });
 });
 
 describe("#4407 per-attempt cost deltas", () => {

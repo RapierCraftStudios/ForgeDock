@@ -83,11 +83,22 @@ export function migrationGeneratorPrompt(problems, mode = "local") {
 /** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
 export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
 
+/** #5346: what the stopped session had established (files read and edited, its last tool call), so the next one does not re-explore. */
+function establishedBlock(e) {
+  if (!e || (!e.read?.length && !e.edited?.length && !e.last)) return "";
+  const list = (xs) => xs.map((x) => `- ${x}`).join("\n");
+  return `<established>
+${e.edited?.length ? `Files the previous session edited:\n${list(e.edited)}\n` : ""}${e.read?.length ? `Files it read (already understood; do not re-read them unless you must edit them):\n${list(e.read)}${e.readMore ? `\n- (+${e.readMore} more)` : ""}\n` : ""}${e.last ? `Its last tool call: ${e.last.name} ${e.last.input}\nThat call may not have completed: check the diff above, then do the next step of the contract.\n` : ""}</established>
+
+`;
+}
+
 /**
  * #4390: appended to the restart prompt when the engine stopped a builder session at the context ceiling: the fresh
  * session continues from the frozen contract, the branch (`git diff --stat` + bounded hunks) and the last validate result.
  */
-export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0 } = {}) {
+export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0, established = null } = {}) {
+  const est = establishedBlock(established);
   const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
   const c = String(check ?? "").trim();
   return `\n\nContext restart: the previous session on this lane reached the ${ceiling}-token context ceiling and the engine stopped it. Its history is gone, its work is not: ${CONTRACT_FILE} is still the frozen authority, and the branch holds the committed work (uncommitted edits were saved in a \`wip(forge): checkpoint\` commit, already pushed to the lane branch: do not amend, reword, squash, reset or rebase commits already on the branch; add new commits on top). Continue from this state; do not start over, and do not re-read what the summary below already shows.
@@ -100,7 +111,7 @@ ${String(stat ?? "").trim() || "(no changes yet)"}
 ${d || "(no changes yet)"}
 </diff>
 
-Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
+${est}Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
 /** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */

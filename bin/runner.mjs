@@ -2053,6 +2053,10 @@ export function readScopeLimitEvents(pid, { procRoot = "/proc", cgroupRoot = "/s
   const count = (file, key) => { try { return Number((readFileSync(join(cgroupRoot, path, file), "utf8").match(new RegExp(`^${key} (\\d+)`, "m")) ?? [])[1]) || 0; } catch { return 0; } };
   return { tasks: count("pids.events", "max"), memory: count("memory.events", "oom_kill") };
 }
+/** #5346: tools whose unresolved tool_use means an unapplied change; the context-ceiling kill waits for their result. */
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/** #5346: the ceiling is a hard stop at this multiple even when an edit is still pending (loop guard). */
+const CONTEXT_HARD_CAP = 1.25;
 /**
  * Async twin of runCliBackend (core work-on live comments): the CLI runs under child_process.spawn so the caller's event
  * loop keeps turning while the session runs. It returns the SAME envelope (and throws the same errors) because the
@@ -2066,6 +2070,7 @@ export function readScopeLimitEvents(pid, { procRoot = "/proc", cgroupRoot = "/s
  * does not count as idle. `onSpawn(child)` receives the ChildProcess.
  * #4390: `contextMax` (stream only; 0 = off) kills the session once one assistant turn's context (input + cache read +
  * cache creation) reaches it, throwing CLI_CONTEXT with the stream-aggregated usage (null when none was seen) and turns.
+ * #5346: the context kill defers while an Edit/Write/MultiEdit/NotebookEdit tool_use has no tool_result yet (hard stop at 1.25x contextMax).
  * #4392: `turnMax` (stream only; 0 = off) kills the session once it has produced that many assistant turns (deduped by
  * message id), throwing CLI_TURNS with `turns`, `turnMax`, `lastTool` and the stream-aggregated usage.
  * #4405: `busy(children)` (info or null) is asked once idle (at most every min(5 s, idleMs)); while it answers busy (a live
@@ -2115,6 +2120,7 @@ export async function runCliBackendAsync(opts) {
     collected = await new Promise((resolveP) => {
       let stdout = "", stderr = "", settled = false, timedOut = false, paused = false;
       let lineBuf = "", resultLine = null, lastTool = null;
+      const pendingEdits = new Set(); let ctxArmed = null; // #5346
       const max = o.maxBuffer ?? DEFAULT_SPAWN_MAX_BUFFER_BYTES;
       const startedAt = Date.now();
       let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null, busyAsk = null, extendedSince = null, extendInfo = null;
@@ -2170,10 +2176,15 @@ export async function runCliBackendAsync(opts) {
         if (!line.startsWith("{") || line.length > 4_000_000) return;
         let j; try { j = JSON.parse(line); } catch { return; }
         if (j?.type === "result") resultLine = line;
-        else if (j?.type === "assistant" && Array.isArray(j.message?.content)) {
+        else if (j?.type === "user" && Array.isArray(j.message?.content)) {
+          // #5346: a tool_result closes its edit; a ceiling crossed mid-edit stops the session at this safe point
+          for (const c of j.message.content) if (c?.type === "tool_result" && c.tool_use_id) pendingEdits.delete(c.tool_use_id);
+          if (ctxArmed && !pendingEdits.size && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { ctxInfo = { context: ctxArmed.context, lastTool: ctxArmed.lastTool }; kill(); }
+        } else if (j?.type === "assistant" && Array.isArray(j.message?.content)) {
           for (const c of j.message.content) {
             if (c?.type !== "tool_use") continue;
             lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+            if (EDIT_TOOLS.has(c.name) && c.id) pendingEdits.add(c.id); // #5346: an unapplied edit is not a checkpointable point
             const key = c.id ?? `${j.message.id}#${toolUses.size}`, inp = c.input ?? {};
             if (!toolUses.has(key) && toolUses.size < TOOL_USES_MAX) toolUses.set(key, { msg: j.message.id ?? null, name: c.name ?? null,
               path: typeof (inp.file_path ?? inp.path) === "string" ? (inp.file_path ?? inp.path) : null, cmd: typeof inp.command === "string" ? inp.command.slice(0, 1000) : null });
@@ -2182,7 +2193,11 @@ export async function runCliBackendAsync(opts) {
           if (u && typeof u === "object") {
             msgUsage.set(j.message.id ?? `#${msgUsage.size}`, u);
             const ctx = toFiniteUsageNumber(u.input_tokens) + toFiniteUsageNumber(u.cache_read_input_tokens) + toFiniteUsageNumber(u.cache_creation_input_tokens);
-            if (contextMax > 0 && ctx >= contextMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { ctxInfo = { context: ctx, lastTool }; kill(); }
+            if (contextMax > 0 && ctx >= contextMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) {
+              // #5346: never restart mid-edit: wait for the pending edit's tool_result, unless the hard cap (1.25x) is reached
+              if (pendingEdits.size && ctx < contextMax * CONTEXT_HARD_CAP) ctxArmed ??= { context: ctx, lastTool };
+              else { ctxInfo = { context: ctx, lastTool }; kill(); }
+            }
             else if (turnMax > 0 && msgUsage.size >= turnMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { turnInfo = { lastTool }; kill(); }
           }
         }

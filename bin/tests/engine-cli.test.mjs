@@ -1227,6 +1227,14 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
   });
 
+  it("#5346: readCoreLimits reads engine.context_ceiling_by_size (junk ignored, absent: no key)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-ctxsz-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_by_size: \"S=80000,L=160000\"\n"); assert.deepEqual(readCoreLimits(d).contextCeilingBySize, { S: 80000, L: 160000 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_by_size: lots\n"); assert.equal(readCoreLimits(d).contextCeilingBySize, undefined);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 5\n"); assert.equal(readCoreLimits(d).contextCeilingBySize, undefined);
+  });
+
   it("#4392: readCoreLimits reads engine.turn_budget_s|m|l over the defaults (0 allowed, junk ignored, none set: the defaults)", async () => {
     const { readCoreLimits } = await import("../engine-cli.mjs");
     const d = tmpDir("fd-tb-");

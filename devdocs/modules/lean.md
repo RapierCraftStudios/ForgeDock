@@ -198,6 +198,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
    `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
    Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   #5346 (`ceiling.mjs`, pure): `engine.context_ceiling_by_size` ("S=..,M=..,L=..", `readCoreLimits` → `contextCeilingBySize`) sets
+   the ceiling per lane size at contract freeze (no entry: the global one; defaults unchanged until an A/B sets them). Before
+   the build, `predictRestart` estimates the start (prompt bytes + the contract's existing deliverable files, 4 bytes/token):
+   at ≥60% of the ceiling the build prompt drops the explore rule and gets `NARROW_NOTE` (`CONTEXT_PREDICT` event); named
+   files alone over the ceiling make a restart certain, so that build runs without the ceiling. The runner never stops
+   mid-edit: a crossing with an Edit/Write/MultiEdit/NotebookEdit `tool_use` unanswered waits for its `tool_result` (hard stop
+   at 1.25x). The restart prompt adds `<established>` (files read, files edited, last tool, from `handoffFacts`), and
+   `toolStats` carries `first_edit_turn` so `context_restart` attempts show turns-to-first-edit.
    **Turn budget** (#4392, `budget.mjs`, forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100, 0 = off;
    `readCoreLimits` → runCore `turnBudgets`): at contract freeze (or a resumed frozen contract) `laneSize` sizes the lane
    from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L); an L lane gets +10 turns per distinct deliverable path above 5 (cap +2x the L base) and a `budget.exceeded` recovery of L another +ceil(base/2) (`scaledExtra`, #4587). While `stage ===
