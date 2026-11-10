@@ -162,12 +162,6 @@ modules:
     authority: required
     token_cost: 900
 
-  - name: lean-spec-size
-    glob: "scripts/check-spec-size*"
-    path: modules/lean.md
-    authority: required
-    token_cost: 900
-
   - name: lean-readiness
     glob: "scripts/readiness*"
     path: modules/lean.md
