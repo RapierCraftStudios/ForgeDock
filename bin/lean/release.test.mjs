@@ -34,6 +34,7 @@ function fakeIo(world = {}) {
       if (a[0] === "pr" && a[1] === "view" && j.includes("--json state,mergeCommit,headRefOid")) return JSON.stringify({ state: w.prState ?? "OPEN", mergeCommit: w.prState === "MERGED" ? { oid: "m".repeat(40) } : null, headRefOid: HEAD });
       if (j.includes("--json headRefOid")) return JSON.stringify({ headRefOid: HEAD });
       if (j.includes("--json comments")) return JSON.stringify({ comments: w.comments });
+      if (a[0] === "api" && /\/commits\/[^/]+\/status$/.test(a[1])) return JSON.stringify(w.statusGate ? [{ name: "forge/deploy-gate", conclusion: w.statusGate }] : []);
       if (a[0] === "api") return JSON.stringify(w.gate ? [{ name: "forge/deploy-gate", conclusion: w.gate }] : []);
       if (a[0] === "pr" && a[1] === "merge") return "";
       throw new Error(`unexpected gh ${j}`);
@@ -73,6 +74,14 @@ describe("release job (#5211)", () => {
       assert.equal(b.out.status, "stopped", String(gate));
       assert.ok(!b.io.calls.some((c) => c[1] === "merge"));
     }
+  });
+
+  it("forge/deploy-gate posted as a commit status (gate-marker-check.yml) counts: no check run, status success -> merges", async () => {
+    const ok = await promote({ gate: null, statusGate: "success" }, { opts: { merge: true } });
+    assert.equal(ok.out.status, "done");
+    assert.ok(ok.io.calls.some((a) => a[1] === "merge" && a.includes("--match-head-commit")));
+    const pend = await promote({ gate: null, statusGate: "pending" }, { opts: { merge: true } });
+    assert.equal(pend.out.status, "stopped");
   });
 
   it("#5266: a release PR merged by hand moves to post-merge with the merge sha, without the opt-in stop", async () => {

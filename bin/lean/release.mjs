@@ -152,7 +152,13 @@ export async function gateState({ io, repo, pr, head }) {
   let marker = null;
   for (const b of bodies) { if (b.includes("FORGE:GATE_PASS")) marker = "pass"; else if (b.includes("FORGE:GATE_FAILURE")) marker = "failure"; }
   const checks = json(await io.gh(["api", `repos/${repo}/commits/${head}/check-runs`, "--jq", "[.check_runs[] | {name, conclusion}]"])) ?? [];
-  const gate = checks.find((c) => c.name === "forge/deploy-gate");
+  let gate = checks.find((c) => c.name === "forge/deploy-gate");
+  // gate-marker-check.yml posts forge/deploy-gate as a commit STATUS (POST /statuses), not a check run: read the
+  // combined status too, or promotion never sees the gate it waits for.
+  if (!gate) {
+    const statuses = json(await io.gh(["api", `repos/${repo}/commits/${head}/status`, "--jq", "[.statuses[] | {name: .context, conclusion: .state}]"])) ?? [];
+    gate = statuses.find((c) => c.name === "forge/deploy-gate");
+  }
   return { marker, deployGate: gate?.conclusion ?? null };
 }
 
