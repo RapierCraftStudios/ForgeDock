@@ -103,4 +103,8 @@ describe("re-plan loop (#5342)", () => {
     assert.equal((await applyReplan({ gh: w.gh, create: w.gh, repo: "o/r", amendment: 3 })).ok, false);
     assert.match(amendmentBody({ inv, epic: 5, from: 7, children: [8] }), /FORGE:REPLAN/);
   });
+
+  it("amendmentBody routes re-scoped user-visible children to /design before build (#5330)", () => {
+    assert.match(amendmentBody({ inv, epic: 5, from: 7, children: [8] }), /user-visible[\s\S]*`\/design`[\s\S]*before build/);
+  });
 });

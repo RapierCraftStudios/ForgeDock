@@ -61,6 +61,7 @@ export function amendmentBody({ inv, epic, from, children }) {
     "Update the spike and the epic so the design holds again, and record the replacement decision (`supersedes`). Then give every held child a disposition in one fenced block:", "",
     `\`\`\`${DISPOSITIONS_TAG}`, JSON.stringify({ children: Object.fromEntries(children.map((n) => [n, { disposition: "unchanged" }])) }, null, 2), "```", "",
     `\`${CHILD_DISPOSITIONS.join("`, `")}`.concat("` (a re-scoped child carries `body`, regenerated from the amended design; a dropped child is closed as superseded)."), "",
+    "A re-scoped child that is user-visible (a page or UI) must say in its body to run `/design` before build, so the rendered page is judged before the lanes merge (#5330).", "",
     `Held until this merges: ${children.length ? children.map((n) => `#${n}`).join(", ") : "none"}.`].join("\n");
 }
 
