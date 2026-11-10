@@ -8,6 +8,8 @@
  * devdocs/decisions/5208-release-postmerge.md.
  */
 
+import { cleanupSnapshot } from "./release-snapshot.mjs";
+
 const BOUNDS = {
   publishPolls: 6, publishPollMs: 10_000, // wait for a run to appear (bot merges never trigger one)
   runPolls: 90, runPollMs: 20_000, // wait for the run to finish
@@ -113,6 +115,10 @@ export async function postMergeStep(ctx) {
   if (config.versionSync) {
     sync = await versionSync(ctx, sha, b);
     if (sync.err) return blocked(sync.err);
+  }
+  if (state.release?.branch) {
+    const gone = cleanupSnapshot({ git: io.git, branch: state.release.branch });
+    if (!gone.deleted) io.print(`release: could not delete ${state.release.branch} (${gone.why}); delete it by hand`);
   }
   io.print(`release: published (run ${pub.run}${pub.dispatched ? ", dispatched" : ""})${art ? ", artifact confirmed" : ""}${sync ? `, version-sync PR #${sync.pr} merged` : ""}`);
   return { published: true, merge: sha, run: pub.run, dispatched: pub.dispatched, artifact: art?.ok ?? null, sync };

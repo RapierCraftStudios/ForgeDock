@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -69,7 +69,7 @@ const comments = (w) => w.gh.filter((a) => a[0] === "pr" && a[1] === "comment").
 
 describe("review-staging args", () => {
   it("accepts a number, a PR URL, --thorough and --json", () => {
-    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null });
+    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null });
     assert.equal(parseArgs(["https://github.com/o/r/pull/77", "--json"]).pr, 77);
     assert.equal(parseArgs([]).pr, null);
     assert.equal(parseArgs(["--thorough"]).thorough, true);
@@ -99,7 +99,11 @@ describe("review-staging flow", () => {
     assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
     assert.deepEqual(comments(w), [`<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${HEAD.slice(0, 7)} -->`]);
     assert.equal(w.files[`${SD}/staging_pr_number.rk`], "42\n");
-    assert.equal(w.files[`${SD}/42_launched_review_agents`], "");
+    assert.equal(w.files[`${SD}/42_launched_review_agents`], "security\ninfra\n", "launched file is generated from the manifest");
+    const man = JSON.parse(w.files[`${SD}/42_review_manifest.json`]);
+    assert.equal(man.head, HEAD);
+    assert.deepEqual(man.agents.map((x) => [x.domain, x.brief]), [["security", `${SD}/review-staging-42/brief-security.md`], ["infra", `${SD}/review-staging-42/brief-infra.md`]], "manifest names = brief file names");
+    for (const x of man.agents) assert.ok(w.files[`${SD}/42_launched_review_agents`].split("\n").includes(x.domain) && w.files[x.brief].includes(`<!-- FORGE:REVIEW-AGENT:${x.domain} -->`) && x.brief.endsWith(`brief-${x.domain}.md`), x.domain);
     assert.equal(w.files[`${SD}/42_launched_review_agents.head`], `${HEAD}\n`);
     assert.deepEqual(w.scripts.map((s) => s.sub && s.script === "review-staging-pre.sh" ? s.sub : s.script), ["bundle", "gate", "scope", "review-prepare.sh"]);
     const prep = w.scripts.find((s) => s.script === "review-prepare.sh").args;
@@ -256,7 +260,7 @@ describe("review-staging helpers", () => {
   it("buildManifest names every brief and the launched-agents file", () => {
     const t = buildManifest({ pr: 1, headSha: HEAD, gate: "PASS", scopeMode: "full", tier: "small", reason: "", contextFile: "/c", launchedFile: "/l", briefs: [{ domain: "security", path: "/b" }] });
     assert.match(t, /^DISPATCH security \/b$/m);
-    assert.match(t, /append its domain to \/l/);
+    assert.match(t, /already recorded in \/l/);
   });
   it("is codebase-agnostic: no repo-specific paths", () => {
     const src = readFileSync(new URL("../review-staging.mjs", import.meta.url), "utf8");
@@ -289,6 +293,7 @@ function postWorld(o = {}) {
       if (k === "pr view") return a.includes("headRefName") ? "staging\n" : `${o.head ?? HEAD}\n`;
       if (k === "pr comment") { if (o.commentFails) throw new Error("boom"); return ""; }
       if (k === "label create") return "";
+      if (k === "api repos/o/r/branches/main/protection/required_status_checks" && o.required) return JSON.stringify({ contexts: o.required });
       if (k === "pr list") return "42\n";
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
@@ -326,7 +331,7 @@ const flagOf = (args, f) => args[args.indexOf(f) + 1];
 
 describe("review-staging post-dispatch args", () => {
   it("parses --finalize/--summary and their options", () => {
-    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null });
+    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null, domain: null, bodyFile: null });
     assert.deepEqual(parseArgs(["--summary", "--filed", "101", "--filed", "#102,103"]).filed, [101, 102, 103]);
   });
   it("rejects bad combinations with exit 2 and touches nothing", async () => {
@@ -527,6 +532,26 @@ describe("review-staging --summary", () => {
     assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1);
   });
 
+  it("only required checks block; other red checks are non-blocking warnings", async () => {
+    const red = (...names) => JSON.stringify([{ name: "CI", bucket: "pass" }, ...names.map((name) => ({ name, bucket: "fail" }))]);
+    const w = await finalized({ ci: red("lighthouse-hands"), required: ["CI"] });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    assert.match(posted(w)[0], /FORGE:GATE_PASS[\s\S]*non-blocking warning: lighthouse-hands/);
+    assert.match(w.out.join("\n"), /WARNING: 1 non-required check\(s\) red, non-blocking: lighthouse-hands/);
+    const w2 = await finalized({ ci: red("CI", "lighthouse-hands"), required: ["CI"] });
+    assert.equal(await reviewStagingFromCli(["--summary"], w2.io), 1);
+    assert.match(posted(w2)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
+    const w3 = await finalized({ ci: red("lighthouse-hands") });
+    assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1, "no readable required set: every red check blocks");
+  });
+
+  it("forge.yaml gate.required_checks adds required checks", () => {
+    const ck = [{ name: "CI", bucket: "pass" }, { name: "lighthouse-hands", bucket: "fail" }];
+    assert.deepEqual(classifyChecks(ck, ["CI"]), { blocking: 0, warnings: ["lighthouse-hands"] });
+    assert.deepEqual(classifyChecks(ck, ["CI", "lighthouse-hands"]), { blocking: 1, warnings: [] });
+    assert.deepEqual(classifyChecks(ck, []), { blocking: 1, warnings: [] });
+  });
+
   it("a LIKELY HIGH does not block; a deleted test-gate verdict fails closed", async () => {
     const w = await finalized({ findings: [{ severity: "HIGH", confidence: "LIKELY" }] });
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
@@ -643,5 +668,38 @@ describe("CI exclusion list drift (#4952)", () => {
     const filters = [...md.matchAll(/select\((\.name != "[^"]+"(?: and \.name != "[^"]+")*)\)/g)].map((m) => [...m[1].matchAll(/\.name != "([^"]+)"/g)].map((x) => x[1]));
     assert.ok(filters.length >= 2, "the spec's jq exclusion filters were found");
     for (const names of filters) assert.deepEqual([...names].sort(), [...CI_EXCLUDED_CHECKS].sort());
+  });
+});
+
+describe("review-staging --post-reviewer and delivery repair (#5317)", () => {
+  const MAN = JSON.stringify({ pr: 42, head: HEAD, agents: [{ domain: "security", brief: `${SD}/review-staging-42/brief-security.md` }] });
+  const pw = (o = {}) => postWorld({ files: { [`${SD}/42_review_manifest.json`]: MAN, [`${SD}/42_launched_review_agents`]: "security\nregression-risk\n", "/body.md": o.body ?? "<!-- FORGE:REVIEW-AGENT:secuirty -->\nReviewed-SHA: 0123456\n\nbody\n<!-- REVIEW-FINDINGS-START -->\n<!-- REVIEW-FINDINGS-END -->" } });
+  it("writes the marker and full SHA from the manifest, replacing a typed header", async () => {
+    const w = pw();
+    assert.equal(await reviewStagingFromCli(["42", "--post-reviewer", "security", "--body-file", "/body.md"], w.io), 0, w.err.join("\n"));
+    const body = comments(w)[0];
+    assert.ok(body.startsWith(`<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: ${HEAD}\n\nbody`), body);
+    assert.ok(!body.includes("secuirty") && !body.includes("0123456\n"));
+  });
+  it("accepts a launched spec-panel domain and refuses an unlaunched name", async () => {
+    const w = pw();
+    assert.equal(await reviewStagingFromCli(["42", "--post-reviewer", "regression-risk", "--body-file", "/body.md"], w.io), 0);
+    const w2 = pw();
+    assert.equal(await reviewStagingFromCli(["42", "--post-reviewer", "secuirty", "--body-file", "/body.md"], w2.io), 1);
+    assert.equal(comments(w2).length, 0);
+    assert.match(w2.err.join("\n"), /not a launched reviewer[\s\S]*security/);
+  });
+  it("finalize relays a single REDISPATCH: only the stale reviewer is re-run", async () => {
+    const stdout = "DELIVERY: infra: stale or wrong Reviewed-SHA 0123456 (expected X)\nREDISPATCH infra /sd/review-staging-42/brief-infra.md";
+    const w = postWorld({ delivery: { code: 1, stdout, stderr: "" } });
+    assert.equal(await reviewStagingFromCli(FIN, w.io), 1);
+    const err = w.err.join("\n");
+    assert.match(err, /stale or wrong Reviewed-SHA/);
+    assert.match(err, /re-run only infra \(/);
+  });
+  it("rejects bad --post-reviewer usage", () => {
+    assert.throws(() => parseArgs(["--post-reviewer", "Bad Name", "--body-file", "f"]));
+    assert.throws(() => parseArgs(["--post-reviewer", "security"]));
+    assert.throws(() => parseArgs(["--body-file", "f"]));
   });
 });

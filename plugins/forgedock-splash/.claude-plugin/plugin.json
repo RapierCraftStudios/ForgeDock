@@ -1,0 +1,10 @@
+{
+  "name": "forgedock-splash",
+  "version": "0.1.0",
+  "description": "ForgeDock's startup splash for Claude Code: the F mark is forged, Clawd bonks it, sparks fly, and it settles on 'supercharged' before clearing.",
+  "author": { "name": "RapierCraft Studios" },
+  "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+  "repository": "https://github.com/RapierCraftStudios/ForgeDock",
+  "license": "AGPL-3.0",
+  "types": "./types/index.d.ts"
+}

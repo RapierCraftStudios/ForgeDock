@@ -13,7 +13,9 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runHostPreflight } from "./release-preflight.mjs";
 import { reviewStagingJson, reviewStagingIo, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { pickFixes, recut } from "./release-snapshot.mjs";
 
 /** Delta passes after a head move, and fix-lane rounds: past either the job blocks for the manual path. */
 export const MAX_DELTA_PASSES = 2;
@@ -131,6 +133,16 @@ export async function fixStep(ctx) {
     for (const issue of issues) {
       const lane = await seam.runLane({ issue, lane: ctx.staging });
       if (lane?.terminalReason !== "merged") return blocked(`fix lane for #${issue} ended ${lane?.terminalReason ?? "without a result"}`);
+    }
+    // Snapshot mode (#5276): the fixes are merged on staging; bring exactly those onto release/<id> (or recut it) before the delta review.
+    if (ctx.config?.mode === "snapshot") {
+      const moved = ctx.config.fixMode === "recut" ? await recut(ctx) : await pickFixes(ctx, { issues });
+      if (moved.err) return blocked(moved.err);
+    }
+    // The host preflight re-runs on the head the fixes produced, before the delta review (the draft PR has no Actions CI yet, #5277).
+    if (ctx.config?.preflight) {
+      const pf = await runHostPreflight(ctx, { head: await seam.headOf(r.pr), pr: r.pr });
+      if (!pf.ok && pf.blocking) return blocked(`host preflight failed at ${pf.head} after the fix round (release-blocker #${pf.issue})`);
     }
     const next = await runReview({ seam, pr: r.pr, def: ctx.def, delta: r.head });
     if (next.blocked) return next;

@@ -132,7 +132,7 @@ test("#5206 R2: a key outside the allowlist, an undeclared arm or a bad value in
   for (const bad of [{ "on.lean.fix_model": "x" }, { "on.engine.conformance": "enforce" }, { "maybe.lean.explore": "on" }, { "on.lean.explore": "sometimes" }, { "on.context_pack": "ab" }, { "on.review.verifier": "loud" }]) {
     const reasons = [];
     assert.equal(parseExperiment({ ...AB, ...bad }, { warn: (m) => reasons.push(m) }), null, JSON.stringify(bad));
-    assert.equal(reasons.length, 1); assert.match(reasons[0], new RegExp(Object.keys(bad)[0].replace(/\./g, "\\.")));
+    assert.equal(reasons.length, 1); assert.match(reasons[0], new RegExp(Object.keys(bad)[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     const opts = { experiment: parseExperiment({ ...AB, ...bad }), explore: { mode: "off" } };
     assert.equal(applyArmOverrides(opts, 7).options, opts, "no partial apply");
   }

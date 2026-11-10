@@ -63,4 +63,9 @@ describe("FORGE:FACTS record (#4401)", () => {
     assert.deepEqual(l.hotspots, ["- hot spot src/a.js:12: retry loop (#33, PR #101)"]);
     assert.deepEqual(l.baselines, ["- baseline: `node --test a.test.mjs` exit 0 (#33, PR #101)"]);
   });
+  it("#5331 baselines record the head they were recorded on; a malformed head is dropped", () => {
+    const v = [{ id: "V1", command: "node --test a.test.mjs", exit: 0 }];
+    assert.equal(normaliseFacts({ validation: v }, { head: "abc1234" }).baselines[0].head, "abc1234");
+    assert.equal("head" in normaliseFacts({ validation: v }, { head: "not a sha" }).baselines[0], false);
+  });
 });

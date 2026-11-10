@@ -22,9 +22,13 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
+import { firstReviewReport, renderFirstReview } from "./first-review.mjs";
+import { firstMergeReport, gatherFirstRunIssues, medianMinutes, renderFirstMerge } from "./firstmerge.mjs";
+import { gatherOriginIssues, originReport, renderOrigin } from "./origin.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
+import { gatherScoreboard, renderScoreboard } from "./scoreboard.mjs";
 import { batchRoot } from "../lean/batch.mjs";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, joinedNumbers, renderConformanceOutcomes, replayPrs, renderReplay, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, readBatchRows } from "./query.mjs";
 import { gitProbes } from "./compounding.mjs";
 
@@ -35,7 +39,10 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --first-review [--repo <owner/repo>] [--since <date>] [--min-n 20] [--json]
+       forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
+       forgedock stats --origin [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --conformance-outcomes [--repo <owner/repo>] [--since <date>] [--window-days 7] [--min-n 20] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
@@ -71,7 +78,9 @@ thresholds under forge.yaml stats.alerts.*. Nothing is printed when none fired o
 
 Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, no comment bodies read):
   --edge FROM:TO        merged PRs that added the dependency or import edge FROM -> TO (e.g. @s/web:@s/db)
-  --milestone M         conformance verdict mix and per-day structure series for milestone M
+  --milestone M         feature scoreboard of milestone M (number or title: journey status at ship, first merge to first green journey, defects
+                        after the last child by class, rework share, interventions; forge#5341) plus the conformance verdict mix and
+                        per-day structure series (--json: query.scoreboard, query.mix)
 
 Context-pack A/B (forge#4275; local run logs only, no GitHub crawl):
   --context-ab          first-pass yield, builder turns, cache tokens and cost per lane type (rerun, child,
@@ -86,7 +95,8 @@ Pool (forge#4549; local batch reports, no gh):
 
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
   --efficiency          $/merge, turns/merge, context/turn per size and model, retries/merge by cause, no-action
-                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
+                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion,
+                        non-model (wait) time by phase and cause
   --batch <id>          also report one batch (~/.forge/batches/<id>, FORGEDOCK_BATCH_DIR)
   --window <list>       trailing windows over the repo's batches (default 7d,30d)
   --compare <date|v>    before/after A/B around a deploy (date or release tag): equal-span cohorts of batches either side,
@@ -94,7 +104,13 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
                         their delta and full-lane cohorts matched per size (forge#4491)
   --offline             skip the GitHub crawl for merged issues (issue quality and acceptance print n/a)
 
+Issue origin (#5294; GitHub issues and telemetry):
+  --origin              requested vs pipeline-generated issues (production, review-finding, follow-up; unknown stays unknown),
+                        how the pipeline-originated ones closed and their share of cost; --since <date> (default: last 30 days)
+
 Self-filed issues (#5207; GitHub issues only):
+  --first-review        clean-first-review rate by repo, change type and risk surface, with first-round finding kinds (#5345)
+  --first-merge         setup start to first merged PR on a first-run repo, against the 15 min target (#5290)
   --self-filed          share of new issues the pipeline filed itself, by kind (follow-up, review-finding, staging-review,
                         rollup), against the 15% target; --since <date> bounds the window (default: the last 30 days)
 
@@ -104,7 +120,10 @@ Lane depth (forge#5209; local run logs, gh only for post-merge defect signals, n
                         defects (reopen, revert, a fix PR touching the same files within 7 days), grouped by verdict and
                         by every reason/signal code, plus the #5052 light-lane promotion verdict: light-shaped lanes cost
                         <= 1.2x and wall <= 1.3x model time, defect rate <= eligible full lanes of the same size;
-                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a)
+                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a);
+                        --since defaults to the last 30 days; defect results of closed windows are cached
+                        (--no-cache / --refresh), progress goes to stderr; the output ends with a recommendation
+                        (promote, do not promote, insufficient data) with eligible share and would-be saving
 
 Compounding (forge#4696; GitHub + git of the current clone, no model):
   --compounding         reintroduction rate (guarded fix reopened, or its lines blamed by a later guarded fix within 90 days),
@@ -119,6 +138,9 @@ Conformance outcomes (forge#5210; read only: one GraphQL search per 100 merged P
                         touching the same hunks via local git blame); defect rate, n and a Wilson 95% interval of
                         nonconforming-merged vs conforming-merged per repo, mode and failure kind; n/a under --min-n
                         (default ${DEFAULT_OUTCOME_MIN_N} per cell); the last line is the conclusion or "insufficient data"
+  --replay <pr,...>     with --conformance-outcomes: per named PR, its mode, shadow verdict and risk surfaces, and whether the
+                        --enforce-domains <list> / --risk-paths <globs> config would have enforced (nonconforming), only flagged
+                        (verdict would pass) or not touched it; the cells also gain per-surface rows (domain:*, risk:*)
   --window-days N       post-merge defect window in days (default ${DEFAULT_WINDOW_DAYS}); --since defaults to 30 days ago
 
 Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
@@ -135,7 +157,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -156,11 +178,17 @@ export function parseArgs(argv) {
     else if (name === "--tiers") o.tiers = true;
     else if (name === "--compounding") o.compounding = true;
     else if (name === "--self-filed") o.selfFiled = true;
+    else if (name === "--first-merge") o.firstMerge = true;
+    else if (name === "--first-review") o.firstReview = true;
+    else if (name === "--origin") o.origin = true;
     else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
     else if (name === "--conformance-outcomes") o.conformanceOutcomes = true;
     else if (name === "--window-days") { const v = take(); if (!/^[1-9]\d*$/.test(v)) throw new Error("--window-days must be a positive integer"); o.windowDays = Number(v); }
+    else if (name === "--replay") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--replay must be a comma list of PR numbers"); o.replay = v.split(",").map(Number); }
+    else if (name === "--enforce-domains") o.enforceDomains = take();
+    else if (name === "--risk-paths") o.riskPaths = take();
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--depth") o.depth = true;
     else if (name === "--pool") o.pool = true;
@@ -192,6 +220,8 @@ export function parseArgs(argv) {
   if (o.compare && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
   if (o.offline && !o.efficiency && !o.depth) throw new Error("--compare and --offline need --efficiency (--offline also works with --depth)");
   if (o.windowDays != null && !o.conformanceOutcomes) throw new Error("--window-days needs --conformance-outcomes");
+  if ((o.replay || o.enforceDomains || o.riskPaths) && !o.conformanceOutcomes) throw new Error("--replay, --enforce-domains and --risk-paths need --conformance-outcomes");
+  if ((o.enforceDomains || o.riskPaths) && !o.replay) throw new Error("--enforce-domains and --risk-paths need --replay");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
   return o;
 }
@@ -245,12 +275,12 @@ export function comparePivot(v, releaseTimes = []) {
 /** Throttled stderr progress printer (never stdout, so --json stays parseable). */
 export function makeProgressPrinter(write = (t) => process.stderr.write(t), now = Date.now) {
   let last = 0, lastPhase = null;
-  return ({ phase, done, total }) => {
+  return ({ phase, done, total, etaMs }) => {
     const t = now();
     const final = total != null && done >= total;
     if (phase === lastPhase && !final && t - last < 2000) return;
     last = t; lastPhase = phase;
-    write(`forgedock stats: ${phase} ${done}${total != null ? `/${total}` : ""}\n`);
+    write(`forgedock stats: ${phase} ${done}${total != null ? `/${total}` : ""}${etaMs ? ` (eta ${Math.ceil(etaMs / 1000)}s)` : ""}\n`);
   };
 }
 
@@ -306,12 +336,30 @@ export function readAlertConfig(cwd = process.cwd()) {
 export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
   const repo = opts.repo;
+  if (opts.firstMerge) { // #5290: GitHub issues + closing PRs only
+    const gh = deps.gh ?? defaultGh;
+    const repos = String(repo).split(",");
+    const reports = [];
+    for (const r of repos) reports.push(firstMergeReport({ issues: await gatherFirstRunIssues({ gh, repo: r }), repo: r }));
+    if (repos.length === 1) return { repo, query: { first_merge: reports[0] } };
+    const med = medianMinutes(reports);
+    return { repo, query: { first_merge: { repo, repos: reports, median_minutes: med, target_minutes: 15, met: med == null ? null : med <= 15 } } };
+  }
   if (opts.selfFiled) { // #5207: GitHub issues only, no telemetry crawl
     const p = parseSince(opts.since);
     if (p.sinceVersion) throw new Error("--self-filed: --since must be a date (YYYY-MM-DD)");
     const since = new Date(p.sinceMs ?? (deps.now?.() ?? Date.now()) - 30 * 86400000).toISOString().slice(0, 10);
     const issues = await gatherIssues({ gh: deps.gh ?? defaultGh, repo, since });
     return { repo, query: { self_filed: selfFiledReport({ issues, since, repo }) } };
+  }
+  if (opts.origin) { // #5294: GitHub issues plus trusted telemetry runs for cost
+    const p = parseSince(opts.since);
+    if (p.sinceVersion) throw new Error("--origin: --since must be a date (YYYY-MM-DD)");
+    const since = new Date(p.sinceMs ?? (deps.now?.() ?? Date.now()) - 30 * 86400000).toISOString().slice(0, 10);
+    const gh = deps.gh ?? defaultGh;
+    const issues = await gatherOriginIssues({ gh, repo, since });
+    const fetched = await fetchGithubRecords({ repo, since: `${since}T00:00:00Z`, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env, onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
+    return { repo, query: { origin: originReport({ issues, runs: toModel(repo, fetched).runs, since, repo }) } };
   }
   let releaseTimes = [];
   if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
@@ -322,8 +370,15 @@ export async function buildReport(opts, deps = {}) {
     return { repo, query: { pool } };
   }
   if (opts.depth) { // forge#5209: run logs; gh only for post-merge defect signals
-    const st = sinceToTimestamp(opts.since, releaseTimes), sinceMs = st.since ? Date.parse(st.since) : null;
-    const depth = await buildDepth({ runsDir: deps.runsDir ?? runsDir(env), repo, sinceMs, gh: opts.offline ? null : (deps.gh ?? defaultGh), minN: opts.minN });
+    const st = sinceToTimestamp(opts.since, releaseTimes), nowMs = deps.now?.() ?? Date.now();
+    let sinceMs = st.since ? Date.parse(st.since) : null;
+    if (sinceMs == null) { // #5318: no --since must not crawl all history
+      sinceMs = nowMs - DEFAULT_LOOKBACK_DAYS * 86400000;
+      (deps.warn ?? ((t) => process.stderr.write(`${t}\n`)))(`--depth: no --since, using the last ${DEFAULT_LOOKBACK_DAYS} days (pass --since <date> for more)`);
+    }
+    const depth = await buildDepth({ runsDir: deps.runsDir ?? runsDir(env), repo, sinceMs, gh: opts.offline ? null : (deps.gh ?? defaultGh), minN: opts.minN,
+      now: nowMs, env, useCache: opts.cache, refresh: opts.refresh, onProgress: deps.onProgress,
+      git: deps.git !== undefined ? deps.git : resolveRepo(null)?.toLowerCase() === repo.toLowerCase() ? gitProbes(process.cwd()) : null });
     return { repo, query: { depth } };
   }
   if (opts.efficiency) { // forge#4402: local batch dirs + run logs; gh only for merged issues
@@ -353,16 +408,25 @@ export async function buildReport(opts, deps = {}) {
   const bound = sinceToTimestamp(opts.since, releaseTimes);
   if (opts.conformanceOutcomes && !bound.since) bound.since = new Date((deps.now?.() ?? Date.now()) - DEFAULT_LOOKBACK_DAYS * 86400000).toISOString().replace(/\.\d{3}Z$/, "Z"); // #5210: bounded crawl
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
+  // #5363: the merged lane PRs come first (one GraphQL search per 100), so only their PRs and closing issues are crawled.
+  const input = opts.conformanceOutcomes ? await (deps.gatherConformanceOutcomes ?? gatherConformanceOutcomes)({ repo, gh: deps.gh ?? defaultGh, since: bound.since, now: deps.now?.() ?? Date.now() }) : null;
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
-    onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
+    onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now, ...(input ? { numbers: joinedNumbers(input.prs) } : {}) });
   if (opts.edge || opts.milestone) { // forge#4165: audit query instead of the version report
     const e = opts.edge ? parseEdge(opts.edge) : null;
     const query = { ...(e ? { edge: { ...e, prs: edgeQuery(gh.records, e.from, e.to) } } : {}), ...(opts.milestone ? { mix: verdictMix(gh.records, gh.items, opts.milestone) } : {}) };
+    if (opts.milestone) { // forge#5341: the feature scoreboard from GitHub plus the local run logs; best-effort, absent when the milestone is unknown
+      try {
+        const runs = opts.local ? (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo) : [];
+        const board = await gatherScoreboard({ io: { gh: deps.gh ?? defaultGh }, repo, ref: opts.milestone, runs });
+        if (board) query.scoreboard = board;
+      } catch (e) { (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(`--milestone: scoreboard unavailable: ${e.message}`); }
+    }
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
   }
+  if (opts.firstReview) return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { first_review: firstReviewReport({ records: gh.records, repo, minN: opts.minNSet ? opts.minN : undefined }) } }; // #5345
   if (opts.conformanceOutcomes) { // forge#5210: read only; GraphQL search per 100 PRs + the telemetry records above + local logs + git
     const now = deps.now?.() ?? Date.now();
-    const input = await (deps.gatherConformanceOutcomes ?? gatherConformanceOutcomes)({ repo, gh: deps.gh ?? defaultGh, since: bound.since, now });
     const verdicts = conformanceVerdicts({ records: gh.records,
       runs: opts.local ? (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo) : [],
       batchRows: opts.local ? (deps.batchRows ?? readBatchRows({ batchRoot: deps.batchRoot ?? batchRoot(env), repo })) : [] });
@@ -370,6 +434,7 @@ export async function buildReport(opts, deps = {}) {
     const report = conformanceOutcomes({ prs: input.prs, verdicts, minN: opts.minNSet ? opts.minN : DEFAULT_OUTCOME_MIN_N, windowDays: opts.windowDays ?? DEFAULT_WINDOW_DAYS,
       now, git, graphqlCalls: input.graphqlCalls, since: input.since });
     if (input.capped) report.sources.capped = true;
+    if (opts.replay) report.replay = replayPrs({ prs: input.prs, verdicts, numbers: opts.replay, enforceDomains: opts.enforceDomains ?? "", riskPaths: opts.riskPaths ?? "" });
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { conformance_outcomes: report } };
   }
   const model = toModel(repo, gh);
@@ -408,8 +473,9 @@ export async function runStats(argv, deps = {}) {
     process.stderr.write(`forgedock stats: --require-met needs --experiment <id>\n`);
     return 2;
   }
-  opts.repo = resolveRepo(opts.repo);
-  if (!opts.repo || !isValidRepo(opts.repo)) {
+  const multi = opts.firstMerge && opts.repo?.includes(","); // #5290: --repo a/x,b/y reports the median across repos
+  if (!multi) opts.repo = resolveRepo(opts.repo);
+  if (!opts.repo || !(multi ? opts.repo.split(",").every(isValidRepo) : isValidRepo(opts.repo))) {
     process.stderr.write(`forgedock stats: could not resolve a valid owner/repo (pass --repo owner/repo)\n`);
     return 2;
   }
@@ -423,10 +489,14 @@ export async function runStats(argv, deps = {}) {
     }
     if (report.query?.experiment && opts.emitEvent) await (deps.emitExperiment ?? (async (r, x) => (await import("../engine-cli.mjs")).experimentEventSink(r, x)))(opts.repo, report.query.experiment);
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
+    if (report.query?.scoreboard && !opts.json) { process.stdout.write(`${renderScoreboard(report.query.scoreboard)}\n`); return 0; }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
+    if (report.query?.first_review && !opts.json) { process.stdout.write(`${renderFirstReview(report.query.first_review)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
-    if (report.query?.conformance_outcomes && !opts.json) { process.stdout.write(`${renderConformanceOutcomes(report.query.conformance_outcomes)}\n`); return 0; }
+    if (report.query?.conformance_outcomes && !opts.json) { const co = report.query.conformance_outcomes; process.stdout.write(`${renderConformanceOutcomes(co)}${co.replay ? `\n\n${renderReplay(co.replay)}` : ""}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
+    if (report.query?.first_merge && !opts.json) { process.stdout.write(`${renderFirstMerge(report.query.first_merge)}\n`); return 0; }
+    if (report.query?.origin && !opts.json) { process.stdout.write(`${renderOrigin(report.query.origin)}\n`); return 0; }
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
@@ -441,6 +511,12 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.context_ab && !opts.json) { process.stdout.write(`${renderContextAb(report.query.context_ab)}\n`); return 0; }
     if (report.query?.explore_ab && !opts.json) { process.stdout.write(`${renderExploreAb(report.query.explore_ab)}\n`); return 0; }
     process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
+    if (!opts.json && !report.query) { // #5290: activation metric on the default report; best-effort, silent when absent
+      try {
+        const fm = firstMergeReport({ issues: await gatherFirstRunIssues({ gh: deps.gh ?? defaultGh, repo: opts.repo }), repo: opts.repo });
+        if (fm.started) process.stdout.write(`\n${renderFirstMerge(fm)}\n`);
+      } catch { /* no first-run data */ }
+    }
     return 0;
   } catch (err) {
     process.stderr.write(`forgedock stats: ${err.message}\n`);

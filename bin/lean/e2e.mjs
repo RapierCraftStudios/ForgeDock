@@ -34,19 +34,35 @@ export function parseE2e(sec = {}) {
 
 /** Changed files (minus the engine's hand-off files) that are e2e specs per `cfg.paths`. */
 export const e2eSpecs = (files, cfg = parseE2e({})) => verifiableFiles(files).filter((f) => (cfg.paths ?? []).some((g) => matchesGlob(f, g)));
-/** True when a contract requirement quote carries a `[type:e2e]` criterion. */
-export const contractWantsE2e = (contract) => (Array.isArray(contract?.requirements) ? contract.requirements : []).some((r) => /\[type:e2e\]/i.test(String(r?.quote ?? "")));
+/** True when a contract requirement quote carries a `[type:e2e]` or `[type:manual]` criterion (#5339). */
+export const contractWantsE2e = (contract) => (Array.isArray(contract?.requirements) ? contract.requirements : []).some((r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? "")));
+
+/** #5339: markers of a test that fakes the thing it claims to prove (mocked modules, patched I/O, fake/stub fixtures). */
+const FAKE_RE = /\b(?:vi|jest)\.(?:mock|fn|spyOn)\(|\bmonkeypatch\b|\bunittest\.mock\b|\bmock\.patch\b|\bMagicMock\b|\bsinon\.stub\b|\b(?:fake|mock|stub)[_-]?[a-z]\w*|\b(?:Fake|Mock|Stub)[A-Z]\w*/i;
+/** #5339: the `paths` whose content (via `read`) carries a fake marker; an unreadable path is not faked. Deterministic, no model call. */
+export function fakedPaths(paths, read) {
+  const out = [];
+  for (const p of paths ?? []) { let t = null; try { t = read(p); } catch { /* unreadable */ } if (typeof t === "string" && FAKE_RE.test(t)) out.push(p); }
+  return out;
+}
+
+const UI_FILE_RE = /\.(?:tsx|jsx|vue|svelte)$/i;
+const UI_INTERACTIVE_RE = /(?:dialog|modal|popover|drawer|cta|button|menu|trigger|layout|hero|header|nav)/i;
+/** #5285: changed non-test UI component files that alter interactive elements (dialogs, CTAs, layout containers); jsdom cannot see layout or clicks. */
+export const uiInteractiveChanged = (files) => verifiableFiles(files).filter((f) => UI_FILE_RE.test(f) && UI_INTERACTIVE_RE.test(f) && !/\.(?:test|spec|stories)\./i.test(f));
 
 /** Whether this lane runs the e2e gate: {run, reason, specs}. */
 export function e2eWanted({ cfg, files, contract } = {}) {
   const c = cfg ?? parseE2e({});
   const specs = e2eSpecs(files, c);
+  const ui = uiInteractiveChanged(files);
   if (c.mode === "never") return { run: false, reason: "verify.e2e: never", specs };
   if (!c.label && !c.workflow) return { run: false, reason: NO_TRIGGER, specs };
   if (c.mode === "always") {
     return skipsCi(files, DEFAULT_SKIP_PATHS) ? { run: false, reason: "docs-only change", specs } : { run: true, reason: "verify.e2e: always", specs };
   }
   if (specs.length) return { run: true, reason: `${specs.length} e2e spec(s) changed`, specs };
+  if (ui.length) return { run: true, reason: `interactive UI changed (${ui.slice(0, 3).join(", ")}): real-browser check`, specs, ui };
   if (contractWantsE2e(contract)) return { run: true, reason: "contract has [type:e2e] criteria", specs };
   return { run: false, reason: "no e2e spec changed and no [type:e2e] criteria", specs };
 }

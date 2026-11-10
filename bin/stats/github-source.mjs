@@ -83,7 +83,7 @@ export function runsFromRecords(records) {
     if (!run._first || r.ts < run._first) run._first = r.ts;
     if (r.experiment != null && r.arm != null) { run.experiment = String(r.experiment); run.arm = String(r.arm); if (r.arm_overrides != null) run.armOverrides = String(r.arm_overrides); } // #4629, #5206
     if (r.event === "run_terminal") {
-      run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.wallMs = num(r.wall_ms); run.ledger = unflattenPhases(r); // #4908
+      run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.milestone = typeof r.milestone === "string" && r.milestone ? r.milestone : null; run.verified = r.verified == null ? null : Number(r.verified) === 1; run.wallMs = num(r.wall_ms); run.ledger = unflattenPhases(r); // #4908, #5339 (milestone, verified)
       continue;
     }
     const id = r.phase ?? "other";
@@ -121,6 +121,8 @@ const PAGE_SIZE = 100;
 // crawl or a small clock skew is re-listed. Re-reads are idempotent: items are keyed by issue number.
 const WATERMARK_OVERLAP_MS = 5 * 60 * 1000;
 const MAX_LIST_REQUESTS = 100000;
+// GitHub refuses page-number pagination of the repo-wide comments endpoint past about 30k items (page 301 at 100 per page).
+const MAX_COMMENT_PAGE = 300;
 
 /** Shift an ISO-8601 timestamp by `ms`; an unparsable value is returned unchanged. */
 export function shiftIso(ts, ms) {
@@ -207,19 +209,52 @@ async function waitForRate(gh, sleep, now) {
  * and PRs that carry at least one trusted FORGE:TELEMETRY comment in that window. Items without one cost nothing more.
  */
 async function scanWindowComments(call, repo, from, env, onPage) {
-  const base = ["per_page=100", ...(from ? [`since=${sinceParam(from)}`] : [])];
   const numbers = new Set();
-  for (let p = 1; p < MAX_LIST_REQUESTS; p++) {
-    const page = parsePages(await call(["api", `repos/${repo}/issues/comments?${[...base, `page=${p}`].join("&")}`]));
-    for (const c of page) {
-      if (!MARKER_RE.test(c?.body ?? "") || !isTrusted(c, env)) continue;
-      const m = /\/issues\/(\d+)$/.exec(c.issue_url ?? "");
-      if (m) numbers.add(Number(m[1]));
+  let cursor = from, pages = 0;
+  for (;;) {
+    const base = ["per_page=100", ...(cursor ? [`since=${sinceParam(cursor)}`] : [])];
+    let page = [];
+    for (let p = 1; p <= MAX_COMMENT_PAGE; p++) {
+      let raw;
+      try { raw = await call(["api", `repos/${repo}/issues/comments?${[...base, `page=${p}`].join("&")}`]); } catch (err) {
+        if (/pagination is limited|HTTP 422/.test(String(err?.message ?? err))) throw new Error(`GitHub's comments pagination cap was hit; retry with a narrower --since (after ${cursor ?? "the start"})`);
+        throw err;
+      }
+      page = parsePages(raw);
+      for (const c of page) {
+        if (!MARKER_RE.test(c?.body ?? "") || !isTrusted(c, env)) continue;
+        const m = /\/issues\/(\d+)$/.exec(c.issue_url ?? "");
+        if (m) numbers.add(Number(m[1]));
+      }
+      onPage(++pages);
+      if (page.length < PAGE_SIZE) return numbers;
     }
-    onPage(p);
-    if (page.length < PAGE_SIZE) break;
+    // The endpoint refuses pages past ~30k items: restart one page-1 walk from the newest update seen, never request past the cap.
+    const next = page.reduce((m, c) => (c?.updated_at && (!m || c.updated_at > m) ? c.updated_at : m), null);
+    if (!next || (cursor && next <= cursor)) throw new Error(`GitHub's comments pagination cap was hit and cannot advance; retry with --since later than ${cursor ?? "the start"}`);
+    cursor = next;
   }
-  return numbers;
+}
+
+/**
+ * Targeted crawl (#5363): only the given issue/PR numbers are read (metadata plus all comments), with no repo-wide comments
+ * scan and no issue listing. Coverage is partial, so the cache is neither read nor written (its watermark would lie).
+ */
+async function fetchNumbers({ repo, numbers, gh, env, onProgress, concurrency, now }) {
+  const list = [...new Set(numbers.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
+  const items = [], t0 = now();
+  let apiCalls = 0, done = 0;
+  const eta = () => (done > 0 && done < list.length ? Math.round(((now() - t0) / done) * (list.length - done)) : 0);
+  await pool(list, concurrency, async (n) => {
+    const [it] = parsePages(await gh(["api", `repos/${repo}/issues/${n}`]));
+    const records = parseTelemetryComments(parsePages(await gh(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])), env);
+    apiCalls += 2;
+    if (it && Number.isInteger(it.number)) items.push({ ...meta(it), records });
+    onProgress({ phase: "telemetry", done: ++done, total: list.length, etaMs: eta() });
+  });
+  const seen = new Set(), records = [];
+  for (const it of items) for (const r of it.records) if (!seen.has(r.eid)) { seen.add(r.eid); records.push(r); }
+  return { items, records, fetched: list.length, fromCache: false, apiCalls, coveredFrom: null };
 }
 
 /**
@@ -232,8 +267,9 @@ async function scanWindowComments(call, repo, from, env, onPage) {
  */
 export async function fetchGithubRecords({ repo, since = null, refresh = false, useCache = true, gh = defaultGh, env = process.env,
   onProgress = () => {}, concurrency = DEFAULT_CONCURRENCY, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now,
-  rateCheck = gh === defaultGh } = {}) {
+  rateCheck = gh === defaultGh, numbers = null } = {}) {
   if (!isValidRepo(repo)) throw new Error(`invalid repo: ${repo}`);
+  if (Array.isArray(numbers)) return fetchNumbers({ repo, numbers, gh, env, onProgress, concurrency, now });
   const cache = useCache && !refresh ? loadCache(repo, env) : emptyCache();
   const start = since ?? null;
   const hasCover = cache.watermark != null;
@@ -271,6 +307,7 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
     saveCache(repo, { ...emptyCache(), watermark: extend ? (pending.size > 0 ? scanResume() : cap(watermark)) : cache.watermark, coveredFrom: extend ? newFloor : cache.coveredFrom, items }, env);
   };
   try {
+    const t0 = now();
     const telemetry = [...await scanWindowComments(call, repo, crawlFrom, env, (p) => onProgress({ phase: "comments", done: p, total: null }))];
     // A telemetry run spans several comment parts and the window holds only the touched ones, so each such issue's full
     // comment list is re-read once (bounded pool) and replaces its records.
@@ -280,7 +317,8 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
     await pool(telemetry, concurrency, async (n) => {
       recordsOf.set(n, parseTelemetryComments(parsePages(await call(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])), env));
       fetched++;
-      onProgress({ phase: "telemetry", done: ++done, total: telemetry.length });
+      done++;
+      onProgress({ phase: "telemetry", done, total: telemetry.length, etaMs: done < telemetry.length ? Math.round(((now() - t0) / done) * (telemetry.length - done)) : 0 });
     });
     const listed = new Set();
     let processed = 0;

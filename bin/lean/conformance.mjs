@@ -69,9 +69,61 @@ const ITEM_PREFIX_RE = /^\s*(?:[-*+]\s+)?(?:\[[ xX]\]\s+)?(?:\d+[.)]\s+)?/;
  */
 export function inIssue(quote, issueText) {
   const q = norm(quote);
-  if (q.length >= MIN_QUOTE_CHARS) return norm(issueText).includes(q);
+  if (q.length >= MIN_QUOTE_CHARS) return norm(issueText).includes(q) || elidedIn(q, norm(issueText)) || compact(issueText).includes(compact(q));
   if (q.length < 3) return false;
   return String(issueText ?? "").split("\n").some((l) => norm(l.replace(ITEM_PREFIX_RE, "")) === q);
+}
+/** #5244: alphanumerics only, so `SLI_X` retyped as "SLI X" or a dropped punctuation mark still compares equal. */
+const compact = (s) => norm(s).replace(/[^a-z0-9]/g, "");
+/** #5244: a quote shortened with "..." (norm folds the ellipsis char): every segment is in the issue, in order, and one is a full-length quote. */
+function elidedIn(q, issue) {
+  if (!q.includes("...")) return false;
+  const segs = q.split("...").map((x) => x.trim()).filter(Boolean);
+  if (!segs.some((x) => x.length >= MIN_QUOTE_CHARS)) return false;
+  let at = 0;
+  for (const seg of segs) { const i = issue.indexOf(seg, at); if (i < 0) return false; at = i + seg.length; }
+  return true;
+}
+const SNAP_MIN = 0.9;
+const tokens = (s) => norm(String(s ?? "").replace(/_/g, " ")).match(/[a-z0-9]+/g) ?? [];
+/**
+ * #5244: the issue's exact line or sentence a near-verbatim quote stands for, or null. At least SNAP_MIN of the quote's tokens must be
+ * in exactly one line or sentence (the shortest of the best scorers; a rival that is not nested in it makes the match ambiguous).
+ */
+export function snapQuote(quote, issueText) {
+  const qt = [...new Set(tokens(quote))];
+  if (qt.length < 4) return null;
+  const seen = new Set(), cands = [];
+  for (const line of String(noComments(String(issueText ?? ""))).split("\n")) {
+    const l = line.replace(ITEM_PREFIX_RE, "").trim();
+    for (const raw of [l, ...l.split(/(?<=[.!?])\s+/)]) {
+      const n = norm(raw);
+      if (n.length < MIN_QUOTE_CHARS || seen.has(n)) continue;
+      seen.add(n);
+      const ct = new Set(tokens(raw));
+      cands.push({ raw, n, score: qt.filter((w) => ct.has(w)).length / qt.length });
+    }
+  }
+  const ok = cands.filter((c) => c.score >= SNAP_MIN);
+  if (!ok.length) return null;
+  const top = Math.max(...ok.map((c) => c.score));
+  const best = ok.filter((c) => c.score === top).sort((a, b) => a.n.length - b.n.length)[0];
+  const rival = ok.some((c) => c !== best && !c.n.includes(best.n) && !best.n.includes(c.n));
+  return rival ? null : best.raw;
+}
+/** #5244: replaces each failing requirement quote with the issue line it snaps to (original kept as `requoted`). */
+export function snapQuotes(contract, issueText) {
+  const reqs = contract?.requirements;
+  if (!Array.isArray(reqs) || issueText == null) return { contract, snapped: [] };
+  const snapped = [];
+  const requirements = reqs.map((r) => {
+    if (!r || typeof r.quote !== "string" || inIssue(r.quote, issueText)) return r;
+    const to = snapQuote(r.quote, issueText);
+    if (!to || !inIssue(to, issueText)) return r;
+    snapped.push({ id: r.id, from: r.quote, to });
+    return { ...r, quote: to, requoted: r.quote };
+  });
+  return { contract: snapped.length ? { ...contract, requirements } : contract, snapped };
 }
 /** #5164: the issue's list or checklist item lines (item marker stripped), or every non-empty line when it has none. */
 export function criterionLines(issueText) {
@@ -136,12 +188,16 @@ export function pathCovers(d, f) {
   if (/[*?]/.test(p)) return globRe(p).test(file);
   return p === file;
 }
+/** #5365: explicit coupling map: editing `when` (a deliverable) also puts `also` in scope (a test asserts parity between them). */
+const COUPLED_PATHS = [{ when: "bin/engine/outcome-codes.mjs", also: ["docs/OUTCOME-CODES.md"] }];
 /** The deliverable id that authorizes `f`, "test", "incidental", or null. */
 export function authorizationOf(contract, f) {
   const d = (contract.deliverables ?? []).find((x) => pathCovers(x.path, f));
   if (d) return d.id;
   if (isTestPath(f)) return "test";
   if (isIncidentalPath(f)) return "incidental";
+  // #5365: a file a parity test reads alongside a changed deliverable is in scope with it
+  if (COUPLED_PATHS.some((c) => c.also.some((g) => pathCovers(g, f)) && (contract.deliverables ?? []).some((x) => pathCovers(x.path, c.when) || pathCovers(c.when, x.path)))) return "coupled";
   return null;
 }
 // A doc a freshness rule can demand: a prose file under a docs directory. Build and dependency files (`requirements.txt`,
@@ -331,6 +387,53 @@ export function guessedUvEnv(command) {
   return /\buv\s+run\b/.test(c) && /--no-project\b/.test(c) && /--offline\b/.test(c) && /--with(?:\s|=)/.test(c) && !/--with-requirements\b/.test(c);
 }
 const guessedUvProblem = (id) => `${id}: the command builds its environment from a hand-picked \`uv run --offline --no-project --with ...\` list, which cannot import the project's full dependency set (env.repro_unrunnable); derive it from the repo's lockfile or toolchain (\`--with-requirements\` of an export, the project runner, or a forge.yaml validate.recipes entry)`;
+const PROJECT_DIR_RE = /^(?:\.\/)?(.+?)\/?$/;
+const ARG_PATH_LIKE_RE = /\/|\.py(?:::|$)|::/;
+const stripDot = (t) => String(t).replace(PROJECT_DIR_RE, "$1");
+/**
+ * #5234: the project dir a segment moves into (`poetry -C D run ...`, `poetry --directory D`, `uv run --project D`, `uv --directory D`)
+ * with its token indexes, or null.
+ */
+function projectDirOf(tokens) {
+  const runner = tokens.findIndex((t) => t === "poetry" || t === "uv");
+  if (runner < 0) return null;
+  const flags = tokens[runner] === "poetry" ? ["-C", "--directory"] : ["--project", "--directory"];
+  for (let i = runner + 1; i < tokens.length; i++) {
+    const t = tokens[i], eq = flags.find((f) => t.startsWith(`${f}=`));
+    if (eq) return { dir: stripDot(t.slice(eq.length + 1)), at: [i] };
+    if (flags.includes(t) && tokens[i + 1]) return { dir: stripDot(tokens[i + 1]), at: [i, i + 1] };
+  }
+  return null;
+}
+/**
+ * #5234: a frozen command that moves its cwd with `poetry -C D` / `uv run --project D` but names pytest paths relative to the
+ * repo root (`D/tests/x.py`), which do not exist from D: pytest exits 4. Returns {dir, paths} (the D-prefixed path args) or null.
+ * Pure string check, one runner segment at a time.
+ */
+export function projectDirPathMiss(command) {
+  for (const seg of String(command ?? "").split(/&&|\|\||;|\|/)) {
+    const tokens = seg.trim().split(/\s+/), pd = projectDirOf(tokens);
+    const py = tokens.findIndex((t) => t === "pytest" || t === "py.test");
+    if (!pd || py < 0) continue;
+    const paths = tokens.slice(py + 1).filter((t) => !t.startsWith("-") && ARG_PATH_LIKE_RE.test(t) && stripDot(t).startsWith(`${pd.dir}/`));
+    if (paths.length) return { dir: pd.dir, paths };
+  }
+  return null;
+}
+/**
+ * #5234: `poetry -C D run pytest D/x.py` -> `cd D && poetry run pytest x.py` (uv: `cd D && uv run pytest x.py`) when the command is
+ * one segment and every path-like pytest arg is D-prefixed; any other command comes back unchanged (validateContract rejects it).
+ */
+export function rewriteProjectDirCommand(command) {
+  const cmd = String(command ?? "");
+  if (/&&|\|\||;|\||[\n'"]/.test(cmd) || !projectDirPathMiss(cmd)) return cmd;
+  const tokens = cmd.trim().split(/\s+/), pd = projectDirOf(tokens), py = tokens.findIndex((t) => t === "pytest" || t === "py.test");
+  const like = (t) => !t.startsWith("-") && ARG_PATH_LIKE_RE.test(t);
+  if (tokens.slice(py + 1).some((t) => like(t) && !stripDot(t).startsWith(`${pd.dir}/`))) return cmd;
+  const out = tokens.map((t, i) => (i > py && like(t) ? stripDot(t).slice(pd.dir.length + 1) : t)).filter((_, i) => !pd.at.includes(i));
+  return `cd ${pd.dir} && ${out.join(" ")}`;
+}
+const projectDirProblem = (id, m) => `${id}: the command moves its cwd to \`${m.dir}\` (poetry -C / uv --project) but names repo-root-relative paths (${m.paths.map((x) => `\`${x}\``).join(", ")}) that do not exist from there, so pytest exits 4 before any test runs; use \`cd ${m.dir} && poetry run pytest <${m.dir}-relative paths>\` instead`;
 /**
  * #5087: a plan decision whose effect is to drop an e2e/integration check for mocked tests ("no Playwright e2e; integration
  * coverage via route and component tests"). The #4726 rule keys on the `[type:e2e]` tag, which a reworded criterion
@@ -389,6 +492,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
     for (const p of tmpdirInputs(v.command)) problems.push(tmpInputProblem(v.id, p));
     if (guessedUvEnv(v.command)) problems.push(guessedUvProblem(v.id));
+    const pdm = projectDirPathMiss(v.command);
+    if (pdm) problems.push(projectDirProblem(v.id, pdm));
     if (vitestQuietFlag(v.command)) problems.push(`${v.id}: vitest 3 rejects -q/--quiet (usage error before any test runs); use --reporter=dot`);
     const syn = shellSyntaxError(v.command);
     if (syn) problems.push(`${v.id}: the command is not valid shell (bash -n: ${syn}); keep notes out of the command`);
@@ -400,6 +505,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));
+      const pdr = projectDirPathMiss(t.command);
+      if (pdr) problems.push(projectDirProblem("repro_test", pdr));
       if (vitestQuietFlag(t.command)) problems.push("repro_test: vitest 3 rejects -q/--quiet; use --reporter=dot");
       const syn = shellSyntaxError(t.command);
       if (syn) problems.push(`repro_test: the command is not valid shell (bash -n: ${syn})`);
@@ -548,9 +655,18 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       applied.push({ kind: a.kind, target: r.id, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
-      if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
-      if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
-      const r = { disposition: "deliver", ...a.requirement, amended: true };
+      if (c.requirements.some((r) => r.id === a.requirement.id)) {
+        // #5365: a taken id is renumbered to the next free R<n>, never a failure; the remap is recorded in `applied`
+        const was = a.requirement.id, free = `R${Math.max(0, ...c.requirements.map((r) => Number(/^R(\d+)$/.exec(String(r.id))?.[1] ?? 0))) + 1}`;
+        a = { ...a, requirement: { ...a.requirement, id: free } };
+        applied.push({ kind: "add-requirement", target: `${was} -> ${free}`, why: `id ${was} already in the contract; renumbered to ${free}` });
+      }
+      let snapTo = null;
+      if (issueText != null && !inIssue(a.requirement.quote, issueText)) {
+        snapTo = snapQuote(a.requirement.quote, issueText);
+        if (!snapTo) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
+      }
+      const r = { disposition: "deliver", ...a.requirement, ...(snapTo ? { quote: snapTo, requoted: a.requirement.quote } : {}), amended: true };
       if (!DISPOSITIONS.includes(r.disposition)) { problems.push(`add-requirement ${r.id}: bad disposition ${r.disposition}`); continue; }
       if (TRACKED.includes(r.disposition) && blank(r.why)) r.why = a.why;
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
@@ -696,7 +812,7 @@ export function noopCommand(command) {
  */
 export function substituteVerdict(run, { repoHas = () => false, command = "" } = {}) {
   if (!run) return "unverified";
-  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
+  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run, command) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
   return run.rc === 124 ? "timeout" : "runs";
 }
 /**
@@ -734,9 +850,11 @@ export async function removedPathsOf(git, base) {
   }
   return gone;
 }
-const UNRUNNABLE_RE = /no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
+const UNRUNNABLE_RE = /ERROR: file or directory not found|ERROR: not found:|no tests ran|collected 0 items|no tests found|could not find (?:the )?pyproject|poetry could not find|syntax error near|unexpected EOF while looking/i;
 /** #4857: a failed rerun that died before any test ran (no tests selected, no project at the cwd, invalid shell): a defect of the frozen command. */
-export function unrunnableValidate({ rc, output } = {}) {
+export function unrunnableValidate({ rc, output } = {}, command = "") {
+  // #5234: pytest's own exit 4 (usage error, path not found) and 5 (no tests collected) are never a test failure
+  if ((rc === 4 || rc === 5) && /\b(?:py\.?test|pytest)\b/.test(String(command ?? ""))) return true;
   return rc !== 0 && rc !== 124 && UNRUNNABLE_RE.test(String(output ?? ""));
 }
 const BLOCK_VALIDATE_RE = /\b(?:V\d+|validate|repro)\b/i;
@@ -822,7 +940,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, routeFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -830,6 +948,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
+  // #5285: interactive UI changed on a high-risk surface with no real-browser check configured: a recorded skip that blocks
+  if (uiBrowser?.files?.length && uiBrowser.highRisk && !uiBrowser.ran) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "ui_browser_unverified", detail: `interactive UI changed (${uiBrowser.files.slice(0, 5).join(", ")}) on a high-risk surface but no real-browser check runs (${uiBrowser.reason}); configure verify.e2e_label/e2e_workflow or add a Playwright spec` });
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -858,7 +978,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
-      if (rerun && unrunnableValidate(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
+      if (rerun && unrunnableValidate(rerun, v.command)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
       // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
       if (rerun?.rc === 124) {
         if (ciVerified) { ciCovered.push(v.id); continue; }
@@ -892,7 +1012,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
   for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
+  for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
+  failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
@@ -1053,10 +1175,13 @@ export function evidencePathOnly(problems = []) {
 }
 /**
  * #5164: true when every problem of an incomplete review is a reviewer slip a targeted re-ask can fix: an evidence path that
- * did not resolve (#4327) or an issue_coverage misquote. A real coverage gap is never one, so it keeps the two-run limit.
+ * did not resolve (#4327) or an issue_coverage misquote. #5345: so is any single missing or invalid row (requirement, preserve,
+ * scope, issue_coverage, verdict): the reply is repaired in place for those ids, never a new review round. A whole absent
+ * `requirements` section is not a slip: it keeps the two-run limit. A real coverage gap is a failure, not an incompleteness.
  */
+const ROW_GAP_RE = /needs exactly one row|status invalid|needs deferral_ok|needs instrumented|needs path:line evidence|needs validated_by|has no scope row|needs a row with status|issue_coverage is missing or empty|verdict must be|regressions must be/;
 export function reaskable(problems = []) {
-  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX));
+  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX) || ROW_GAP_RE.test(String(p)));
 }
 const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)));
 
@@ -1139,8 +1264,10 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 }
 
 
-/** #4726: a requirement quote that carries a `[type:e2e]` criterion. */
-const wantsE2e = (r) => /\[type:e2e\]/i.test(String(r?.quote ?? ""));
+/** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? ""));
+/** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
+const DEFAULT_ENFORCED_KINDS = ["e2e_row"];
 const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 /**
  * #4726: whether a validate command runs a real end-to-end check: an entry of `verify.e2e_checks`, a file of the e2e spec set
@@ -1149,6 +1276,7 @@ const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 export function isE2eCommand(command, e2e = null) {
   const cmd = String(command ?? "");
   if ((e2e?.checks ?? []).some((c) => c && cmd.includes(c))) return true;
+  if ((e2e?.faked ?? []).some((f) => f && cmd.includes(f))) return false; // #5339: names a test that fakes the real path
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
@@ -1168,7 +1296,7 @@ export function decide(raw, ctx) {
   const rv = fillEngineRows(raw, ctx);
   const comp = checkCompleteness(rv, ctx);
   if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
-  const f = [];
+  const f = [], converted = [];
   const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
   const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
   for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
@@ -1180,24 +1308,29 @@ export function decide(raw, ctx) {
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
-      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, detail: `${r.id} is a [type:e2e] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack); run one, or mark ${r.id} post-deploy with a tracked follow-up` });
+      const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
+    } else if (r.disposition === "defer" && wantsE2e(r)) {
+      // #5339: a deferred e2e/manual requirement is not met; only a post-deploy one is transferred to the epic (the lane closes partial)
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
     }
     // #5207: in-lane engineering work is never deferrable, whatever the reviewer says; one failure per row.
-    if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
+    if (TRACKED.includes(r.disposition) && row.status === "implemented" && (inLaneDeferral(r) || row.deferral_ok === false)) converted.push({ id: r.id, evidence: String(row.evidence ?? "") }); // #5365: delivered in the diff
+    else if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
     else if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
   for (const s of rv.scope) {
     if (!blank(s.authorized_by)) continue;
     const engine = authorizationOf(ctx.contract, s.file);
-    if (engine === "test" || engine === "incidental") continue; // always allowed; a reviewer "none" here is a misreading, not creep
+    if (engine === "test" || engine === "incidental" || engine === "coupled") continue; // always allowed; a reviewer "none" here is a misreading, not creep
     f.push({ code: C.CONFORMANCE_SCOPE_CREEP, detail: `${s.file}: ${s.note || "not authorized by the contract"}` });
   }
   for (const p of rv.preserve ?? []) if (p.status !== "intact") f.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, detail: `${p.id} ${p.status}${p.evidence ? ` (${p.evidence})` : ""}${p.note ? `: ${p.note}` : ""}` });
   for (const r of rv.regressions ?? []) f.push({ code: C.CONFORMANCE_REGRESSION, detail: `${r?.at ?? "?"}: ${r?.failure ?? ""}` });
-  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv };
+  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted };
   // A NONCONFORMING verdict with every row passing gives the builder nothing to fix: re-ask the reviewer.
   if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }], missing: ["verdict"], review: rv };
-  return { state: "conforms", failures: [], review: rv };
+  return { state: "conforms", failures: [], review: rv, converted };
 }
 
 /** The ids (or sections) a targeted re-ask must fill: requirement ids without a valid row, issue_coverage problems, ...; [] when complete. */
@@ -1245,6 +1378,15 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
 }
 
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */
+/** #5365: flips the requirements `converted` names (decide) to deliver, keeping the original row in amended_from; returns a new contract. */
+export function convertDelivered(contract, converted) {
+  const by = new Map((converted ?? []).map((x) => [x.id, x.evidence]));
+  return { ...contract, requirements: (contract.requirements ?? []).map((r) => {
+    if (!by.has(r.id) || !TRACKED.includes(r.disposition)) return r;
+    const { bucket, why, check, tracked, class: cls, ...rest } = r;
+    return { ...rest, disposition: "deliver", amended: true, amended_from: r.amended_from ?? Object.fromEntries(["quote", "disposition", "why", "bucket", "check", "tracked", "class"].filter((k) => r[k] != null).map((k) => [k, r[k]])), amendment: { text: `delivered in the diff (${by.get(r.id) || "reviewer evidence"})`, why: "reviewer found the deferred requirement delivered" } };
+  }) };
+}
 /** #5207: in-lane engineering deferrals are never filed (decide() sends them back to the builder). */
 export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked && !inLaneDeferral(r));
 
@@ -1256,14 +1398,43 @@ export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(tit
  * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
  * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
  */
-export function closePlan(contract, { title = null, review = null } = {}) {
+export function closePlan(contract, { title = null, review = null, issueText = null, liveBlocks = [] } = {}) {
   const reqs = contract.requirements ?? [];
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
-  if (!isInvestigation(title)) return { reason: "completed", tracked };
+  // #5285: a default-on change whose live acceptance is deferred is not closed as completed
+  if (liveBlocks.length) return { reason: "partial", tracked, liveBlocked: true, blocks: liveBlocks, open: reqs.filter((r) => liveBlocks.some((b) => b.id === r.id)) };
+  // #5339: an e2e/manual requirement that was not run in the lane is transferred to the epic, not met: the issue stays partial
+  const transferred = reqs.filter((r) => r.disposition === "post-deploy" && wantsE2e(r));
+  if (transferred.length) return { reason: "partial", tracked, transferred: true, open: transferred };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
+  if (!isInvestigation(title)) {
+    const unticked = unmetChecklist(reqs, rows, issueText);
+    return unticked.length ? { reason: "partial", tracked, checklist: true, open: unticked.map((u) => u.req), unticked: unticked.map((u) => u.item) } : { reason: "completed", tracked };
+  }
   const open = reqs.filter((r) => TRACKED.includes(r.disposition)
     || (r.disposition === "deliver" && rows && rows.find((x) => x?.id === r.id)?.status !== "implemented"));
   return open.length ? { reason: "partial", tracked, open } : { reason: "completed", tracked };
+}
+
+const UNTICKED_RE = /^\s*[-*+]\s+\[ \]\s+(.+?)\s*$/;
+/**
+ * #5240: the issue's unticked `- [ ]` acceptance items whose requirement is not settled: a deliver row the review did not mark
+ * implemented, or a defer/post-deploy row with no tracking issue. An item no contract quote matches is not judged here (the
+ * reviewer's issue_coverage gate owns coverage), and a skipped review (null rows) judges dispositions only.
+ */
+function unmetChecklist(reqs, rows, issueText) {
+  if (!issueText) return [];
+  const out = [];
+  for (const line of String(noComments(String(issueText))).split("\n")) {
+    const item = UNTICKED_RE.exec(line)?.[1];
+    if (!item) continue;
+    const req = reqs.find((r) => r?.quote && matchCriterion(String(r.quote).replace(ITEM_PREFIX_RE, ""), item) !== null);
+    if (!req) continue;
+    const unmet = TRACKED.includes(req.disposition) ? !req.tracked
+      : req.disposition === "deliver" && rows && rows.find((x) => x?.id === req.id)?.status !== "implemented";
+    if (unmet) out.push({ item, req });
+  }
+  return out;
 }
 
 const UNUSABLE_REVIEW = ["review.incomplete", "review.inconsistent", "review.unparseable"];
@@ -1325,6 +1496,21 @@ export function ownerRoute(r) {
   // Release review #5103 (BUG-3): a credential/spend/write need is external even when it also names a rollout or release.
   if (POST_PROMOTION_RE.test(text) && !EXTERNAL_NEED_RE.test(text)) return "post-deploy";
   return READONLY_PROD_RE.test(text) && !EXTERNAL_NEED_RE.test(text) ? "host" : "external";
+}
+/** #5250: an acceptance criterion that can only be met by measuring live production or capturing in a real browser. */
+const LIVE_EVIDENCE_RE = /\b(?:measur\w*|capture\w*)\b[^.\n]{0,60}\b(?:production|prod|live)\b|\b(?:production|prod|live)\b[^.\n]{0,40}\b(?:measur\w*|capture\w*|clear rate|success rate|latency|traffic)\b|\breal[- ](?:browser|chrome|device)s?\b|\b(?:real|headless)[- ]browser\b[^.\n]{0,40}\bcaptures?\b/i;
+/**
+ * #5250: intake triage. `{host:true, items}` when the issue's acceptance checklist is non-empty and EVERY item needs live
+ * production measurement or a real-browser capture (and none needs a credential, spend or write: EXTERNAL_NEED_RE). One
+ * code-shaped item keeps it a code lane. Backlog aggregates (FORGE:DEFERRED_FROM / BACKLOG_BATCH) only quote such text and are never host work.
+ */
+export function intakeHostWork(body) {
+  const text = String(body ?? "");
+  if (/FORGE:(?:DEFERRED_FROM|BACKLOG_BATCH)/.test(text)) return { host: false, items: [] };
+  const section = noComments(text).split(/^#{1,2}\s+(?=\S)/m).find((s) => /^acceptance\b/i.test(s)) ?? "";
+  const items = [...section.matchAll(/^\s*[-*]\s+\[[ xX]\]\s+(.+)$/gm)].map((m) => m[1].trim());
+  const host = items.length > 0 && items.every((t) => (LIVE_EVIDENCE_RE.test(t) || READONLY_PROD_RE.test(t)) && !EXTERNAL_NEED_RE.test(t));
+  return { host, items: host ? items : [] };
 }
 const PRE_PROMOTION_RE = /(?:before|pre)[- ]?(?:promotion|release|deploy)/i;
 /** #5186: an explicit host deferral that is post-promotion text (and needs nothing external) joins the release rollup; work needed before promotion stays host. Single source for scripts/file-deferred-followups.sh host_route (#5197). */
@@ -1446,7 +1632,7 @@ export function normalizeKindModes(raw) {
 export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
   const block = [], record = [];
   for (const f of failures ?? []) {
-    const own = kinds?.[f?.code];
+    const own = kinds?.[f?.code] ?? (DEFAULT_ENFORCED_KINDS.includes(f?.kind) ? "enforce" : undefined);
     (own ? own === "enforce" : !shadow || allow.includes(f?.code)) ? block.push(f) : record.push(f);
   }
   return { block, record };

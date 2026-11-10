@@ -46,4 +46,13 @@ describe("#4304: spec CI gates ignore forgedock/verify", () => {
       assert.equal(count(jq, [{ name: "ci", bucket: "pass" }, { name: "Check for FORGE gate markers", bucket: "fail" }]), "0", f);
     }
   });
+
+  it("#5277: a pending check counts as not-passed in every deploy-pr gate read, and the gate prints PENDING, not PASSED, for it", { skip: spawnSync("jq", ["--version"]).status !== 0 && "jq not on PATH" }, () => {
+    const count = (jq, checks) => spawnSync("jq", [jq], { input: JSON.stringify(checks), encoding: "utf8" }).stdout.trim();
+    for (const [f, c] of reads.filter(([f]) => f === "deploy-pr")) assert.equal(count(jqOf(c), [{ name: "ci", bucket: "pending" }]), "1", f);
+    assert.match(deploy, /CI gate: PENDING/);
+    // "CI gate: PASSED (no failing checks)" sits only under the zero-count branch, which a pending check no longer reaches.
+    assert.equal((deploy.match(/CI gate: PASSED \(no failing checks\)/g) ?? []).length, 1);
+    assert.match(deploy, /ci_only_pending\(\)/);
+  });
 });

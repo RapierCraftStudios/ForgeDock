@@ -594,6 +594,28 @@ pipeline:
 
 ---
 
+### `ci` budget and placement (forge#5278)
+
+Actions-minutes awareness and where CI runs. Keys are flat under `ci:` (the parser is one level deep; they coexist with the `milestone_integration` keys above).
+
+```yaml
+ci:
+  mode: auto               # remote | local-first | local-attested | auto (default)
+  monthly_minutes: 40000   # budget; default: the plan's included minutes
+  reserve_pct: 10          # headroom under the budget before auto switches (0-90, default 10)
+  # included_minutes: 50000  # override the built-in plan table (free 2000, pro/team 3000, enterprise 50000)
+  # plan: enterprise         # override the detected plan
+```
+
+| `mode` | Behaviour |
+|---|---|
+| `remote` | Current behaviour: `verify.mode` ci/hybrid push and wait for Actions. |
+| `local-first` | Host checks must pass before anything is pushed that triggers paid CI; `verify.mode` ci/hybrid run as `local`. Paid CI runs once on the release head. |
+| `local-attested` | As `local-first`, and the host result is posted as a `forgedock/ci-local` commit status; paid CI only for release/nightly. Trust trade-off: the status is attested by ForgeDock, not run by Actions, the same trust as a self-hosted runner. |
+| `auto` | `remote` while the projected month stays under `monthly_minutes` less `reserve_pct`; otherwise `local-first`, announced in the next batch/release report. A public repo (free hosted minutes) is never switched; an unreadable billing API stays `remote`. |
+
+`forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]]` prints the plan, included minutes, month-to-date usage across the account (billing usage API: needs a token that can read the org or user billing), the projection, the active mode, alerts (projected overage, a new burn source such as a repo flipped private) and the parity hit rate (local green -> remote red, per suite). `--digest` adds the per-repo and per-workflow month digest; `--propose` lists the runnable local jobs derived from the repo's workflow files (same tool pins). `--set-mode`, `--budget`, `--reserve`, `--plan` write the `ci` block (see `/forgedock-ci-setup`). Runner minutes are weighted by OS (Linux 1, Windows 2, macOS 10). Caches live in `~/.forge/ci-budget/` (`FORGEDOCK_CI_BUDGET_DIR`).
+
 ## `execution` (OPTIONAL)
 
 Owner opt-in for the paid API agent backend (#4257). The API backend is **never the default**: under `--backend auto` (the default) ForgeDock uses the `claude` CLI, and when no CLI is available it fails with `CLI_BACKEND_UNAVAILABLE` instead of billing `ANTHROPIC_API_KEY`.
@@ -721,6 +743,15 @@ selftest:
 
 ---
 
+## `gate` (OPTIONAL)
+
+```yaml
+gate:
+  required_checks: ["CI"]   # extra checks the staging review treats as required
+```
+
+`forgedock review-staging --summary` blocks only on the required checks of the target branch (branch protection and rulesets, read from the GitHub API) plus this explicit list; the list is never inferred. Other red checks are reported as non-blocking warnings. When no required checks can be read, every red check blocks.
+
 ## `release` (OPTIONAL)
 
 Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review and fixes are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). Post-merge is automated (#5213): it confirms a publish run for the merge commit (dispatching one when none appears), waits for `artifact_check`, then opens and merges the version-sync PR; a bound that runs out stops the job as blocked and `--resume <id>` retries. `--watch` is accepted and has no effect until the review step lands.
@@ -731,7 +762,20 @@ release:
   artifact_check: ""
   version_sync: false
   publish_workflow: publish.yml
+  preflight_command: ""
+  preflight_timeout: 1200
+  preflight_blocking: true
+  rehearsal_command: ""
+  rehearsal_timeout: 1200
+  rehearsal_blocking: true
+  mode: freeze
+  branch_pattern: "release/{date}-{n}"
+  fix_mode: cherry-pick
 ```
+
+`forgedock release verify <sha> [--repo owner/repo]` reads the `FORGE:RELEASE` record from the PR that contains `<sha>` and exits 0 only when `<sha>` is the snapshot plus recorded picks, each a clean cherry-pick of a `branches.staging` commit (same tree as `git cherry-pick`), so a repo workflow that trusted `head.ref == staging` can call it instead.
+
+The forge.yaml reader handles two levels, so the rehearsal block is written as the flat keys `rehearsal_command`, `rehearsal_timeout` and `rehearsal_blocking`.
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
@@ -739,6 +783,29 @@ release:
 | `artifact_check` | string | No | Shell command that confirms the published artifact (e.g. `npm view pkg@1.2.3 version`). Post-merge retries it with a bounded exponential backoff (npm propagation delay) and blocks when it keeps failing. Default: none. |
 | `version_sync` | boolean | No | The repo pushes a `chore/sync-version-<VERSION>` branch after a release. Post-merge opens its PR to `branches.staging` if missing and merges it with `--match-head-commit` once its checks are green (no checks, or a red one, blocks the job). Default: `false`. |
 | `publish_workflow` | string | No | Workflow file post-merge looks for (and dispatches when no run appears) for the merge commit. Default: `publish.yml`. |
+
+| `preflight_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout on the staging head **before** the release PR is opened (#5277), again after each fix round, and once more on the final head before the PR is marked ready. Put the repo's own suites here, e.g. `preflight_command: npm test`. Setting it also opens the release PR as a **draft** and marks it ready only after review and a passing preflight, so Actions CI runs once on the final head. Unset: no preflight, the PR is opened ready as before. |
+| `preflight_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
+| `preflight_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per head (a re-run comments on it) and stops the job before the PR is opened or marked ready; fix it and `--resume <id>`. `false`: the failure is recorded and the release goes on. |
+| `rehearsal_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout, on the release-PR head after review and before promotion (#5253). Wire the project's deploy dry-run here: bundle build, env load and the trusted-runtime closure check, e.g. `rehearsal_command: ./scripts/deploy-dry-run.sh` where the script builds the release bundle, loads the production env file in check mode and verifies the trusted-runtime closure, exiting non-zero on the first failure. Unset: no rehearsal, release behavior is unchanged. |
+| `rehearsal_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
+| `rehearsal_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per release head (a re-run at the same head comments on it) with the output tail and the head SHA, and stops the job before promotion; fix it and `--resume <id>`. `false`: the failure is recorded and promotion goes on. |
+| `mode` | `snapshot` \| `freeze` | No | `freeze` (default) is the original behaviour: the release PR head is `branches.staging`, preflight refuses while a lane runs or a PR targets staging, and every batch is held at K=1 until the job ends. `snapshot` (#5276) cuts `release/<id>` from a staging SHA and opens `release/<id>` → `branches.default`; lanes keep merging to staging and no batch K is touched. A `FORGE:RELEASE` record (snapshot SHA, base/head range, bundle PRs, issues, cherry-picks) is kept in the job state and as a hidden marker in the PR body. Only one release branch may exist at a time. Promotion is unchanged (merge commit, `--match-head-commit`) but is stopped unless the head is the snapshot plus exactly the recorded cherry-picks. The branch is deleted after post-merge; fixes are already on staging, so nothing is back-merged. |
+| `branch_pattern` | string | No | Snapshot branch name; `{date}` is `YYYYMMDD`, `{n}` counts the day's release PRs. Default `release/{date}-{n}`. Everything under the pattern's prefix before `{` counts as a release in flight. |
+| `fix_mode` | `cherry-pick` \| `recut` | No | Snapshot mode only. `cherry-pick` (default): after a fix lane merges to staging, the merged commits of PRs labelled `release-blocker`, or closing a `release-blocker` issue or the blocking issue the job filed, are cherry-picked onto `release/<id>` (a clean pick only; a conflict blocks the job) and appended to `FORGE:RELEASE`. `recut`: the branch is moved to the current staging tip and the picks start over. |
+
+The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
+
+Repos that set `preflight_command` should skip their Actions CI while the release PR is a draft, so the paid run happens once, on the final head:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  test:
+    if: ${{ !github.event.pull_request.draft }}
+```
 
 **Commands that use this section**: `forgedock release`
 
@@ -778,6 +845,8 @@ issue_watch:
 | `include_followups` | string | No | `none` (default) or `defer-only`. |
 | `trust_app` | boolean | No | Claim issues authored by this repo's ForgeDock App. Other bots and `NONE`-association authors stay untrusted. Default false. |
 | `trust_app_labels` | list | No | Needs `trust_app`: an App-authored issue must carry one of these labels. |
+| `skip_labels` | list | No | Issues carrying any of these labels are skipped. Default for `mode: batch`: `epic, needs-human, post-deploy, workflow:merged, awaiting-promotion, host-task`; `[]` for the other modes and to switch it off. |
+| `release_pause` | boolean | No | Pause the watch while a `forgedock release` job is in flight; it resumes by itself. Default true in `mode: batch`. |
 | `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
 | `sweep_needs_human` | boolean | No | Also settle `needs-human` escalations that predate the watch (the backlog). Default false; `forgedock issue-watch run --dry-run` classifies them first and writes nothing. |
 | `max_launches` | integer | No | Total lane launches (claims plus requeues by the decision engine); at N the watch drains. Default: none. Decision-stage issues also count against `max_issues`. |
@@ -921,7 +990,7 @@ lean:
 | `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. A test that ran but is not red on the base and green on head fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A head the harness could not run at all (timeout, missing runner or dependencies) ends `needs-human` with the recoverable code `env.repro_unrunnable`, not a builder round: the batch runner's recovery lane reruns it through the repo's own toolchain (see docs/OUTCOME-CODES.md). The harness runs with the lane env (`TMPDIR`, toolchain) and the workspace dependency trees, and a repro test file that is new on head is run against the base sources. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
 | `precheck.max_minutes` | number | No | Total budget in minutes (1–120) of one round of pre-PR check commands (#4331). The flat form `lean.precheck_max_minutes` also works and wins. When unset, `verify.precheck_total_seconds` applies (default 600 s). Check commands run change-scoped (a learned command with a test-map entry runs only when its globs match the changed files; unmapped commands always run), concurrently up to the host worker cap under one heavy slot, each timed (`ms` in the `PRECHECK_COMMANDS` run-log event). Commands not started when the budget runs out are recorded `deferred-to-ci` (an anomaly, not a failure) and left to CI. |
 | `fix_model` | string | No | Model of fresh fix-round sessions (#4363; `engine.lean_fix_model` is also read). Default: the reviewer model (`engine.lean_reviewer_model`, else Sonnet). Fix rounds for precheck, CI, docs, structure, enumerating-test and sequence-number failures, and conformance or review FAILs whose failures all cite a `file:line`, run in a fresh session (no resume of the builder's transcript) whose prompt carries only the round's failure output, the capped `git diff <base>...HEAD`, the frozen contract and the issue title and summary (under 60K characters). A fresh session that makes no commit gets one resume of the original builder session in the same round. Other rounds (block or contract corrections, CI unavailable, base-sync conflicts, failures without a file:line) resume the builder as before; round limits (`verify.max_rounds`, the one review retry) are unchanged. The run log's `PHASE_ATTEMPT_USAGE` records `mode: "fresh"\|"resume"` on each fix-round attempt. Plan and build sessions keep the builder model. |
-| `builder_routing` | string | No | `on` (default) or `off` (#4394). After the contract is frozen, the lane is classed from its deliverable paths only: `risk` (any path with a built-in risk word such as auth, billing, payments, session, secret or migration, or matching a `review.risk_paths` glob), `docs-config-test` (every path is a test, doc or config file; lockfiles count as code), `small` (at most 2 non-test deliverables) or `large` (more, or none). `docs-config-test` and `small` build on the mid tier (`builder_mid_model`); `risk` and `large` build on the top model (`--model`, else the CLI default). The plan and contract-correction calls always run on the top model. A failed validate round on the mid tier (`precheck`, `ci_red`, `merge_ci`) escalates the lane once: that fix round and every later builder call, fresh fix sessions included, run on the top model. Escalation adds no round. Conformance or review fix rounds do not escalate and keep `fix_model`. `off` keeps every builder call on the top model, as before, and still records the class. The run log gets `BUILDER_ROUTE {mode, class, tier, model, risk}` and `BUILDER_ESCALATED {from, to, trigger}`, and `RUN_TERMINAL` gets `builder_tier`, `builder_class`, `builder_escalated` and `builder_model`. `forgedock stats --tiers` reports merge, conformance and post-merge-rework rates, first-pass yield and cost per tier (`mid`, `mid->top`, `top`) and class, from local run logs. Target-repo risk areas (for example detection code) belong in `review.risk_paths`. |
+| `builder_routing` | string | No | `on` (default) or `off` (#4394). After the contract is frozen, the lane is classed from its deliverable paths only: `risk` (any path with a built-in risk word such as auth, billing, payments, session, secret or migration, or matching a `review.risk_paths` glob), `docs-config-test` (every path is a test, doc or config file; lockfiles count as code), `small` (at most 2 non-test deliverables) or `large` (more, or none). `docs-config-test` and `small` build on the mid tier (`builder_mid_model`); `risk` and `large` build on the top model (`--model`, else the CLI default). The plan and contract-correction calls always run on the top model. A failed validate round on the mid tier (`precheck`, `ci_red`, `merge_ci`) escalates the lane once: that fix round and every later builder call, fresh fix sessions included, run on the top model. Escalation adds no round. Conformance or review fix rounds do not escalate and keep `fix_model`. `off` keeps every builder call on the top model, as before, and still records the class. The run log gets `BUILDER_ROUTE {mode, class, tier, model, risk}` and `BUILDER_ESCALATED {from, to, trigger}`, and `RUN_TERMINAL` gets `builder_tier`, `builder_class`, `builder_escalated` and `builder_model`. `forgedock stats --tiers` reports merge, conformance and post-merge-rework rates, first-pass yield and cost per tier (`mid`, `mid->top`, `top`) and class, from local run logs. Target-repo risk areas (for example detection code) belong in `review.risk_paths`. A diff that relaxes a rule in a declared `review.risk_paths` path (a new accept/rescue/allow branch or a removed deny) must add a negative test (`conformance.unimplemented` `relaxation_untested` otherwise) and always gets the independent verifier, even with `review.verifier: off` (#5237). |
 | `builder_mid_model` | string | No | Mid-tier builder model for `builder_routing` (#4394; `engine.lean_builder_mid_model` is also read). Default `claude-sonnet-5-5`. An invalid id is ignored. |
 | `light.mode` | string | No | `off`, `shadow` (default) or `on` (#4448). `bin/lean/light.mjs` decides whether an issue qualifies for the light lane: a repro, steps to reproduce, expected or actual behaviour or a code block in the body; 1 to `max_files` predicted non-test files; no `size:M`/`size:L` label; no predicted path with a built-in risk word or matching `review.risk_paths`; not an `investigate(` issue, a post-deploy issue (`post-deploy`/`awaiting-promotion` label, or only post-deploy checklist items) or a decision issue (`decision`, `needs-decision`, `product-decision`, `rfc` or `adr` label, or a `decision(`/`rfc(`/`adr(` title). A missing repro or file prediction is `ambiguous`, left to a cheap classifier. `off` is never eligible; `shadow` reports the verdict without changing the lane; `on` lets an eligible issue run light. The lane wiring is #4450. A light lane posts a `FORGE:LITE` receipt on the issue (outcome light or upgraded, diff stat, red/green repro, gates, true cost from the #4407 per-session deltas, eligibility reason, upgrade reasons), and the batch efficiency report ends with a `lanes:` line: the light/upgraded/full split with cost and the upgrade rate, upgraded ÷ (light + upgraded) (#4452). A predicted file over `maintenance.hotspot.file_lines` is a hard `hotspot` reason, and every evaluated signal (repro, named files, churn, hotspot, risk path, `docs`/`config`/`chore` labels, size) is recorded in the `LIGHT_ELIGIBILITY` event's `signals` without changing the verdict (#5209). `forgedock stats --depth` reports outcomes per verdict and signal and whether the #5052 promotion criterion is met; flipping `mode: on` stays a config decision. The flat form `lean.light_mode` also works and wins. |
 | `light.max_lines` | number | No | Upgrade trigger (#4448): a light lane whose non-test diff (added + deleted lines) exceeds this moves to the full lane. Default 40. The other triggers: more than `max_files` non-test changed files, a repro that is not red on the base, two failed test runs, a touched risk path, or a public-API-shape change (#4449). Flat `lean.light_max_lines` wins. |
@@ -985,6 +1054,7 @@ verify:
     ".py": "scripts/pytest {path}"
   e2e: auto                     # optional e2e merge gate: auto (default) | always | never
   precheck_block: false         # optional (#5079); true: a declared pre-PR check still failing after the fix round (or a round with no commit) ends the lane needs-human ci.red (recoverable) instead of opening the PR with an anomaly
+  guard_block: true             # optional (#5239); default true: verify.invariants (the pre-merge guard set) block the merge; false keeps a failing invariant advisory
   e2e_label: full-ci            # PR label that makes the repo's CI run e2e (label path)
   e2e_checks: "e2e"             # check names of the e2e jobs the label path waits on
   # e2e_workflow: e2e.yml       # or: a workflow_dispatch workflow that runs e2e (wins over the label)
@@ -1004,6 +1074,7 @@ verify:
 | `precheck_total_seconds` | integer | No | Total budget of one round of pre-PR check commands (1–7200, default 600; it was 1800 before 1.30.0). `lean.precheck.max_minutes` takes precedence. Commands not started within the budget are deferred to CI, not failed. |
 | `checks` | string | No | Comma-separated check names that gate CI verification without `workflow` (forge#4387). Overrides the required-check set; other checks are reported, not gating. |
 | `invariants` | list | No | Block list of cheap repo-wide check commands (#4585), e.g. the suites that list every table, export, key or namespace (cross-tenant registry, export and purge coverage, i18n status, boundary tests). They run in the pre-PR check round in every verify mode, whichever tests the test map selected: never scoped away by `.forge/test-map.json`, deduplicated against the learned commands, and subject to the same round budget and per-command timeout. A failure goes to the builder in the precheck fix round like a failed declared check. The plan and implement prompts also carry an invariants checklist built from the list (a new table, export or key must join every registry that enumerates its kind). `forgedock check` and the light lane run them too. Absent: nothing changes. |
+| `guard_block` | boolean | No | Default `true` (#5239). `invariants` are the repo's pre-merge guard set: they also run on the merged tree after a base-sync (before the push), and one still failing after the fix rounds ends the lane needs-human `ci.red` instead of opening or merging the PR. Before spending a builder round, a failing invariant is run once on the merge base: if it fails there too the base is already red, so the lane ends `deferred` with `base.red` (never needs-human, retried after 900 s), the commit that last changed the files the failure names is found with `git log`, and the issue it belongs to (closing keyword, `issue-N` branch, or last `(#N)` in the message) gets a `FORGE:BASE_RED` comment and is reopened if closed; with no issue number a tracking issue is filed. `false`: failing invariants stay advisory as before. No effect without `invariants`. |
 | `guard_command` | map | No | Guard gate (#4693) test-file command per extension (#4792), e.g. `".py": "scripts/pytest {path}"` for a repo whose tests need a managed environment. Consulted before the contract's validate commands and the hard-coded `node --test` / `python -m pytest -q` fallbacks. `{path}` is replaced by the repo-relative path of the guard's base copy (`<name>__guardbase.<ext>`); a template without `{path}` gets it appended. Runs from the worktree root. Keys may be written with or without the leading dot. Absent: unchanged. |
 | `check_run` | boolean | No | Default `false` (no Checks API call, behaviour unchanged). `true`: after each push of a reviewed head (PR open, base-sync, merge-time fix round) the engine posts one completed `forgedock/verify` check run on that head (forge#4270), `success` iff every deterministic gate the lane already ran passed: declared check commands, undeclared package edges, docs freshness, contract scope, validate ids, requirement status, hotspot growth, amendments. The output carries each gate's id, pass/fail and evidence as JSON; the run log records a `VERIFY` event. Report only: ForgeDock never makes it required and never waits on it (it is ignored by its own CI waits); requiring it is the repository's branch-protection choice. Creating check runs needs a token that may (a GitHub App with `checks: write`); a Checks API failure is logged as an anomaly and never fails the lane. |
 | `post_merge` | string | No | Command run in the lane worktree on the merged tree after each base-sync merge, before the push (forge#4406). Default: the typecheck rows of the lane's change-scoped checks (`bin/lean/checks.mjs`), in `local` and `hybrid` mode only; `ci` mode runs no host typecheck unless `post_merge` is set. A failure resumes the builder with the output, up to `max_rounds` rounds, and the fixed head is re-reviewed; still failing is a trajectory anomaly and CI stays the gate. |
@@ -1446,6 +1517,9 @@ verification:
 
 topology:
   route_reachability: "bash scripts/check-ingress.sh"   # optional; blocking when declared
+  prod_parity:                                         # optional; block map {path glob: command | "note: how to verify"}
+    "db/migrations/**": "bash scripts/check-migration-role.sh"
+    "web/app/**": "note: run under the production ISR runtime"
 ```
 
 | Field | Type | Required | Description |
@@ -1466,6 +1540,7 @@ topology:
 | `coupled_files` | map (glob → glob list) | No | Default unset (#5079). "If file A changes, file B must change": a block map `{when glob: required glob[, glob]}`, e.g. `"infra/guard/bootstrap.sh": "infra/guard/MANIFEST.sha256"`. A key prefixed `added:` fires only for files the lane adds (`"added:scripts/tests/test_*.py": ".github/workflows/ci.yml"`). A lane that changes a `when` file without a matching required file fails precheck with `coupled_file_missing` (`conformance.unimplemented`, builder resumed once). Quote keys that contain `*`, and list alternatives as separate keys: brace globs (`*.{ts,tsx}`) are not expanded. |
 | `validate.recipes` | map (regex → replacement) | No | Default unset. A top-level `validate:` block with a block-style `recipes:` map, e.g. `"poetry run pytest": "uv run --with-requirements r.txt pytest"`. Each key is a regex source; the first recipe that matches a frozen validate or `repro_test` command rewrites it at contract freeze (`applyValidateRecipes`), recorded as a decision. Use it for commands whose environment is not installed in lane sandboxes. |
 | `topology.route_reachability` | string (command) | No | Default unset (no check, no behaviour change). A repo-supplied command that takes the route paths a diff adds (Next.js `app/**/route.*`, `pages/api/**`; URL form, route groups removed) as arguments and exits non-zero when the production ingress does not deliver them to the service that implements them. Runs in the lean lane after validate and in `review-pr-staging`; a non-zero exit blocks (`conformance.unimplemented`, kind `route_unreachable`). Read by `readEnvConfig` (`bin/engine-cli.mjs`), run by `bin/lean/routecheck.mjs`. |
+| `topology.prod_parity` | block map | No | Default unset (no check, no behaviour change; #5284). Production-only facts the lane tests cannot exercise (runtime build mode, migration role vs app role, env-file scope, ingress). Key: path glob; value: a check command, run once with the matching changed paths as arguments (non-zero or cannot-start blocks, `conformance.unimplemented` kind `prod_parity_failed`), or `note: <how to verify>`, which blocks (kind `prod_parity_unjustified`) until `.forge-lean/result.json` carries `parity: [{surface: <glob>, justification}]`. Read by `readEnvConfig`, run by `bin/lean/prodparity.mjs`. |
 
 **Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
 
@@ -1550,6 +1625,31 @@ the gate is DEGRADED and reported in `verification_skipped`, never a silent pass
 **Commands that use this section**: `work-on` (validate V4.8)
 
 ---
+
+## Schema check and config history (#5315)
+
+forge.yaml is parsed tolerantly, so a setting nobody reads used to be silent. `bin/config-schema.mjs` now checks it:
+
+| Finding | Level | Meaning |
+|---------|-------|---------|
+| `unknown-key` | error | A top-level key outside the sections in this document, or an unknown child of a closed section (`verification.ci_local`) |
+| `ignored-on-path` | error | The key is set, but the active `engine.path` never reads it (the legacy `full` path ignores `env`, `verify`, `lean`, `engine.conformance`, `engine.conformance_kinds`) |
+| `wrong-type` | error | A typed key has the wrong shape (for example `verification.ci_local.extra_commands` that is not a list, `engine.path` outside `core\|full\|lean\|auto`) |
+| `deprecated-alias` | warning | `pipeline.token_budget_per_batch`, `build.diff_size.threshold` |
+
+`npx forgedock doctor` reports errors as failures and aliases as warnings; `orchestrate` prints one `config: ...` line per finding at batch start, naming the key.
+
+### Config history
+
+Every setup or agent edit of forge.yaml records a version under `~/.forge/config-history/<owner>__<repo>/` (override the root with `FORGE_CONFIG_HISTORY_DIR`), never a `forge.yaml.bak-*` file in the repo.
+
+| Command | Does |
+|---------|------|
+| `forgedock config history` | Lists versions with date and reason |
+| `forgedock config diff <n>` | Diffs version `n` against the current forge.yaml |
+| `forgedock config rollback <n>` | Restores version `n`; the current content is recorded first, so a rollback can be undone |
+| `forgedock config record [reason]` | Records the current forge.yaml as a version |
+| `forgedock config import-bak [--delete]` | One-time import of `forge.yaml.bak*` files in the repo into the history (idempotent); `--delete` removes them |
 
 ## Credentials File Format
 
@@ -1757,21 +1857,28 @@ systemctl --user daemon-reload && systemctl --user enable --now forgedock-bot-to
 
 ## GitHub App Install
 
-During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`) on your account or org.
+During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`). Installing alone changes nothing; to run the pipeline as the App's bot (its own API budget, `<app>[bot]` authorship) sign in with `forgedock auth login`. Without a login, every pipeline `gh` call uses your own `gh auth`, exactly as before.
 
-**What installing it does today**: registers the app against the account/org you choose. That's it.
+### Broker sign-in
 
-**What it does NOT do (yet)**:
-- It does **not** create a bot token. GitHub App *installation* tokens can only be minted with the app's private key, and that key is held solely by RapierCraft Studios (the app's owner) — your installation grants *your* installation ID against *RapierCraft's* app, not a key you can use yourself.
-- It does **not** auto-refresh anything, and there is no background process managing token expiry.
-- It does **not** change which `gh` auth context pipeline commands (`/work-on`, `/orchestrate`, etc.) use. Every pipeline `gh` call always uses whatever auth is currently active in your shell — your personal token unless you've manually configured something else.
-- It does **not** wire up webhook-driven "automatic pipeline triggers" — no webhook receiver exists yet.
+```
+forgedock auth login --broker-url https://<broker> --client-id <App client id> [--installation N]
+forgedock auth status
+forgedock auth logout
+```
 
-**Why this matters**: GitHub App installation tokens get materially higher API rate limits than a personal access token, and actions taken with them are attributed to the bot (`rapiercraft-forgedock[bot]`) rather than your personal account. Those benefits are real, but delivering them to arbitrary installers requires a hosted token-minting backend service that doesn't exist yet (tracked as forge#1890). Installing the app today is safe and free, but on its own changes nothing about how the pipeline authenticates.
+- Login uses the GitHub App **device flow** (client ID only; no secret on your machine). The CLI stores the user token and installation under `~/.forge/app-auth.json` (mode 0600; `FORGE_HOME_DIR` overrides the directory). `FORGEDOCK_BROKER_URL` and `FORGEDOCK_APP_CLIENT_ID` can replace the flags.
+- On every CLI start the stored login yields a short-lived installation token, scoped to your repository ids and the permissions the pipeline uses, which is set as `GH_TOKEN` in the CLI process env only. It is not a global credential: no `gh auth login`, no git credential helper (#4565). It is refreshed when under 10 minutes remain.
+- If the broker is unreachable or refuses, one warning line is printed and the pipeline continues on your own `gh` auth. `FORGEDOCK_NO_APP_AUTH=1` skips the App identity.
+- Broker contract (client side): `POST {broker}/v1/token` with `Authorization: Bearer <user token>` and body `{installation_id, repository_ids, permissions}`, answering `{token, expires_at}`. The broker server, quotas, mint logs, revocation and security page live on the platform side.
 
-`npx forgedock doctor` reports this status explicitly (Check 12: "GitHub App / bot token") so you aren't left guessing whether a bot token is active.
+### Bring your own App
 
-**If you want bot-token behavior today**: you'd need to register your own GitHub App (with your own private key), and drive your own token-refresh loop (mint an installation token via the app's `/app/installations/{id}/access_tokens` API, then `gh auth login --with-token`, repeating before the ~1-hour expiry). This is an advanced, self-hosted setup — ForgeDock does not package a generic version of this for you.
+`forgedock auth login --byo [--org ORG] [--installation N]` runs GitHub's App manifest flow through a loopback page, stores the App id and private key (`~/.forge/app-byo.pem`, 0600) and mints installation tokens locally. No third-party broker is involved.
+
+### Doctor
+
+`npx forgedock doctor` (Check 12, "GitHub App / bot token") shows the active identity, its source (`broker`, `byo` or personal fallback) and the `core.limit` of the active token. Without a login it keeps the earlier messages, including the refresh-stamp check for the self-hosted `scripts/refresh-bot-token.sh` setup.
 
 ---
 

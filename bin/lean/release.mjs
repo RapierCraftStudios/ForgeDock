@@ -18,8 +18,12 @@ import { ghRunner } from "./issuewatch.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
+import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
+import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
+import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
+import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
-export const RELEASE_STEPS = ["preflight", "release-pr", "review", "fixes", "promotion", "post-merge"];
+export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -42,20 +46,34 @@ export function openRelease(root, id, mounts) {
   };
 }
 
-/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow}`. */
+/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow, rehearsal, preflight, mode, branchPattern, fixMode}` (#5253, #5276, #5277). */
 export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...optKeys(r), ...snapshotKeys(r) };
 }
+
+/** `{mode, branchPattern, fixMode}` only when configured (#5276): mode `snapshot` cuts release/<id>; anything else is `freeze`. */
+const snapshotKeys = (r) => {
+  const pick = (v, ok, dflt) => (ok.includes(String(v).trim().toLowerCase()) ? String(v).trim().toLowerCase() : dflt);
+  return {
+    ...(r.mode ? { mode: pick(r.mode, ["snapshot", "freeze"], "freeze") } : {}),
+    ...(r.branch_pattern ? { branchPattern: String(r.branch_pattern) } : {}),
+    ...(r.fix_mode ? { fixMode: pick(r.fix_mode, ["cherry-pick", "recut"], "cherry-pick") } : {}),
+  };
+};
+export const isSnapshot = (config) => config?.mode === "snapshot";
+
+/** `{rehearsal}` / `{preflight}` only when configured, so the config of a repo without them keeps its shape. */
+const optKeys = (r) => { const rehearsal = parseRehearsalConfig(r), preflight = parsePreflightConfig(r); return { ...(rehearsal ? { rehearsal } : {}), ...(preflight ? { preflight } : {}) }; };
 
 const json = (s) => JSON.parse(String(s || "null"));
 
 /** The bundle list of PRs merged into `base` since the last release PR (the newest merged head->base PR). */
 export async function bundleList({ io, repo, head, base }) {
   const last = json(await io.gh(["pr", "list", "--repo", repo, "--base", base, "--head", head, "--state", "merged", "--limit", "1", "--json", "mergedAt"]))?.[0]?.mergedAt;
-  const merged = json(await io.gh(["pr", "list", "--repo", repo, "--base", head, "--state", "merged", "--limit", "200", "--json", "number,title,mergedAt"])) ?? [];
+  const merged = json(await io.gh(["pr", "list", "--repo", repo, "--base", head, "--state", "merged", "--limit", "200", "--json", "number,title,mergedAt,closingIssuesReferences"])) ?? [];
   return merged.filter((p) => !last || p.mergedAt > last).sort((a, b) => a.number - b.number);
 }
 
@@ -63,6 +81,8 @@ const bundleBody = (list) => `## Release bundle\n\n${list.length ? list.map((p) 
 
 async function preflightStep(ctx) {
   const { io, repo, state, staging } = ctx;
+  // Snapshot mode: lanes keep merging to staging; the release is cut from a fixed SHA, so nothing is refused or held (#5276).
+  if (isSnapshot(ctx.config)) return { snapshot: true, held: 0 };
   const lanes = await io.runningLanes(repo);
   if (lanes.length) return { refused: `lanes of ${repo} are running (${lanes.map((l) => `${l.batch}#${l.issue}`).join(", ")}); wait or cancel them` };
   const open = json(await io.gh(["pr", "list", "--repo", repo, "--base", staging, "--state", "open", "--json", "number"])) ?? [];
@@ -88,12 +108,37 @@ export async function restoreBatches(ctx) {
   ctx.save();
 }
 
+/** Snapshot mode: cut release/<id> (once; a resume reuses the recorded branch) and open release/<id> -> default. */
+async function snapshotPrStep(ctx) {
+  const { io, repo, staging, def, state } = ctx;
+  if (!io.git) throw new Error("snapshot releases need io.git");
+  if (!state.release) {
+    const bundle = await bundleList({ io, repo, head: staging, base: def });
+    const cut = await cutSnapshot({ io, git: io.git, repo, staging, def, pattern: ctx.config.branchPattern ?? DEFAULT_PATTERN, id: state.id, bundle });
+    if (cut.refused) return { refused: cut.refused };
+    state.release = cut.record; state.releaseBundle = bundle;
+    ctx.save();
+  }
+  const { branch } = state.release;
+  const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", branch, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
+  if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch };
+  const list = state.releaseBundle ?? [];
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list)])).trim();
+  const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
+  if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
+  state.steps["release-pr"] = { done: false, result: { pr: n } }; // writeRecord reads the PR number from here
+  await writeRecord(ctx);
+  const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
+  return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length, branch };
+}
+
 async function releasePrStep(ctx) {
+  if (isSnapshot(ctx.config)) return snapshotPrStep(ctx);
   const { io, repo, staging, def } = ctx;
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", staging, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true };
   const list = await bundleList({ io, repo, head: staging, base: def });
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list)])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
@@ -114,8 +159,15 @@ export async function gateState({ io, repo, pr, head }) {
 async function promotionStep(ctx) {
   const { io, repo, state, opts } = ctx;
   const { pr } = state.steps["release-pr"].result;
-  const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid"]));
+  const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "state,mergeCommit,headRefOid"]));
   const head = view?.headRefOid;
+  // Already merged (by hand, or by a crashed --merge run): hand the merge sha to post-merge; never gate or merge again.
+  if (view?.state === "MERGED" && view?.mergeCommit?.oid) return { merged: true, alreadyMerged: true, mergeCommit: view.mergeCommit.oid, head };
+  if (view?.state === "CLOSED") return { stopped: true, why: `release PR #${pr} was closed without merging`, head };
+  if (state.release) {
+    const chain = checkChain({ git: io.git, record: state.release, sha: head, staging: ctx.staging, exact: true });
+    if (!chain.ok) return { stopped: true, why: `release head ${head} is not snapshot + recorded cherry-picks: ${chain.why}`, head };
+  }
   const gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
@@ -125,11 +177,16 @@ async function promotionStep(ctx) {
   return { merged: true, head, gate };
 }
 
+const OPTIONAL_STEPS = ["host-preflight", "mark-ready"];
+
 const STEP_FNS = {
   preflight: preflightStep,
+  "host-preflight": hostPreflightStep,
   "release-pr": releasePrStep,
   review: (ctx) => reviewStep(ctx),
   fixes: (ctx) => fixStep(ctx),
+  "mark-ready": markReadyStep,
+  rehearsal: (ctx) => rehearsalStep(ctx),
   promotion: promotionStep,
   "post-merge": (ctx) => postMergeStep(ctx),
 };
@@ -146,7 +203,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   const rel = openRelease(root, id, mounts);
   const state = rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
   state.opts = { merge: !!(opts.merge || state.opts?.merge) };
-  const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", save: () => rel.save(state) };
+  const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.save();
   let out;
   try {
@@ -155,6 +212,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
+      if (result?.skipped && OPTIONAL_STEPS.includes(step)) continue; // unconfigured: leaves no trace in the state
       if (result?.stopped) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; out = { id, status: "stopped", step, reason: result.why }; break; }
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
       ctx.save();
@@ -169,15 +227,20 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
 }
 
 /** Real effects. `runningLanes`/`batches` read the batch dirs of `repo` (a plan without `repo` is taken as this repo's). */
-export function realReleaseIo({ env = process.env, exec = execFileSync, print = (l) => console.log(l) } = {}) {
+export function realReleaseIo({ env = process.env, exec = execFileSync, print = (l) => console.log(l), cwd = process.cwd() } = {}) {
   const gh = ghRunner(exec, print);
   const root = batchRoot(env);
   const mine = (b, repo) => { const r = b.readPlan()?.repo; return !r || r === repo; };
   const unfinished = (repo) => listBatches(root).map((id) => openBatch(root, id)).filter((b) => !b.readReport() && mine(b, repo));
   return {
     gh: (args) => gh(args), print, now: () => Date.now(),
+    git: (args, { env: extra, input } = {}) => exec("git", args, { cwd, encoding: "utf8", input, env: { ...env, ...extra }, maxBuffer: 64 << 20, stdio: ["pipe", "pipe", "pipe"] }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     run: async (cmd) => { try { exec("sh", ["-c", cmd], { stdio: "ignore", timeout: 120_000 }); return { ok: true }; } catch { return { ok: false }; } },
+    rehearse: async (cmd, { timeout } = {}) => {
+      try { return { ok: true, code: 0, output: String(exec("sh", ["-c", cmd], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer: 16 << 20 })) }; }
+      catch (e) { return { ok: false, code: e.status ?? null, timedOut: e.code === "ETIMEDOUT", output: `${e.stdout ?? ""}${e.stderr ?? ""}` || String(e.message) }; }
+    },
     runningLanes: (repo) => unfinished(repo).flatMap((b) => Object.entries(b.state.load()?.lanes ?? {})
       .filter(([n, rec]) => rec?.pid && isLaneAlive(rec.pid, b.resultFile(n)) && !existsSync(b.resultFile(n)))
       .map(([n]) => ({ batch: b.id, issue: n }))),
@@ -190,12 +253,13 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo]";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env;
-  const io = deps.io ?? realReleaseIo({ env });
+  const io = deps.io ?? realReleaseIo({ env, cwd });
+  if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
   const root = releaseRoot(env);
@@ -209,8 +273,24 @@ export async function releaseFromCli(argv, deps = {}) {
   }
   repo ??= JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
+  const budget = async (since) => { // #5278: the Actions-minutes line (and any auto switch to local-first); never fails the job
+    try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
+  };
+  await budget(null);
   const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config: readReleaseConfig(raw), branches: readBranches(cwd), root, id, mounts: deps.mounts });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
+  try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
   return r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;
+}
+
+/** `forgedock release verify <sha> [--repo R]`: exit 0 when the release head is the snapshot plus its recorded cherry-picks of staging commits, else 1. */
+async function verifyFromCli(argv, { io, cwd }) {
+  const sha = argv.find((a, i) => !a.startsWith("--") && argv[i - 1] !== "--repo");
+  if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha)) throw new Error(`release verify needs a commit sha; ${RELEASE_USAGE}`);
+  const repo = flag(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
+  const full = io.git(["rev-parse", sha]).trim();
+  const r = await verifyRelease({ io, git: io.git, repo, staging: readBranches(cwd).staging || DEFAULT_STAGING_BRANCH, sha: full });
+  io.print(r.ok ? `release verify ${full}: ok (snapshot + ${r.picks} cherry-pick(s), PR #${r.pr})` : `release verify ${full}: FAILED: ${r.why}`);
+  return r.ok ? 0 : 1;
 }

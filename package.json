@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
-  "version": "1.52.0",
-  "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code and OpenCode entrypoints.",
+  "version": "1.53.1",
+  "description": "An AI engineering team that ships to production",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
@@ -42,6 +42,9 @@
     "!docs/site/.vitepress/",
     "examples/",
     "packages/protocol/src/",
+    "plugins/forgedock-splash/",
+    "!plugins/forgedock-splash/tests/",
+    ".claude-plugin/marketplace.json",
     "scripts/",
     "templates/",
     "LICENSE",

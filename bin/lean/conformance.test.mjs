@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -467,6 +467,43 @@ describe("conformance review: the engine computes the verdict from complete rows
       assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
     }
   });
+  it("#5234 project-dir paths and pytest exit 4", () => {
+    const poetry = "poetry -C services/api run pytest -q services/api/tests/test_x.py services/api/tests/test_y.py";
+    assert.deepEqual(projectDirPathMiss(poetry), { dir: "services/api", paths: ["services/api/tests/test_x.py", "services/api/tests/test_y.py"] });
+    assert.equal(rewriteProjectDirCommand(poetry), "cd services/api && poetry run pytest -q tests/test_x.py tests/test_y.py");
+    const uv = "uv run --project services/api pytest services/api/tests/x.py -k foo";
+    assert.equal(rewriteProjectDirCommand(uv), "cd services/api && uv run pytest tests/x.py -k foo");
+    assert.equal(rewriteProjectDirCommand("poetry --directory=./services/api run pytest services/api/tests/x.py"), "cd services/api && poetry run pytest tests/x.py");
+    const mixed = "poetry -C services/api run pytest services/api/tests/x.py tests/hands_conformance";
+    assert.equal(rewriteProjectDirCommand(mixed), mixed);
+    const chained = "poetry -C services/api run pytest services/api/tests/x.py && echo ok";
+    assert.equal(rewriteProjectDirCommand(chained), chained);
+    for (const fine of ["cd services/api && poetry run pytest ../../services/api/tests/x.py", "poetry -C services/api run pytest tests/x.py", "poetry run pytest services/api/tests/x.py"]) {
+      assert.equal(projectDirPathMiss(fine), null, fine);
+      assert.equal(rewriteProjectDirCommand(fine), fine);
+    }
+    for (const cmd of [poetry, uv, mixed]) {
+      const v = validateContract({ ...C, validate: [{ id: "V1", command: cmd }] }, ISSUE);
+      assert.ok(v.problems.some((x) => x.startsWith("V1: the command moves its cwd to `services/api`")), v.problems.join("; "));
+    }
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: uv } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: the command moves its cwd")), rt.problems.join("; "));
+    // pytest exit 4 is a defect of the frozen command: contract.invalid_command, and a substitute is judged ok
+    const exit4 = { rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py\n\nno tests ran in 0.01s" };
+    assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: file or directory not found: services/api/tests/x.py" }));
+    assert.ok(unrunnableValidate({ rc: 4, output: "ERROR: not found: /repo/tests/x.py::t" }));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed, 2 passed" }));
+    // exit 4 or 5 of a pytest command is unrunnable whatever the output says; other runners and test failures are not
+    for (const rc of [4, 5]) assert.ok(unrunnableValidate({ rc, output: "" }, "poetry run pytest -q tests/x.py"), `rc ${rc}`);
+    assert.ok(!unrunnableValidate({ rc: 4, output: "" }, "node --test x.mjs"));
+    assert.ok(!unrunnableValidate({ rc: 1, output: "1 failed" }, "pytest tests/x.py"));
+    assert.equal(substituteVerdict({ rc: 4, output: "" }, { command: poetry }), "ok");
+    assert.equal(substituteVerdict({ rc: 1, output: "1 failed" }, { command: poetry }), "runs");
+    assert.equal(substituteVerdict(exit4), "ok");
+    const contract = { requirements: [], deliverables: [], validate: [{ id: "V1", command: poetry }] };
+    const p = precheck({ contract, result: { validation: [{ id: "V1", exit: 4 }] }, changedFiles: [], validateRuns: { V1: exit4 } });
+    assert.deepEqual(p.failures.map((f) => [f.code, f.kind]), [["contract.invalid_command", "validate_command_invalid"]]);
+  });
   it("#5232 a guessed offline uv --with environment is rejected for repro_test and validate; a requirements export passes", () => {
     const bad = "cd w && uv run --offline --no-project --with pytest --with structlog python -m pytest -q t.py";
     assert.equal(guessedUvEnv(bad), true);
@@ -543,8 +580,10 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.match(problems[0], /nearest criterion line: "The scrape route must release/);
     assert.ok(reaskable(problems));
     assert.ok(reaskable(["R1: evidence path /layout.tsx does not exist"]), "#4327 evidence paths stay re-askable");
-    assert.ok(!reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]));
-    assert.ok(!reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]), "#5345 a missing row is repaired in place");
+    assert.ok(reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(!reaskable(["requirements rows are missing"]), "a whole absent section keeps the two-run limit");
+    assert.ok(!reaskable([...problems, "something else is wrong"]));
     assert.ok(!reaskable([]));
     assert.deepEqual(fillEngineRows(good, ctx).issue_coverage, good.issue_coverage, "verbatim rows are untouched");
   });
@@ -605,6 +644,22 @@ describe("conformance review: the engine computes the verdict from complete rows
 });
 
 describe("close plan and follow-up items", () => {
+  it("#5285: a live default-on change with live acceptance deferred closes partial and names the blocker", () => {
+    const k = { requirements: [{ id: "R3", disposition: "defer", bucket: "post-deploy" }] };
+    const p = closePlan(k, { liveBlocks: [{ id: "R3", flag: "pool" }] });
+    assert.equal(p.reason, "partial");
+    assert.equal(p.liveBlocked, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R3"]);
+    assert.equal(closePlan(k).reason, "completed");
+  });
+  it("#5285: interactive UI on a high-risk surface with no browser check fails precheck; with one, or off a risk surface, it passes", () => {
+    const k = { requirements: [{ id: "R1", disposition: "deliver" }], deliverables: [{ id: "D1", path: "web/Cta.tsx" }] };
+    const res = { requirements: [{ id: "R1", status: "implemented" }], validation: [] };
+    const run = (uiBrowser) => precheck({ contract: k, result: res, changedFiles: ["web/Cta.tsx"], uiBrowser }).failures.filter((f) => f.kind === "ui_browser_unverified");
+    assert.equal(run({ files: ["web/Cta.tsx"], ran: false, highRisk: true, reason: "no e2e_label or e2e_workflow configured" }).length, 1);
+    assert.equal(run({ files: ["web/Cta.tsx"], ran: true, highRisk: true, reason: "x" }).length, 0);
+    assert.equal(run({ files: ["web/Cta.tsx"], ran: false, highRisk: false, reason: "x" }).length, 0);
+  });
   it("links every tracking issue once; nothing tracked when everything is delivered", () => {
     assert.deepEqual(closePlan(C), { reason: "completed", tracked: [] });
     const k = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "defer", tracked: "#9" }, { id: "R3", disposition: "post-deploy", tracked: "#9" }] };
@@ -626,6 +681,22 @@ describe("close plan and follow-up items", () => {
     assert.deepEqual(closePlan(d, { title, review: rows("implemented", "deferred") }).open.map((r) => r.id), ["R2"]);
     assert.deepEqual(closePlan(d, { title, review: { requirements: [{ id: "R1", status: "implemented" }] } }).open.map((r) => r.id), ["R2"], "a missing row is not an answer");
     assert.equal(closePlan(d, { title, review: null }).reason, "completed", "a skipped review judges dispositions only");
+  });
+  it("#5240 an unticked acceptance box with an undelivered or untracked requirement closes partial for any title", () => {
+    const issueText = "## Acceptance\n\n- [ ] Replaying the incident keeps the issue open with a partial outcome\n- [ ] The gate mode is recorded in the trajectory notes\n";
+    const reqs = [
+      { id: "R1", quote: "- [ ] Replaying the incident keeps the issue open with a partial outcome", disposition: "deliver" },
+      { id: "R2", quote: "- [ ] The gate mode is recorded in the trajectory notes", disposition: "defer", tracked: "#9" },
+    ];
+    const rows = (s1) => ({ requirements: [{ id: "R1", status: s1 }, { id: "R2", status: "deferred" }] });
+    const p = closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial"), issueText });
+    assert.equal(p.reason, "partial"); assert.equal(p.checklist, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R1"]); assert.deepEqual(p.unticked, ["Replaying the incident keeps the issue open with a partial outcome"]);
+    assert.deepEqual(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("implemented"), issueText }), { reason: "completed", tracked: ["#9"] });
+    const untracked = closePlan({ requirements: [reqs[0], { ...reqs[1], tracked: undefined }] }, { title: "fix: x", review: rows("implemented"), issueText });
+    assert.deepEqual(untracked.open.map((r) => r.id), ["R2"]);
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: rows("partial") }).reason, "completed", "no issue text: unchanged");
+    assert.equal(closePlan({ requirements: reqs }, { title: "fix: x", review: null, issueText }).reason, "completed", "skipped review judges dispositions only");
   });
   it("#4398 formatShadowSummary: shadow would-block and false-block shares, risk-enforced lanes; null without conformance rows", () => {
     assert.equal(formatShadowSummary([{ issue: 1 }]), null); assert.equal(formatShadowSummary(undefined), null);
@@ -1530,5 +1601,127 @@ describe("#5197 hostRoute is exported as the single host-route source", () => {
     assert.equal(hostRoute5197({ bucket: "host", why: "verify the dashboard after release" }), "post-deploy");
     assert.equal(hostRoute5197({ bucket: "host", why: "capture logs before promotion" }), "host");
     assert.equal(hostRoute5197({ bucket: "host", why: "provide the API key after release" }), "host");
+  });
+});
+
+import { intakeHostWork } from "./conformance.mjs";
+describe("#5250 intakeHostWork", () => {
+  const body = (...items) => `## Problem\nx\n\n## Acceptance Criteria\n\n${items.map((t) => `- [ ] ${t}`).join("\n")}\n`;
+  it("matches when every criterion needs live production measurement or a real-browser capture", () => {
+    const r = intakeHostWork(body("Measured clear rate on live production traffic is above 50%", "Root-cause capture from a real browser is attached"));
+    assert.equal(r.host, true); assert.equal(r.items.length, 2);
+  });
+  it("one code-shaped criterion keeps a code lane", () => {
+    assert.equal(intakeHostWork(body("Measured clear rate on live production traffic is above 50%", "The retry guard stops after a rejection")).host, false);
+  });
+  it("code-only, credential-needing, checklist-less and empty bodies do not match", () => {
+    assert.equal(intakeHostWork(body("The retry guard stops after a rejection")).host, false);
+    assert.equal(intakeHostWork(body("Measure live production latency using the API key")).host, false);
+    assert.equal(intakeHostWork("## Acceptance\nmeasured on live production").host, false);
+    assert.equal(intakeHostWork("").host, false); assert.equal(intakeHostWork(null).host, false);
+  });
+  it("a backlog aggregate that merely quotes such text is not host work", () => {
+    assert.equal(intakeHostWork("## Acceptance Criteria\n\n### #5240\n<!-- FORGE:DEFERRED_FROM: #5240 -->\n\n- [ ] classify issues whose acceptance requires live production measurement or real-browser captures as host work\n").host, false);
+  });
+});
+
+describe("contract quote snapping (#5244)", () => {
+  const LINE = "- Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`). Below it, publish no signal.";
+  const ISS = `## Problem\n\n${LINE}\n- Remove the legacy **alert** path entirely from the worker.\n- Remove the legacy alert path entirely from the scheduler.\n`;
+  it("markdown inline code spans, elision and spaced identifiers all match", () => {
+    assert.ok(inIssue("Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`).", ISS));
+    assert.ok(inIssue("Add SLI_CONCENTRATION_MIN_REST_EVENTS (default 30 per window, documented in config.env.example). Below it, publish...", ISS));
+    assert.ok(inIssue("Add `SLI_CONCENTRATION_MIN_REST_EVENTS` (default 30 per window, documented in `config.env.example`). Below it, publish…", ISS));
+    assert.ok(inIssue("Add SLI CONCENTRATION MIN REST EVENTS (default 30 per window", ISS));
+    assert.ok(!inIssue("Add SLI_CONCENTRATION_MIN_REST_EVENTS (default 99 per window", ISS));
+  });
+  it("a near-verbatim quote snaps to the one issue line and records the original", () => {
+    const q = "Add the SLI_CONCENTRATION_MIN_REST_EVENTS (default 30 per window, documented in config.env.example)";
+    assert.ok(!inIssue(q, ISS));
+    const c = { requirements: [{ id: "R2b", quote: q, disposition: "deliver" }] };
+    const { contract, snapped } = snapQuotes(c, ISS);
+    assert.equal(snapped.length, 1);
+    assert.ok(contract.requirements[0].quote.includes("`SLI_CONCENTRATION_MIN_REST_EVENTS`"));
+    assert.equal(contract.requirements[0].requoted, q);
+    assert.ok(inIssue(contract.requirements[0].quote, ISS));
+  });
+  it("an ambiguous or dissimilar quote does not snap", () => {
+    assert.equal(snapQuote("Remove the legacy alert path entirely from the service", ISS), null);
+    assert.equal(snapQuote("Publish a completely different dashboard widget for billing", ISS), null);
+    assert.equal(snapQuotes({ requirements: [{ id: "R1", quote: "totally unrelated words about something else here" }] }, ISS).snapped.length, 0);
+  });
+});
+
+describe("#5345 an incomplete reviewer reply is repaired in place", () => {
+  it("every row-level gap is re-askable and the repaired rows merge into the first reply (no new review round)", () => {
+    for (const p of ["R2: status invalid: maybe", "R1: a defer requirement needs deferral_ok true|false (is deferring it justified?)", "changed file a.js has no scope row", "preserve P1 needs a row with status intact|violated|unverified", "verdict must be CONFORMS or NONCONFORMING"]) assert.ok(reaskable([p]), p);
+    const merged = mergeReviewRows({ verdict: "CONFORMS", requirements: [{ id: "R1", status: "implemented" }] }, { requirements: [{ id: "R2", status: "implemented" }] });
+    assert.deepEqual(merged.requirements.map((r) => r.id), ["R1", "R2"]);
+  });
+});
+
+describe("#5339 a faked or deferred e2e/manual requirement is not met", () => {
+  const Q = "Users can render the launch film end to end [type:e2e]";
+  const mk = (cmd, quote, extra = {}, disposition = "deliver") => {
+    const contract = { ...C, requirements: [{ id: "R1", quote, disposition, ...extra }, C.requirements[1]], validate: [{ id: "V1", command: cmd }] };
+    return { contract, ctx: { ...ctx, contract } };
+  };
+  const rv = (contract) => ({ ...good, issue_coverage: [{ quote: contract.requirements[0].quote, status: "covered" }, ...good.issue_coverage.slice(1)] });
+  const run = (cmd, quote, e2e, disposition, row = {}) => { const m = mk(cmd, quote, {}, disposition); const r = rv(m.contract); r.requirements = [{ ...r.requirements[0], ...row }, ...r.requirements.slice(1)]; return decide(r, { ...m.ctx, issueText: `${ISSUE}\n${quote}`, e2e }); };
+  it("a validate that names a faked test is not an e2e run, even with e2e in its name (spectracut #63 replay)", () => {
+    const d = run("node --test tests/e2e/film.e2e.test.mjs", Q, { faked: ["tests/e2e/film.e2e.test.mjs"] });
+    assert.equal(d.state, "nonconforming");
+    assert.deepEqual(codes(d), ["conformance.e2e_unverified"]);
+    assert.equal(d.failures[0].kind, "e2e_row");
+    assert.equal(run("node --test tests/e2e/film.e2e.test.mjs", Q, { faked: [] }).state, "conforms");
+    assert.equal(run("make film", Q, { checks: ["make film"], faked: ["make film"] }).state, "conforms", "a configured e2e check is always real");
+  });
+  it("[type:manual] is judged like [type:e2e]; a deferred e2e row fails, a post-deploy one is transferred", () => {
+    assert.deepEqual(codes(run("pytest tests/test_x.py", "Operators can restore a backup [type:manual]")), ["conformance.e2e_unverified"]);
+    assert.equal(codes(run("pytest tests/test_x.py", Q, undefined, "defer", { status: "deferred", deferral_ok: true })).includes("conformance.e2e_unverified"), true);
+    assert.equal(codes(run("pytest tests/test_x.py", Q, undefined, "post-deploy", { status: "post-deploy" })).includes("conformance.e2e_unverified"), false);
+  });
+  it("e2e_unverified of the e2e row blocks by default; forge.yaml conformance_kinds overrides; other kinds follow the lane", () => {
+    const fs = [{ code: "conformance.e2e_unverified", kind: "e2e_row" }, { code: "conformance.e2e_unverified", kind: "ui_browser_unverified" }];
+    assert.deepEqual(blockingFailures(fs, { shadow: true }).block.map((f) => f.kind), ["e2e_row"]);
+    assert.deepEqual(blockingFailures(fs, { shadow: true, kinds: { "conformance.e2e_unverified": "shadow" } }).block, []);
+  });
+  it("closePlan: a transferred e2e/manual requirement closes partial, never completed", () => {
+    const k = { requirements: [{ id: "R1", quote: Q, disposition: "post-deploy", tracked: "#9" }] };
+    const p = closePlan(k);
+    assert.equal(p.reason, "partial");
+    assert.equal(p.transferred, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R1"]);
+    assert.equal(closePlan({ requirements: [{ id: "R1", quote: "A plain thing [type:unit]", disposition: "post-deploy" }] }).reason, "completed");
+  });
+  it("#5365 add-requirement id collision is renumbered to the next free R<n> and recorded, never a problem", () => {
+    const add = (id) => ({ kind: "add-requirement", requirement: { id, quote: "Billing pricing is unchanged.", disposition: "deliver" }, why: "missed" });
+    const a = applyAmendments(C, [add("R2"), add("R2")], ISSUE);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.contract.requirements.map((r) => r.id), ["R1", "R2", "R3", "R4"]);
+    assert.ok(a.applied.some((x) => x.target === "R2 -> R3") && a.applied.some((x) => x.target === "R2 -> R4"));
+    assert.equal(applyAmendments(C, [add("R9")], ISSUE).applied[0].target, "R9");
+  });
+  it("#5365 a file coupled to a deliverable (outcome-codes.mjs <-> docs/OUTCOME-CODES.md) is not scope creep; an unrelated doc still is", () => {
+    const k = { ...C, deliverables: [{ id: "D1", path: "bin/engine/outcome-codes.mjs" }] };
+    const run = (f) => precheck({ contract: k, result: { requirements: [], validation: [{ id: "V1", exit: 0 }] }, changedFiles: ["bin/engine/outcome-codes.mjs", f] }).failures.map((x) => x.kind);
+    assert.equal(run("docs/OUTCOME-CODES.md").includes("scope_creep"), false);
+    assert.ok(run("docs/OTHER.md").includes("scope_creep"));
+    const none = precheck({ contract: C, result: { requirements: [], validation: [] }, changedFiles: ["docs/OUTCOME-CODES.md"] }).failures.map((x) => x.kind);
+    assert.ok(none.includes("scope_creep"), "coupling needs the paired deliverable");
+    const dctx = { ...ctx, contract: k, changedFiles: ["bin/engine/outcome-codes.mjs", "docs/OUTCOME-CODES.md"] };
+    const kr = { ...good, requirements: [good.requirements[0], good.requirements[1]], scope: [{ file: "bin/engine/outcome-codes.mjs", authorized_by: "D1" }, { file: "docs/OUTCOME-CODES.md", authorized_by: "none" }] };
+    assert.ok(!decide(kr, dctx).failures.some((f) => f.code === "conformance.scope_creep"));
+  });
+  it("#5365 a defer row the review finds implemented converts to deliver instead of unjustified_deferral; an undelivered one still fails", () => {
+    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
+    const c2 = { ...ctx, contract: k };
+    const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", ...extra }] });
+    const d = decide(rv({ status: "implemented", evidence: "src/search.js:7", validated_by: "V1", deferral_ok: false, note: "replay already ships" }), c2);
+    assert.deepEqual(codes(d), []);
+    assert.deepEqual(d.converted, [{ id: "R2", evidence: "src/search.js:7" }]);
+    const conv = convertDelivered(k, d.converted).requirements[1];
+    assert.equal(conv.disposition, "deliver"); assert.equal(conv.bucket, undefined); assert.equal(conv.amended_from.disposition, "defer");
+    assert.deepEqual(codes(decide(rv({ status: "deferred", deferral_ok: false }), c2)), ["conformance.unjustified_deferral"]);
   });
 });

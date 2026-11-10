@@ -74,3 +74,41 @@ export async function dormancyReport({ introduced = [], flagState, decisions = [
   }
   return out.sort((a, b) => b.days - a.days);
 }
+
+const LIVE_MODES = /^(?:on|true|1|enforce|enforced|live|treated|active)$/i;
+const MODE_LINE_RE = /^["']?([A-Za-z_][\w.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9_]+)["']?\s*,?;?\s*(?:#.*|\/\/.*)?$/;
+/**
+ * #5240: the current mode of every rollout flag (declared in the forge.yaml `rollouts` registry files) that a changed file
+ * names, `[{flag, mode, live}]`; `live` is false for shadow/off/cohort-less modes, i.e. the change is inert in production.
+ * `read(path)` returns file text or throws; unreadable files and an absent registry give [].
+ */
+export function rolloutModes(cfg, changedFiles, read) {
+  if (!cfg?.files?.length) return [];
+  const modes = new Map();
+  for (const f of cfg.files) {
+    let text; try { text = String(read(f)); } catch { continue; }
+    for (const l of text.split("\n")) { const m = MODE_LINE_RE.exec(l.trim()); if (m) modes.set(m[1], m[2]); }
+  }
+  if (!modes.size) return [];
+  const texts = [];
+  for (const f of changedFiles ?? []) { if (inRegistry(cfg, f)) continue; try { texts.push(String(read(f))); } catch { /* deleted or unreadable */ } }
+  return [...modes].filter(([flag]) => texts.some((t) => flagRe(flag).test(t))).map(([flag, mode]) => ({ flag, mode, live: LIVE_MODES.test(mode) })).sort((a, b) => a.flag.localeCompare(b.flag));
+}
+
+const LIVE_ACCEPTANCE_RE = /\b(?:live|production|prod|post-deploy|real[- ]browser|measur\w*)\b/i;
+/**
+ * #5285: a requirement deferred for live or post-deploy verification while a live (default-on) rollout is touched ships
+ * unverified in production. `modes` is rolloutModes' output; returns `[{id, flag}]` of the deferred rows that block close.
+ */
+export function liveDeferralBlocks(contract, modes) {
+  const live = (modes ?? []).filter((m) => m.live).map((m) => m.flag);
+  if (!live.length) return [];
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r?.disposition !== "defer" && r?.disposition !== "post-deploy") continue;
+    if (r.transferred || /\[type:(?:e2e|manual)\]/i.test(String(r.quote ?? ""))) { out.push({ id: r.id, flag: live.join(", ") }); continue; } // #5339: transferred to the epic, still unrun
+    const b = String(r.bucket ?? "");
+    if (r.disposition === "post-deploy" || b === "post-deploy" || b === "verify-now" || b === "host" || LIVE_ACCEPTANCE_RE.test(`${r.quote ?? ""} ${r.why ?? ""}`)) out.push({ id: r.id, flag: live.join(", ") });
+  }
+  return out;
+}

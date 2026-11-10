@@ -25,7 +25,7 @@ const H = 3_600_000;
 
 describe("account rotator adapter (#5094)", () => {
   it("parseLive reads the five fields and rejects malformed lines", () => {
-    assert.deepEqual(parseLive("42 1800000100 7 1800500000 1800000000"), { fiveHourPct: 42, fiveHourResetMs: 1_800_000_100_000, weeklyPct: 7, weeklyResetMs: 1_800_500_000_000 });
+    assert.deepEqual(parseLive("42 1800000100 7 1800500000 1800000000"), { fiveHourPct: 42, fiveHourResetMs: 1_800_000_100_000, weeklyPct: 7, weeklyResetMs: 1_800_500_000_000, updatedMs: 1_800_000_000_000 });
     assert.equal(parseLive(""), null);
     assert.equal(parseLive("12 abc 3 4"), null);
     assert.equal(parseLive("1 2 3"), null);
@@ -173,6 +173,25 @@ describe("account rotator: detection, staleness, exclusion, pick (#5205)", () =>
     assert.equal(rot.dir, join(b.home, ".tokenbaton"));
     assert.deepEqual(rot.accounts.map((a) => a.n), [1, 2]);
     assert.equal(rot.current(), 2);
+  });
+
+  it("#5236 --pick fails and the only account is at its weekly limit: no account is picked (never the default profile)", () => {
+    const b = baton(1, { 1: [10, T0 + H, 100, T0 + 9 * H] });
+    const rot = openRotator({ kind: "tokenbaton", home: b.home, env: {}, now: () => T0, exec: () => ({ status: 1, stdout: "" }) });
+    assert.equal(rot.pick().account, null);
+  });
+
+  it("#5236 a sample older than the max age is unknown even with a future reset; a newer polled used.N replaces the 5h figure", () => {
+    const b = baton(1, { 1: [10, T0 + H, 0, T0 + 90 * H], 2: [50, T0 + H, 0, T0 + 90 * H] });
+    const dir = join(b.home, ".tokenbaton");
+    writeFileSync(join(dir, "live.1"), `10 ${Math.round((T0 + H) / 1000)} 0 ${Math.round((T0 + 90 * H) / 1000)} ${Math.round((T0 - 3 * H) / 1000)}\n`); // updated 3h ago
+    const noCli = () => ({ status: 1, stdout: "" });
+    const rot = openRotator({ kind: "tokenbaton", home: b.home, env: {}, now: () => T0, exec: noCli, stat: () => T0 });
+    assert.equal(rot.accounts.find((a) => a.n === 1).stale, true);
+    assert.deepEqual(rot.pick(), { account: 2, stale: false }, "old 10% ranks after the fresh 50%");
+    writeFileSync(join(dir, "used.2"), "97\n"); // polled, newer than live.2's sample age
+    const rot2 = openRotator({ kind: "tokenbaton", home: b.home, env: {}, now: () => T0 + 1000, exec: noCli, stat: () => T0 + 500 });
+    assert.deepEqual(rot2.pick(), { account: 1, stale: true }, "polled 97% blocks account 2");
   });
 
   it("#5205 a stale sample is unknown, never 0%: ranked after a fresh one, and an excluded account never counts as room", () => {

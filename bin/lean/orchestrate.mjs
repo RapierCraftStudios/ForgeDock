@@ -21,7 +21,7 @@
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit (and #5168 a claude login failure, `backend.auth`) holds admissions for that account until its reset, and deferrals other than a wait (`host.busy`,
- * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784; `backend.auth`, #5168) stop after `maxDeferrals`.
+ * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788; `rate_limited`, #4784; `backend.auth`, #5168; `quota.exhausted`, #5236) stop after `maxDeferrals`.
  * #5161: an engine-error whose detail is a transport/gateway failure (`isTransientEngineError`) is requeued with backoff
  * (`transientRetryDelayMs`) up to `transientRetries` times, not counted against `ENGINE_ERROR_RELAUNCHES`; then it ends engine-error.
  * #5112: with `remote.offlineFallback` (`execution.fallback_local`), an issue deferred `remote.capacityFallbackAfter` times (default
@@ -133,6 +133,8 @@ import { mapLimit } from "./pmap.mjs";
 import { quotaRequeue } from "./rotator.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 import { formatOverload } from "./hostload.mjs";
+import { lackedTools } from "./toolplace.mjs";
+import { openPrerequisites } from "./prereq.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -238,7 +240,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
   const code = r?.code ?? null;
   if (UNCAPPED_DEFERRALS.has(code)) return { delayMs: (posNum(r?.retryInSeconds) ?? HOST_BUSY_RETRY_S) * 1000, host: true };
   // #4784: a usage limit is a known-time wait gated by the account hold, never capped.
-  if (code === "rate_limited") {
+  if (code === "rate_limited" || code === "quota.exhausted") { // #5236: no account has capacity: held until the earliest reset
     const at = posNum(r?.resetAtEpochMs) && r.resetAtEpochMs > now ? r.resetAtEpochMs : now + (posNum(r?.retryInSeconds) ?? RATE_LIMIT_FALLBACK_S) * 1000;
     return { delayMs: at - now, hold: true };
   }
@@ -253,6 +255,10 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
   if (Number.isFinite(at) && at > now) return { delayMs: Math.min(at - now + 5000, DEFER_BACKOFF_MAX_S * 1000) };
   return { delayMs: Math.min(DEFER_BACKOFF_S * 2 ** (k - 1), DEFER_BACKOFF_MAX_S) * 1000 };
 }
+
+// #5241: a cancel re-sends a stop that was not accepted every STOP_RETRY_MS and reports a lane still running after STOP_TIMEOUT_MS.
+const STOP_RETRY_MS = 15 * 1000;
+const STOP_TIMEOUT_MS = 120 * 1000;
 
 const cancellableSleep = (ms, signal) => new Promise((res) => {
   const t = setTimeout(res, ms);
@@ -305,7 +311,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null }) {
   const saved = store?.load?.() ?? null;
@@ -381,6 +387,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
     if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
+      const lk = lackedTools(remote.contractOf?.(n), remote.lacks);
+      if (lk.tools.length) return { where: "local", reason: `host tool: sandbox lacks ${lk.tools.join(", ")}` };
+    }
     if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
     try {
       if (typeof remote.place === "function") {
@@ -494,6 +504,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // #4409: `head` (decomposed sub-issues) puts them at the front of the queue in their given order; a sub-issue's
   // estimate is the parent's ÷ N, floored at the M default.
+  // #5340: an open declared prerequisite outside the batch joins it, so edges() orders it first (no run that can only end dependency-open).
+  const pullPrerequisites = async (ns) => {
+    for (const n of ns) {
+      if (results.has(n)) continue;
+      const { pull } = await openPrerequisites({ deps: deps.get(n) ?? [], inBatch: (d) => set.has(d), results, issueState, issueLabels });
+      if (pull.length) { await addIssues(pull); decided({ issue: n, what: `prerequisite ${pull.map((d) => `#${d}`).join(", ")} is open: pulled into the batch ahead of it`, why: "declared Depends on, outside the batch", alternative: "start the run and end dependency-open" }); }
+    }
+  };
   const addIssues = async (ns, { head = false, parent = null } = {}) => {
     const fresh = ns.filter((d) => !set.has(d));
     for (const d of fresh) {
@@ -506,6 +524,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (head) { pending.splice(at++, 0, d); heads.add(d); } else pending.push(d);
       enqueued.set(d, now());
     }
+    await pullPrerequisites(fresh);
     noteCrossLane();
   };
   // New issues (a fresh batch, or extra issues passed to a resume) join the queue.
@@ -519,6 +538,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     await mapLimit(unread, setupConcurrency, async (n) => { await readDeps(n); setup.read++; save(); });
     setup = null;
   }
+  await pullPrerequisites([...pending]);
   if (estimate) for (const n of order) { // a resume that enabled the estimator
     if (estimates.has(n) || results.has(n)) continue;
     let b = ""; try { b = await readBody(n); } catch { b = ""; }
@@ -714,6 +734,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settle = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
+    if (cancelled && releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } } // #5241: the lane ended: its lease goes with it
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
@@ -727,7 +748,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.conformance && typeof r.conformance === "object" ? { conformance: r.conformance } : {}), // #4398
       ...(rec?.placement ? { placement: rec.placement } : {}), ...(estimates.has(n) ? { est_minutes: Math.round(estimates.get(n) * 10) / 10 } : {}) }; // #4409
     noteLimited(r); // #5205
-    const quotaPause = row.outcome === "deferred" && r?.code === "rate_limited" && !cancelled;
+    const quotaPause = row.outcome === "deferred" && (r?.code === "rate_limited" || r?.code === "quota.exhausted") && !cancelled;
     if (!quotaPause && quota.has(n)) { // #5094: the paused attempts' cost, added once
       const q = quota.get(n); quota.delete(n);
       row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(q.cost_usd) || 0)) * 1e6) / 1e6;
@@ -809,7 +830,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           // #5094: an account rotator with headroom means another account runs the next call, so no host hold is recorded.
           // #5203: a usage limit on the pool account rotates like a rotator account (the router hands the next sandbox the
           // lowest-usage login, #5165), so it sets no pool hold and no batch-wide notBefore while any account has headroom.
-          const usage = r?.code === "rate_limited";
+          const usage = r?.code === "rate_limited" || r?.code === "quota.exhausted";
           let poolId = null;
           if (usage) { try { poolId = remote?.identity?.() ?? null; } catch { poolId = null; } }
           const rq = quotaRequeue({ rotator, r, prior: quota.get(n), delayMs: pol.delayMs, exclude: excluded(), poolId });
@@ -833,6 +854,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           requeue(n, delayMs); done(); save();
           const iso = new Date(resumeAt).toISOString();
           update({ ...row, outcome: "paused", quota: { resumeAt: iso }, detail: `paused (${r?.code === "backend.auth" ? "backend.auth" : "quota"}) until ${iso}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+          if (r?.code === "quota.exhausted") { const ev = { event: "quota.exhausted", issue: n, batch: batchId ?? null, resumeAt: iso, detail: `quota.exhausted: no account has capacity; resuming ${iso}` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } // #5236: batch-level event supervisors see
           return;
         }
         requeue(n, capGated ? 0 : delayMs); done(); save();
@@ -1144,8 +1166,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       requeueApplied.add(requeueKey(e));
       const row = results.get(e.issue);
       // #5203: a quota-paused issue (pending, no row) is released: its notBefore and the pool hold go, so the next grant admits it.
-      if (!row && pending.includes(e.issue) && quota.has(e.issue) && !running.has(e.issue)) {
+      // #5241: so is an issue waiting out a deferral (e.g. lease-held by a cancelled batch's lane): the next pass admits it.
+      if (!row && pending.includes(e.issue) && (quota.has(e.issue) || notBefore.has(e.issue)) && !running.has(e.issue)) {
         notBefore.delete(e.issue);
+        if (!quota.has(e.issue)) { deferrals.delete(e.issue); update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (deferral released)` }); n++; continue; }
         try { const pool = remote?.identity?.(); if (pool) holds.clear(pool); } catch { /* fail-open */ }
         decided({ issue: e.issue, what: `released quota pause of #${e.issue} by ${e.by ?? "operator"} (forgedock orchestrate --requeue)`, why: e.reason || "operator decision", alternative: "wait for the account reset" });
         update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (quota pause released)` });
@@ -1191,11 +1215,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     return n;
   };
   // #4376: one SIGTERM per running local lane (their teardown saves the work); remote lanes run to their result unless the cancel carries `stopRemote` (#4612).
-  const stopSent = new Set();
+  // #5241: a stop not accepted is retried and, once the lane outlives the teardown timeout, reported (never silent).
+  const stopSent = new Map(); // issue -> {at, accepted, since, reported}
   function stop(n, rec) {
-    if (!stopLane || (rec?.remote && cancelled?.stopRemote !== true) || stopSent.has(n)) return; // #4612: remote lanes only when the cancel asked for it
-    stopSent.add(n);
-    try { Promise.resolve(stopLane(n, rec)).catch(() => {}); } catch { /* best effort */ }
+    if (!stopLane || (rec?.remote && cancelled?.stopRemote !== true)) return; // #4612: remote lanes only when the cancel asked for it
+    const t = now(), s = stopSent.get(n) ?? { at: null, accepted: false, since: t, reported: false };
+    stopSent.set(n, s);
+    if (!s.reported && t - s.since >= stopTimeoutMs) {
+      s.reported = true;
+      const why = rec?.stopNote ?? (s.accepted ? "stop sent, the lane has not exited" : "stop not accepted");
+      update({ issue: null, outcome: "cancelled", detail: `#${n} not confirmed stopped after ${Math.round(stopTimeoutMs / 1000)}s: ${why}; its lease stays held until it exits` });
+      decided({ issue: n, what: `#${n} not confirmed stopped by the cancel`, why, alternative: "stop the lane by hand" });
+    }
+    if (s.accepted || (s.at !== null && t - s.at < stopRetryMs)) return;
+    s.at = t;
+    try { Promise.resolve(stopLane(n, rec)).then((ok) => { if (ok !== false) s.accepted = true; }, () => {}); } catch { /* best effort */ }
   }
   // #4592: re-read the hold set; one decision and one row when it changes.
   const refreshHeld = () => {
@@ -1513,7 +1547,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
-      if (getRequeued && pending.some((n) => quota.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
+      if (getRequeued && pending.some((n) => quota.has(n) || notBefore.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
       if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
@@ -1521,7 +1555,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
       if (tripped) wake = null;
-      if (getCancelled && running.size && !cancelled) wake = Math.min(wake ?? pollMs, pollMs); // #4376: notice a cancel while lanes run
+      if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());
         else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }

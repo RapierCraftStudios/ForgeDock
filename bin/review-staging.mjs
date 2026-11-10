@@ -27,11 +27,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
+import { gateByRef } from "./lean/acceptance.mjs";
+import { DEFAULT_FEATURE_PATTERN } from "./lean/lane.mjs";
+import { requiredChecksFor } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
   "       forgedock review-staging [<PR>] --finalize --test-gate-output <file> [--notes-dropped <n>] [--json]\n" +
-  "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]";
+  "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]\n" +
+  "       forgedock review-staging [<PR>] --post-reviewer <domain> --body-file <file>";
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 /** selftest.sandbox_repo turns the release gate on only when it names a repo (`null`, `~`, `false` or prose leave it off). */
 const SANDBOX_RE = /^[\w.-]+\/[\w.-]+$/;
@@ -48,7 +52,7 @@ class Stop extends Error {
 
 /** argv -> {pr, thorough, json, mode, testGateOutput, notesDropped, filed, delta}. Throws Stop(2) on anything else. */
 export function parseArgs(argv) {
-  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null };
+  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null };
   const setMode = (m, a) => { if (o.mode !== "pre") throw new Stop(2, [`review-staging: ${a} cannot be combined with --${o.mode}`, USAGE]); o.mode = m; };
   const value = (i, a) => { const v = argv[i + 1]; if (v == null || v.startsWith("--")) throw new Stop(2, [`review-staging: ${a} requires a value`, USAGE]); return v; };
   for (let i = 0; i < argv.length; i++) {
@@ -57,6 +61,8 @@ export function parseArgs(argv) {
     else if (a === "--json") o.json = true;
     else if (a === "--finalize") setMode("finalize", a);
     else if (a === "--summary") setMode("summary", a);
+    else if (a === "--post-reviewer") { setMode("post-reviewer", a); o.domain = value(i++, a); }
+    else if (a === "--body-file") o.bodyFile = value(i++, a);
     else if (a === "--test-gate-output") o.testGateOutput = value(i++, a);
     else if (a === "--delta") {
       const v = value(i++, a);
@@ -79,6 +85,8 @@ export function parseArgs(argv) {
       o.pr = Number(m[1]);
     } else throw new Stop(2, [`review-staging: unknown argument: ${a}`, USAGE]);
   }
+  if (o.mode === "post-reviewer" && (!/^[a-z0-9-]+$/.test(o.domain) || !o.bodyFile || o.json || o.delta)) throw new Stop(2, ["review-staging: --post-reviewer takes a lowercase marker domain and --body-file <file>", USAGE]);
+  if (o.mode !== "post-reviewer" && o.bodyFile) throw new Stop(2, ["review-staging: --body-file belongs to --post-reviewer", USAGE]);
   if (o.mode !== "finalize" && (o.testGateOutput != null || o.notesDropped)) throw new Stop(2, ["review-staging: --test-gate-output/--notes-dropped belong to --finalize", USAGE]);
   if (o.mode !== "summary" && o.filed.length) throw new Stop(2, ["review-staging: --filed belongs to --summary", USAGE]);
   if (o.mode !== "pre" && o.thorough) throw new Stop(2, ["review-staging: --thorough belongs to the pre-dispatch", USAGE]);
@@ -107,10 +115,10 @@ export function buildManifest(m) {
     ...(m.delta ? [`DELTA: ${m.delta.from}..${m.headSha} files=${m.delta.files.length}`] : []),
     `CONTEXT_FILE=${m.contextFile}`,
     ...m.briefs.map((b) => `DISPATCH ${b.domain} ${b.path}`),
-    `NEXT: dispatch one isolated reviewer per DISPATCH line (prompt = the brief file's content) in a single message; before each launch append its domain to ${m.launchedFile}.`,
+    `NEXT: dispatch one isolated reviewer per DISPATCH line (prompt = the brief file's content) in a single message; these domains are already recorded in ${m.launchedFile}. Reviewers post with: forgedock review-staging ${m.pr} --post-reviewer <domain> --body-file <file> (it writes the marker and the full Reviewed-SHA).`,
     m.delta
       ? `NEXT: delta pass: the spec-owned panel (${SPEC_PANEL}) is credited from the earlier pass at ${m.delta.from.slice(0, 7)}; dispatch only the DISPATCH lines.`
-      : `NEXT: dispatch the spec-owned panel per commands/review-pr-staging.md (${SPEC_PANEL}), appending each domain to the same file.`,
+      : `NEXT: dispatch the spec-owned panel per commands/review-pr-staging.md (${SPEC_PANEL}), appending each domain to ${m.launchedFile} before launch (the manifest ${m.manifestFile ?? ""} already lists the briefed ones).`,
     `NEXT: after every reviewer posted, run /test-gate, save its output to a file, then run: forgedock review-staging ${m.pr} --finalize --test-gate-output <file>`,
   ];
   return lines.join("\n");
@@ -140,7 +148,7 @@ function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", configPath: path, sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
+  return { ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", featurePattern: typeof cfg.branches?.feature_pattern === "string" && cfg.branches.feature_pattern.includes("{slug}") ? cfg.branches.feature_pattern : null, configPath: path, extraRequiredChecks: Array.isArray(cfg.gate?.required_checks) ? cfg.gate.required_checks.map((x) => String(x).trim()).filter(Boolean) : [], sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -228,6 +236,7 @@ async function main(argv, io) {
   const a = parseArgs(argv);
   if (a.mode === "finalize") return finalize(a, io);
   if (a.mode === "summary") return summary(a, io);
+  if (a.mode === "post-reviewer") return postReviewer(a, io);
   const c = readConfig(io);
   const sd = io.env.FORGE_SCRATCHPAD || join(io.cwd, ".forge-scratch");
   io.mkdir(sd);
@@ -299,7 +308,7 @@ async function main(argv, io) {
   // Roster + briefs
   const agents = ctx.roster?.agents?.length ? ctx.roster.agents : ["security"];
   const launchedFile = join(sd, `${pr}_launched_review_agents`);
-  io.writeFile(launchedFile, "");
+  const manifestFile = join(sd, `${pr}_review_manifest.json`);
   // The head this list describes: review-prepare trusts the list as --delta proof only for this head.
   io.writeFile(`${launchedFile}.head`, `${head}\n`);
   const briefDir = join(sd, `review-staging-${pr}`);
@@ -322,7 +331,7 @@ async function main(argv, io) {
     };
     const extra = [
       `## Staging review (staging->main PR #${pr}, head ${head})`,
-      `Your marker domain is \`${domain}\`: start your comment with \`<!-- FORGE:REVIEW-AGENT:${domain} -->\`, then the line \`Reviewed-SHA: ${head}\`, and end it with the structured findings block.`,
+      `Your marker domain is \`${domain}\`: start your comment with \`<!-- FORGE:REVIEW-AGENT:${domain} -->\`, then the line \`Reviewed-SHA: ${head}\`, and end it with the structured findings block. Post it with \`forgedock review-staging ${pr} --post-reviewer ${domain} --body-file <file>\`: the tool writes that marker and the full SHA itself, from the launch manifest.`,
       scopeSection(scope, delta, head),
       ...(ctx.broken_assumptions?.length ? ["## Pre-found integration issues to verify", ...ctx.broken_assumptions.map((x) => `- ${x}`)] : []),
       ...(priorOpen.length ? ["## Prior open findings (carried forward: do not re-file)", ...priorOpen.map((x) => `- ${x}`)] : []),
@@ -334,9 +343,13 @@ async function main(argv, io) {
     briefs.push({ domain, path });
   }
 
+  // One source of names: the launch manifest. The launched file is generated from it; --post-reviewer reads it for the marker and SHA.
+  io.writeFile(manifestFile, `${JSON.stringify({ pr, head, agents: briefs.map((b) => ({ domain: b.domain, brief: b.path })) })}\n`);
+  io.writeFile(launchedFile, briefs.map((b) => `${b.domain}\n`).join(""));
+
   let bundle = [];
   try { bundle = io.readFile(prsFile).split(/\s+/).filter((n) => /^\d+$/.test(n)); } catch { /* reported empty */ }
-  const m = { pr, headSha: head, gate, bundle, scopeMode: scope.scope_mode, tier: ctx.roster?.tier ?? "full", reason: ctx.roster?.reason ?? "", contextFile: ctxFile, launchedFile, briefs, reentry: priorRoutes > 0, delta };
+  const m = { pr, headSha: head, gate, bundle, scopeMode: scope.scope_mode, tier: ctx.roster?.tier ?? "full", reason: ctx.roster?.reason ?? "", contextFile: ctxFile, launchedFile, manifestFile, briefs, reentry: priorRoutes > 0, delta };
   io.out(a.json ? JSON.stringify(m) : buildManifest(m));
   return 0;
 }
@@ -373,6 +386,23 @@ function testGateResult(io, sd, pr) {
   return VERDICT_RE.test(v) ? { verdict: v, reason, invalid: false } : { verdict: "BLOCK", reason: "persisted test-gate verdict missing/invalid", invalid: true };
 }
 
+/** --post-reviewer: post one reviewer's comment with the marker and full Reviewed-SHA written from the launch manifest, never from the agent's text. */
+async function postReviewer(a, io) {
+  const { c, sd, pr } = await postContext(a, io);
+  const man = readJson(io, join(sd, `${pr}_review_manifest.json`));
+  if (!man || !SHA_RE.test(man.head ?? "")) throw new Stop(1, [`review-staging: no launch manifest for PR #${pr} (run the pre-dispatch first)`]);
+  const launched = (readText(io, join(sd, `${pr}_launched_review_agents`)) ?? "").split("\n").filter((l) => /^[a-z0-9-]+$/.test(l));
+  const known = [...new Set([...(man.agents ?? []).map((x) => x.domain), ...launched])];
+  if (!known.includes(a.domain)) throw new Stop(1, [`review-staging: ${a.domain} is not a launched reviewer of PR #${pr} (launched: ${known.join(" ")}); the marker name must come from the launch manifest`]);
+  let body;
+  try { body = io.readFile(a.bodyFile); } catch { throw new Stop(1, [`review-staging: cannot read --body-file ${a.bodyFile}`]); }
+  // Whatever header the reviewer typed is replaced: only the manifest's SHA and name reach the comment.
+  body = body.replace(/^(?:\s*<!-- FORGE:REVIEW-AGENT:[^>]*-->[ \t]*\r?\n|\s*Reviewed-SHA:[^\n]*\n)+/, "").replace(/^\s+/, "");
+  await retryGh(io, ["pr", "comment", String(pr), "-R", c.ghRepo, "--body", `<!-- FORGE:REVIEW-AGENT:${a.domain} -->\nReviewed-SHA: ${man.head}\n\n${body}`]);
+  io.out(`POSTED ${a.domain} Reviewed-SHA ${man.head} on PR #${pr}`);
+  return 0;
+}
+
 /** --finalize: delivery, test gate, extract, classify (dry run + real), file-prepare; prints the items to file. */
 async function finalize(a, io) {
   const { c, sd, env, pr, head } = await postContext(a, io);
@@ -387,7 +417,12 @@ async function finalize(a, io) {
   relay(io, d);
   // Exit 2 = the comments could not be listed on any attempt (forge#5166): rerun, never re-dispatch reviewers that may have posted.
   if (d.code === 2) throw new Stop(1, ["REVIEW_RESULT: status: BLOCKED, blocker: reviewer delivery could not be verified (GitHub comment listing failed); rerun --finalize, do not re-dispatch reviewers", BLOCK_DEPLOY]);
-  if (d.code !== 0) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: reviewer delivery incomplete (exit ${d.code}); re-dispatch each missing reviewer once with the note "structured findings block required", else the panel is degraded`, BLOCK_DEPLOY]);
+  if (d.code !== 0) {
+    // review-staging-post.sh names each failing reviewer and why on a REDISPATCH line: repair only those, never the whole panel.
+    const redo = String(d.stdout ?? "").split("\n").filter((l) => l.startsWith("REDISPATCH ")).map((l) => l.slice(11).split(" ")[0]);
+    const only = redo.length ? `re-run only ${redo.join(", ")} (REDISPATCH lines above; post with --post-reviewer so the SHA is right), then rerun --finalize` : `re-dispatch each missing reviewer once with the note "structured findings block required", else the panel is degraded`;
+    throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: reviewer delivery incomplete (exit ${d.code}); ${only}`, BLOCK_DEPLOY]);
+  }
 
   // 6.5 verdict handling (override, posture, test-gate markers)
   const prsFile = join(sd, `${pr}_bundle-prs.txt`);
@@ -489,18 +524,51 @@ export const CI_EXCLUDED_CHECKS = ["forgedock/verify", "forge/deploy-gate", "Che
 
 const parseChecks = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
 
+const isRed = (k) => k?.bucket === "fail" || k?.bucket === "cancel";
+
+/**
+ * Red checks outside CI_EXCLUDED_CHECKS, split by whether they block. With a non-empty `required` set (branch protection,
+ * rulesets and forge.yaml gate.required_checks) only required red checks block and the rest are warnings. An empty set
+ * (no protection, or a failed read: indistinguishable) keeps every red check blocking (fail closed).
+ */
+export function classifyChecks(checks, required = []) {
+  const red = checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && isRed(k));
+  const req = new Set(required);
+  if (!req.size) return { blocking: red.length, warnings: [] };
+  const hit = red.filter((k) => req.has(k.name));
+  return { blocking: hit.length, warnings: [...new Set(red.filter((k) => !req.has(k.name)).map((k) => String(k.name)))] };
+}
+
 /** Failing (fail/cancel) checks outside CI_EXCLUDED_CHECKS. */
 export function countFailingChecks(checks) {
-  return checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && (k?.bucket === "fail" || k?.bucket === "cancel")).length;
+  return classifyChecks(checks).blocking;
 }
 
 /** Phase 8 verdict from the deterministic inputs (CI, test gate, CONFIRMED CRITICAL/HIGH). */
-export function stagingVerdict({ ciFailing, testGateInvalid, confirmedCritical, confirmedHigh }) {
+export function stagingVerdict({ ciFailing, testGateInvalid, acceptanceBlocked = null, confirmedCritical, confirmedHigh }) {
+  if (acceptanceBlocked) return { verdict: "BLOCK DEPLOY", why: `feature acceptance blocked: ${acceptanceBlocked}` };
   if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify, forge/deploy-gate and the gate-marker check excluded)` };
   if (testGateInvalid) return { verdict: "BLOCK DEPLOY", why: "test-gate result missing/invalid (fail closed)" };
   if (confirmedCritical > 0) return { verdict: "BLOCK DEPLOY", why: `${confirmedCritical} CONFIRMED CRITICAL finding(s)` };
   if (confirmedHigh > 0) return { verdict: "NEEDS FIXES FIRST", why: `${confirmedHigh} CONFIRMED HIGH finding(s)` };
   return { verdict: "APPROVE FOR DEPLOY", why: "no CI failure, no blocking test gate, no CONFIRMED CRITICAL/HIGH finding" };
+}
+
+/**
+ * #5336: the feature-acceptance gate of a milestone release PR (head ref `milestone/<slug>` by the feature pattern). A milestone
+ * with an epic is blocked by a red or never-run journey, and a SKIP test gate is a blocking finding there, not a pass.
+ * Returns the blocking reason or null. A PR that is not from a milestone branch is not gated; an unreadable read fails closed.
+ */
+async function acceptanceBlock(io, c, pr, tg) {
+  let branch = "";
+  try { branch = (await io.gh(["pr", "view", String(pr), "-R", c.ghRepo, "--json", "headRefName", "--jq", ".headRefName"])).trim(); } catch { return null; }
+  const [pre, post = ""] = String(c.featurePattern ?? DEFAULT_FEATURE_PATTERN).split("{slug}");
+  if (!pre || !branch.startsWith(pre) || !branch.endsWith(post) || branch.length <= pre.length + post.length) return null;
+  let g;
+  try { g = await gateByRef({ io, repo: c.ghRepo, branch, stage: "ship", pattern: c.featurePattern ?? DEFAULT_FEATURE_PATTERN }); } catch (e) { return `journey gate unreadable (${String(e?.message ?? e).slice(0, 120)}; fail closed)`; }
+  if (!g.gated) return null;
+  if (!g.ok) return g.reasons.join("; ");
+  return tg.verdict === "SKIP" ? "Test Gate SKIP (verification.integration_tests not configured) on a milestone with an epic" : null;
 }
 
 /** --summary: Phase 8 verdict + summary comment ending in exactly one gate marker kind. Never merges. */
@@ -516,9 +584,14 @@ async function summary(a, io) {
   let ciFailing = 1;
   const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket"], { env, cwd: io.cwd });
   const checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
-  if (checks) ciFailing = countFailingChecks(checks);
+  let warnings = [];
+  if (checks) {
+    const required = [...new Set([...(await requiredChecksFor({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch })), ...c.extraRequiredChecks])];
+    ({ blocking: ciFailing, warnings } = classifyChecks(checks, required));
+  }
 
-  const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
+  const acceptanceBlocked = await acceptanceBlock(io, c, pr, tg);
+  const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, acceptanceBlocked, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
   const pass = v.verdict === "APPROVE FOR DEPLOY";
   const marker = pass ? "FORGE:GATE_PASS" : "FORGE:GATE_FAILURE";
   const bundle = (st.bundle ?? []).join(" ");
@@ -542,9 +615,10 @@ async function summary(a, io) {
     "### Risk Matrix",
     "| Domain | Result | Notes |",
     "|--------|--------|-------|",
-    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded |`,
+    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded${warnings.length ? `; ${warnings.length} non-required check(s) red, non-blocking warning: ${warnings.join(", ")}` : ""} |`,
     `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
+    ...(acceptanceBlocked ? [`| **Feature acceptance** | \`BLOCK\` | ${acceptanceBlocked.replace(/\|/g, "/")} |`] : []),
     "",
     (TEST_GATE_NOTE[tg.verdict] ?? TEST_GATE_NOTE.BLOCK)(tg.reason),
     "",
@@ -570,8 +644,8 @@ async function summary(a, io) {
   } catch (e) {
     throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not post the Phase 8 summary and gate marker (${e.message})`, BLOCK_DEPLOY]);
   }
-  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, testGate: tg.verdict, filed: a.filed }));
-  else io.out([`VERDICT: ${v.verdict} (${v.why})`, `GATE: ${marker} posted on PR #${pr}`, ...(pass ? [] : [BLOCK_DEPLOY])].join("\n"));
+  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, warnings, testGate: tg.verdict, filed: a.filed }));
+  else io.out([`VERDICT: ${v.verdict} (${v.why})`, ...(warnings.length ? [`WARNING: ${warnings.length} non-required check(s) red, non-blocking: ${warnings.join(", ")}`] : []), `GATE: ${marker} posted on PR #${pr}`, ...(pass ? [] : [BLOCK_DEPLOY])].join("\n"));
   return pass ? 0 : 1;
 }
 

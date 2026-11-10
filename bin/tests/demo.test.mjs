@@ -27,6 +27,7 @@ import {
   demoUsage,
   demoForgeYaml,
   renderNextSteps,
+  formatDemoCost,
   runDemo,
 } from "../demo.mjs";
 
@@ -390,5 +391,63 @@ describe("constants", () => {
   it("default repo and dirname are stable", () => {
     assert.equal(DEFAULT_DEMO_REPO, "RapierCraftStudios/forgedock-demo");
     assert.equal(DEFAULT_DEMO_DIRNAME, "forgedock-demo");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// --run: subscription CLI first, API key fallback, live view, result (#5304)
+// ---------------------------------------------------------------------------
+
+describe("runDemo --run (#5304)", () => {
+  const TARGET = join(HOME, DEFAULT_DEMO_DIRNAME);
+  function setup({ ready = true, ghOk = true } = {}) {
+    const fsx = makeFsx({ present: [TARGET, join(TARGET, "forge.yaml"), join(FORGE_HOME, "commands")], dirContents: { [TARGET]: ["x"] } });
+    const logger = makeLogger();
+    const exec = makeExec((cmd, a) => {
+      if (cmd === "gh" && a[0] === "auth") return { status: ghOk ? 0 : 1, stdout: "", stderr: "" };
+      if (cmd === "gh" && a[0] === "pr") return { status: 0, stdout: "https://github.com/o/r/pull/7\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    });
+    const runs = [];
+    const watches = [];
+    const base = {
+      forgeHome: FORGE_HOME, home: HOME, cwd: "/work", args: ["--run"], apiKey: undefined,
+      exec, fsx, logger, commandExists: () => true, launch: () => {},
+      backendCheck: async () => ({ ready, backend: "cli" }),
+      spawnWatch: (o) => { watches.push(o); return { kill() { watches.killed = true; } }; },
+      runCommandFn: async (o) => { runs.push(o); return { status: "ok", costUsd: 1.234 }; },
+    };
+    return { base, logger, runs, watches };
+  }
+
+  it("runs on the CLI backend with no API key, opens watch, prints PR link and cost", async () => {
+    const { base, logger, runs, watches } = setup();
+    const r = await runDemo(base);
+    assert.equal(r.status, "ok");
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].apiKey, undefined);
+    assert.equal(watches.length, 1);
+    assert.ok(watches.killed);
+    assert.match(logger.text(), /Merged PR: https:\/\/github.com\/o\/r\/pull\/7/);
+    assert.match(logger.text(), /Cost: \$1\.23/);
+  });
+
+  it("neither CLI nor API key: print-only, runner not invoked", async () => {
+    const { base, logger, runs } = setup({ ready: false });
+    await runDemo(base);
+    assert.equal(runs.length, 0);
+    assert.match(logger.text(), /No logged-in `claude` CLI/);
+  });
+
+  it("gh unauthenticated: runs but skips the live view", async () => {
+    const { base, runs, watches } = setup({ ghOk: false });
+    await runDemo(base);
+    assert.equal(runs.length, 1);
+    assert.equal(watches.length, 0);
+  });
+
+  it("formatDemoCost falls back to tokens then unavailable", () => {
+    assert.equal(formatDemoCost({ usage: { input_tokens: 2, output_tokens: 3 } }), "5 tokens");
+    assert.equal(formatDemoCost({}), "unavailable");
   });
 });

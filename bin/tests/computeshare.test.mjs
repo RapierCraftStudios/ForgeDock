@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
+import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
 function fakeDocker() {
@@ -17,6 +18,8 @@ function fakeDocker() {
     async run(args) { const name = args[args.indexOf("--name") + 1]; this.runs.push(args); containers.set(name, { running: true, exitCode: 0, startedAt: new Date().toISOString(), finishedAt: "" }); return "cid"; },
     async inspect(name) { return containers.get(name) ?? null; },
     async remove(name) { containers.delete(name); },
+    kills: [],
+    async kill(name, signal) { const c = containers.get(name); if (!c?.running) return false; this.kills.push([name, signal]); c.running = false; c.exitCode = 143; c.finishedAt = new Date().toISOString(); return true; },
     async listLabelled() { return [...containers.keys()]; },
     async wipe() {},
     volumes: new Set(),
@@ -453,6 +456,7 @@ function usageRouter(accounts, { usage = true, ceiling } = {}) {
     const d = join(dir, `.claude-${n}`); mkdirSync(d); dirs.push(d);
     writeFileSync(join(d, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: `tok-${n}`, refreshToken: "refresh-SECRET", expiresAt: Date.now() + a.validH * 3600000 } }));
     if (usage && a.live) writeFileSync(join(src, `live.${n}`), a.live);
+    if (usage && a.used !== undefined) writeFileSync(join(src, `used.${n}`), `${a.used}\n`); // #5236: tokenbaton's polled figure
   }
   const log = { info: (m) => logs.info.push(String(m)), warn: (m) => logs.warn.push(String(m)), error() {} };
   const r = createRouter({ state_dir: dir, enroll_token: "enroll", forgedock_token: "fd", claude_config_dirs: dirs, usage_source: src, ...(ceiling ? { usage_ceiling_pct: ceiling } : {}) }, { fetchFn: async () => new Response("{}"), log });
@@ -542,17 +546,41 @@ test("#5205 router: a fresh 47% account ranks over a stale 99% one whose reset p
   assert.match(only.logs.info.find((m) => /claude login selected/.test(m)), /account=1 usage=unknown% \(stale\)/);
 });
 
+test("#5236 router: weekly-exhausted account with an old-updated 5h sample is excluded; old samples rank after fresh ones", async () => {
+  const old = inS(-3 * 3600); // updated 3h ago, reset still in the future
+  const r = usageRouter({
+    1: { validH: 9, live: `0 ${inS(3600)} 100 ${inS(86400)} ${old}` }, // weekly 100: never handed out
+    2: { validH: 8, live: `0 ${inS(3600)} 10 ${inS(86400)} ${old}` }, // "0%" from a days-old sample: unknown
+    3: { validH: 2, live: `60 ${inS(3600)} 10 ${inS(86400)} ${inS(-60)}` },
+  });
+  const a = await r.get();
+  assert.equal(a.body.account, 3, "the fresh 60% ranks before the old 0%, and 1 is excluded");
+  const only = usageRouter({ 1: { validH: 9, live: `0 ${inS(3600)} 100 ${inS(86400)} ${old}` } });
+  const o = await only.get();
+  assert.equal(o.status, 429, "the weekly-exhausted account is the only one: typed 429 with its weekly reset");
+  assert.match(o.body.reset_at, /^\d{4}-/);
+});
+
+test("#5236 router: a newer polled used.N figure blocks an account whose live sample looks fine", async () => {
+  const fresh = inS(-60);
+  const r = usageRouter({
+    1: { validH: 9, live: `10 ${inS(3600)} 10 ${inS(86400)} ${fresh}`, used: 100 },
+    2: { validH: 2, live: `50 ${inS(3600)} 10 ${inS(86400)} ${fresh}` },
+  });
+  assert.equal((await r.get()).body.account, 2, "polled 100% (newer than the sample) excludes account 1");
+});
+
 test("#5205 router: a reported-limited account is skipped until its reset; all limited -> 429 with the earliest reset", async () => {
   const late = inS(7200), early = inS(1800);
   const { get, post, logs } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` }, 3: { validH: 6, live: `97 ${late} 0 ${inS(86400)} 0` } });
   assert.equal((await get()).body.token, "tok-1");
-  assert.equal((await post({ reset_at: inS(3600) }, "wrong")).status, 401);
-  const m = await post({ reset_at: inS(3600) });
+  assert.equal((await post({ reset_at: inS(3600), account: 1 }, "wrong")).status, 401);
+  const m = await post({ reset_at: inS(3600), account: 1 });
   assert.equal(m.status, 200);
   assert.equal(m.body.account, 1);
   assert.ok(logs.info.some((l) => /claude login limited: account=1 agent=a1/.test(l)));
   assert.equal((await get()).body.token, "tok-2", "the limited account is excluded");
-  await post({ reset_at: early });
+  await post({ reset_at: early, account: 2 });
   const r = await get();
   assert.equal(r.status, 429);
   assert.equal(r.body.code, "rate_limited");
@@ -560,11 +588,25 @@ test("#5205 router: a reported-limited account is skipped until its reset; all l
   assert.ok(!logs.info.concat(logs.warn).join("\n").includes("tok-"), "the token is never logged");
 });
 
+test("#5267 router: reset_at is clamped to 7 days; the reported account (not the agent's last) is limited; a missing or foreign account is refused", async () => {
+  const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` }, 2: { validH: 6, live: `40 ${inS(3600)} 0 ${inS(86400)} 0` } });
+  assert.equal((await get()).body.account, 1);
+  assert.equal((await post({ reset_at: inS(3600) })).status, 400, "no account in the report");
+  assert.equal((await post({ reset_at: inS(3600), account: 2 })).status, 404, "account 2 was never handed to this agent");
+  const far = await post({ reset_at: inS(365 * 86400), account: 1 });
+  assert.equal(far.status, 200);
+  assert.ok(Date.parse(far.body.until) <= Date.now() + 7 * 86400000 + 60000, "clamped to now+7d");
+  assert.ok(Date.parse(far.body.until) > Date.now() + 6 * 86400000, "still a long exclusion");
+  assert.equal((await get()).body.account, 2, "account 1 is excluded");
+  const other = await post({ reset_at: inS(60), account: 1 }); // sandbox B reports account 1 although the agent last got 2
+  assert.equal(other.body.account, 1, "attributed to the reported account, not the last handed");
+});
+
 test("#5205 router: a limited report with no reset excludes the account for an hour", async () => {
   const { get, post } = usageRouter({ 1: { validH: 6, live: `20 ${inS(3600)} 0 ${inS(86400)} 0` } });
-  assert.equal((await post({})).status, 404, "no account handed to this agent yet");
+  assert.equal((await post({ account: 1 })).status, 404, "no account handed to this agent yet");
   await get();
-  const m = await post({ reset_at: null });
+  const m = await post({ reset_at: null, account: 1 });
   assert.ok(Math.abs(Date.parse(m.body.until) - (Date.now() + 3600000)) < 60000);
   assert.equal((await get()).status, 429);
 });
@@ -575,17 +617,86 @@ test("#5205 agent: the sandbox limited route drops the claude cache and forwards
   const rec = Object.values(agent.store.data.sandboxes ?? {}).find((x) => x.id === "cl1") ?? agent.store.data.sandboxes?.cl1;
   const calls = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init = {}) => { calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : null }); return new Response(JSON.stringify(String(url).endsWith("/limited") ? { account: 1, until: "2026-11-07T12:00:00.000Z" } : { token: `t${calls.length}` }), { status: 200 }); };
+  globalThis.fetch = async (url, init = {}) => { calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : null }); return new Response(JSON.stringify(String(url).endsWith("/limited") ? { account: 1, until: "2026-11-07T12:00:00.000Z" } : { token: `t${calls.length}`, account: 1 }), { status: 200 }); };
   const send = (req) => new Promise((resolve) => { agent.handle(req, { writeHead(s, h) { this.s = s; this.h = h ?? {}; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(String(b)) }); } }); });
   const getCred = () => send({ method: "GET", url: "/sandboxes/cl1/creds/claude", headers: { authorization: `Bearer ${rec.credToken}` }, socket: {} });
   try {
     assert.equal((await getCred()).body.token, "t1");
     assert.equal((await getCred()).body.token, "t1", "cached");
+    assert.equal((await getCred()).body.account, 1, "the sandbox learns its account");
     assert.equal((await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: "Bearer nope" }, { reset_at: 1 }))).status, 401);
-    const r = await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: `Bearer ${rec.credToken}` }, { reset_at: 1800000000 }));
+    const r = await send(jsonReq("POST", "/sandboxes/cl1/creds/claude/limited", { authorization: `Bearer ${rec.credToken}` }, { reset_at: 1800000000, account: 1, extra: "dropped" }));
     assert.equal(r.status, 200);
     const fwd = calls.find((c) => c.url.endsWith("/agent/creds/claude/limited"));
-    assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000 }]);
+    assert.deepEqual([fwd.method, fwd.body], ["POST", { reset_at: 1800000000, account: 1 }]);
     assert.equal((await getCred()).body.token, "t3", "the cache was dropped: a fresh token");
   } finally { globalThis.fetch = realFetch; }
+});
+
+// #5274: POST /sandboxes/:id/stop signals the lane (teardown checkpoints) and keeps the sandbox; DELETE no longer 502s on a slow destroy.
+const httpCall = (target, method, url, token) => new Promise((resolve) => {
+  const req = { method, url, headers: { authorization: `Bearer ${token}` }, socket: {}, async *[Symbol.asyncIterator]() {} };
+  target.handle(req, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ status: this.s, body: b ? JSON.parse(b) : null }); } });
+});
+
+test("agent stop SIGTERMs a running lane and keeps the sandbox; unknown 404, exited 200 (#5274)", async () => {
+  const { agent, docker } = agentFixture();
+  await agent.launch({ spec: spec("s1"), cpus: 1, mem_gb: 1 });
+  const r = await httpCall(agent, "POST", "/sandboxes/s1/stop", "agent-token");
+  assert.equal(r.status, 202);
+  assert.deepEqual(docker.kills, [[safeName("s1"), "TERM"]]);
+  assert.ok(agent.store.data.sandboxes.s1, "stop must not destroy the sandbox");
+  assert.equal((await httpCall(agent, "POST", "/sandboxes/s1/stop", "agent-token")).status, 200);
+  assert.equal(docker.kills.length, 1);
+  assert.equal((await httpCall(agent, "POST", "/sandboxes/nope/stop", "agent-token")).status, 404);
+});
+
+test("router forwards stop to the owning agent without dropping the sandbox (#5274)", async () => {
+  const { router, calls } = routerFixture({ big: { cpus_free: 8, mem_free_gb: 16 } });
+  await router.launch(spec("s2"));
+  const r = await httpCall(router, "POST", "/sandboxes/s2/stop", "fd");
+  assert.equal(r.status, 200);
+  assert.ok(calls.includes("POST big/sandboxes/s2/stop"));
+  assert.ok(router.store.data.sandboxes.s2);
+});
+
+test("router DELETE of a live sandbox waits past the 15s default and returns 2xx (#5274)", async () => {
+  const { router, calls } = routerFixture({ big: { cpus_free: 8, mem_free_gb: 16 } });
+  await router.launch(spec("s3"));
+  const timeouts = [], orig = AbortSignal.timeout;
+  AbortSignal.timeout = (ms) => { timeouts.push(ms); return orig.call(AbortSignal, ms); };
+  let r;
+  try { r = await httpCall(router, "DELETE", "/sandboxes/s3", "fd"); } finally { AbortSignal.timeout = orig; }
+  assert.equal(r.status, 200);
+  assert.ok(calls.includes("DELETE big/sandboxes/s3"));
+  assert.ok(timeouts.length && timeouts.every((ms) => ms >= 120000), `destroy timeout must exceed docker rm + volume rm: ${timeouts}`);
+  assert.equal(router.store.data.sandboxes.s3, undefined);
+});
+
+// #5274 integration: the real remote transport -> router -> agent chain (in-process HTTP bridge, fake docker) for `--cancel --stop-remote`.
+test("transport.stop through router and agent signals the lane; it exits interrupted with its checkpoint kept (#5274)", async () => {
+  const { agent, docker } = agentFixture();
+  const serve = (target) => (url, init) => new Promise((resolve) => {
+    const u = new URL(url), chunks = init.body ? [Buffer.from(init.body)] : [];
+    const req = { method: init.method, url: u.pathname + u.search, headers: Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])), socket: {}, async *[Symbol.asyncIterator]() { yield* chunks; } };
+    target.handle(req, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve(new Response(b || "{}", { status: this.s, headers: { "content-type": "application/json" } })); } });
+  });
+  // The router reaches the agent through the same bridge.
+  const bridged = createRouter({ state_dir: tmpDir("cs-router-i-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd", abandon_after_s: 1800 },
+    { fetchFn: serve(agent), now: () => Date.now(), log: quiet });
+  bridged.store.data.agents.a1 = { url: "http://a1:7711", token: "agent-token" };
+  const transport = httpTransport({ endpoint: "http://pool", token: "fd", fetchFn: serve(bridged) });
+
+  await transport.launch(spec("i1", { cpus: 1, mem_gb: 1 }));
+  assert.equal(await transport.status("i1"), "running");
+  assert.equal(await transport.stop("i1"), true, "pool must support stop, not 404/405");
+  assert.deepEqual(docker.kills, [[safeName("i1"), "TERM"]]);
+  // The lane's SIGTERM teardown writes its result and the container exits 143.
+  const sb = agent.store.data.sandboxes.i1;
+  mkdirSync(join(sb.dir, "result"), { recursive: true });
+  writeFileSync(join(sb.dir, "result", "1.json"), JSON.stringify({ outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" }));
+  assert.equal(await transport.status("i1"), "exited");
+  assert.deepEqual(await transport.result("i1"), { outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" });
+  assert.ok(agent.store.data.sandboxes.i1, "stop keeps the sandbox (checkpoint) until the dispatcher destroys it");
+  assert.equal(await transport.destroy("i1"), true);
 });

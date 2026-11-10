@@ -252,15 +252,16 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       // #5165: every router login at its usage ceiling -> pass the typed 429 (reason, reset) through, uncached, so the lane defers.
       if (x.status === 429 && x.data && typeof x.data === "object") return { status: 429, body: x.data, retryAfter: x.retryAfter };
       if (!x.ok || !x.data?.token) return { status: 502, body: { error: `router credentials (${kind}): HTTP ${x.status}` } };
-      credCache[kind] = { token: x.data.token, at: now() };
+      credCache[kind] = { token: x.data.token, account: Number.isInteger(x.data.account) ? x.data.account : null, at: now() };
     }
-    return { status: 200, body: { token: credCache[kind].token } };
+    return { status: 200, body: { token: credCache[kind].token, ...(credCache[kind].account !== null && credCache[kind].account !== undefined ? { account: credCache[kind].account } : {}) } };
   }
   /** #5205: a sandbox's lane hit a usage limit: drop the cached claude token and tell the router to exclude that account. */
   async function sandboxCredLimited(id, req, body) {
     if (!sandboxAuthed(id, req)) return SANDBOX_UNAUTHORIZED;
-    delete credCache.claude;
-    const x = await call(cfg.router_url, "POST", "/agent/creds/claude/limited", { body: body && typeof body === "object" ? body : {}, token: cfg.token, timeoutMs: 20000 });
+    const b = body && typeof body === "object" ? body : {};
+    if (!Number.isInteger(b.account) || credCache.claude?.account === b.account) delete credCache.claude; // another sandbox's account stays cached
+    const x = await call(cfg.router_url, "POST", "/agent/creds/claude/limited", { body: { reset_at: b.reset_at ?? null, account: b.account ?? null }, token: cfg.token, timeoutMs: 20000 });
     return { status: x.ok ? 200 : x.status || 502, body: x.data && typeof x.data === "object" ? x.data : {} };
   }
 
@@ -396,6 +397,15 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
     [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
     [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
+    // #5274: SIGTERM the lane (PID 1) so its teardown checkpoints and reports deferred run.interrupted; the sandbox is kept, never destroyed.
+    [route("POST", "/sandboxes/:id/stop"), async ({ id }) => {
+      const r = own(id);
+      if (!r) return { status: 404, body: { state: "gone" } };
+      await refresh(r);
+      if (r.state === "exited") return { status: 200, body: { ok: true, state: "exited" } };
+      await docker.kill(r.name, "TERM");
+      return { status: 202, body: { ok: true, state: "stopping" } };
+    }],
     [route("GET", "/usage-history"), async () => {
       let rows = [];
       try { rows = readFileSync(join(stateDir, "usage-history.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }

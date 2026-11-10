@@ -423,3 +423,29 @@ describe("depcache (#4347): installs and repairs run with the lane toolchain env
     assert.equal(seen[1].env.npm_config_cache, cache.env().npm_config_cache);
   });
 });
+
+describe("depcache (#5331): per-service Python lockfiles", () => {
+  for (const eco of ["poetry", "uv"]) {
+    it(`services/<name>/${eco === "uv" ? "uv" : "poetry"}.lock is prepared in its own dir, never "skipped: no lockfile"`, async () => {
+      const { cache, lane, base } = setup(eco);
+      const wt = join(base, "wt", "svc");
+      mkdirSync(wt, { recursive: true });
+      FIXTURES[eco](join(wt, "services/api"));
+      const res = await cache.prepare({ wt, repoKey: "repo-svc" });
+      assert.equal(res.length, 1, JSON.stringify(res));
+      assert.notEqual(res[0].reason, "no lockfile");
+      assert.equal(res[0].eco, eco);
+      assert.equal(res[0].dir, "services/api");
+      assert.ok(["miss-installed", "hit"].includes(res[0].status), JSON.stringify(res[0]));
+      assert.ok(existsSync(join(wt, "services/api/.venv")));
+      void lane;
+    });
+  }
+  it("a repo with no lockfile anywhere is still skipped", async () => {
+    const { cache, base } = setup("poetry");
+    const wt = join(base, "wt", "none");
+    mkdirSync(join(wt, "services/api"), { recursive: true });
+    const [r] = await cache.prepare({ wt, repoKey: "repo-none" });
+    assert.equal(r.reason, "no lockfile");
+  });
+});

@@ -4,6 +4,7 @@
  * `forgedock resume-stalled [--dry-run] [--lane <lane>]` enumerates all in-flight
  * issues, calls scanStalls, and re-dispatches each stalled issue via run-issue.
  */
+import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -24,17 +25,20 @@ import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/ev
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane, makeLaneCache } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
+import { coerceVerify as coerceCiVerify, budgetReportLine, recordHostCheck } from "./lean/ci-budget.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
-import { otherLaneOwner } from "./lean/lanelock.mjs";
+import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
+import { parseCeilingBySize } from "./lean/ceiling.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
+import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
@@ -298,6 +302,10 @@ export function readSequenceRegenerate(cwd = process.cwd()) {
 export function readSequenceVersioned(cwd = process.cwd()) {
   try { const l = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {}; return String(l.sequence_versioned ?? l.versioned ?? "").trim() || undefined; } catch { return undefined; }
 }
+/** #5340: forge.yaml `engine.shared_surfaces` (comma scalar or block list of globs, `glob => command` = generated registry), or undefined. */
+export function readSharedSurfaces(cwd = process.cwd()) {
+  try { const v = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.shared_surfaces; const out = Array.isArray(v) ? v.map(String) : typeof v === "string" && v.trim() ? [v.trim()] : []; return out.length ? out : undefined; } catch { return undefined; }
+}
 /** #4664: forge.yaml `followups.default_milestone` (milestone title for deferred follow-ups whose parent's milestone has shipped), or undefined. */
 export function readFollowupsDefaultMilestone(cwd = process.cwd()) {
   try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.followups?.default_milestone ?? "").trim() || undefined; } catch { return undefined; }
@@ -397,6 +405,7 @@ export function readHeavy(cwd = process.cwd()) {
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`), plus `tasks_max` (#4690, default 1024). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
  * `engine.cli_busy_minutes` (default 45, #4405): extra silence allowed while the builder has a live heavy step or heavy-queue entry.
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
+ * #5346: `engine.context_ceiling_by_size` ("S=..,M=..,L=.."; a size without an entry uses context_ceiling_tokens).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
@@ -412,6 +421,7 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
       ...(posNum(y.engine?.cli_busy_minutes) ? { cliBusyMinutes: posNum(y.engine.cli_busy_minutes) } : {}),
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
+      ...(parseCeilingBySize(y.engine) ? { contextCeilingBySize: parseCeilingBySize(y.engine) } : {}), // #5346
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
   } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
@@ -426,14 +436,14 @@ export function readMergeWait(cwd = process.cwd()) {
 /**
  * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
  * `  skip_paths` comma-separated, `  max_rounds`, `  check_run: true` (#4270)) for the core path; undefined when the
- * section is absent or unreadable.
+ * section is absent or unreadable. `  guard_block: false` (#5239) lets verify.invariants fail without blocking the merge.
  */
 export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
     const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
-    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) });
+    return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -551,11 +561,12 @@ export function readEnvConfig(cwd = process.cwd()) {
     const rm = readYamlMap(cwd, "validate", "recipes"); // #5020: y?.validate?.recipes, a block map {match regex: replacement} applied to frozen validate and repro commands
     const recipes = Object.entries(rm ?? {}).map(([match, replace]) => ({ match, replace }));
     const cf = readYamlMap(cwd, "verification", "coupled_files"); // #5079: {when glob: required glob[, glob]}
+    const pp = readYamlMap(cwd, "topology", "prod_parity"); // #5284: {path glob: command | "note: how to verify"} production-only facts
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     const rr = s(y?.topology?.route_reachability); // #5087: repo-supplied command: exits non-zero when the ingress does not deliver the added route paths (args) to their service
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -923,12 +934,12 @@ export async function runFromCli(argv, deps = {}) {
   if (pathFlag && !ENGINE_PATHS.includes(pathFlag)) throw new Error(`--path must be one of ${ENGINE_PATHS.join("|")}`);
   const enginePath = pathFlag ?? readEnginePath() ?? "core";
   if (enginePath !== "full" && (retry || waitLease)) {
-    throw new Error("--retry and --wait-lease are not supported with the core path (a rerun resumes from the open PR or remote branch automatically); use --path full for them");
+    throw new Error(USER_ERRORS.retryUnsupported);
   }
   // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
-  if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
+  if (enginePath === "full" && !lane) throw new Error(USER_ERRORS.laneRequired);
   // #4298: recovery lanes (#4267) exist only on the core path; the legacy full path would silently ignore --recover.
-  if (enginePath === "full" && argv.includes("--recover")) throw new Error("--recover is not supported with --path full (recovery lanes run on the core path only)");
+  if (enginePath === "full" && argv.includes("--recover")) throw new Error(USER_ERRORS.recoverUnsupported);
   const io = deps.io ?? makeIo();
   const resultFile = flag(argv, "--result-file");
   // #4256: where the dispatcher placed this lane (hybrid execution), recorded in the lane's FORGE:STATE.
@@ -983,7 +994,7 @@ export async function runFromCli(argv, deps = {}) {
   if (enginePath !== "full") {
     // Core work-on (lean): one builder session, one reviewer, GitHub as the register.
     const leanRepo = logRepo;
-    if (!leanRepo) throw new Error("core path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+    if (!leanRepo) throw new Error(USER_ERRORS.noRepo);
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
     // #4121: a batch lane reports its result through --result-file (written atomically, also for a thrown run).
@@ -1009,7 +1020,7 @@ export async function runFromCli(argv, deps = {}) {
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1315,10 +1326,15 @@ async function addedEdges({ added, records, io, repo }) {
  */
 /** #5000: what happened to the batch after an add/requeue; never implies a run when no daemon hosts it. */
 const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reopened and hosted by the schedd`
-  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass`
+  : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass (within ~5s while lanes run; if it is finishing, the schedd re-hosts the batch)`
   : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
 
-async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
+/** #5314: `--add`/`--requeue` never exit 0 with nothing scheduled: no runner hosts the batch and none was started → a non-zero exit with the reason. */
+const unhostedFailure = (id, res, requireHost, result) => {
+  if (requireHost && !res.hosted && !res.reopened) throw Object.assign(new Error(`batch ${id}: the issues are queued in the batch but NOTHING is scheduled: no schedd hosts it. Start the runner: forgedock orchestrate --resume ${id}`), { code: "batch.not-hosted", result });
+};
+
+async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
   if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
@@ -1351,6 +1367,7 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
   if (out.added.length || out.requeued.length) print(hostedLine(id, res));
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
+  if (out.added.length || out.requeued.length) unhostedFailure(id, res, requireHost, out);
   return out;
 }
 
@@ -1382,7 +1399,7 @@ function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
  */
-async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) => console.log(l) }) {
+async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
   let res = viaDaemon ? await viaDaemon(op, issues) : null;
@@ -1390,6 +1407,11 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) =
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
     res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
+  }
+  if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
+    const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;
+    const dead = issues.filter((n) => st?.pending?.includes(n) && st?.results?.[n] === undefined && Number.isFinite(st?.notBefore?.[n]) && batchMod.cancelledOwners(root, repo, n, id).length);
+    if (dead.length) await takeover(dead);
   }
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
   print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
@@ -1403,7 +1425,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) =
  * written. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
  * cleared so `--resume` runs it again). The runner applies the entries and posts the FORGE:DECISION.
  */
-async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
+async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
   if (!id || String(id).startsWith("--") || !tokens.length) throw new Error(ORCH_USAGE);
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1421,6 +1443,11 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
     else if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) refused.push({ issue: n, reason: "still labelled needs-human: record the decision and remove the label first" });
     else open.push(n);
   }
+  // #5241: an issue deferred on a lease a cancelled batch's lane holds: the lease goes, so the requeue takes over at once
+  for (const n of open) {
+    if (!batchMod.cancelledOwners(root, repo, n, id).length || !b.store.load()?.pending?.includes(n)) continue;
+    try { await clearLease({ projector: makeProjector(io, { repo: repo ?? undefined }), issue: n }); } catch { /* the lease expires */ }
+  }
   const why = reason || "operator decision", by = "operator";
   let res = { requeued: [], refused: [] };
   if (open.length) {
@@ -1430,7 +1457,7 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
   const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
   if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
-  if (out.requeued.length) print(hostedLine(id, res));
+  if (out.requeued.length) { print(hostedLine(id, res)); unhostedFailure(id, res, requireHost, out); }
   return out;
 }
 
@@ -1517,16 +1544,18 @@ async function orchestrateClient(argv, deps = {}) {
   }
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue"), id = argv[i + 1];
-    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id) });
+    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
-    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root: await batchRootOf(), viaDaemon: holdVia(id) });
+    const root = await batchRootOf(), io = deps.io ?? makeIo();
+    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id),
+      takeover: (ns) => requeueBatch({ id, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io, viaDaemon: requeueVia(id) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
+    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id), requireHost: true });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
@@ -1542,7 +1571,7 @@ async function orchestrateClient(argv, deps = {}) {
     let sub = [...argv];
     if (!flag(sub, "--repo")) {
       const repo = await resolveDefaultRepo(deps.io ?? makeIo());
-      if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+      if (!repo) throw new Error(USER_ERRORS.noRepoOrchestrate);
       sub = [...sub, "--repo", repo];
     }
     const pinned = schedd.batchEnv(process.env, readPinnedEnvConfig(process.cwd()));
@@ -1621,15 +1650,17 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue");
-    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
-    return holdBatch({ op, id: flag(argv, `--${op}`), tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l) });
+    const hid = flag(argv, `--${op}`);
+    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l),
+      takeover: (ns) => requeueBatch({ id: hid, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
@@ -1648,7 +1679,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #5031: a resume (operator or schedd restart) keeps the base waits recorded at start; a landed commit releases on the first check
     for (const [n, l] of Object.entries(plan.baseWaits ?? {})) if (Array.isArray(l) && l.length) baseWaits.set(Number(n), l.filter((w) => w && typeof w.sha === "string" && typeof w.base === "string"));
   }
-  const issues = issuesOf(argv);
+  let issues = issuesOf(argv);
   if (!issues.length) throw new Error(ORCH_USAGE);
   const parallel = parallelOf(argv);
   // The lanes' env: a resumed daemon batch uses the env its plan kept, over the daemon's own.
@@ -1662,7 +1693,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const model = flag(argv, "--model");
   const io = deps.io ?? makeIo();
   const repo = flag(argv, "--repo") ?? plan?.repo ?? (await resolveDefaultRepo(io));
-  if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  if (!repo) throw new Error(USER_ERRORS.noRepoOrchestrate);
   const cwd = plan?.cwd ?? callerCwd;
   await assertLaneNotDefault(io, lane, repo, cwd);
   if (!deps.allowTmpfs && process.env.FORGEDOCK_BATCH_ALLOW_TMPFS !== "1") batchMod.assertDiskPath(root);
@@ -1692,6 +1723,21 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         const refusal = new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
         await alertRefusal({ root, issues, repo, cwd, argv, message: refusal.message, unmet, sink, gh: gateIo.gh, deps }); // #5167: recorded for `forgedock status`
         throw refusal;
+      }
+    }
+    // #5241: an issue already pending or running in another active batch of the repo is skipped (naming it), unless --force <reason>
+    if (!force) {
+      const taken = new Map(issues.map((n) => [n, batchMod.activeBatchOf(root, repo, n)]).filter(([, b]) => b));
+      for (const [n, b] of taken) sink.line(`skipped: #${n} is already in active batch ${b}; --force "<reason>" starts it here anyway`);
+      if (taken.size) {
+        if (taken.size === issues.length) throw new Error(`every issue is already in an active batch (${[...new Set(taken.values())].join(", ")}); pass --force "<reason>" to start them anyway`);
+        const out = []; // drop the skipped operands, keeping each valued flag with its value
+        for (let i = 0; i < argv.length; i++) {
+          if (ORCH_VALUED.includes(argv[i])) { out.push(argv[i], argv[++i]); continue; }
+          if (/^#?\d+$/.test(argv[i]) && taken.has(parseInt(argv[i].replace("#", ""), 10))) continue;
+          out.push(argv[i]);
+        }
+        argv = out; issues = issuesOf(argv);
       }
     }
     const base = deps.batchId ?? batchMod.newBatchId();
@@ -1755,7 +1801,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -1851,7 +1897,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");
     const stopLane = deps.stopLane ?? ((n, rec) => (rec?.remote || rec?.handle ? remoteStop?.(n, rec) ?? false : rec?.pid ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
-    lanes = { ...lanes, stopLane };
+    // #5241: a cancelled lane that ended gives its issue lease back, unless a live lane of another batch runs the issue.
+    const releaseLease = deps.releaseLease ?? (leanIo?.projector ? async (n) => { await clearLease({ projector: leanIo.projector, issue: n, shouldClear: () => !batchMod.batchesOwning(root, repo, n, { exceptId: batch.id }).some((o) => !o.cancelled && o.running) }); } : null);
+    lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
@@ -1861,6 +1909,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
+  // #5315: a forge.yaml key that is unknown, ignored by this engine path, mistyped or a deprecated alias is named at batch start, never silent.
+  try { for (const f of validateForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"), { path: deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd) })) sink.line(`config: ${formatFinding(f)}`); } catch { /* no forge.yaml: nothing to validate */ }
   // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
@@ -1911,7 +1961,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   let integration = deps.integration;
   if (integration === undefined) {
     const { makeIntegration } = await import("./lean/integration.mjs");
-    integration = makeIntegration({ repo, io: leanIo, cfg: await readIntegration(cwd), pattern: branches.featurePattern ?? undefined,
+    // forge#5336: the epic journeys run after each child merge (real runs only: injected test seams keep their own io).
+    const journeys = deps.leanIo || deps.leanModule || deps.laneScript ? null : (await import("./lean/acceptance.mjs")).makeJourneyRunner({ repo, io: leanIo, cwd });
+    integration = makeIntegration({ repo, io: leanIo, cfg: await readIntegration(cwd), pattern: branches.featurePattern ?? undefined, journeys, skeleton: !!journeys, // #5337: the skeleton hold rides the same real-run guard
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)), onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
     try { await integration?.prime(); } catch { /* streaks unknown: nothing is held */ }
   }
@@ -1980,6 +2032,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
+    resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
@@ -2071,6 +2124,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
+  report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396
@@ -2090,7 +2144,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
-  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
+  try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
@@ -2412,7 +2466,9 @@ export async function checkFromCli(argv, deps = {}) {
   const picked = pre.planPrecheck({ testMap, files, learned, maxMinutes, verify });
   const par = String(env.FORGE_HOST_PARALLELISM ?? "").trim(), pinned = /^\d+$/.test(par) && Number(par) > 0;
   const runCommand = deps.runCommand ?? (await import("./lean/effects.mjs")).runCheckCommand;
-  const r = await pre.selfCheck({ contract, plan: { mode: verify.mode, commands: picked.commands, budgetMs: picked.budgetMs, perCommandMs: picked.perCommandMs },
+  const { selfReviewFindings } = await import("./lean/selfreview.mjs"); // #5345: the reviewer's deterministic checks, before any reviewer
+  const review = selfReviewFindings({ contract, result: await readJson(".forge-lean/result.json"), changedFiles: files });
+  const r = await pre.selfCheck({ review, contract, plan: { mode: verify.mode, commands: picked.commands, budgetMs: picked.budgetMs, perCommandMs: picked.perCommandMs },
     parallelism: pinned ? Number(par) : 1, now: deps.now,
     run: ({ command, timeoutMs, workers }) => runCommand({ command, cwd: repo, timeoutMs, env: pinned ? { FORGE_HOST_PARALLELISM: String(workers) } : null }) });
   // #4390: each failure's full output goes to .forge-lean/logs/ (git-excluded); the table shows its tail, ids and the path
@@ -2430,8 +2486,12 @@ export async function checkFromCli(argv, deps = {}) {
   let fingerprint = null;
   try { fingerprint = await pre.worktreeFingerprint({ git, base }); } catch { /* recorded without one: the engine reads it as skipped */ }
   const strip = (x) => (x.status ? { ...(x.id ? { id: x.id } : {}), command: x.command, status: x.status } : { ...(x.id ? { id: x.id } : {}), command: x.command, rc: x.rc, ms: x.ms });
-  const record = { v: 1, at: new Date((deps.now ?? Date.now)()).toISOString(), base, fingerprint, ok: r.ok, validate: r.validate.map(strip), commands: [...r.commands.map(strip), ...r.deferred.map((command) => ({ command, status: "deferred-to-ci" }))] };
+  const record = { v: 1, at: new Date((deps.now ?? Date.now)()).toISOString(), base, fingerprint, ok: r.ok, ...(r.review?.length ? { review: r.review.map((f) => ({ code: f.code, detail: f.detail })) } : {}), validate: r.validate.map(strip), commands: [...r.commands.map(strip), ...r.deferred.map((command) => ({ command, status: "deferred-to-ci" }))] };
   try { await (deps.writeFile ?? ((p, t) => fsp.writeFile(p, t)))(join(repo, pre.SELF_CHECK_FILE), `${JSON.stringify(record)}\n`); } catch { /* .forge-lean missing: still print */ }
+  try { // #5278: parity row for the local green -> remote red hit rate; the attested status in ci.mode local-attested
+    const suites = [...record.validate, ...record.commands].filter((x) => !x.status).map((x) => ({ name: x.id ?? x.command, ok: x.rc === 0 }));
+    await recordHostCheck({ cwd: repo, head: String(await git(["rev-parse", "HEAD"])).trim(), ok: r.ok, suites });
+  } catch { /* best effort */ }
   out(o.json ? JSON.stringify({ ...r, base, fingerprint }, null, 2) : pre.formatCheckTable(r));
   return { ...r, base, fingerprint, files, exitCode: r.ok ? 0 : 1 };
 }
@@ -2460,6 +2520,7 @@ export async function schedFromCli(argv, deps = {}) {
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
     for (const l of schedMod.remoteLines(st)) console.log(l); // #4964
+    try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }
   if (sub === "cap") {

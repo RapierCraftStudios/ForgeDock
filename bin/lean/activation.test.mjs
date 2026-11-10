@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readRollouts, detectNewOffKeys, activationFailures, dormancyReport, coversFlag } from "./activation.mjs";
+import { readRollouts, detectNewOffKeys, activationFailures, dormancyReport, coversFlag, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { precheck } from "./conformance.mjs";
 
 const cfg = { files: ["config/rollouts.json"], days: 14 };
@@ -71,5 +71,40 @@ describe("dormancy report (#4769)", () => {
   it("a keep-off decision (exact or wildcard) silences the entry", async () => {
     const r = await dormancyReport({ introduced, flagState, now, decisions: [{ flag: "EXTRACTION_V2_*", decision: "keep-off" }, { flag: "egress_country_exploration", decision: "promote" }] });
     assert.deepEqual(r.map((x) => x.flag), ["egress_country_exploration", "clearance_exit_routing"]);
+  });
+});
+
+describe("#5240 rolloutModes", () => {
+  const files = { "config/rollouts.json": '{\n  "t4_retry_byte_gate": "shadow",\n  "other_flag": "on",\n  "unused": "off"\n}', "svc/retry.py": "if rollout('t4_retry_byte_gate'):\n  pass\nother_flag_x = 1", "svc/b.py": "other_flag()" };
+  const read = (f) => { if (!(f in files)) throw new Error("ENOENT"); return files[f]; };
+  it("reports the mode of flags a changed file names; shadow/off are not live", () => {
+    assert.deepEqual(rolloutModes(cfg, ["svc/retry.py", "svc/b.py"], read), [{ flag: "other_flag", mode: "on", live: true }, { flag: "t4_retry_byte_gate", mode: "shadow", live: false }]);
+  });
+  it("is empty without a registry, an unreadable registry, or a change that names no flag", () => {
+    assert.deepEqual(rolloutModes(null, ["svc/retry.py"], read), []);
+    assert.deepEqual(rolloutModes(cfg, ["svc/retry.py"], () => { throw new Error("x"); }), []);
+    assert.deepEqual(rolloutModes(cfg, ["gone.py"], read), []);
+  });
+});
+
+describe("liveDeferralBlocks (#5285)", () => {
+  const c = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R3", disposition: "defer", bucket: "post-deploy", why: "live acceptance run" }] };
+  it("a live rollout with deferred live acceptance blocks (the #38819 replay)", () => {
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "alterlab_google_pool", mode: "on", live: true }]), [{ id: "R3", flag: "alterlab_google_pool" }]);
+  });
+  it("a default-off (inert) rollout or no rollout ships with the deferral", () => {
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "alterlab_google_pool", mode: "off", live: false }]), []);
+    assert.deepEqual(liveDeferralBlocks(c, []), []);
+  });
+  it("a deferral that is not about live verification does not block", () => {
+    assert.deepEqual(liveDeferralBlocks({ requirements: [{ id: "R2", disposition: "defer", bucket: "owner:rotate key", why: "needs a credential" }] }, [{ flag: "f", mode: "on", live: true }]), []);
+  });
+});
+
+describe("liveDeferralBlocks transferred requirements (#5339)", () => {
+  it("a live rollout with a post-deploy e2e/manual requirement transferred to the epic blocks, even without a live bucket", () => {
+    const c = { requirements: [{ id: "R2", quote: "Search works against the live web [type:e2e]", disposition: "post-deploy", bucket: "date:2027-01-01" }] };
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "pool", mode: "on", live: true }]), [{ id: "R2", flag: "pool" }]);
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "pool", mode: "off", live: false }]), []);
   });
 });

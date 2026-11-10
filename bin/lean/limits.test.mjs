@@ -364,6 +364,24 @@ describe("tokenbaton rotation holds (#5205)", () => {
     assert.deepEqual(Object.keys(st.limitedAccounts).sort(), ["1", "3"], "limited accounts persist with the batch");
   });
 
+  it("#5236 a quota.exhausted lane result is held until the earliest reset and the batch log row names the code and reset", async () => {
+    const { c, now, sleep } = fakeClock();
+    const t0 = c.t, earliest = t0 + 3 * H;
+    const rot = { accounts: [{ n: 1 }, { n: 2 }], headroom: () => now() >= earliest, resumeAt: () => earliest, isAccount: (id) => id === "acct-1", currentIdentity: () => "acct-1",
+      pick: () => (now() >= earliest ? { account: 2, stale: false } : { account: null, earliestReset: earliest }) };
+    const limits = openLimits(storeFile(), { now }), updates = [], starts = [];
+    const rows = await orchestrate({ issues: [1], now, sleep, readBody: async () => "", rotator: rot, limits, identity: () => "acct-1", store: memStore(), onUpdate: (u) => updates.push(u),
+      runOne: async () => { starts.push(now()); return starts.length === 1 ? { terminalReason: "deferred", code: "quota.exhausted", backendId: "acct-1", resetAtEpochMs: earliest, detail: "quota exhausted: no account has capacity" } : { terminalReason: "merged" }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(starts[1], earliest, "rerun at the earliest reset");
+    const paused = updates.find((u) => u.outcome === "paused");
+    assert.equal(paused.quota.resumeAt, new Date(earliest).toISOString());
+    assert.match(paused.detail, /quota\.exhausted/);
+    const evt = updates.find((u) => u.event === "quota.exhausted");
+    assert.ok(evt, "batch-level quota.exhausted event");
+    assert.equal(evt.resumeAt, new Date(earliest).toISOString());
+  });
+
   it("#5205 a lane-reported limited account is excluded from headroom until its reset", async () => {
     const { c, now, sleep } = fakeClock();
     const t0 = c.t, seen = [];

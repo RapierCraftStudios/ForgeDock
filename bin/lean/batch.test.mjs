@@ -446,6 +446,9 @@ describe("#4402: the batch report prints the efficiency lines, fail-soft", () =>
   });
 });
 
+// #5314: with no daemon the CLI queues the issues, then fails loudly (nothing is scheduled); the queued result rides on the error.
+const queued = (p) => p.catch((e) => { if (e?.code === "batch.not-hosted") return e.result; throw e; });
+
 describe("#4408: issues added to a running batch (forgedock orchestrate --add)", () => {
   const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
   it("one lane running: an added independent issue starts on the next pass, an added one that Depends on the running issue waits for its merge", async () => {
@@ -545,7 +548,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.unrunAdds(), [2, 3, 5]);
     const views = [];
     const io = { gh: async (a) => { if (a[0] === "api") return "OWNER\n"; views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
-    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io }));
+    const res = await queued(quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io })));
     assert.deepEqual(res.added, [6]);
     assert.deepEqual(res.skipped.map((x) => [x.issue, x.reason]).sort(), [[3, "already in batch"], [7, "closed"], [8, "unreadable"], ["x", "not an integer"]]);
     assert.ok(views.every((a) => a.includes("-R") && a.includes("o/r")), "state read against the batch's repo");
@@ -566,7 +569,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5", "6", "--lane", "staging"], { batchRoot: root, io })), /usage/);
     assert.deepEqual(views, ["6"]);
     assert.deepEqual(b.readAdded(), [6]);
-    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io }));
+    const res = await queued(quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io })));
     assert.deepEqual(res.added, [7]);
     assert.deepEqual(res.skipped, []);
     assert.deepEqual(b.readAdded(), [6, 7]);
@@ -1065,13 +1068,13 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.match(bad.refused[1].reason, /needs-human/);
     assert.deepEqual(b.readRequeued(), []);
     assert.ok(b.readReport(), "nothing changed");
-    const ok = await quiet(() => orchestrateFromCli(["--requeue", "b1", "5", "--reason", "decided"], { batchRoot: root, io }));
+    const ok = await queued(quiet(() => orchestrateFromCli(["--requeue", "b1", "5", "--reason", "decided"], { batchRoot: root, io })));
     assert.deepEqual(ok.requeued, [5]);
     assert.equal(b.readRequeued()[0].reason, "decided");
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
   });
 
-  it("#5000: --add/--requeue on a finished batch without a daemon clear the report and say it is not hosted", async () => {
+  it("#5000/#5314: --add/--requeue on a finished batch without a daemon queue the issue and fail loudly (nothing is scheduled)", async () => {
     const root = tmpDir("batch-add-finished-");
     const b = openBatch(root, "b1");
     b.writePlan({ argv: ["1"], repo: "o/r" });
@@ -1080,14 +1083,13 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     const io = { gh: async () => JSON.stringify({ state: "OPEN", labels: [], body: "", author: { login: "a" } }) };
     const lines = [];
     const run = async (argv) => { const l = console.log; console.log = (x) => lines.push(String(x)); try { return await orchestrateFromCli(argv, { batchRoot: root, io }); } finally { console.log = l; } };
-    const add = await run(["--add", "b1", "7"]);
-    assert.deepEqual(add.added, [7]);
+    await assert.rejects(run(["--add", "b1", "7"]), /NOTHING is scheduled.*--resume b1/);
+    assert.deepEqual(b.readAdded(), [7], "the add itself is kept");
     assert.equal(b.readReport(), null, "a plain add reopens the finished batch for --resume");
-    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)), "the CLI says nothing is scheduled yet");
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
     b.writeReport({ rows: [], report: "x" });
     lines.length = 0;
-    const rq = await run(["--requeue", "b1", "5"]);
-    assert.deepEqual(rq.requeued, [5]);
+    await assert.rejects(run(["--requeue", "b1", "5"]), /NOTHING is scheduled/);
     assert.equal(b.readReport(), null);
     assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
   });
@@ -1568,14 +1570,35 @@ describe("#5161 transient engine-error retries", () => {
   });
 });
 
+describe("#5242 an add that lands after the last dispatch pass keeps the batch open", () => {
+  it("a run that receives an add in its post-loop tail writes no report.json, so the add is not stranded", async () => {
+    const batchRoot = tmpDir("tail-add-batch-");
+    const leanIo = { gh: async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ body: "", milestone: null, comments: [], author: { login: "x" } }) : a[0] === "repo" ? "main\n" : "[]"), git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
+    const deps = { dir: tmpDir("tail-add-run-"), batchRoot, allowTmpfs: true, emitTelemetry: async () => {}, leanIo, pollMs: 5, preflight: null,
+      io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ body: "", state: "OPEN" }) : "o/r\n"), git: async () => "" },
+      alertConfig: { get tailAdd() { openBatch(batchRoot, readdirSync(batchRoot)[0]).addIssues([9]); return null; } }, // read by the post-loop alerts step
+      leanModule: { runCore: async (o) => ({ terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }) } };
+    const adm = tmpDir("tail-add-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
+    const l = console.log; console.log = () => {};
+    try { await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], deps); } finally { console.log = l; process.chdir(prevCwd); }
+    const b = openBatch(batchRoot, readdirSync(batchRoot)[0]);
+    assert.deepEqual(b.unrunAdds(), [9], "the add was never drained");
+    assert.equal(b.readReport(), null, "the batch stays open for a re-host or --resume");
+  });
+});
+
 describe("#5167 early batch health in runBatch", () => {
   // #1 and #3 are roots, #2 depends on #1. #3 runs until `release`; the captured T+15 timer fires while it runs.
-  const mk = ({ fail }) => {
+  const mk = ({ fail, merged = false }) => {
     const timers = [], comments = [], notes = [], gate = { open: null };
     const released = new Promise((r) => { gate.open = r; });
     const bodies = { 1: "", 2: "Depends on #1", 3: "" };
     const leanIo = { gh: async (a) => {
       if (a[0] === "issue" && a[1] === "comment") { if (/FORGE:BATCH-HEALTH/.test(a.at(-1))) comments.push(a); return ""; }
+      if (merged && a[0] === "issue" && a[1] === "view" && a.some((x) => /closedByPullRequestsReferences/.test(x))) return JSON.stringify({ state: "CLOSED", labels: [], comments: [], closedByPullRequestsReferences: [{ number: 99 }] });
+      if (merged && a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: "MERGED" });
       if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "", milestone: { title: "M Two" }, comments: [], author: { login: "x" } });
       return a[0] === "repo" ? "main\n" : "[]";
     }, git: async (a) => (a[0] === "ls-remote" ? "abc\tref\n" : "") };
@@ -1591,6 +1614,25 @@ describe("#5167 early batch health in runBatch", () => {
     return { deps, timers, comments, notes, gate };
   };
   const capture = async (fn) => { const lines = [], l = console.log; console.log = (...a) => lines.push(a.join(" ")); try { await fn(); } finally { console.log = l; } return lines; };
+
+  it("#5243 roots whose issues were merged by hand raise no BATCH UNHEALTHY and no requeue suggestion", async () => {
+    const { deps, timers, comments, gate } = mk({ fail: true, merged: true });
+    let id = null;
+    const adm = tmpDir("bh-adm-"), prevCwd = process.cwd();
+    writeFileSync(join(adm, "forge.yaml"), "engine:\n  admission_enabled: false\n");
+    process.chdir(adm);
+    const lines = await capture(async () => {
+      const run = orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter", "--parallel", "3"], deps);
+      try {
+        await until(() => { id = readdirSyncSafe(deps.batchRoot)[0]; return id && JSON.parse(readFileSync(join(deps.batchRoot, id, "state.json"), "utf8")).results?.[1]; });
+        await timers[0].fn();
+        await until(() => existsSync(join(deps.batchRoot, id, "health.json")), 5000);
+      } finally { gate.open(); await run; process.chdir(prevCwd); }
+    });
+    assert.ok(!lines.some((l) => /BATCH UNHEALTHY|--requeue/.test(l)), lines.join("\n"));
+    assert.equal(comments.length, 0);
+    assert.equal(JSON.parse(readFileSync(join(deps.batchRoot, id, "health.json"), "utf8")).alertedAt, undefined);
+  });
 
   it("#5167 roots ending engine-error raise one BATCH UNHEALTHY at T+15 with recovery commands, on every channel", async () => {
     const { deps, timers, comments, notes, gate } = mk({ fail: true });

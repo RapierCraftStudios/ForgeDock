@@ -207,6 +207,8 @@ Present the proposed issues to the user. Ask:
 
 ### Step 6: Create issues and assign to milestone
 
+**Epic acceptance (forge#5336, hard gate)**: an issue labelled `epic` (including a planned tracker) is created only with a ```` ```forge-acceptance ```` block of at least one user journey in its body (format: `bin/lean/acceptance.mjs`). Check the body first with `npx forgedock acceptance check --body-file "$BODY_FILE"`; a non-zero exit refuses the creation.
+
 **Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here (it is the single canonical standard; no bespoke inline template). The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 --> In greenfield mode it comes from the Step 4G plan instead, and Affected Files are planned paths inside the spike's `Repo layout`. <!-- Added: forge#4175 -->
 
 **Route creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
@@ -360,6 +362,8 @@ fi
 
 ### Step 6C: Re-validate dependency order
 
+A milestone/feature epic's first wave has one `skeleton`-labelled issue (builds, boots, one journey passes); every other issue depends on it. Run `npx forgedock plan validate --live` to check.
+
 After a milestone is added, the train order changes or an issue is decomposed, run `npx forgedock plan validate --live` (#4659). Fix every `invalid` edge (a dependency in a later milestone) before continuing; `held` edges are reported only.
 
 ### Step 7: Report
@@ -441,6 +445,10 @@ bash "$(forge_resolve milestone-drift.sh)" "{slug}" --format text
 **This is the human-gated deployment step.** When the user says "ship {slug}", they've decided this feature set is ready for production.
 
 ### Step 1: Pre-flight check
+
+**Re-plan (forge#5342)**: a lane or journey run that finds the design wrong ends with a `design-invalidated` block; the engine files one spike-amendment issue and holds the affected open siblings behind it. After it merges, run `npx forgedock replan apply --amendment N --repo {REPO}` to mark each open child unchanged, re-scoped or dropped and update the epic checklist. A re-scoped user-visible child is routed to `/design` before build (forge#5330 owns the generic visual gate).
+
+**Feature acceptance (forge#5336, hard gate)**: `npx forgedock acceptance gate --milestone "{TITLE}" --stage ship`. A non-zero exit (a journey is red or never ran on the branch head) blocks the ship; print its lines and stop. A milestone without an epic is not gated.
 
 ```bash
 # Check milestone branch exists
@@ -784,7 +792,7 @@ Protected branches get ONE sync PR (`sync/milestone-{slug}`) whose head is force
 
 ## Action: Close Milestone (without shipping)
 
-For milestones that are abandoned or superseded:
+For milestones that are abandoned or superseded: shipped milestones close only after `npx forgedock acceptance gate --milestone "{TITLE}" --stage close` exits 0 (post-deploy journeys passed; the epic keeps `awaiting-measurement` until then). Abandoning an unshipped milestone is not gated.
 
 ```bash
 gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field state="closed"

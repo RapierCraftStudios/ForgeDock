@@ -125,7 +125,7 @@ const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})(?:, i
 export function renderContract(c, hash, { compact = false, scope = null } = {}) {
   const json = `<details><summary>contract.json (sha256 ${hash}${scope ? `, issue ${scope}` : ""})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
   if (compact) return `## Builder Contract (frozen \`${hash}\`)\n\n${c.requirements.length} requirement(s), ${(c.deliverables ?? []).length} deliverable(s); the tables are omitted because the contract is large.\n\n${json}`;
-  const disp = (r) => `${r.disposition}${r.verify === "out_of_band" ? `, verified out of band${r.evidence ? ` (${escl(r.evidence)})` : ""}` : ""}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
+  const disp = (r) => `${r.disposition === "post-deploy" && /\[type:(?:e2e|manual)\]/i.test(String(r.quote ?? "")) ? "post-deploy, transferred to the epic (not met)" : r.disposition}${r.verify === "out_of_band" ? `, verified out of band${r.evidence ? ` (${escl(r.evidence)})` : ""}` : ""}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
   const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
   const del = (c.deliverables ?? []).map((d) => `| ${esc(d.id)} | \`${esc(d.path)}\` | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`).join("\n");
   const dec = Array.isArray(c.decisions) && c.decisions.length // forge#4165: decision provenance

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -12,6 +12,9 @@ import { jsonStore } from "./store.mjs";
 import { versionOf } from "./version.mjs";
 
 const run = promisify(execFile);
+
+/** #5274: an agent destroy (docker rm, volume rm, wipe) outlasts the 15s call default; DELETE would 502 while the destroy still succeeded. */
+const DESTROY_TIMEOUT_MS = 180000;
 
 /**
  * Router: the endpoint ForgeDock's remote provider talks to (POST /sandboxes, GET /sandboxes/:id[/logs|/result|/usage],
@@ -97,7 +100,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // usage (validity breaks ties). Only the short-lived access token is shared; refresh tokens stay here, so this host
   // keeps refreshing its own sessions.
   // #5205: the account last handed to each agent, and accounts a lane reported limited (n -> until ms), excluded until then.
-  const lastAccount = new Map(), limited = new Map();
+  const handed = new Map(), limited = new Map(); // handed: agent -> accounts handed to it
+  const MAX_LIMIT_MS = 7 * 86400000; // a reported reset is clamped to now+7d
   function claudeToken(req = null) {
     const dirs = cfg.claude_config_dirs ?? readdirSync(homedir()).filter((d) => /^\.claude(-\d+)?$/.test(d)).map((d) => join(homedir(), d));
     const logins = [];
@@ -118,16 +122,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const { login, pct } = pick;
     log.info?.(`claude login selected: account=${login.n ?? "default"} usage=${pct ?? "unknown"}%${pick.stale ? " (stale)" : ""} expires_at=${new Date(login.expiresAt).toISOString()}`);
     const agent = req ? agentFor(req) : null;
-    if (agent) lastAccount.set(agent, login.n ?? null);
+    if (agent && login.n !== null) handed.set(agent, (handed.get(agent) ?? new Set()).add(login.n));
     return { status: 200, body: { token: login.accessToken, expires_at: new Date(login.expiresAt).toISOString(), account: login.n ?? null } };
   }
-  /** #5205: a lane on this agent hit a usage limit: its last account is excluded until reset_at (default now+1h). */
+  /** #5205: a sandbox on this agent hit a usage limit: the account it reports (one handed to this agent) is excluded until reset_at (default now+1h, at most now+7d). */
   function claudeLimited(req, body) {
-    const agent = agentFor(req), n = agent ? lastAccount.get(agent) : undefined;
-    if (n === undefined || n === null) return { status: 404, body: { error: "no claude account handed to this agent" } };
+    const agent = agentFor(req), n = body?.account;
+    if (!Number.isInteger(n)) return { status: 400, body: { error: "account required (the number from the credential response)" } };
+    if (!agent || !handed.get(agent)?.has(n)) return { status: 404, body: { error: "that claude account was not handed to this agent" } };
     const t = Date.parse(String(body?.reset_at ?? "")), e = Number(body?.reset_at);
     const at = body?.reset_at !== null && body?.reset_at !== "" && Number.isFinite(e) ? e * 1000 : t; // epoch s, or an ISO time
-    const until = Number.isFinite(at) && at > now() ? at : now() + 3600000;
+    const until = Number.isFinite(at) && at > now() ? Math.min(at, now() + MAX_LIMIT_MS) : now() + 3600000;
     limited.set(n, Math.max(until, limited.get(n) ?? 0));
     log.info?.(`claude login limited: account=${n} agent=${agent} until=${new Date(until).toISOString()}`);
     return { status: 200, body: { account: n, until: new Date(until).toISOString() } };
@@ -209,13 +214,13 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return { status: 404, body: { error: "no warm sandbox ready" } };
   }
 
-  async function forward(id, method, path) {
+  async function forward(id, method, path, timeoutMs) {
     const s = own(sbx(), id);
     const a = s && own(agents(), s.agent);
     if (!a) return { status: 404, body: { state: "gone" } };
     s.touched = now(); store.save();
     try {
-      const r = await agentCall(a, method, path);
+      const r = await agentCall(a, method, path, undefined, timeoutMs);
       if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; relayQ.delete(id); store.save(); }
       return { status: r.status, body: agentBody(r, s.agent) };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
@@ -229,7 +234,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       if (!a) { delete sbx()[id]; continue; }
       try {
         if (now() - s.touched > abandonMs) {
-          const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`);
+          const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, undefined, DESTROY_TIMEOUT_MS);
           if (r.ok || r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
         } else {
           const r = await agentCall(a, "POST", `/sandboxes/${encodeURIComponent(id)}/lease`);
@@ -306,7 +311,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     })],
     [route("GET", "/sandboxes/:id/relay"), fd(async ({ id }) => ({ status: 200, body: { requests: [...(relayQ.get(id) ?? new Map())].filter(([, r]) => !r.done).map(([rid, r]) => ({ rid, argv: r.argv })) } }))],
     [route("POST", "/sandboxes/:id/relay/:rid"), fd(async (p, body) => relayAnswer(p, body))],
-    [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`))],
+    [route("POST", "/sandboxes/:id/stop"), fd(async ({ id }) => forward(id, "POST", `/sandboxes/${encodeURIComponent(id)}/stop`))], // #5274
+    [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, DESTROY_TIMEOUT_MS))],
     [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
@@ -391,13 +397,25 @@ export function usageSource(cfg, env = process.env) {
 export function parseLiveUsage(text) {
   const f = String(text ?? "").trim().split(/\s+/).map(Number);
   if (f.length < 4 || !f.slice(0, 4).every(Number.isFinite)) return null;
-  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000 };
+  return { fiveHourPct: f[0], fiveHourResetMs: f[1] * 1000, weeklyPct: f[2], weeklyResetMs: f[3] * 1000, updatedMs: Number.isFinite(f[4]) && f[4] > 0 ? f[4] * 1000 : 0 };
 }
 
+/** #5236: a `live.<n>` sample older than this is unknown for the 5-hour window (updated 0 or absent: age unknown). */
+export const SAMPLE_MAX_AGE_MS = 30 * 60000;
+
 /** Map account n -> parsed `live.<n>` for the given accounts; unreadable or malformed files are left out. */
-export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8")) {
+export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8"), mtime = (p) => statSync(p).mtimeMs) {
   const out = new Map();
-  for (const n of ns) { try { const u = parseLiveUsage(readFile(join(dir, `live.${n}`))); if (u) out.set(n, u); } catch { /* no usage for n */ } }
+  for (const n of ns) {
+    let u = null;
+    try { u = parseLiveUsage(readFile(join(dir, `live.${n}`))); } catch { u = null; }
+    // #5236: tokenbaton's polled endpoint figure `used.<n>` (a percent; the file mtime is its age), feature-detected.
+    try {
+      const p = join(dir, `used.${n}`), pct = Number(String(readFile(p)).trim().split(/\s+/)[0]), at = mtime(p);
+      if (Number.isFinite(pct) && pct >= 0 && Number.isFinite(at)) u = { ...(u ?? {}), polledPct: pct, polledAtMs: at };
+    } catch { /* no polled figure for n */ }
+    if (u) out.set(n, u);
+  }
   return out;
 }
 
@@ -409,7 +427,7 @@ export function readUsage(dir, ns, readFile = (p) => readFileSync(p, "utf8")) {
  * `fallback: true`. Every candidate excluded: a typed 429 carrying the earliest reset (limited untils included).
  * @returns {{status: 200, login, pct, fallback, stale} | {status: 429, retryAfter, body} | {status: 503}}
  */
-export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited = new Map() }) {
+export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited = new Map(), maxAgeMs = SAMPLE_MAX_AGE_MS }) {
   const valid = logins.filter((l) => l.accessToken && l.expiresAt > now + 30 * 60000);
   if (!valid.length) return { status: 503 };
   const used = (pct, resetMs) => (resetMs <= now ? null : pct); // #5205: a passed reset is unknown
@@ -420,11 +438,18 @@ export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited =
     if (Number.isFinite(lim) && lim > now) { blocked.push(lim); continue; }
     const u = l.n !== null && l.n !== undefined ? usage.get(l.n) : undefined;
     if (!u) { unknown.push({ l, stale: false }); continue; }
-    const five = used(u.fiveHourPct, u.fiveHourResetMs), week = used(u.weeklyPct, u.weeklyResetMs);
-    if ((five !== null && five >= ceilingPct) || (week !== null && week >= 100)) {
+    // #5236: a 5-hour figure older than maxAgeMs is unknown (a future reset does not make an old sample fresh); the
+    // weekly figure holds until its reset. A newer polled `used.<n>` replaces the 5-hour figure.
+    const has = Number.isFinite(u.fiveHourPct) && Number.isFinite(u.weeklyPct);
+    const aged = has && u.updatedMs > 0 && now - u.updatedMs > maxAgeMs;
+    const polled = Number.isFinite(u.polledPct) && now - u.polledAtMs <= maxAgeMs && u.polledAtMs > (u.updatedMs ?? 0) ? u.polledPct : null;
+    const five = polled !== null ? polled : has && !aged ? used(u.fiveHourPct, u.fiveHourResetMs) : null;
+    const week = has ? used(u.weeklyPct, u.weeklyResetMs) : null;
+    const fiveFull = five !== null && five >= ceilingPct, weekFull = week !== null && week >= 100;
+    if (fiveFull || weekFull) {
       const r = [];
-      if (five !== null && five >= ceilingPct) r.push(u.fiveHourResetMs);
-      if (week !== null && week >= 100) r.push(u.weeklyResetMs);
+      if (fiveFull) r.push(has && u.fiveHourResetMs > now ? u.fiveHourResetMs : has && u.weeklyResetMs > now ? u.weeklyResetMs : now + 3600000);
+      if (weekFull) r.push(u.weeklyResetMs);
       blocked.push(Math.max(...r));
     } else if (five === null || week === null) unknown.push({ l, stale: true });
     else known.push({ l, pct: five });

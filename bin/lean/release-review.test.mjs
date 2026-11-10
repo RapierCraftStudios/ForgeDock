@@ -178,3 +178,76 @@ describe("reviewStagingJson (library entry)", () => {
     assert.ok(r.lines.length > 0);
   });
 });
+
+describe("fixStep in snapshot mode (#5276)", () => {
+  const failed = { pr: 7, head: H1, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [101], filed: [101], ciFailing: 0 };
+  const SNAP = "1".repeat(40), TIP = "2".repeat(40), ORIG = "3".repeat(40), PICK = "4".repeat(40);
+  /** git/gh fakes for one blocker fix (PR 55, closes issue 101) merged on staging; `conflict` makes merge-tree fail. */
+  const world = ({ conflict = false } = {}) => {
+    const git = [], gh = [];
+    const io = {
+      git: (a) => {
+        git.push(a);
+        if (a[0] === "rev-parse") return `${TIP}\n`;
+        if (a[0] === "merge-base") { if (a[3] === SNAP) throw new Error("not an ancestor"); return ""; }
+        if (a[0] === "rev-list") return `${ORIG} ${"5".repeat(40)}\n`;
+        if (a[0] === "merge-tree") { if (conflict) throw new Error("CONFLICT"); return "tree\n"; }
+        if (a[0] === "log") return a.includes("--format=%B") ? "fix: blocker\n" : "An\nae@x\n2026-01-01T00:00:00Z\n";
+        if (a[0] === "commit-tree") return `${PICK}\n`;
+        return "";
+      },
+      gh: async (a) => {
+        gh.push(a);
+        if (a[1] === "list" && a[0] === "issue") return "[]";
+        if (a[0] === "pr" && a[1] === "list") return JSON.stringify([{ number: 55, mergeCommit: { oid: ORIG }, mergedAt: "t", labels: [], closingIssuesReferences: [{ number: 101 }] }]);
+        if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ body: "" });
+        return "";
+      },
+    };
+    return { io, git, gh };
+  };
+  const snapCtx = (seam, w, fixMode) => {
+    const c = ctx(seam, { review: { result: failed } });
+    c.io = { ...c.io, ...w.io };
+    c.git = w.io.git;
+    c.config = { mode: "snapshot", ...(fixMode ? { fixMode } : {}) };
+    c.state.release = { branch: "release/x", snapshot: SNAP, range: {}, picks: [] };
+    return c;
+  };
+
+  it("R2: after the fix lane merges, its commit is cherry-picked onto the release branch before the delta review", async () => {
+    const s = fakeSeam({ heads: [H2] }), w = world();
+    const c = snapCtx(s, w);
+    const r = await fixStep(c);
+    assert.equal(r.blocked, undefined);
+    assert.deepEqual(c.state.release.picks, [{ sha: PICK, orig: ORIG, pr: 55 }]);
+    assert.ok(w.git.some((a) => a[0] === "push" && a.includes(`${PICK}:refs/heads/release/x`)));
+    assert.ok(w.gh.some((a) => a[1] === "edit" && a[a.indexOf("--body") + 1].includes("FORGE:RELEASE")), "the record is written to the PR");
+    assert.deepEqual(s.log.slice(0, 2), [["lane", 101, "staging"], ["pre", H1]]);
+  });
+
+  it("a conflicting cherry-pick blocks the job instead of reviewing a head that lacks the fix", async () => {
+    const s = fakeSeam({ heads: [H2] });
+    const r = await fixStep(snapCtx(s, world({ conflict: true })));
+    assert.equal(r.blocked, true);
+    assert.match(r.reason, /conflicts/);
+    assert.ok(!s.log.some((e) => e[0] === "pre"));
+  });
+
+  it("fix_mode recut moves the branch to the staging tip instead of picking", async () => {
+    const s = fakeSeam({ heads: [H2] }), w = world();
+    const c = snapCtx(s, w, "recut");
+    await fixStep(c);
+    assert.ok(w.git.some((a) => a[0] === "push" && a.includes("--force") && a.includes(`${TIP}:refs/heads/release/x`)));
+    assert.equal(c.state.release.snapshot, TIP);
+    assert.deepEqual(c.state.release.picks, []);
+  });
+
+  it("freeze mode (no mode) never touches git", async () => {
+    const s = fakeSeam({ heads: [H2] }), w = world();
+    const c = snapCtx(s, w);
+    c.config = {};
+    await fixStep(c);
+    assert.deepEqual(w.git, []);
+  });
+});

@@ -109,9 +109,16 @@ function flowSection(runs) {
   for (const r of runs) if (r.code) { codes[r.code] = (codes[r.code] ?? 0) + 1; coded++; }
   const top = Object.entries(codes).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([code, count]) => ({ code, count, pct: count / coded }));
+  // #5339: verified = merged with no transferred or unverified requirement; an older run without the field counts as verified
+  const merged = runs.filter((r) => r.reason === "merged");
+  const isVerified = (r) => r.verified !== false;
+  const ms = new Map();
+  for (const r of merged) { const k = r.milestone ?? "(none)"; const g = ms.get(k) ?? { milestone: k, merged: 0, verified: 0 }; g.merged++; if (isVerified(r)) g.verified++; ms.set(k, g); }
   return {
     n,
-    mergedPct: ratio(runs.filter((r) => r.reason === "merged").length, n),
+    mergedPct: ratio(merged.length, n),
+    verifiedPct: ratio(merged.filter(isVerified).length, n),
+    milestones: [...ms.values()].sort((a, b) => a.milestone.localeCompare(b.milestone)),
     needsHumanPct: ratio(runs.filter((r) => r.reason === "needs-human").length, n),
     remediationPct: ratio(runs.filter((r) => r.remediated).length, n),
     codesN: coded, codes: top,

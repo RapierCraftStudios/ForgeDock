@@ -37,6 +37,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   BACKEND_AUTH: "backend.auth", // forge#5168: the claude CLI login failed ("Failed to authenticate"); deferred under the account hold, never engine-error, never the breaker
+  QUOTA_EXHAUSTED: "quota.exhausted", // forge#5236: no account has capacity (every login at its ceiling); deferred until the earliest reset, never backend.auth
   HOST_BUSY: "host.busy",
   GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
   GH_AUTH: "gh.auth", // forge#4662: gh answered HTTP 401 and one token refresh did not fix it; run deferred, a rerun resumes
@@ -60,12 +61,14 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start (a non-auth 4xx/config error or a non-HTTP start failure); needs-human, not relaunched
+  BASE_RED: "base.red", // forge#5239: a verify.invariants guard fails on the base too; the lane is deferred behind the introducing issue, never needs-human
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   SANDBOX_TRANSIENT: "sandbox.transient", // forge#5095: the sandbox provider answered a 5xx on launch (router/agent infrastructure); deferred with backoff, capped by max_deferrals, never needs-human
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
+  DESIGN_INVALIDATED: "design.invalidated", // forge#5342: a lane found the plan wrong; one spike amendment filed, siblings held; the rework-share rollup counts it
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   DEPENDENCY_BLOCKED: "dependency.blocked",
   // Lane resolution refusals (#4125): before any lease, comment or worktree; terminal reason `lane-refused`.
