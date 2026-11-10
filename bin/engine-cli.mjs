@@ -1348,8 +1348,9 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost 
   if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   out.edges = await addedEdges({ added: out.added, records, io, repo }); // #4773
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
-  if (out.added.length || out.requeued.length) { print(hostedLine(id, res)); unhostedFailure(id, res, requireHost, out); }
+  if (out.added.length || out.requeued.length) print(hostedLine(id, res));
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
+  if (out.added.length || out.requeued.length) unhostedFailure(id, res, requireHost, out);
   return out;
 }
 
