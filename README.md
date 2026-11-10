@@ -128,7 +128,7 @@ Deeper: [How it works](docs/site/how-it-works.md) · [GitHub is your agents' mem
 
 - [Getting started](docs/site/getting-started.md) · [Install](docs/site/install.md) · [Configuration](docs/CONFIG.md) · [Command reference](docs/site/command-reference.md)
 - [Troubleshooting & recovery](docs/site/troubleshooting.md) · [Outcome codes](docs/OUTCOME-CODES.md) · [Stats](docs/STATS.md)
-- [Start a new project](docs/site/start-a-new-project.md) · [Comparison with other approaches](docs/comparison.md) · [Release eval scorecards](docs/eval/README.md)
+- [Start a new project](docs/site/start-a-new-project.md) · [Comparison with other approaches](docs/comparison.md) · [Release eval scorecards](docs/eval/README.md) · [Adversarial benchmark](docs/eval/adversarial-bench.md)
 
 ## For companies
 
