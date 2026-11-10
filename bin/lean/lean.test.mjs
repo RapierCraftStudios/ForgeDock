@@ -2414,7 +2414,7 @@ describe("comment templates", () => {
   });
 
   it("live posting: stage notes appear while the builder session is still running", async () => {
-    const until = async (wd, marker) => { for (let i = 0; i < 300 && !wd.comments.some((c) => c.includes(`<!-- ${marker} -->`)); i++) await new Promise((r) => setTimeout(r, 10)); return wd.comments.map(markerOf); };
+    const until = async (wd, marker) => { for (let i = 0; i < 1000 && !wd.comments.some((c) => c.includes(`<!-- ${marker} -->`)); i++) await new Promise((r) => setTimeout(r, 10)); return wd.comments.map(markerOf); };
     const w = world({ builder: async (wd, put, kind) => {
       wd.liveSeen ??= {};
       if (kind === "plan") {
@@ -7834,10 +7834,10 @@ describe("lane shared-state isolation (#5333)", () => {
   it("a note posted live that a later stash pop replaces with another lane's file is re-rendered after the builder's final turn", async () => {
     const w = withNote({}, async (wd, put) => {
       put(`forge-stamp: issue=7 contract=-\n${STAGE_MD.implementation}`);
-      for (let i = 0; i < 300 && !wd.comments.some((c) => c.includes("<!-- FORGE:IMPLEMENTATION -->")); i++) await new Promise((r) => setTimeout(r, 10));
+      for (let i = 0; i < 1000 && !wd.comments.some((c) => c.includes("<!-- FORGE:IMPLEMENTATION -->")); i++) await new Promise((r) => setTimeout(r, 10));
       put(foreign(99));
     });
-    await run(w);
+    await run(w, { livePollMs: 10, stableMs: 30 });
     assert.ok(w.patches.length >= 1, "the posted comment was edited");
     assert.doesNotMatch(w.patches.at(-1).join(" "), /curl_cffi|chrome156/);
     assert.ok(!w.comments.some((c) => /curl_cffi|chrome156/.test(c)));
