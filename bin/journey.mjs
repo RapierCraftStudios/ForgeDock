@@ -2451,6 +2451,7 @@ export async function forge(ctx) {
 import { detectConfig } from "./init-detect.mjs";
 import { enrich, resolveEnrichBackend } from "./init-enrich.mjs";
 import { isClaudeCliAvailable } from "./runner.mjs";
+import { installSplash } from "./splash-install.mjs";
 import { annotatedReviewScreen, box, confirm, getLogoTagline, input, select } from "./tui.mjs";
 import {
   defaultExec as repoExec, listOwners, listAppInstallations, ownerCoverageWarning,
@@ -3084,12 +3085,15 @@ export async function runJourney(ctx) {
     // stable copy, not the ephemeral npm/npx/git source. Stashed on ctx so
     // forge()'s reporting block can surface the outcome (see isEphemeralCachePath
     // advisory extension above).
+    const splashPkgRoot = ctx.forgeHome;
     const persistResult = await persistHome(ctx);
     ctx.persistHomeResult = persistResult;
     if (!persistResult.skipped) {
       ctx.forgeHome = persistResult.forgeHome;
     }
     const forged = await forge(ctx);
+    const splash = installSplash({ pkgRoot: splashPkgRoot, home: ctx.home, env: ctx.env, argv: ctx.argv, exec: ctx.splashExec });
+    if (splash.line) ctx.stdout.write(`  ${splash.status === "installed" || splash.status === "already-installed" ? "✔" : "!"} ${splash.line}\n\n`);
     const { draft, description } = await setupAfterRead(ctx, await read(ctx));
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);

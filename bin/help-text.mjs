@@ -111,6 +111,7 @@ export const FLAG_ROWS = [
   ["--verbose", "Show detection sources for every field (init)"],
   ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
   ["--refresh-context", "Regenerate review.context/tech_stack from manifests and show a diff for approval (init)"],
+  ["--no-splash", "Skip installing the startup splash plugin during setup (or set FORGEDOCK_NO_SPLASH=1)"],
   ["--version, -v", "Print the installed version and check for updates"],
 ];
 

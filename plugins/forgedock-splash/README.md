@@ -13,6 +13,10 @@ It changes nothing else: no commands, prompts, tools or settings.
 
 ## Install and turn off
 
+`npx forgedock` installs it by default at user scope (through a local `forgedock-local` marketplace under `~/.forge`) when the `claude` CLI is on PATH, and refreshes it on every re-run. Skip it with `npx forgedock --no-splash` or `FORGEDOCK_NO_SPLASH=1`; a plugin you disabled is never re-enabled. `npx forgedock uninstall` removes it.
+
+Manual install:
+
 ```
 /plugin marketplace add RapierCraftStudios/ForgeDock
 /plugin install forgedock-splash@forgedock
