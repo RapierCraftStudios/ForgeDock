@@ -79,11 +79,16 @@ test("calibrateEvidence checks each evidence pattern against the file at the bas
 });
 
 /** A fake runner for the real runArm: the arm's diff touches `paths` and adds `added`. */
-function fakeRun({ paths = [], added = [], claude = { is_error: false, total_cost_usd: 0.5, duration_ms: 1000 } } = {}) {
+function fakeRun({ paths = [], added = [], claude = { is_error: false, total_cost_usd: 0.5, duration_ms: 1000 }, full = {} } = {}) {
   const calls = [];
   const run = async (cmd, args) => {
     calls.push([cmd, ...args]);
     if (cmd === "claude") return { code: 0, stdout: JSON.stringify(claude), stderr: "" };
+    if (cmd === "forgedock") {
+      const rf = args[args.indexOf("--result-file") + 1], n = args[1];
+      if (full[n]) writeFileSync(rf, JSON.stringify(full[n]));
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (cmd === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${HEAD}\n`, stderr: "" };
     if (cmd === "git" && args[0] === "diff" && args[1] === "--quiet") return { code: paths.length ? 1 : 0, stdout: "", stderr: "" };
     if (cmd === "git" && args[0] === "diff" && args[1] === "--name-only") return { code: 0, stdout: paths.join("\n"), stderr: "" };
@@ -122,4 +127,18 @@ test("CLI: validate, run (control arm) and aggregate write rows and a scorecard"
   assert.equal(JSON.parse(o2.s).arms.control.wrong_implemented, 1);
   assert.equal(await main(["aggregate", rows, "--corpus", cp, "--model", "m", "--date", "yesterday"], { out: o2, err }), 1);
   assert.equal(await main(["bogus"], { out, err }), 1);
+});
+
+test("CLI run with both arms: the full lane closes the invalid issue, the control implements it; both land in the scorecard", async () => {
+  const tmp = tmpDir("bench-adv-both-"), cp = new URL("../../docs/eval/corpus/adversarial-v1.json", import.meta.url).pathname;
+  const out = { s: "", write(x) { this.s += x; } }, err = { s: "", write(x) { this.s += x; } };
+  const cfgPath = join(tmp, "cfg.json"), rows = join(tmp, "rows.jsonl"), sc = join(tmp, "score.md");
+  writeFileSync(cfgPath, JSON.stringify({ arms: { full: { repo: "acme/sandbox", issues: Object.fromEntries(corpus().issues.map((i, k) => [i.id, k + 1])) }, control: { model: "claude-opus-5-5" } } }));
+  const { run } = fakeRun({ paths: ["more_itertools/more.py"], full: { 5: { terminalReason: "closed-invalid", cost_usd: 0.2, wall_ms: 500, model_ms: 400 } } });
+  assert.equal(await main(["run", "--corpus", cp, "--config", cfgPath, "--out", rows, "--issues", "adv-wp-one-empty"], { run, out, err }), 0, err.s);
+  const lines = readFileSync(rows, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(lines.map((r) => [r.arm, r.wrong_implemented]), [["full", false], ["control", true]]);
+  assert.equal(lines[0].terminal, "closed-invalid", "the full row came from the result file");
+  assert.equal(await main(["aggregate", rows, "--corpus", cp, "--model", "claude-opus-5-5", "--date", "2026-11-10", "--scorecard", sc], { out, err }), 0);
+  assert.match(readFileSync(sc, "utf8"), /Wrong issues implemented[^\n]*\| 0 of 1 invalid \| 1 of 1 invalid \|/);
 });
