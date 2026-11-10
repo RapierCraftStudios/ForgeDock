@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -289,6 +289,7 @@ function postWorld(o = {}) {
       if (k === "pr view") return a.includes("headRefName") ? "staging\n" : `${o.head ?? HEAD}\n`;
       if (k === "pr comment") { if (o.commentFails) throw new Error("boom"); return ""; }
       if (k === "label create") return "";
+      if (k === "api repos/o/r/branches/main/protection/required_status_checks" && o.required) return JSON.stringify({ contexts: o.required });
       if (k === "pr list") return "42\n";
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
@@ -525,6 +526,26 @@ describe("review-staging --summary", () => {
     assert.match(posted(w2)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
     const w3 = await finalized({ ci: "not json" });
     assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1);
+  });
+
+  it("only required checks block; other red checks are non-blocking warnings", async () => {
+    const red = (...names) => JSON.stringify([{ name: "CI", bucket: "pass" }, ...names.map((name) => ({ name, bucket: "fail" }))]);
+    const w = await finalized({ ci: red("lighthouse-hands"), required: ["CI"] });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    assert.match(posted(w)[0], /FORGE:GATE_PASS[\s\S]*non-blocking warning: lighthouse-hands/);
+    assert.match(w.out.join("\n"), /WARNING: 1 non-required check\(s\) red, non-blocking: lighthouse-hands/);
+    const w2 = await finalized({ ci: red("CI", "lighthouse-hands"), required: ["CI"] });
+    assert.equal(await reviewStagingFromCli(["--summary"], w2.io), 1);
+    assert.match(posted(w2)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
+    const w3 = await finalized({ ci: red("lighthouse-hands") });
+    assert.equal(await reviewStagingFromCli(["--summary"], w3.io), 1, "no readable required set: every red check blocks");
+  });
+
+  it("forge.yaml gate.required_checks adds required checks", () => {
+    const ck = [{ name: "CI", bucket: "pass" }, { name: "lighthouse-hands", bucket: "fail" }];
+    assert.deepEqual(classifyChecks(ck, ["CI"]), { blocking: 0, warnings: ["lighthouse-hands"] });
+    assert.deepEqual(classifyChecks(ck, ["CI", "lighthouse-hands"]), { blocking: 1, warnings: [] });
+    assert.deepEqual(classifyChecks(ck, []), { blocking: 1, warnings: [] });
   });
 
   it("a LIKELY HIGH does not block; a deleted test-gate verdict fails closed", async () => {

@@ -48,6 +48,7 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
+    ["npx forgedock doctor --verbose", "Also show internal and legacy checks (FORGE_HOME, Playwright MCP, version-gated features, resource hygiene)"],
     ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
