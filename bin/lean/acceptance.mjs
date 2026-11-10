@@ -149,7 +149,8 @@ export function gateMilestone({ epics, head, stage = "ship" }) {
     if (!d || d.untrusted || !d.journeys?.length) { reasons.push(`${tag}: no runnable journey declared${d?.untrusted ? " (only by untrusted authors)" : ""}`); continue; }
     if (d.errors?.length) reasons.push(`${tag}: ${d.errors.join("; ")}`);
     const recs = (e.comments ?? []).filter((c) => isTrustedComment(c)).map((c) => acceptanceResultOf(c.body)).filter(Boolean);
-    const onHead = recs.filter((r) => r.site !== "post-deploy" && sameSha(r.head, head)).at(-1);
+    // close after ship: the branch is deleted (head null), so the last milestone-site run is the shipped head's record
+    const onHead = recs.filter((r) => r.site !== "post-deploy" && (head == null || sameSha(r.head, head))).at(-1);
     for (const j of d.journeys.filter((x) => x.when === "milestone")) {
       const got = onHead?.results?.[j.name]?.result;
       if (got === "pass") continue;
@@ -199,7 +200,7 @@ export async function gateByRef({ io, repo, title = null, branch = null, head = 
   if (!epics.length) return { gated: false, ok: true, reasons: [], milestone: ms };
   let h = head;
   if (!h && ms.branch) { try { h = String(await io.gh(["api", `repos/${repo}/branches/${encodeURIComponent(ms.branch)}`, "--jq", ".commit.sha"])).trim(); } catch { h = null; } }
-  if (!h) return { gated: true, ok: false, reasons: [`milestone ${ms.title}: head of ${ms.branch} unreadable (fail closed)`], milestone: ms };
+  if (!h && stage !== "close") return { gated: true, ok: false, reasons: [`milestone ${ms.title}: head of ${ms.branch} unreadable (fail closed)`], milestone: ms };
   return { gated: true, ...gateMilestone({ epics, head: h, stage }), milestone: ms, epics, head: h };
 }
 
@@ -267,7 +268,7 @@ export async function acceptanceFromCli(argv, deps = {}) {
     if (!val("--milestone") && !val("--branch")) throw new Error(usage);
     const g = await gateByRef({ io, repo, title: val("--milestone"), branch: val("--branch"), stage, pattern });
     if (!g.gated) print("acceptance: milestone has no epic; not gated");
-    else if (g.ok) print(`acceptance: pass (${g.milestone.title} @ ${String(g.head).slice(0, 7)}, ${stage})`);
+    else if (g.ok) print(`acceptance: pass (${g.milestone.title} @ ${g.head ? String(g.head).slice(0, 7) : "branch deleted"}, ${stage})`);
     else for (const r of g.reasons) print(`acceptance: BLOCKED: ${r}`);
     return g.ok ? 0 : 1;
   }
