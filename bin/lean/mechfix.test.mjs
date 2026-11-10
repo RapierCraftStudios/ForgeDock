@@ -38,6 +38,20 @@ describe("#5348 enumerating list insertion", () => {
     assert.deepEqual(r.remaining.map((m) => m.symbol), ["gone"]);
     assert.equal(fs.readFileSync(join(cwd, "a.test.mjs"), "utf8"), `const L = ["one", "two", "three", "four"];\nconst M = ["x1", "x2", "x3", "x4"];\n`);
   });
+  it("a failed write moves only that test's rows to remaining, not another test's applied rows", () => {
+    const cwd = tmp();
+    fs.writeFileSync(join(cwd, "a.test.mjs"), `const L = ["one", "two", "three"];\n`);
+    fs.writeFileSync(join(cwd, "b.test.mjs"), `const M = ["x1", "x2", "x3"];\nconst N = [a, b];\n`);
+    const missing = [
+      { symbol: "four", module: "m", test: "a.test.mjs", line: 1 },
+      { symbol: "x4", module: "n", test: "b.test.mjs", line: 1 },
+      { symbol: "nope", module: "o", test: "b.test.mjs", line: 2 },
+    ];
+    const fsx = { ...fs, writeFileSync: (f, t) => { if (String(f).endsWith("b.test.mjs")) throw new Error("EROFS"); return fs.writeFileSync(f, t); } };
+    const r = applyEnumerating({ missing, cwd, fsx });
+    assert.deepEqual(r.applied.map((m) => m.symbol), ["four"]);
+    assert.deepEqual(r.remaining.map((m) => m.symbol).sort(), ["nope", "x4"]);
+  });
 });
 
 describe("#5348 duplicate export rename", () => {

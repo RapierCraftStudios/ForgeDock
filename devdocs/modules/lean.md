@@ -192,6 +192,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`mechfix.mjs` `applyEnumerating` writes the missing entry into the test's string list, `renameDuplicates` renames an
    export only its declaring file mentions to `<App><Name>`; the detector's `others`, which declare the name themselves, do not
    block the rename and are left untouched, any other mentioning file does), commit it (`MECHANICAL_FIX` event) and re-run the detector.
+   #5405: `applyEnumerating` collects each test's applied rows per test and adds them to `applied` only after that test's write
+   succeeds; a failed write moves only that test's rows to `remaining`, so earlier tests' written fixes stay applied and committed.
    What is left goes to one narrow session per stage: the enumerating round also carries the pending duplicate-export and
    English-copy findings (`mergeNarrowTasks`; their gates re-check). The session runs profile `narrow` (no lane text,
    CLAUDE.md off, `prompts.mjs` `narrowFixPrompt`: contract excerpt, failure output and named files, `NARROW_PROMPT_MAX`
