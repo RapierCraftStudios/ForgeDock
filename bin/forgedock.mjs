@@ -28,7 +28,7 @@ import {
   findMarkdownFiles,
   parseInstallTier,
   writeForgeYaml,
-  backupExisting,
+  backupForgeYaml,
   backfillForgeYaml,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
@@ -89,6 +89,8 @@ import {
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
 import { checkContext, refreshContextFlow } from "./review-context.mjs";
+import { runConfigCommand } from "./config-history.mjs";
+import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
 import { applyAuthEnv, doctorAppAuth } from "./auth/app-token.mjs";
 import {
@@ -1086,7 +1088,7 @@ async function initFlow(c) {
     return refreshContextFlow({
       cwd: c.cwd,
       out: c.stdout,
-      deps: { interactive: process.stdin.isTTY === true, confirm, backup: backupExisting, write: atomicWriteFile },
+      deps: { interactive: process.stdin.isTTY === true, confirm, backup: (p) => backupForgeYaml(p, "refresh-context"), write: atomicWriteFile },
     });
   }
   const hasExisting = existsSync(outputPath);
@@ -1127,7 +1129,7 @@ async function initFlow(c) {
       c.stdout.write("  Run this inside the target git repository, or use interactive init (npx forgedock init) to edit those fields.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init (minimal)");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const content = buildMinimalForgeYaml({
       projectName: draft.project.name.value,
@@ -1166,7 +1168,7 @@ async function initFlow(c) {
       c.stdout.write("  Enter real values, or run this inside the target git repository.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
@@ -2760,6 +2762,8 @@ async function doctor(fix = false, verbose = false) {
             }
           } catch { /* advisory check: never fail doctor */ }
 
+          for (const f of validateForgeYaml(content)) (f.level === "error" ? fail : warn)(`forge.yaml ${f.code}`, f.message);
+
           const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
           const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
           if (
@@ -3385,7 +3389,7 @@ function help() {
     ["npx forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> [--before s|--after s] | --show <id>", "Unattended multi-milestone train: one durable state file (order, active set, lifecycle), typed STOP reasons, resumable; never edits forge.yaml"],
     ["npx forgedock guards list [--path p] [--json] | backfill --since <date> [--dry-run]", "Fix guards: list the FORGE:GUARD records (test files + protected hunks of merged fixes) covering a path, or build them for already-merged lean lanes"],
     ["npx forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--dry-run] | status [--name <w>]", "Named, scoped, capped watches (forge.yaml issue_watch.watches) that claim matching open issues into lanes or one long-lived orchestrate batch, or (mode: release) pool them and cut themed releases; see docs/ISSUE-WATCH.md"],
-    ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; see docs/SELFTEST.md"],
+    ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>] | --journey [--repo <owner/sandbox>] [--pr <N>] [--update-snapshots]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; --journey runs the packed CLI as a new user (clean environment, then a sandbox repo to a merged PR) and posts FORGE:JOURNEY; see docs/SELFTEST.md"],
     ["npx forgedock prod-watch run [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status", "Production-side watcher (forge.yaml prod_watch): read-only signal sources -> triage -> governor -> issues, kill-switch file, owner digest; see docs/PROD-WATCH.md"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock decisions list [--stale] [--refresh]", "List anchored decisions (FORGE:DECISION); --stale shows those with an anchor missing on the base"],
@@ -4538,11 +4542,14 @@ switch (command) {
         console.log(`\n  Sections already present (unchanged): ${result.alreadyPresent.join(", ") || "none"}`);
         console.log(`\n  All added sections are commented out — edit forge.yaml to enable the ones you need.`);
       }
+    } else if (["history", "diff", "rollback", "record", "import-bak"].includes(subcommand)) {
+      exitCode = runConfigCommand(subcommand, restArgs.slice(1), { cwd: process.cwd() });
     } else {
       console.log(`${RED}Unknown config subcommand: ${subcommand ?? "(none)"}${RESET}`);
       console.log(
         `Usage: ${CYAN}npx forgedock config migrate [dir]${RESET}\n` +
-          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).`,
+          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).\n` +
+          `       ${CYAN}npx forgedock config history | diff <n> | rollback <n> | record [reason] | import-bak [--delete]${RESET}`,
       );
       exitCode = 1;
     }

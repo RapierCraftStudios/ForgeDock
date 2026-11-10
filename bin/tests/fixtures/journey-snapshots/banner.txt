@@ -1,0 +1,73 @@
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+        ▄▄██████████████████
+     ▄█████████████▀▀▀▀▀▀▀▀▀
+   ▄██████████▀▀
+    ▀▀▀▀▀  ▄▄███████▀
+        ▄████████▀
+      ▄██████▀
+       ▀▀▀▀
+
+  F O R G E D O C K
+  ──── lighting the forge ────────────────────
+
+  ✔ Node              <ver>
+  ✔ git               <ver>
+  ✖ Claude Code       <path> not found
+╭───────────────────────── fix ─────────────────────────╮
+│  Install Claude Code: https://claude.com/claude-code  │
+╰───────────────────────────────────────────────────────╯
+
+  ✖ GitHub CLI        not found
+╭───────────────── fix ─────────────────╮
+│  Install gh: https://cli.github.com/  │
+│  Windows: winget install GitHub.cli   │
+╰───────────────────────────────────────╯
+
+  ✔ Platform          Linux (WSL) (unknown)
+  ✔ WSL               detected
+  ✔ Shell             unknown
+
+  Forging commands into <path>
+
+  ✔ 42 slash commands linked (new 42, updated 0, unchanged 0)
+  ✔ 3 pipeline scripts linked into <path> (new 3, updated 0, copied 0, unchanged 0)
+  ✔ SessionStart hook registered <path>
+  ✔ toolset migrated to persisted home <path>
+  ✔ PreToolUse enforcement hook registered (branch/label enforcement)
+
+  Reading your repository
+
+  ✔ owner/repo        your-github-org/your-repo-name  [low]
+  ✔ default branch    main  [low]
+  ✔ staging branch    main  [low]
+  ✔ project name      Your Repo Name  [med]
+  ✔ description       none found  [low]
+  ✦ no Claude Code CLI or ANTHROPIC_API_KEY — skipping AI enrichment
+
+  Connect to GitHub
+
+  Skipped — install anytime: https://github.com/apps/rapiercraft-forgedock/installations/new
+
+   ▄▄████████
+ ▄█████▀▀▀▀▀   Forged. install → config in <time>
+ ▀▀ ▄████▀
+   ▀▀▀
+
+  ✔ forge.yaml written          5 fields flagged # TODO
+  ✔ 42 commands · hook active   Claude Code knows this repo
+  ✔ 3 pipeline scripts   <path> — classify-lane, transition-label, validate-pr-target
+
+╭──────────────────────────────── what's next ─────────────────────────────────╮
+│   1. install GitHub App       — github.com/apps/rapiercraft-forgedock        │
+│   2. run npx forgedock labels setup — bootstrap GitHub labels                │
+│   3. run npx forgedock doctor     — verify the install is green              │
+│   4. open claude in this repo                                                │
+│   5. run /issue <title> then <path> <number>                               │
+│   6. run npx forgedock run-issue <N> — drive an issue via the durable engine │
+│   7. run npx forgedock watch      — monitor pipeline state                   │
+│   8. run npx forgedock guide      — how the workflow fits together           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  not for you? npx forgedock uninstall removes everything · full command list: npx forgedock help
+  docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget
+
+  Skipped — try it anytime: npx forgedock demo
