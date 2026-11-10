@@ -20,6 +20,7 @@ import { tmpDir } from "./_tmp.mjs";
 import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
+  mkdtempSync,
   mkdirSync,
   writeFileSync,
   rmSync,
@@ -4378,5 +4379,41 @@ describe("readScopeLimitEvents (forge#4690)", () => {
       writeFileSync(join(root, "proc", "7", "cgroup"), "0::/user.slice/x.service\n");
       assert.equal(readScopeLimitEvents(7, o), null);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("#5334 a killed stream session carries the usage it streamed", () => {
+  const msg = (id, out) => `echo '{"type":"assistant","message":{"id":"${id}","usage":{"input_tokens":10,"output_tokens":${out},"cache_read_input_tokens":100,"cache_creation_input_tokens":5},"content":[{"type":"tool_use","name":"Bash","input":{"command":"x"}}]}}'`;
+  const fake = (body) => {
+    const d = mkdtempSync(join(os.tmpdir(), "fd-5334-")); const bin = join(d, "claude");
+    writeFileSync(bin, `#!/bin/sh\n${body}\n`); chmodSync(bin, 0o755);
+    return { d, bin };
+  };
+  const go = async (o, body) => { const { d, bin } = fake(body); const { runCliBackendAsync } = await import("../runner.mjs"); return runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, ...o }); };
+  const want = { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 10, cache_read_input_tokens: 200 };
+
+  it("CLI_IDLE and CLI_TIMEOUT errors carry usage, turns and toolUses; the session snapshot matches", async () => {
+    for (const [o, code] of [[{ idleMs: 500, maxMs: 20000 }, "CLI_IDLE"], [{ idleMs: 0, maxMs: 700 }, "CLI_TIMEOUT"]]) {
+      const session = {};
+      await assert.rejects(go({ ...o, session }, `${msg("a", 10)}\n${msg("b", 20)}\nsleep 30`), (e) => {
+        assert.equal(e.code, code); assert.deepEqual(e.usage, want); assert.equal(e.turns, 2); assert.equal(e.toolUses.length, 2);
+        assert.deepEqual(session.snapshot().usage, want); assert.equal(session.snapshot().turns, 2);
+        return true;
+      });
+    }
+  });
+
+  it("a host kill (SIGTERM from outside) carries the usage streamed so far", async () => {
+    await assert.rejects(go({ idleMs: 20000, maxMs: 20000 }, `${msg("a", 10)}\n${msg("b", 20)}\nkill -TERM $$`), (e) => {
+      assert.equal(e.code, "CLI_BACKEND_FAILED"); assert.deepEqual(e.usage, want); assert.equal(e.turns, 2);
+      return true;
+    });
+  });
+
+  it("estimateCostUsd prices by model family and is null without usage", async () => {
+    const { estimateCostUsd } = await import("../runner.mjs");
+    const u = { input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 1e6, cache_creation_input_tokens: 1e6 };
+    assert.equal(estimateCostUsd(u, "claude-opus-5-5"), 110.25); assert.equal(estimateCostUsd(u, "default"), 22.05); assert.equal(estimateCostUsd(u, "haiku"), 7.35);
+    assert.equal(estimateCostUsd(null), null);
   });
 });

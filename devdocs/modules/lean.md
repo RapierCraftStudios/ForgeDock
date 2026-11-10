@@ -2887,3 +2887,20 @@ and the runner's auto-add stay soft.
 ## Entry 2026-11-10 — issue-watch parity with the owner's bash intake watcher (#5313)
 
 `issuewatch-parity.mjs` holds the pure helpers: `isPullRequest`, `closingPrIssues` (open PRs' `closingIssuesReferences`), `skipLabelHit` with `DEFAULT_SKIP_LABELS`, `releaseInFlight` (a `~/.forge/releases/<id>/state.json` with no end `status` and a fresh mtime, since `runRelease` writes `status` only when the job ends) and `watchLiveness`. `planClaims` and the release pass skip PRs, issues with an open closing PR and `skip_labels` (default for `mode: batch`); a `search` selecting PRs fails at load. `runWatch` stamps `state.heartbeat` every pass and, with `release_pause` (default in batch), writes `state.paused` and skips the pass while a release job runs; the next pass resumes. `tick` re-checks `batch.reported` right before `batch.add` so a finished batch is never added to. `status` prints running/paused/stale/done with the heartbeat. Cost: 0 LLM calls.
+
+## Entry 2026-11-10 — Interrupted runs record the usage they streamed (#5334)
+
+A builder session cut off before its `result` line (host kill, idle kill, timeout, lane limit, or an engine SIGTERM
+mid-call) used to record nothing: `RUN_TERMINAL` showed `model_ms: 0` and no turns. Now `runCliBackendAsync` attaches the
+streamed `usage`, `turns` and `toolUses` to every stream kill (`CLI_IDLE`, `CLI_TIMEOUT`, a host kill's
+`CLI_BACKEND_FAILED`) and fills the caller's `session.snapshot()`. `lean.mjs` records one `PHASE_ATTEMPT_USAGE` per
+killed session (`killedAttempt`): from the error on a kill branch, or from `flushInflight()` at the start of `finish`
+on a signal, always before `RUN_TERMINAL`; `err.usageRecorded` prevents a double count. A killed stream has no CLI
+cost, so `cost_usd` is estimated from tokens (`runner.mjs` `estimateCostUsd`, per model family; unnamed model = the
+middle tier) and flagged `cost_estimated: true`. A kill that streamed nothing carries `usage_unknown: true` (turns
+`null`), and `RUN_TERMINAL` copies the flag; never a silent 0. `forgedock stats` needs no change: it sums
+`PHASE_ATTEMPT_USAGE` rows.
+
+Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issue>.jsonl` (`runLogPath`); the bare
+`<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
+does, and take the repo from the RUN_START slice, never from the number alone.

@@ -110,7 +110,7 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 };
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null }) => {
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
     const bin = pinnedBin || resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
@@ -122,7 +122,7 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: [...(resume ? ["--resume", resume] : []), ...settings],
       logger: { log() {} },
-      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
+      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, session, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
       baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses) }; // #4410: tool calls per turn, re-reads
