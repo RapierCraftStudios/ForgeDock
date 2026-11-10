@@ -241,7 +241,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
       try { return { ok: true, code: 0, output: String(exec("sh", ["-c", cmd], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer: 16 << 20 })) }; }
       catch (e) { return { ok: false, code: e.status ?? null, timedOut: e.code === "ETIMEDOUT", output: `${e.stdout ?? ""}${e.stderr ?? ""}` || String(e.message) }; }
     },
-    runningLanes: (repo) => unfinished(repo).flatMap((b) => Object.entries(b.state.load()?.lanes ?? {})
+    runningLanes: (repo) => unfinished(repo).flatMap((b) => Object.entries(b.store.load()?.lanes ?? {})
       .filter(([n, rec]) => rec?.pid && isLaneAlive(rec.pid, b.resultFile(n)) && !existsSync(b.resultFile(n)))
       .map(([n]) => ({ batch: b.id, issue: n }))),
     batches: (repo) => unfinished(repo).map((b) => ({ id: b.id, k: b.readParallel() ?? 1 })),
