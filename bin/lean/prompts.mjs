@@ -23,8 +23,12 @@ export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url)
 /** #4364: `forgedock check`, the engine's validate and pre-PR checks run in-session before the result is written. */
 export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
+/** #5347: every turn re-sends the whole session context, so independent read-only calls go out together, not one per turn. */
+const BATCH_RULE = `One turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.`;
+
 const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
-Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Issue independent read-only calls (reads, greps, git log/blame, gh) in the same turn or one shell call. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.`;
+Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.
+${BATCH_RULE}`;
 
 /** #4450: the host-rules block of the builder prompts (toolchain, sparse and repo-facts lines included), reused by the light-lane prompt. */
 export const hostRules = ({ toolchain = null, sparse = null, facts = null } = {}) => `${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}`;
@@ -169,7 +173,7 @@ A new default-off flag or rollout key needs an activation row: defer, bucket \`o
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
 A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
-A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with "Build reads:", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.
 
 An added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
 
@@ -243,6 +247,18 @@ If you find you are blocked, write "status":"blocked" with a typed "block" inste
 export function contextPackNote(pack) {
   if (!pack?.text) return "";
   return `\n\nContext pack (hints, not proof; compiled by the engine from GitHub and git). The issue outranks the code, which outranks this pack: verify anything you rely on. Contract requirements quote only the issue and its trusted comments, never this pack. Open a link (gh issue view N / gh pr view N) yourself when you need more.\n${pack.text}`;
+}
+
+/**
+ * #5347: the implement prompt's opening batch, from facts: the frozen contract's deliverable paths, the context pack's file list
+ * and the test-map commands those paths select. "" when there is nothing to open. The build's first turn issues these reads together.
+ */
+export function buildOpeningNote({ paths = [], tests = [], packFiles = [] } = {}) {
+  const ps = [...new Set(paths.filter((p) => typeof p === "string" && p))].slice(0, 12);
+  const ts = [...new Set(tests.filter((t) => typeof t === "string" && t))].slice(0, 6);
+  const fs = [...new Set(packFiles.filter((p) => typeof p === "string" && p && !ps.includes(p)))].slice(0, 8);
+  if (!ps.length && !ts.length && !fs.length) return "";
+  return `\n\nOpening batch: your first turn reads these together as parallel tool calls (the "Build reads" you listed in the plan, plus):${ps.length ? `\nDeliverables: ${ps.join(", ")}` : ""}${fs.length ? `\nContext pack files (touched by earlier PRs on these symbols): ${fs.join(", ")}` : ""}${ts.length ? `\nMapped tests (test map): ${ts.join("; ")}` : ""}`;
 }
 
 /** #4271: the bug-lane plan addition (lean.repro_test prefer on a bug/type:bug issue); "" when off, so the prompt is unchanged. */

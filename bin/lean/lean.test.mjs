@@ -6,7 +6,7 @@ import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
@@ -1989,8 +1989,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause).
-    assert.ok(approxTokens(plan) <= 2175, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1675, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
+    assert.ok(approxTokens(plan) <= 2275, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1725, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2448,8 +2448,8 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2075, `plan prompt is ${approxTokens(plan)} tokens`); // 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} of 1650 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(plan) <= 2150, `plan prompt is ${approxTokens(plan)} tokens`); // 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(impl) <= 1700, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -5086,7 +5086,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const w = withCi(world());
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
-    assert.equal(builders(w)[1][4], builderImplementPrompt());
+    assert.ok(builders(w)[1][4].startsWith(builderImplementPrompt()), "#5347: only the opening-batch note follows the base prompt");
     assert.doesNotMatch(traj(w)[0], /\| Verify \|/);
   });
 
@@ -7458,11 +7458,11 @@ describe("#4395 lane profile", () => {
 
   it("#4410 both builder prompts ask for same-turn read-only calls and read-once notes (within budget)", () => {
     for (const p of [builderPlanPrompt(7), builderImplementPrompt(), builderImplementPrompt("ci")]) {
-      assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
+      assert.match(p, /One turn, many calls: when several reads, greps, git show\/log\/blame or gh calls do not depend on each other, issue them all in the same turn/);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1650 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2075, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2075 tokens`);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1700, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2150, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -7802,7 +7802,7 @@ describe("prompt budgets (#4969)", () => {
     assert.notEqual(moved, impl);
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
-    assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
+    assert.ok(approxTokens(moved) <= 1700, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1700 tokens`);
   });
 });
 
@@ -7852,5 +7852,60 @@ describe("#5237 relaxation gate", () => {
     const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf()] })); w.diffText = rescue;
     assert.equal((await run(w, { dir: tmpDir("relax-") })).terminalReason, "merged");
     assert.equal(w.vcalls.length, 0);
+  });
+});
+
+describe("#5347 builders open with one batch of independent reads", () => {
+  it("the batching rule is its own rule in plan, implement and fix prompts, and the plan asks for the build's reads", async () => {
+    const { fixSessionPrompt, buildOpeningNote } = await import("./prompts.mjs");
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt(), fixSessionPrompt({ task: "t" })]) assert.match(p, /One turn, many calls/);
+    assert.match(builderPlanPrompt(7), /Build reads/);
+    assert.match(buildOpeningNote({ paths: ["a.mjs", "a.mjs", "b.mjs"], tests: ["node --test a.test.mjs"] }), /Deliverables: a\.mjs, b\.mjs\nMapped tests \(test map\): node --test a\.test\.mjs/);
+    assert.equal(buildOpeningNote({}), "");
+  });
+  it("the implement session prompt carries the contract's deliverable paths and the test map's commands", async () => {
+    const { buildOpeningNote } = await import("./prompts.mjs");
+    const { selectCommands, parseTestMap } = await import("./testmap.mjs");
+    const map = parseTestMap(JSON.stringify({ version: 1, entries: [{ globs: ["src/**"], command: "node --test src/x.test.mjs" }] }));
+    const note = buildOpeningNote({ paths: ["src/x.mjs", "docs/y.md"], tests: selectCommands(map, ["src/x.mjs", "docs/y.md"]) });
+    assert.match(note, /src\/x\.mjs, docs\/y\.md/);
+    assert.match(note, /node --test src\/x\.test\.mjs/);
+  });
+});
+
+describe("#5347 lane: the build opens with its independent reads in one turn", () => {
+  it("a lane whose contract names two deliverables hands the builder the opening batch; the builder's one-turn reads through the real stream parser record calls/turn >= 2", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { toolStats } = await import("./toolstats.mjs");
+    const two = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R1"] }] };
+    const w = world({ contract: two, changed: ["src/foo.js", "src/bar.js", "test/foo.test.js"] }), dir = tmpDir("core-onebatch-"), orig = w.io.runner;
+    const prompts = [];
+    w.io.runner = async (c) => {
+      const out = await orig(c);
+      if (c.role !== "builder" || /PLANNING ONLY/.test(c.prompt)) return out;
+      prompts.push(c.prompt);
+      // the model's side, stood in by a fake CLI: one assistant message (one id) with a Read per opening-batch path
+      const paths = (/Deliverables: (.*)/.exec(c.prompt)?.[1] ?? "").split(", ").filter(Boolean);
+      const blocks = paths.map((p, i) => ({ type: "tool_use", id: `t${i}`, name: "Read", input: { file_path: p } }));
+      const ev = (o) => JSON.stringify(o).replaceAll("'", "");
+      const script = `#!/bin/sh\necho '${ev({ type: "assistant", message: { id: "m1", content: blocks, usage: { input_tokens: 1, output_tokens: 1 } } })}'\necho '${ev({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s", usage: { input_tokens: 2, output_tokens: 2 } })}'\n`;
+      writeFileSync(`${dir}/fake`, script); chmodSync(`${dir}/fake`, 0o755);
+      const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: dir, bin: `${dir}/fake`, logger: { log() {} }, stream: true });
+      return { ...out, tools: toolStats(r.toolUses) };
+    };
+    await run(w, { dir });
+    assert.ok(prompts.length && /Opening batch: .*\nDeliverables: src\/foo\.js, src\/bar\.js/.test(prompts[0]), "the implement prompt carries the opening batch");
+    const u = readLog(dir, 7).find((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement" && e.trigger === "build");
+    assert.equal(u.tools.turns, 1);
+    assert.equal(u.tools.calls, 2);
+    assert.ok(u.tools.per_turn >= 2, `calls/turn ${u.tools.per_turn}`);
+  });
+  it("the context pack's file list joins the opening batch (compileContextPack files from the ledger)", async () => {
+    const { compileContextPack } = await import("./context.mjs");
+    const { buildOpeningNote } = await import("./prompts.mjs");
+    const pack = compileContextPack({ issue: 9, links: [], attempts: [], ledger: [{ pr: 4, sha: "abc", title: "t", revert: false, reverted: null, files: ["src/a.js", "src/b.js"], notes: [] }], facts: [] });
+    assert.deepEqual(pack.files, ["src/a.js", "src/b.js"]);
+    assert.deepEqual(compileContextPack({ issue: 9, links: [], attempts: [], ledger: [], facts: [] }).files, []);
+    assert.match(buildOpeningNote({ paths: ["src/a.js"], packFiles: pack.files }), /Context pack files \(touched by earlier PRs on these symbols\): src\/b\.js/);
   });
 });

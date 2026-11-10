@@ -366,3 +366,13 @@ describe("#4491 before/after compare", () => {
     assert.match(text, /^issue quality: n\/a \(no gh\/repo\)$/m);
   });
 });
+
+describe("#5347 calls/turn alert", () => {
+  const lines = (p50, n) => formatEfficiencyLines({ ...efficiencyMetrics({}), tool_calls_per_turn_p50: p50, tool_calls_per_turn_n: n });
+  it("fires below the threshold with enough samples; silent above it, with few samples or no data", () => {
+    assert.ok(lines(1.03, 5).some((l) => /^ALERT: calls\/turn p50 1\.03/.test(l)));
+    assert.ok(!lines(2.1, 5).some((l) => l.startsWith("ALERT")));
+    assert.ok(!lines(1.03, 1).some((l) => l.startsWith("ALERT")));
+    assert.ok(!lines(null, 0).some((l) => l.startsWith("ALERT")));
+  });
+});

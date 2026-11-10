@@ -233,6 +233,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Before/after (#4436): `forgedock stats --lane-profile` (`query.mjs` `laneProfileReport` / `renderLaneProfiles`) reads
    every RUN_START slice (`readLocalRuns(dir, {allSlices: true})`), groups finished runs by `lane_profile` with baseline
    sessions/median/mean per phase and the conformance rate per profile (the `--tiers` rule); `--issues` pins the issue set.
+   **One turn, many calls** (#5347): #4410's clause was buried in the quiet-output paragraph and the p50 stayed ~1.03, so
+   `HOST_RULES` now ends with its own `BATCH_RULE`; the plan prompt ends with a "Build reads:" list and the implement prompt
+   gets `buildOpeningNote` (contract deliverable paths plus the base test map's commands for them) so the build opens with
+   one batch. Plan/implement caps rose to 2150/1700 tokens.
    **Batched reads** (#4410): `HOST_RULES` also tells the builder to issue independent read-only calls (reads, greps,
    git log/blame, gh) in the same turn or one shell call, and to read each file's ranges once and keep notes. The
    wording replaced older text, so the plan/implement token caps are unchanged. Calls/turn p50 > 1.5 is no longer a
@@ -1141,7 +1145,8 @@ any error prints `efficiency: n/a (...)` without failing the batch.
 The last line (#4410) is `tools: calls/turn p50 X, re-reads (>=3x same path)/merge Y`. For each merged lane with
 `PHASE_ATTEMPT_USAGE.tools`, it takes the implement calls / implement tool turns and prints the median across lanes,
 plus re-read paths per such lane (`tool_calls_per_turn_p50`, `rereads_per_merge`, per-issue
-`implement_tool_calls_per_turn` / `implement_rereads`). Logs without tool data give `n/a`.
+`implement_tool_calls_per_turn` / `implement_rereads`). Logs without tool data give `n/a`. #5347: with 3 or more
+sampled lanes (`tool_calls_per_turn_n`) and p50 below `CALLS_PER_TURN_ALERT` (1.5) an `ALERT:` line follows.
 `forgedock stats --efficiency` prints the same lines per batch and over trailing
 windows (`docs/STATS.md`). Cost: 0 LLM calls.
 
