@@ -250,14 +250,15 @@ export function contextPackNote(pack) {
 }
 
 /**
- * #5347: the implement prompt's opening batch, from facts: the frozen contract's deliverable paths and the test-map
- * commands those paths select. "" when there is nothing to open. The build's first turn issues these reads together.
+ * #5347: the implement prompt's opening batch, from facts: the frozen contract's deliverable paths, the context pack's file list
+ * and the test-map commands those paths select. "" when there is nothing to open. The build's first turn issues these reads together.
  */
-export function buildOpeningNote({ paths = [], tests = [] } = {}) {
+export function buildOpeningNote({ paths = [], tests = [], packFiles = [] } = {}) {
   const ps = [...new Set(paths.filter((p) => typeof p === "string" && p))].slice(0, 12);
   const ts = [...new Set(tests.filter((t) => typeof t === "string" && t))].slice(0, 6);
-  if (!ps.length && !ts.length) return "";
-  return `\n\nOpening batch: your first turn reads these together as parallel tool calls (the "Build reads" you listed in the plan, plus):${ps.length ? `\nDeliverables: ${ps.join(", ")}` : ""}${ts.length ? `\nMapped tests (test map): ${ts.join("; ")}` : ""}`;
+  const fs = [...new Set(packFiles.filter((p) => typeof p === "string" && p && !ps.includes(p)))].slice(0, 8);
+  if (!ps.length && !ts.length && !fs.length) return "";
+  return `\n\nOpening batch: your first turn reads these together as parallel tool calls (the "Build reads" you listed in the plan, plus):${ps.length ? `\nDeliverables: ${ps.join(", ")}` : ""}${fs.length ? `\nContext pack files (touched by earlier PRs on these symbols): ${fs.join(", ")}` : ""}${ts.length ? `\nMapped tests (test map): ${ts.join("; ")}` : ""}`;
 }
 
 /** #4271: the bug-lane plan addition (lean.repro_test prefer on a bug/type:bug issue); "" when off, so the prompt is unchanged. */

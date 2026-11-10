@@ -6,7 +6,7 @@ import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
@@ -7870,5 +7870,42 @@ describe("#5347 builders open with one batch of independent reads", () => {
     const note = buildOpeningNote({ paths: ["src/x.mjs", "docs/y.md"], tests: selectCommands(map, ["src/x.mjs", "docs/y.md"]) });
     assert.match(note, /src\/x\.mjs, docs\/y\.md/);
     assert.match(note, /node --test src\/x\.test\.mjs/);
+  });
+});
+
+describe("#5347 lane: the build opens with its independent reads in one turn", () => {
+  it("a lane whose contract names two deliverables hands the builder the opening batch; the builder's one-turn reads through the real stream parser record calls/turn >= 2", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { toolStats } = await import("./toolstats.mjs");
+    const two = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R1"] }] };
+    const w = world({ contract: two, changed: ["src/foo.js", "src/bar.js", "test/foo.test.js"] }), dir = tmpDir("core-onebatch-"), orig = w.io.runner;
+    const prompts = [];
+    w.io.runner = async (c) => {
+      const out = await orig(c);
+      if (c.role !== "builder" || /PLANNING ONLY/.test(c.prompt)) return out;
+      prompts.push(c.prompt);
+      // the model's side, stood in by a fake CLI: one assistant message (one id) with a Read per opening-batch path
+      const paths = (/Deliverables: (.*)/.exec(c.prompt)?.[1] ?? "").split(", ").filter(Boolean);
+      const blocks = paths.map((p, i) => ({ type: "tool_use", id: `t${i}`, name: "Read", input: { file_path: p } }));
+      const ev = (o) => JSON.stringify(o).replaceAll("'", "");
+      const script = `#!/bin/sh\necho '${ev({ type: "assistant", message: { id: "m1", content: blocks, usage: { input_tokens: 1, output_tokens: 1 } } })}'\necho '${ev({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s", usage: { input_tokens: 2, output_tokens: 2 } })}'\n`;
+      writeFileSync(`${dir}/fake`, script); chmodSync(`${dir}/fake`, 0o755);
+      const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: dir, bin: `${dir}/fake`, logger: { log() {} }, stream: true });
+      return { ...out, tools: toolStats(r.toolUses) };
+    };
+    await run(w, { dir });
+    assert.ok(prompts.length && /Opening batch: .*\nDeliverables: src\/foo\.js, src\/bar\.js/.test(prompts[0]), "the implement prompt carries the opening batch");
+    const u = readLog(dir, 7).find((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement" && e.trigger === "build");
+    assert.equal(u.tools.turns, 1);
+    assert.equal(u.tools.calls, 2);
+    assert.ok(u.tools.per_turn >= 2, `calls/turn ${u.tools.per_turn}`);
+  });
+  it("the context pack's file list joins the opening batch (compileContextPack files from the ledger)", async () => {
+    const { compileContextPack } = await import("./context.mjs");
+    const { buildOpeningNote } = await import("./prompts.mjs");
+    const pack = compileContextPack({ issue: 9, links: [], attempts: [], ledger: [{ pr: 4, sha: "abc", title: "t", revert: false, reverted: null, files: ["src/a.js", "src/b.js"], notes: [] }], facts: [] });
+    assert.deepEqual(pack.files, ["src/a.js", "src/b.js"]);
+    assert.deepEqual(compileContextPack({ issue: 9, links: [], attempts: [], ledger: [], facts: [] }).files, []);
+    assert.match(buildOpeningNote({ paths: ["src/a.js"], packFiles: pack.files }), /Context pack files \(touched by earlier PRs on these symbols\): src\/b\.js/);
   });
 });
