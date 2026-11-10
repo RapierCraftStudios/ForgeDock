@@ -5,7 +5,7 @@
 #
 # Usage: check-spec-size.sh [base_ref]     (default: $BASE_REF, else origin/staging)
 # Env:   PR_LABELS  comma-separated PR label names (untrusted; grep-matched only)
-#        PR_HEAD_REF / PR_BASE_REF  PR head and base branch names; staging -> main
+#        PR_HEAD_REF / PR_BASE_REF  PR head and base branch names; staging|release/* -> main
 #                   (a release PR) is skipped: cumulative growth is not judged here
 #        PR_SAME_REPO  must be "true" for the release skip (a fork branch named
 #                   staging must not bypass the budget)
@@ -40,10 +40,11 @@ if ! git rev-parse --verify -q "$BASE^{commit}" >/dev/null; then
 fi
 
 # --- release PR skip (staging -> main) ---------------------------------------
-if [ "${PR_HEAD_REF:-}" = "staging" ] && [ "${PR_BASE_REF:-}" = "main" ] && [ "${PR_SAME_REPO:-}" = "true" ]; then
+case "${PR_HEAD_REF:-}" in staging|release/*) _REL_HEAD=1 ;; *) _REL_HEAD=0 ;; esac
+if [ "$_REL_HEAD" = "1" ] && [ "${PR_BASE_REF:-}" = "main" ] && [ "${PR_SAME_REPO:-}" = "true" ]; then
   out "## Spec-size budget"
   out ""
-  out "Result: SKIPPED (release PR staging -> main; growth was checked per PR)"
+  out "Result: SKIPPED (release PR staging|release/* -> main; growth was checked per PR)"
   echo "spec-size: skipped for release PR staging -> main"
   exit 0
 fi

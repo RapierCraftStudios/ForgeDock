@@ -26,7 +26,7 @@ describe("doctor verbosity", () => {
   it("default run hides internal and legacy warnings", () => {
     const out = run();
     for (const label of ["FORGE_HOME env var", "Playwright MCP", "CLAUDE.md legacy block", "Version-gated features", "Resource hygiene"]) {
-      assert.ok(!new RegExp(`⚠\\s+${label.replace(/[()~.]/g, "\\$&")}`).test(out), `${label} should be hidden`);
+      assert.ok(!new RegExp(`⚠\\s+${label.replace(/[\\()~.]/g, "\\$&")}`).test(out), `${label} should be hidden`);
     }
   });
 
