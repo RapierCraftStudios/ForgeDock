@@ -2992,3 +2992,8 @@ path is authorized (#5380).
 - **Epic transfer.** `closePlan` with `liveBlocks` also reports `transferred` and `transfer` (the e2e/manual post-deploy rows); `lean.mjs` transfers `closing.transfer ?? closing.open`.
 - **Protection read.** `requiredChecksRead` returns `{checks, unreadable}` (non-404 failure = unreadable); `review-staging` `requiredSet` then yields `[]`, so every red check blocks (fail closed). `requiredChecksFor` still returns the names.
 - **Cleanup.** `formatSelfReview` and `holdEdges` removed (no callers); `budgetAlerts({facts, seen})`; shared `runMinutes` in `ci-budget.mjs`.
+
+## Entry 2026-11-10 — release reviewer sessions pin the job's forgedock (#5388)
+
+- **PATH shim.** `release-review.mjs` `realSeam.runAgent` passes the runner an env whose PATH starts with a lazily made tmp dir holding a `forgedock` shim that execs `process.execPath ROOT/bin/forgedock.mjs`, so briefs, spec-panel prompts and the test gate run this build (`--post-reviewer`), not the globally installed CLI. The dir is removed on process exit; `makeRunner` is an injection point for tests.
+- **Session failures.** `reviewRound` records each failed reviewer session (domain, exit, last lines) instead of swallowing it, and appends `session failures: ...` to the `finalize stopped` and degraded-panel `fail` reasons.

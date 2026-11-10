@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam } from "./release-review.mjs";
+import { readFileSync } from "node:fs";
 import { reviewStagingJson } from "../review-staging.mjs";
 
 const H1 = "a".repeat(40), H2 = "b".repeat(40);
@@ -32,6 +33,23 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [] } = {}) {
 const ctx = (seam, steps = {}) => ({ io: { review: seam }, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
 
 describe("reviewStep", () => {
+  it("reviewer sessions run the release job's own forgedock build", async () => {
+    let seen = null;
+    const real = realSeam({ repo: "o/r", def: "main", env: { PATH: "/usr/bin" }, cwd: "/tmp", makeRunner: () => async (a) => { seen = a; return { text: "" }; } });
+    await real.runAgent({ role: "release-review-security", issue: 7, prompt: "p" });
+    const [dir, ...rest] = seen.env.PATH.split(":");
+    assert.equal(rest.join(":"), "/usr/bin");
+    const shim = readFileSync(`${dir}/forgedock`, "utf8");
+    assert.ok(shim.includes(process.execPath) && shim.includes("bin/forgedock.mjs"), shim);
+  });
+
+  it("a failed reviewer session is reported with its exit and tail", async () => {
+    const s = fakeSeam({ fins: [{ code: 1, data: null, lines: ["finalize failed"] }] });
+    s.runAgent = async (a) => { if (a.role === "release-review-security") throw Object.assign(new Error("forgedock: unknown option --post-reviewer"), { code: 2 }); return { text: "ok" }; };
+    const r = await reviewStep(ctx(s));
+    assert.match(r.reason, /session failures: security \(exit 2: forgedock: unknown option --post-reviewer\)/);
+  });
+
   it("realSeam exposes every effect the steps use, matching the fake seam", () => {
     const real = Object.keys(realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp" })).sort();
     assert.deepEqual(real, Object.keys(fakeSeam()).filter((k) => k !== "log" && k !== "agents").sort());
