@@ -34,8 +34,17 @@ export function parseE2e(sec = {}) {
 
 /** Changed files (minus the engine's hand-off files) that are e2e specs per `cfg.paths`. */
 export const e2eSpecs = (files, cfg = parseE2e({})) => verifiableFiles(files).filter((f) => (cfg.paths ?? []).some((g) => matchesGlob(f, g)));
-/** True when a contract requirement quote carries a `[type:e2e]` criterion. */
-export const contractWantsE2e = (contract) => (Array.isArray(contract?.requirements) ? contract.requirements : []).some((r) => /\[type:e2e\]/i.test(String(r?.quote ?? "")));
+/** True when a contract requirement quote carries a `[type:e2e]` or `[type:manual]` criterion (#5339). */
+export const contractWantsE2e = (contract) => (Array.isArray(contract?.requirements) ? contract.requirements : []).some((r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? "")));
+
+/** #5339: markers of a test that fakes the thing it claims to prove (mocked modules, patched I/O, fake/stub fixtures). */
+const FAKE_RE = /\b(?:vi|jest)\.(?:mock|fn|spyOn)\(|\bmonkeypatch\b|\bunittest\.mock\b|\bmock\.patch\b|\bMagicMock\b|\bsinon\.stub\b|\b(?:fake|mock|stub)[_-]?[a-z]\w*|\b(?:Fake|Mock|Stub)[A-Z]\w*/i;
+/** #5339: the `paths` whose content (via `read`) carries a fake marker; an unreadable path is not faked. Deterministic, no model call. */
+export function fakedPaths(paths, read) {
+  const out = [];
+  for (const p of paths ?? []) { let t = null; try { t = read(p); } catch { /* unreadable */ } if (typeof t === "string" && FAKE_RE.test(t)) out.push(p); }
+  return out;
+}
 
 const UI_FILE_RE = /\.(?:tsx|jsx|vue|svelte)$/i;
 const UI_INTERACTIVE_RE = /(?:dialog|modal|popover|drawer|cta|button|menu|trigger|layout|hero|header|nav)/i;

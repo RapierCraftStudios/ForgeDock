@@ -41,7 +41,9 @@ function sections(g) {
   out.push("### Lane wall time by phase", ...(L?.n ? [...table(["phase", "n", "p50", "p90"], Object.entries(L.phases).map(([p, v]) => [p, String(v.n), dur(v.p50), dur(v.p90)])), `Largest: ${L.largest.phase} (${Math.round(L.largest.share * 100)}% of ledger time)`] : [NA]), "");
   const f = g.flow;
   out.push("### Flow", ...table(["metric", "value"], [
-    ["merged", pct(f.mergedPct)], ["needs-human", pct(f.needsHumanPct)], ["remediation rate", pct(f.remediationPct)],
+    ["merged", pct(f.mergedPct)], ["verified (merged, no transferred/unverified requirement)", pct(f.verifiedPct)],
+    ...(f.milestones ?? []).map((m) => [`milestone ${m.milestone}: merged / verified`, `${m.merged} / ${m.verified}`]),
+    ["needs-human", pct(f.needsHumanPct)], ["remediation rate", pct(f.remediationPct)],
     ["top outcome codes (n=" + f.codesN + ")", f.codes.slice(0, 5).map((x) => `${x.code} ${x.count} (${pct(x.pct)})`).join(", ") || NA],
     ...(g.firstPass ? [["first-pass rate", `${pct(g.firstPass.rate)} (${g.firstPass.firstPass}/${g.firstPass.n} lanes that reached the build, ${g.firstPass.unknown} unknown)`]] : []),
     // #4375: the same rate split by whether the context pack carried pitfalls matching the issue's files

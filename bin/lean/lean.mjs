@@ -56,7 +56,8 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
-import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
+import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, NO_TRIGGER } from "./e2e.mjs";
+import { transferToEpic } from "./acceptance.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { openRotator, rotatorRetry } from "./rotator.mjs";
 import { poolExhausted, exhaustedDeferral, quotaFacts } from "./quota.mjs"; // #5236
@@ -375,6 +376,7 @@ export async function runCore(o) {
   let pitMatched = null; // #4375: pitfalls in the pack that match the issue's files; null when no pack was compiled
   let factsSeen = []; // #4401: trusted comment bodies on the issue, so an identical FORGE:FACTS is never posted twice
   let guardAddedMs = 0; // #4705 (R12): wall time the guard gate added, summed over the lane, carried on RUN_TERMINAL
+  let verifiedLane = null; // #5339: true when the lane merged with no transferred or unverified requirement (carried on RUN_TERMINAL)
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   const kinds = normalizeKindModes(conformanceKinds); // engine.conformance_kinds: a failure code's own mode
   let domains = [], domainsLogged = null; // #5099: review domains the diff touches (review-roster.sh path triggers)
@@ -508,7 +510,7 @@ export async function runCore(o) {
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
-    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
+    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
@@ -2394,7 +2396,9 @@ export async function runCore(o) {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
-      const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE, e2e: { checks: vcfg.e2e?.checks ?? [], isSpec: (x) => e2eSpecs([x], vcfg.e2e).length > 0 } };
+      // #5339: validate-command paths that fake the real path (mocks, fakes, stubs): they cannot verify an e2e/manual requirement
+      const cmdPaths = [...new Set((effective.validate ?? []).flatMap((v) => String(v.command ?? "").split(/\s+/)).map((t) => t.replace(/^["']+|["']+$/g, "")).filter((t) => listed.has(t)))];
+      const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE, e2e: { faked: fakedPaths(cmdPaths, (x) => readFileSync(join(wt, x), "utf8")), checks: vcfg.e2e?.checks ?? [], isSpec: (x) => e2eSpecs([x], vcfg.e2e).length > 0 } };
       let d = null, first = null;
       for (let t = 0; t < 3; t++) {
         // #4327/#5164: a third run only when the repaired reply is incomplete solely by reviewer slips (unresolved evidence paths, coverage misquotes).
@@ -2789,8 +2793,15 @@ export async function runCore(o) {
     const closing = closePlan(effective, { title: iss.title, review, issueText, liveBlocks });
     if (closing.liveBlocked) T.decisions.push(`Default-on rollout with live acceptance deferred (${liveBlocks.map((b) => `${b.id} on ${b.flag}`).join(", ")}): issue left open as partial (#5285)`);
     if (inert.length) T.decisions.push(`Inert in production: the change touches rollout ${inert.map((m) => `${m.flag} (mode ${m.mode})`).join(", ")}; the issue's production outcome is not claimed (#5240)`);
+    if (closing.transferred) { // #5339: unrun e2e/manual requirements go to the epic's acceptance; the issue records them transferred, not met
+      let epicNo = null;
+      try { epicNo = await transferToEpic({ io: { gh: ghc }, repo, milestoneTitle: milestone, issue, reqs: closing.open }); } catch (e) { T.anomalies.push(`transfer to the epic failed: ${String(e?.message ?? e).slice(0, 120)}`); }
+      for (const r of closing.open) r.transferred = epicNo ?? false;
+      T.decisions.push(epicNo ? `Requirements ${closing.open.map((r) => r.id).join(", ")} transferred to epic #${epicNo} (post-deploy journey): not met, issue left open as partial (#5339)` : `Requirements ${closing.open.map((r) => r.id).join(", ")} need a real run and no epic exists to take them: issue left open as partial (#5339)`);
+    }
+    verifiedLane = !closing.transferred && !closing.liveBlocked && !closing.checklist;
     if (closing.checklist) T.decisions.push(`Unticked acceptance criteria unmet (${closing.open.map((r) => r.id).join(", ")}): issue left open as partial (#5240)`);
-    if (closing.reason === "partial" && !closing.checklist) { // #4398: an investigation whose question is not answered carries it forward
+    if (closing.reason === "partial" && !closing.checklist && !closing.transferred) { // #4398: an investigation whose question is not answered carries it forward
       const untracked = closing.open.filter((r) => !r.tracked);
       if (untracked.length) {
         const carried = untracked.map((r) => ({ ...r, disposition: "defer", class: "ops", why: "investigation question not answered" })); // #5207: the batch aggregate
@@ -3250,13 +3261,15 @@ export async function runCore(o) {
       }
     }
     const partial = closing.reason === "partial";
-    if (closing.checklist || closing.liveBlocked) keepOpen = true; // #5240: an unmet acceptance checkbox is not closed as completed; #5285: nor a default-on change with live acceptance deferred
+    if (closing.checklist || closing.liveBlocked || closing.transferred) keepOpen = true; // #5339: a transferred e2e/manual requirement is not met; // #5240: an unmet acceptance checkbox is not closed as completed; #5285: nor a default-on change with live acceptance deferred
     if (closing.liveBlocked) { // #5285: post what blocks the close
       try { await post("FORGE:TRACKED", `## Left open: live acceptance deferred on a default-on change\nMerged by PR #${pr}, but the rollout is live and these requirements still need live verification:\n${closing.blocks.map((b) => `- ${b.id} (flag ${b.flag})`).join("\n")}\n\nKeep the flag default-off until they are verified, or verify them and close.${closing.tracked.length ? ` Tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the trajectory decision records it too */ }
     }
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
     if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
-    if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
+    if (closing.transferred) { // #5339: record what is transferred, not met
+      try { await post("FORGE:TRACKED", `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${closing.open.map((r) => `- ${r.id}: ${r.transferred ? `transferred to epic #${r.transferred} (post-deploy journey)` : "no epic to take it"}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body carries them too */ }
+    } else if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
       try { await post("FORGE:TRACKED", `## Left open: partial\nMerged by PR #${pr}, but these acceptance criteria are not met by it:\n${closing.unticked.map((u) => `- [ ] ${u}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}${inert.length ? `\n\nInert in production: the change takes effect only behind ${inert.map((m) => `\`${m.flag}\` (mode: ${m.mode})`).join(", ")}; the production outcome is not claimed.` : ""}`); } catch { /* the PR body and FORGE:STATE carry them */ }
     } else if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is
       if (partial || closing.tracked.length) try { await post("FORGE:TRACKED", `## Left open: follow-up pending\nMerged by PR #${pr}; the issue stays open until the pending follow-up is filed (FORGE:FOLLOWUP_PENDING).${partial ? " The investigation's stated question is not answered in this change." : ""}${closing.tracked.length ? ` Already tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body links them too */ }

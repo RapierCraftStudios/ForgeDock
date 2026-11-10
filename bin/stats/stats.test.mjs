@@ -980,3 +980,14 @@ describe("env.tool_missing per release (forge#4414)", () => {
     assert.equal(after.groups[0].flow.codesN, 2);
   });
 });
+
+describe("merged vs verified (#5339)", () => {
+  const run = (n, extra) => ({ source: "local", repo: "o/r", version: "2.0.0", issue: n, run: `r${n}`, finished: true, hydrated: false, usageEvents: 1, reason: "merged", code: null, remediated: false, startTs: null, endTs: null, wallMs: 1, phases: {}, ...extra });
+  it("a merged lane with a transferred requirement is merged but not verified; milestones are split; older runs count as verified", () => {
+    const runs = [run(1, { milestone: "M1", verified: true }), run(2, { milestone: "M1", verified: false }), run(3, { milestone: "M2" }), run(4, { reason: "needs-human" })];
+    const g = aggregate({ runs }, { releaseTimes: [] }).groups.find((x) => x.version === "2.0.0");
+    assert.equal(g.flow.mergedPct, 0.75);
+    assert.equal(g.flow.verifiedPct, 0.5);
+    assert.deepEqual(g.flow.milestones, [{ milestone: "M1", merged: 2, verified: 1 }, { milestone: "M2", merged: 1, verified: 1 }]);
+  });
+});
