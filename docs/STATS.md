@@ -124,8 +124,10 @@ for post-merge defect signals; `--offline` skips that crawl (defects print n/a, 
 
 Columns per cell: n, merge rate, first-pass rate, needs-human rate, median cost, median wall minutes, median wall/model
 time, review findings per lane (conformance failures + verifier findings) and the share of lanes with any, conformance
-failure rate, and the post-merge defect rate (a reopen, a revert naming the PR, or a `fix`/`bug` PR touching the same
-non-test files within 7 days) over merged lanes with known defect data.
+failure rate, and the post-merge defect rate over merged lanes with known defect data. A defect is any of the
+`--conformance-outcomes` signals within 7 days (#5364): reverted, reopened, cited (a later PR names the PR or issue as
+the cause), or `same_hunks` (a later fix PR's old-side lines git-blame to the lane's merge commit). `same_hunks` needs a
+local clone of the repo (run from it); without one a lane with no other signal is n/a, counted as unresolved.
 
 Cells are grouped by verdict (eligible, ambiguous, ineligible) and by every reason and signal code (`hotspot`,
 `churn_high`, `label_docs`, `size_S`, ...), so outcomes can be attributed to each signal.

@@ -2772,6 +2772,12 @@ Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs`
 - Promotion rule (#5052): treatment = light|upgraded lanes, control = eligible full lanes in the same size buckets; cost ratio <= 1.2, wall/model <= 1.3, defect rate <= control; any cell under `--min-n` (10) is `insufficient data`. Flipping `lean.light.mode: on` stays a config decision.
 Tests: `light.test.mjs` "#5209", `lean.test.mjs` "#4450 light lane" (#5209 cases), `bin/stats/depth.test.mjs`.
 
+## Entry 2026-11-10 — `stats --depth` defect signal is line-level (#5364)
+
+- The #5209 rule (a later `fix*`/`bug` PR sharing any non-test file within 7 days) flagged 47-80% of AlterLab merges on hot shared files. `bin/stats/depth.mjs` now uses the conformance-outcomes signals, imported from `conformance-outcomes.mjs` (`reverts`, `cites`, `sameHunks`, `isFix`), not copied: reverted, reopened, cited, `same_hunks` (blame of the later fix's old-side lines to the lane's merge commit, via `gitProbes`).
+- Merge shas come from `repos/{repo}/pulls/N` (cached); `same_hunks` is null without a local clone, and `defect` is then null (n/a, counted in `defects_unresolved`) unless another signal is true. Defect cache version 2 drops the file-overlap values.
+- The #5209 entry above describes the old rule and is history. Tests: `bin/stats/depth.test.mjs`.
+
 ## Conformance outcomes (#5210)
 
 `forgedock stats --conformance-outcomes` (`bin/stats/conformance-outcomes.mjs`) reads whether the conformance gate earns its

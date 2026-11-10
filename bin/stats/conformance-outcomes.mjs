@@ -58,7 +58,7 @@ function twoByTwo(rows, minN) {
 const refsOf = (p) => [p.number, ...(p.closingIssues ?? []).map((i) => i.number)].filter((x) => Number.isSafeInteger(x));
 const text = (q) => `${q.title ?? ""}\n${q.body ?? ""}`;
 const isRevert = (q) => /^revert\b/i.test(q.title ?? "");
-const isFix = (q) => /^(fix|hotfix|bugfix)\b/i.test(q.title ?? "") || /^revert\b/i.test(q.title ?? "");
+export const isFix = (q) => /^(fix|hotfix|bugfix)\b/i.test(q.title ?? "") || /^revert\b/i.test(q.title ?? "");
 
 /** True when a later PR `q` reverts `p`. */
 export function reverts(q, p, repo) {
