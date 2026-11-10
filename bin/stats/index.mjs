@@ -377,7 +377,8 @@ export async function buildReport(opts, deps = {}) {
       (deps.warn ?? ((t) => process.stderr.write(`${t}\n`)))(`--depth: no --since, using the last ${DEFAULT_LOOKBACK_DAYS} days (pass --since <date> for more)`);
     }
     const depth = await buildDepth({ runsDir: deps.runsDir ?? runsDir(env), repo, sinceMs, gh: opts.offline ? null : (deps.gh ?? defaultGh), minN: opts.minN,
-      now: nowMs, env, useCache: opts.cache, refresh: opts.refresh, onProgress: deps.onProgress });
+      now: nowMs, env, useCache: opts.cache, refresh: opts.refresh, onProgress: deps.onProgress,
+      git: deps.git !== undefined ? deps.git : resolveRepo(null)?.toLowerCase() === repo.toLowerCase() ? gitProbes(process.cwd()) : null });
     return { repo, query: { depth } };
   }
   if (opts.efficiency) { // forge#4402: local batch dirs + run logs; gh only for merged issues
