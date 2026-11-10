@@ -1,11 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { acquireBranchLock, waitPidsExit, LOCK_DIR } from "./branchlock.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
-const common = () => mkdtempSync(join(tmpdir(), "branchlock-"));
+const common = () => tmpDir("branchlock-");
 
 describe("branch writer lock (#5333)", () => {
   it("two sessions cannot hold the same lane branch at once; the second reports the holder", async () => {
