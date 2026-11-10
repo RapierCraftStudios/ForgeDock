@@ -160,7 +160,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
    #5079: `verify.precheck_block: true` makes that exhausted / no-commit case `needsHuman` `ci.red` (recoverable) instead. forge.yaml `verification.coupled_files` (`readEnvConfig` → `coupledFiles`; `coupled.mjs`) is a block map `{when glob: required glob[, glob]}` (`added:` prefix = newly added files only); a miss is a `coupled_file_missing` `conformance.unimplemented` failure passed to `precheck()` as `coupledFailures`. Path-scoped suites are `.forge/test-map.json` entries.
    Timeout (rc 124, #4589/#4620): retried once longer if the round budget has room; a spent budget defers the
-   command to CI, but a command that hit its own timeout with no room for a longer retry stays a failing rc 124.
+   command to CI. #5332: a command still at rc 124 after that is host load, never a failing check
+   (`precheck.mjs` `splitPrecheckResults`/`timedOutDetail`): no builder resume, never `ci.red`, `PRECHECK_COMMANDS`
+   `self_check` is `timed_out` (not green). Without `verify.precheck_block` it is a `deferred-to-ci` anomaly naming
+   command and limit; with it (or a failing guard) the lane ends `env.validate_timeout` (recoverable) with that detail.
    A validate rerun that still times out (#4906) is infrastructure: `precheck()` counts it covered when CI verified the
    head, else `env.validate_timeout` (environment state, recoverable, no builder resume; teardown pushes the commits),
    never `conformance.unimplemented`.
@@ -2892,3 +2895,20 @@ and the runner's auto-add stay soft.
 
 `stagestamp.mjs`: the builder writes `forge-stamp: issue=N contract=HASH` as the first line of each `.forge-lean/*.md` stage note (rule added to the builder prompt in `prompts.mjs`). `readStage` (`lean.mjs`) verifies it: a note stamped for another issue or contract (e.g. a `git stash pop` that applied another lane's files) is not posted (`STAGE_STAMP_MISMATCH` event plus anomaly), the comment is rendered from `result.json` instead, and `recheckStages` re-reads it after the builder's final turn. A missing stamp is accepted. `branchlock.mjs`: one writer per lane branch, a lock file in the shared git common dir (`forge-branch-locks/`, atomic create, pid liveness, stale takeover); `builderOnce` holds it, waits `branchLockWaitMs` (default 10 min) for another session (fix-up beside recovery), then defers `host.busy`. `builderOnce` also defers `run.interrupted` when the worktree is gone. `teardown` waits for the builder pids to exit (`waitPidsExit`: SIGKILL after a grace period) before `worktree remove`; a survivor keeps worktree and branch (`TEARDOWN_KEPT`). The builder env carries `FORGE_LANE_WORKTREE=1`; `bin/hooks/pre-tool-use.mjs` then denies `git stash` push/pop/apply/drop (list/show allowed) and names the WIP commit. Post-deploy check `implementation-comment-file-overlap` (`.forge/post-deploy-checks.json`, 7d).
 Cite: #5333.
+
+## Entry 2026-11-10 — Interrupted runs record the usage they streamed (#5334)
+
+A builder session cut off before its `result` line (host kill, idle kill, timeout, lane limit, or an engine SIGTERM
+mid-call) used to record nothing: `RUN_TERMINAL` showed `model_ms: 0` and no turns. Now `runCliBackendAsync` attaches the
+streamed `usage`, `turns` and `toolUses` to every stream kill (`CLI_IDLE`, `CLI_TIMEOUT`, a host kill's
+`CLI_BACKEND_FAILED`) and fills the caller's `session.snapshot()`. `lean.mjs` records one `PHASE_ATTEMPT_USAGE` per
+killed session (`killedAttempt`): from the error on a kill branch, or from `flushInflight()` at the start of `finish`
+on a signal, always before `RUN_TERMINAL`; `err.usageRecorded` prevents a double count. A killed stream has no CLI
+cost, so `cost_usd` is estimated from tokens (`runner.mjs` `estimateCostUsd`, per model family; unnamed model = the
+middle tier) and flagged `cost_estimated: true`. A kill that streamed nothing carries `usage_unknown: true` (turns
+`null`), and `RUN_TERMINAL` copies the flag; never a silent 0. `forgedock stats` needs no change: it sums
+`PHASE_ATTEMPT_USAGE` rows.
+
+Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issue>.jsonl` (`runLogPath`); the bare
+`<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
+does, and take the repo from the RUN_START slice, never from the number alone.

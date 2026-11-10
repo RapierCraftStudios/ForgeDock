@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { formatFirstPassSummary } from "./fixround.mjs";
-import { runChecks, retryTimeoutMs, runWithTimeoutRetry, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint, quietFailure } from "./precheck.mjs";
+import { runChecks, retryTimeoutMs, runWithTimeoutRetry, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint, quietFailure, splitPrecheckResults, timedOutDetail } from "./precheck.mjs";
 import { execFileSync } from "node:child_process";
 import { readPrecheckBudget } from "../engine-cli.mjs";
 import { orchestrate } from "./orchestrate.mjs";
@@ -280,5 +280,18 @@ describe("check timeout is infrastructure (#4589)", () => {
     let n = 0;
     const x = await runWithTimeoutRetry(async (ms) => (++n === 1 ? { rc: 124, output: "t" } : { rc: 0, output: String(ms) }), 1000, { load: idle });
     assert.deepEqual([x.retried, x.r.rc, x.r.output], [true, 0, "2000"]);
+  });
+});
+
+describe("#5332 timed-out checks are not failing checks", () => {
+  it("splitPrecheckResults separates rc 124 from real failures", () => {
+    const r = [{ command: "a", rc: 0 }, { command: "b", rc: 124 }, { command: "c", rc: 1 }];
+    const { failed, timedOut } = splitPrecheckResults(r);
+    assert.deepEqual(failed.map((x) => x.command), ["c"]); assert.deepEqual(timedOut.map((x) => x.command), ["b"]);
+    assert.deepEqual(splitPrecheckResults(undefined), { failed: [], timedOut: [] });
+  });
+  it("timedOutDetail names the command and its limit", () => {
+    assert.equal(timedOutDetail([{ command: "make t", rc: 124, output: "x\n(timed out after 900s)" }], 300000), "`make t` (timed out after 900 s, exit 124)");
+    assert.equal(timedOutDetail([{ command: "make t", rc: 124, output: "" }], 300000), "`make t` (timed out after 300 s, exit 124)");
   });
 });
