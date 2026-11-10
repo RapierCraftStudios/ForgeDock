@@ -3420,6 +3420,7 @@ function help() {
     ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes] [--sandboxes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes, orphaned lane sandboxes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
+    ["npx forgedock replay --timelapse <batch|epic> [--repo owner/repo] [--out dir] [--format gif|mp4] [--duration 30-90]", "Read-only 30-90 s time-lapse (frames, vhs tape, GIF/MP4 when vhs is installed) of a recorded batch or epic from the lifecycle event log"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]", "Bootstrap ForgeDock-managed labels on a GitHub repo, plus optional per-repo domain labels (idempotent)"],
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
@@ -4446,6 +4447,16 @@ switch (command) {
     try {
       const result = await resumeStalledFromCli(restArgs);
       if (result && result.failed && result.failed.length > 0) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "replay": {
+    const { replayFromCli } = await import("./replay-timelapse.mjs");
+    try {
+      exitCode = await replayFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
