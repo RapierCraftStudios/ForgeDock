@@ -235,6 +235,15 @@ describe("bootstrap-create: backlog creation", () => {
     assert.match(h, /### Next commands \(in build order\)\n1\. \/orchestrate milestone "[^"]+"\n2\. \/orchestrate milestone "[^"]+"\n3\. /);
   });
 
+  test("the skeleton issue gets the skeleton label (#5337)", () => {
+    const { s, io } = fakeGitHub();
+    createBacklog(samplePlan(), { io, repo: REPO, config: CONFIG });
+    assert.ok(s.labels.has("skeleton"));
+    const withLabel = s.issues.filter((i) => i.labels.includes("skeleton"));
+    assert.equal(withLabel.length, 1);
+    assert.match(withLabel[0].title, /scaffold/i);
+  });
+
   test("a re-run reuses everything: no new issue, milestone, branch, comment or label transition", () => {
     const { s, io } = fakeGitHub();
     const first = createBacklog(samplePlan(), { io, repo: REPO, config: CONFIG });
@@ -352,7 +361,7 @@ describe("/bootstrap spec and templates", () => {
       milestones: [{ key: "m1", title: "Foundation" }],
       issues: [
         { key: "SPIKE", title: "spike", milestone: "m1", labels: ["infra"], body: ui.replace(/\*\*Parent\*\*: .*/, "**Parent**: none (spike)").replace(/^Depends on .*$/m, "None.").replace(/#\{\{[A-Z_]+\}\}/g, "") },
-        { key: "DB", title: "db", milestone: "m1", labels: ["backend"], deps: [], body: ui.replace(/^Depends on .*$/m, "None.").replace(/see #\{\{NEEDS_HUMAN_KEY\}\}/, "see #{{CREDS}}") },
+        { key: "DB", title: "db", milestone: "m1", labels: ["backend"], skeleton: true, deps: [], body: `${ui.replace(/^Depends on .*$/m, "None.").replace(/see #\{\{NEEDS_HUMAN_KEY\}\}/, "see #{{CREDS}}")}\nOne acceptance journey passes.` },
         { key: "PAGE", title: "page", milestone: "m1", labels: ["frontend"], ui: true, hero: true, deps: ["DB"], body: ui.replace(/see #\{\{NEEDS_HUMAN_KEY\}\}/, "see #{{CREDS}}") },
         { key: "CREDS", title: "creds", milestone: "m1", labels: ["needs-human"], needsHuman: true, body: human },
       ],

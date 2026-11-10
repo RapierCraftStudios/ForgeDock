@@ -1255,8 +1255,10 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 }
 
 
-/** #4726: a requirement quote that carries a `[type:e2e]` criterion. */
-const wantsE2e = (r) => /\[type:e2e\]/i.test(String(r?.quote ?? ""));
+/** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? ""));
+/** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
+const DEFAULT_ENFORCED_KINDS = ["e2e_row"];
 const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 /**
  * #4726: whether a validate command runs a real end-to-end check: an entry of `verify.e2e_checks`, a file of the e2e spec set
@@ -1265,6 +1267,7 @@ const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 export function isE2eCommand(command, e2e = null) {
   const cmd = String(command ?? "");
   if ((e2e?.checks ?? []).some((c) => c && cmd.includes(c))) return true;
+  if ((e2e?.faked ?? []).some((f) => f && cmd.includes(f))) return false; // #5339: names a test that fakes the real path
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
@@ -1296,7 +1299,11 @@ export function decide(raw, ctx) {
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
-      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, detail: `${r.id} is a [type:e2e] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack); run one, or mark ${r.id} post-deploy with a tracked follow-up` });
+      const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
+    } else if (r.disposition === "defer" && wantsE2e(r)) {
+      // #5339: a deferred e2e/manual requirement is not met; only a post-deploy one is transferred to the epic (the lane closes partial)
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
     }
     // #5207: in-lane engineering work is never deferrable, whatever the reviewer says; one failure per row.
     if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
@@ -1377,6 +1384,9 @@ export function closePlan(contract, { title = null, review = null, issueText = n
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
   // #5285: a default-on change whose live acceptance is deferred is not closed as completed
   if (liveBlocks.length) return { reason: "partial", tracked, liveBlocked: true, blocks: liveBlocks, open: reqs.filter((r) => liveBlocks.some((b) => b.id === r.id)) };
+  // #5339: an e2e/manual requirement that was not run in the lane is transferred to the epic, not met: the issue stays partial
+  const transferred = reqs.filter((r) => r.disposition === "post-deploy" && wantsE2e(r));
+  if (transferred.length) return { reason: "partial", tracked, transferred: true, open: transferred };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
   if (!isInvestigation(title)) {
     const unticked = unmetChecklist(reqs, rows, issueText);
@@ -1603,7 +1613,7 @@ export function normalizeKindModes(raw) {
 export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
   const block = [], record = [];
   for (const f of failures ?? []) {
-    const own = kinds?.[f?.code];
+    const own = kinds?.[f?.code] ?? (DEFAULT_ENFORCED_KINDS.includes(f?.kind) ? "enforce" : undefined);
     (own ? own === "enforce" : !shadow || allow.includes(f?.code)) ? block.push(f) : record.push(f);
   }
   return { block, record };

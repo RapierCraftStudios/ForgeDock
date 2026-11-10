@@ -45,3 +45,14 @@ describe("#4410 toolStats", () => {
     assert.deepEqual(s, { calls: 3, turns: 3, per_turn: 1, rereads: 0, top: [] });
   });
 });
+
+describe("#5347 parallel tool calls in one turn", () => {
+  it("tool_use blocks sharing one message id are one turn; a build opening with three reads in one turn averages above 2", () => {
+    const opening = [bash("sed -n 1,40p a.js", "m1"), bash("sed -n 1,40p b.js", "m1"), { msg: "m1", name: "Grep", path: null, cmd: null }];
+    const s = toolStats([...opening, bash("npm test", "m2")]);
+    assert.equal(s.turns, 2);
+    assert.equal(s.calls, 4);
+    assert.equal(s.per_turn, 2);
+    assert.equal(toolStats(opening).per_turn, 3);
+  });
+});

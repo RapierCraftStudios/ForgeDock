@@ -83,7 +83,7 @@ export function runsFromRecords(records) {
     if (!run._first || r.ts < run._first) run._first = r.ts;
     if (r.experiment != null && r.arm != null) { run.experiment = String(r.experiment); run.arm = String(r.arm); if (r.arm_overrides != null) run.armOverrides = String(r.arm_overrides); } // #4629, #5206
     if (r.event === "run_terminal") {
-      run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.wallMs = num(r.wall_ms); run.ledger = unflattenPhases(r); // #4908
+      run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.milestone = typeof r.milestone === "string" && r.milestone ? r.milestone : null; run.verified = r.verified == null ? null : Number(r.verified) === 1; run.wallMs = num(r.wall_ms); run.ledger = unflattenPhases(r); // #4908, #5339 (milestone, verified)
       continue;
     }
     const id = r.phase ?? "other";

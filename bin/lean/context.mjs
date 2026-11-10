@@ -486,6 +486,9 @@ const linkLine = (l) => { const fails = (Array.isArray(l.failures) ? l.failures 
 const pitfallLine = (p) => `- [${p.trigger}] ${oneLine(p.lesson, 160)}${p.globs?.length ? ` (${p.globs.join(", ")})` : ""}; seen ${p.count}×`;
 const ledgerLine = (p) => `- ${p.pr ? `PR #${p.pr}` : "commit"} ${p.sha}${p.revert ? " [revert]" : ""}${p.reverted ? ` [reverted by ${p.reverted}]` : ""} "${p.title}"${p.files?.length ? ` (${p.files.join(", ")})` : ""}${p.notes?.length ? ` — ${p.notes.join("; ")}` : ""}`;
 
+/** #5347: the files earlier merged PRs on the issue's symbols touched (the ledger's), unique, at most 8: the builder's cheap answer to "where to look". */
+const packFiles = (facts) => [...new Set((facts.ledger ?? []).flatMap((p) => p.files ?? []))].slice(0, 8);
+
 /**
  * The pack text for `facts`, ranked: explicit links (parent > Depends on > body links > cross-references > siblings),
  * prior attempts, recurring pitfalls of the repo (#4375, in the engine's selected order), the symbol ledger (newest first), repo-fact pointers. One line per item; a parent or dependency also
@@ -511,7 +514,7 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
   }
   const found = Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, cand.filter((c) => c.src === s).length]));
   const recall = facts?.recall && typeof facts.recall === "object" ? { present: Boolean(facts.recall.present), reason: oneLine(facts.recall.reason ?? "", 80) } : null;
-  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [], recall };
+  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [], recall, files: [] };
   if (!cand.length) return empty;
   const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts (this issue and the same subject)", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Facts from earlier lanes and repo facts" };
   const head = `Context pack for #${facts.issue}`;
@@ -532,7 +535,7 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
     if (rows.length) parts.push(`\n${titles[s]}:`, ...rows.map((r) => r.text));
   }
   const text = parts.join("\n");
-  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit), recall };
+  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit), recall, files: packFiles(facts) };
 }
 
 /** The pack text without its pitfalls section (#4375: pitfalls are local only and never posted). */

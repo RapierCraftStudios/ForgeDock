@@ -27,6 +27,7 @@ export const ACCEPTANCE_MARKER = "FORGE:ACCEPTANCE";
 export const ACCEPTANCE_TAG = "forge-acceptance";
 export const AWAITING_LABEL = "awaiting-measurement";
 export const WHEN = ["milestone", "post-deploy"];
+export const TRANSFER_MARKER = "FORGE:TRANSFERRED";
 
 const isForgeMarker = (body) => /^\s*<!--\s*FORGE:/.test(String(body ?? ""));
 const sameSha = (a, b) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
@@ -124,6 +125,17 @@ export async function runJourneys({ journeys, site = "milestone", cwd, config = 
   return rows;
 }
 
+/** #5339: the name a journey must carry to settle a requirement transferred from `issue`'s `req`. */
+export const transferName = (issue, req) => `#${issue} ${req}`;
+
+/** #5339: {issue, req, quote} of a FORGE:TRANSFERRED comment body (posted by the engine; it declares no command), or null. */
+export function transferOf(body) {
+  const s = String(body ?? "");
+  if (!s.trimStart().startsWith(`<!-- ${TRANSFER_MARKER} -->`)) return null;
+  const line = s.split("\n").find((l) => /^\{.*"req"/.test(l.trim()));
+  try { const j = line && JSON.parse(line.trim()); return j && Number.isInteger(j.issue) && typeof j.req === "string" ? j : null; } catch { return null; }
+}
+
 /**
  * The gate for one milestone's epics. `epics`: [{number, declared, comments}]. `stage`: "ship" needs every milestone journey
  * green on `head`; "close" also needs every post-deploy journey to have passed (any head, site post-deploy).
@@ -144,6 +156,10 @@ export function gateMilestone({ epics, head, stage = "ship" }) {
       reasons.push(`${tag}: journey "${j.name}" ${got ? "is red" : recs.length ? `has not run on ${String(head).slice(0, 7)}` : "has never run"}`);
     }
     if (stage === "close") {
+      // #5339: a requirement transferred from a lane is open until a post-deploy journey named `#<issue> <req>` passes
+      for (const t of (e.comments ?? []).filter((c) => isTrustedComment(c)).map((c) => transferOf(c.body)).filter(Boolean)) {
+        if (!recs.some((r) => r.site === "post-deploy" && r.results?.[transferName(t.issue, t.req)]?.result === "pass")) reasons.push(`${tag}: requirement ${t.req} transferred from #${t.issue} has not been run (post-deploy journey "${transferName(t.issue, t.req)}" must pass; epic stays open, ${AWAITING_LABEL})`);
+      }
       for (const j of d.journeys.filter((x) => x.when === "post-deploy")) {
         if (!recs.some((r) => r.site === "post-deploy" && r.results?.[j.name]?.result === "pass")) reasons.push(`${tag}: post-deploy journey "${j.name}" has not passed in production (epic stays open, ${AWAITING_LABEL})`);
       }
@@ -185,6 +201,28 @@ export async function gateByRef({ io, repo, title = null, branch = null, head = 
   if (!h && ms.branch) { try { h = String(await io.gh(["api", `repos/${repo}/branches/${encodeURIComponent(ms.branch)}`, "--jq", ".commit.sha"])).trim(); } catch { h = null; } }
   if (!h) return { gated: true, ok: false, reasons: [`milestone ${ms.title}: head of ${ms.branch} unreadable (fail closed)`], milestone: ms };
   return { gated: true, ...gateMilestone({ epics, head: h, stage }), milestone: ms, epics, head: h };
+}
+
+/**
+ * #5339: record each requirement of `issue` that cannot run in the lane on the milestone's epic (a FORGE:TRANSFERRED comment,
+ * idempotent per issue+req), so `gate --stage close` holds the epic open until it runs. Returns the epic number, or null
+ * (no milestone or no epic: the requirement stays open on the issue, which closes partial).
+ */
+export async function transferToEpic({ io, repo, milestoneTitle, issue, reqs, now = () => new Date().toISOString(), pattern = DEFAULT_FEATURE_PATTERN }) {
+  if (!milestoneTitle || !reqs?.length) return null;
+  const ms = await findMilestone({ io, repo, title: milestoneTitle, pattern });
+  if (!ms) return null;
+  const epics = await readEpics({ io, repo, milestone: ms });
+  const epic = epics.find((e) => e.state === "open") ?? epics[0];
+  if (!epic) return null;
+  const have = new Set(epic.comments.map((c) => transferOf(c.body)).filter(Boolean).map((t) => transferName(t.issue, t.req)));
+  for (const r of reqs) {
+    if (have.has(transferName(issue, r.id))) continue;
+    const rec = { issue, req: r.id, quote: String(r.quote ?? "").slice(0, 300), at: now() };
+    await io.gh(["issue", "comment", String(epic.number), "-R", repo, "--body", [`<!-- ${TRANSFER_MARKER} -->`, `## Requirement transferred from #${issue} (${r.id}): not met, open`, JSON.stringify(rec), "",
+      `The lane could not run this end to end. Declare a post-deploy journey named \`${transferName(issue, r.id)}\` in the epic's \`forge-acceptance\` block; the epic cannot close until it passes.`].join("\n")]);
+  }
+  return epic.number;
 }
 
 /** Run a milestone's journeys in `cwd` (checked out at its branch head) and post the result on each epic. Resolves [{epic, result, rows}]. */
@@ -246,7 +284,8 @@ export async function acceptanceFromCli(argv, deps = {}) {
 
 /**
  * The orchestrate seam's `journeys({title, branch, number})`: fetch the milestone branch, check it out detached in a
- * throwaway worktree, run the epics' milestone journeys there and post the results. Milestones with no epic or journey are a no-op.
+ * throwaway worktree, run the epics' milestone journeys there and post the results. Milestones with no epic or journey are a no-op (a string);
+ * a run resolves {summary, red, ran, head} (#5337).
  */
 export function makeJourneyRunner({ repo, io, cwd = process.cwd(), tmpRoot }) {
   return async ({ title, branch, number }) => {
@@ -263,7 +302,8 @@ export function makeJourneyRunner({ repo, io, cwd = process.cwd(), tmpRoot }) {
       await git(["worktree", "add", "--detach", dir, `origin/${branch}`]);
       const head = String(await git(["rev-parse", "HEAD"], { cwd: dir })).trim();
       const res = await runMilestoneJourneys({ io, repo, milestone: { number, title, branch }, cwd: dir, head });
-      return res.map((r) => `#${r.epic} ${r.result}`).join(", ") || "no journey declared";
+      // #5337: structured so the integration seam can file the red issue and hold admission; it still reads as its `summary`.
+      return { summary: res.map((r) => `#${r.epic} ${r.result}`).join(", ") || "no journey declared", red: res.some((r) => r.result === "fail"), ran: res.some((r) => r.result === "pass" || r.result === "fail"), head };
     } finally {
       try { await git(["worktree", "remove", "--force", dir]); } catch { /* pruned below */ }
       try { rmSync(join(dir, ".."), { recursive: true, force: true }); await git(["worktree", "prune"]); } catch { /* best effort */ }
