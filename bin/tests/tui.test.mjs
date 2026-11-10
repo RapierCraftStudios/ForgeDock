@@ -546,7 +546,7 @@ describe("renderLogo — plain-text fallback in non-TTY/NO_COLOR environment", (
 
   it("includes tagline in the plain-text output", () => {
     const result = renderLogo({});
-    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+    assert.ok(result.includes("An AI engineering team that ships to production"),
       "plain-text output must include the tagline");
   });
 
@@ -568,12 +568,12 @@ describe("renderLogo — context-based tagline", () => {
     const result = renderLogo({ context: "doctor" });
     assert.ok(result.includes("inspecting the anvil"),
       "context 'doctor' must select its mapped tagline");
-    assert.ok(!result.includes("GitHub as a knowledge graph for AI agents"),
+    assert.ok(!result.includes("An AI engineering team that ships to production"),
       "context 'doctor' must not fall back to the default tagline");
   });
 
   it("selects distinct taglines for install/update/uninstall/status", () => {
-    assert.ok(renderLogo({ context: "install" }).includes("lighting the forge"));
+    assert.ok(renderLogo({ context: "install" }).includes("An AI engineering team that ships to production"));
     assert.ok(renderLogo({ context: "update" }).includes("tempering the blade"));
     assert.ok(renderLogo({ context: "uninstall" }).includes("banking the coals"));
     assert.ok(renderLogo({ context: "status" }).includes("reading the heat"));
@@ -581,20 +581,20 @@ describe("renderLogo — context-based tagline", () => {
 
   it("falls back to the default tagline for an unmapped context", () => {
     const result = renderLogo({ context: "some-unknown-command" });
-    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+    assert.ok(result.includes("An AI engineering team that ships to production"),
       "unmapped context must fall back to the default tagline");
   });
 
   it("falls back to the default tagline when context is omitted", () => {
     const result = renderLogo({ version: "1.2.3" });
-    assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+    assert.ok(result.includes("An AI engineering team that ships to production"),
       "omitted context must fall back to the default tagline");
   });
 
   it("falls back to the default tagline for Object.prototype-colliding contexts", () => {
     for (const context of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) {
       const result = renderLogo({ context });
-      assert.ok(result.includes("GitHub as a knowledge graph for AI agents"),
+      assert.ok(result.includes("An AI engineering team that ships to production"),
         `context '${context}' must fall back to the default tagline, not a prototype member`);
       assert.ok(!/\[native code\]/.test(result),
         `context '${context}' must not leak a native-code function string`);

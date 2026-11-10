@@ -14,6 +14,7 @@
  */
 
 import readline from "readline";
+import { TAGLINE } from "./brand.mjs";
 
 // ---------------------------------------------------------------------------
 // ANSI detection — computed once at module load
@@ -1625,7 +1626,7 @@ function gradientText(text, start, end) {
  * Default tagline — used when no context is given, or the given context has
  * no mapped entry in LOGO_TAGLINES.
  */
-const DEFAULT_TAGLINE = "GitHub as a knowledge graph for AI agents";
+const DEFAULT_TAGLINE = TAGLINE;
 
 /**
  * Context-specific taglines shown under the logo. Keyed by the invoking
@@ -1634,7 +1635,7 @@ const DEFAULT_TAGLINE = "GitHub as a knowledge graph for AI agents";
  * caller.
  */
 const LOGO_TAGLINES = {
-  install: "lighting the forge",
+  install: TAGLINE,
   update: "tempering the blade",
   uninstall: "banking the coals",
   doctor: "inspecting the anvil",
