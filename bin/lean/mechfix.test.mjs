@@ -3,11 +3,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import { join } from "node:path";
 import { insertIntoList, applyEnumerating, renamedExport, renameDuplicates } from "./mechfix.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
-const tmp = () => fs.mkdtempSync(join(process.env.TMPDIR || os.tmpdir(), "mechfix-"));
+const tmp = () => tmpDir("mechfix-");
 
 describe("#5348 enumerating list insertion", () => {
   it("appends to a one-per-line list, copying quote, indent and the trailing comma", () => {
