@@ -97,8 +97,8 @@ export function renamedExport(symbol, path) {
 const word = (s) => new RegExp(`(?<![\\w$])${s.replace(/[$]/g, "\\$&")}(?![\\w$])`, "g");
 
 /**
- * Duplicate exports: rename the lane's new export to `<AppPrefix><Symbol>` when the name occurs only in its declaring file
- * (so no importer, registry or test keyed by the name can be left behind) and never as a property, string or label.
+ * Duplicate exports: rename the lane's new export to `<AppPrefix><Symbol>` when the name occurs only in its declaring file and the
+ * other files that declare it themselves (`others`; so no importer, registry or test keyed by the name can be left behind) and never as a property, string or label.
  * @param dups [{symbol, path, others}]; `git(args)` returns stdout
  * @returns {Promise<{applied: object[], remaining: object[]}>}
  */
@@ -110,7 +110,8 @@ export async function renameDuplicates({ dups = [], cwd, git, fsx = fs } = {}) {
       const next = renamedExport(d.symbol, d.path);
       if (!next || next === d.symbol || (await grep(next)).length) { remaining.push(d); continue; }
       const files = await grep(d.symbol);
-      if (files.length !== 1 || files[0] !== d.path) { remaining.push(d); continue; }
+      const ours = new Set([d.path, ...(d.others ?? [])]); // the detector's others declare the name themselves, so they cannot import ours
+      if (!files.includes(d.path) || files.some((f) => !ours.has(f))) { remaining.push(d); continue; }
       const text = fsx.readFileSync(join(cwd, d.path), "utf8");
       const re = word(d.symbol);
       const bad = [...text.matchAll(re)].some((m) => /[.'"`]$/.test(text.slice(Math.max(0, m.index - 1), m.index)) || /^\s*[:'"`]/.test(text.slice(m.index + d.symbol.length, m.index + d.symbol.length + 2)));

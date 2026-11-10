@@ -190,7 +190,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Block/contract corrections, CI-unavailable and base-sync conflict resolution still resume; round gates unchanged.
    #5348 narrow fixes: the enumerating and duplicate-export gates first apply the change the detector names with no model
    (`mechfix.mjs` `applyEnumerating` writes the missing entry into the test's string list, `renameDuplicates` renames an
-   export only its declaring file mentions to `<App><Name>`), commit it (`MECHANICAL_FIX` event) and re-run the detector.
+   export only its declaring file mentions to `<App><Name>`; the detector's `others`, which declare the name themselves, do not
+   block the rename and are left untouched, any other mentioning file does), commit it (`MECHANICAL_FIX` event) and re-run the detector.
    What is left goes to one narrow session per stage: the enumerating round also carries the pending duplicate-export and
    English-copy findings (`mergeNarrowTasks`; their gates re-check). The session runs profile `narrow` (no lane text,
    CLAUDE.md off, `prompts.mjs` `narrowFixPrompt`: contract excerpt, failure output and named files, `NARROW_PROMPT_MAX`
