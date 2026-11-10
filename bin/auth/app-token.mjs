@@ -8,6 +8,7 @@
  * Broker contract (assumed, documented in docs/CONFIG.md): `POST {broker}/v1/token`, `Authorization: Bearer <user token>`,
  * body `{installation_id, repository_ids, permissions}` → `{token, expires_at}`. Tokens are never logged.
  */
+import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -115,12 +116,55 @@ export async function resolveAuth({ env = process.env, now = Date.now(), fetch: 
   }
 }
 
-/** Startup hook: put the App token in `env` (the CLI process env, inherited by child `gh` calls). Prints one warning on fallback. */
+// The token this module last wrote to an env: a GH_TOKEN that differs from it was exported by the operator and is never touched (#5381).
+let ownedToken = null;
+let ownedExpiry = 0;
+const operatorOwns = (env) => Boolean(env.GH_TOKEN) && env.GH_TOKEN !== ownedToken;
+
+function adopt(env, r) {
+  if (!r.env.GH_TOKEN) return;
+  env.GH_TOKEN = r.env.GH_TOKEN;
+  ownedToken = r.env.GH_TOKEN;
+  ownedExpiry = Date.parse(r.expiresAt) || 0;
+}
+
+/** Startup hook: put the App token in `env` (the CLI process env, inherited by child `gh` calls). Prints one warning on fallback. An operator-exported GH_TOKEN wins. */
 export async function applyAuthEnv({ env = process.env, warn = (m) => process.stderr.write(`${m}\n`), ...rest } = {}) {
+  if (operatorOwns(env)) return { env: {}, source: "personal", operator: true };
   const r = await resolveAuth({ env, ...rest });
-  Object.assign(env, r.env);
+  adopt(env, r);
   if (r.warning) warn(r.warning);
   return r;
+}
+
+/**
+ * Keep the App token in `env` fresh for long-running commands (#5381): a timer re-resolves it before expiry and reassigns
+ * `env.GH_TOKEN`, which later `gh` calls and lanes inherit. No-op unless this module owns the env token. @returns {() => void} stop
+ */
+export function startAuthRefresh({ env = process.env, now = Date.now, fetch: fetchFn = fetch, setTimer = setTimeout, clearTimer = clearTimeout, warn = (m) => process.stderr.write(`${m}\n`) } = {}) {
+  if (!ownedToken || operatorOwns(env)) return () => {};
+  let timer = null;
+  let stopped = false;
+  let warned = false;
+  const schedule = (ms) => {
+    if (stopped) return;
+    timer = setTimer(tick, Math.max(30000, ms));
+    timer?.unref?.();
+  };
+  const tick = async () => {
+    if (stopped || operatorOwns(env)) return;
+    const t = now();
+    const r = await resolveAuth({ env, now: t, fetch: fetchFn });
+    if (r.env.GH_TOKEN) {
+      adopt(env, r);
+      return schedule(ownedExpiry - now() - REFRESH_BEFORE_MS + 1000);
+    }
+    if (!warned && r.warning) { warned = true; warn(r.warning); }
+    if (ownedExpiry <= t) { delete env.GH_TOKEN; ownedToken = null; } // expired: let gh fall back to the user's own auth
+    schedule(60000);
+  };
+  schedule(ownedExpiry - now() - REFRESH_BEFORE_MS + 1000);
+  return () => { stopped = true; if (timer) clearTimer(timer); };
 }
 
 const defaultGh = (args, env) => execFileSync("gh", args, { encoding: "utf8", env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "ignore"], timeout: 15000 });
@@ -169,7 +213,7 @@ export async function authFromCli(args, { env = process.env, out = (m) => consol
 }
 
 async function byoLogin({ env, out, fetchFn, org, installationId, openUrl, ...io }) {
-  const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const state = randomBytes(16).toString("hex");
   const code = await receiveManifestCode({
     state, org, manifest: (port) => buildAppManifest({ redirectUrl: `http://127.0.0.1:${port}/callback` }),
     onListening: (url) => (openUrl ? openUrl(url) : out(`Open ${url} to create your GitHub App`)),
