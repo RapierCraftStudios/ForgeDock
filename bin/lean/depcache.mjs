@@ -57,6 +57,26 @@ function detect(fs, wt) {
   }
   if (has("uv.lock")) out.push({ eco: "uv", lock: "uv.lock" });
   else if (has("poetry.lock")) out.push({ eco: "poetry", lock: "poetry.lock" });
+  else out.push(...serviceLocks(fs, wt));
+  return out;
+}
+
+const SERVICE_ROOTS = ["services", "packages", "apps"];
+const SERVICE_CAP = 8;
+/** #5331: Python lockfiles one level down (services/<name>/uv.lock|poetry.lock) when the root has none; each is prepared in its own dir. */
+function serviceLocks(fs, wt) {
+  const out = [];
+  for (const root of SERVICE_ROOTS) {
+    let names = [];
+    try { names = fs.readdirSync(join(wt, root)).sort(); } catch { continue; }
+    for (const n of names) {
+      const dir = `${root}/${n}`;
+      for (const [eco, lock] of [["uv", "uv.lock"], ["poetry", "poetry.lock"]]) {
+        if (out.length >= SERVICE_CAP) return out;
+        try { if (fs.existsSync(join(wt, dir, lock))) { out.push({ eco, lock, dir }); break; } } catch { /* unreadable: skip */ }
+      }
+    }
+  }
   return out;
 }
 
@@ -108,6 +128,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
 
   async function keyOf(wt, d, pkgs) {
     const h = createHash("sha256").update(`v1\0${d.eco}\0${process.platform}-${process.arch}\0`);
+    if (d.dir) h.update(`${d.dir}\0`);
     h.update(await runtime(JS.has(d.eco) ? "node" : "python3")).update("\0");
     const files = JS.has(d.eco) ? [d.lock, ...pkgs, "pnpm-workspace.yaml", ".npmrc", ".yarnrc.yml"] : [d.lock, "pyproject.toml", ".python-version"];
     for (const f of files) {
@@ -281,7 +302,10 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const keyRoot = join(root, safeSegment(repoKey ?? "repo"));
     const out = [];
     for (const d of found) {
-      try { out.push(await prepareOne(wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined)); } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e) }); }
+      try {
+        const r = await prepareOne(d.dir ? join(wt, d.dir) : wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined);
+        out.push(d.dir ? { ...r, dir: d.dir } : r);
+      } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e) }); }
     }
     return out;
   }
