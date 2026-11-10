@@ -38,6 +38,7 @@ import {
   resolveClaudeConfigDir,
   setupAfterRead,
 } from "./journey.mjs";
+import { SPLASH_PLUGIN, splashState, uninstallSplash } from "./splash-install.mjs";
 import {
   deriveWorkflowLabels,
   FINDINGS_LANE_LABEL,
@@ -252,7 +253,7 @@ function isOwnedLinkTarget(dest, src, kind, rel) {
 // --minimal is init-only. Subcommands with their own flag parsing (run,
 // run-issue, demo) receive restArgs — everything after the command token.
 const rawArgs = process.argv.slice(2);
-const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras", "--refresh-context"]);
+const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras", "--refresh-context", "--no-splash"]);
 const flags = rawArgs.filter((a) => FLAGS.has(a));
 // --global is stripped from positionals/restArgs for backward compatibility
 // with existing invocations, but is otherwise a no-op — see the install-mode
@@ -1437,6 +1438,9 @@ async function uninstall() {
     );
   }
   console.log("");
+
+  // Startup splash plugin + the local marketplace setup added (#5312).
+  for (const line of uninstallSplash({ home: HOME }).lines) console.log(`  ${GREEN}✔${RESET}  ${line}`);
 
   console.log(`${GREEN}ForgeDock uninstalled.${RESET} No residue remains from this directory.`);
   console.log(`  Re-install at any time with: ${CYAN}npx forgedock${RESET}`);
@@ -3125,6 +3129,9 @@ async function doctor(fix = false, verbose = false) {
     }
   }
 
+  // ── Startup splash plugin (informational, #5312): never a failure ─────────
+  pass("Startup splash", splashState({ home: HOME }) + ` (${SPLASH_PLUGIN}; install: npx forgedock, skip: --no-splash)`);
+
   // ── Check 8: FORGE_HOME environment variable (informational) ──────────────
   // The journey-based install never exports FORGE_HOME — it isn't required
   // for the pipeline to run. It only affects orchestrate's legacy
@@ -3414,6 +3421,7 @@ function help() {
     ["npx forgedock doctor --verbose", "Also show internal and legacy checks (FORGE_HOME, Playwright MCP, version-gated features, resource hygiene)"],
     ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
     ["npx forgedock update", "Pull latest & reinstall"],
+    ["npx forgedock --no-splash", "Run setup without installing the startup splash plugin (or set FORGEDOCK_NO_SPLASH=1)"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
     ["npx forgedock opencode status", "Check the OpenCode adapter"],
