@@ -2872,6 +2872,18 @@ Cite: #5305.
 
 forge.yaml `topology.prod_parity` (block map `{path glob: command | "note: how to verify"}`, read by `readEnvConfig` → `prodParity`) generalises `route_reachability` (#5087) to runtime build mode, DB role/ownership and env scope. `bin/lean/prodparity.mjs` matches the lane's changed files to the globs; a command rule runs once with the matching paths (non-zero or rc 127 → `conformance.unimplemented` kind `prod_parity_failed`), a note rule needs `parity: [{surface, justification}]` in the result file (else kind `prod_parity_unjustified`). Failures enter `precheck` as `prodParityFailures`, beside `routeFailures`. The plan prompt lists touched surfaces and the review rubric treats a surface with no evidence as not delivered. No key, no check. Record: `devdocs/decisions/5284-prod-parity.md`.
 
+## Entry 2026-11-10 — dispatch-stall watchdog, fail-loud add, first-hour report (#5314)
+
+The schedd (`bin/lean/schedd.mjs`, `watchBatches`, every `FORGEDOCK_SCHEDD_STALL_CHECK_MS`, default 60s) polls every
+daemon batch with `evaluateDispatchStall` (`batch-health.mjs`): ready pending issues (not held, no future retry-at,
+in-batch dependencies ended well), a free lane and no progress for `FORGEDOCK_SCHEDD_STALL_MIN` (default 10) minutes.
+An unhosted batch is re-hosted (`--resume`, once per ready set); a hosted-but-silent one, or a re-host that did not
+help, records one needs-you item in `health.json` (`stall`, `alertedAt`; shown by `forgedock status` and `sched show`).
+Cancelled, reported and tripped-breaker batches are skipped. Every daemon batch also gets `first-hour.json` and a line in
+`batch.log` once (at T+60 or when it ends): dispatched / running / merged / stuck and why; `sched show` prints the summary.
+`--add` / `--requeue` exit non-zero (`batch.not-hosted`) when no schedd hosts the batch after queueing; `--resume <id> N...`
+and the runner's auto-add stay soft.
+
 ## Entry 2026-11-10 — issue-watch parity with the owner's bash intake watcher (#5313)
 
 `issuewatch-parity.mjs` holds the pure helpers: `isPullRequest`, `closingPrIssues` (open PRs' `closingIssuesReferences`), `skipLabelHit` with `DEFAULT_SKIP_LABELS`, `releaseInFlight` (a `~/.forge/releases/<id>/state.json` with no end `status` and a fresh mtime, since `runRelease` writes `status` only when the job ends) and `watchLiveness`. `planClaims` and the release pass skip PRs, issues with an open closing PR and `skip_labels` (default for `mode: batch`); a `search` selecting PRs fails at load. `runWatch` stamps `state.heartbeat` every pass and, with `release_pause` (default in batch), writes `state.paused` and skips the pass while a release job runs; the next pass resumes. `tick` re-checks `batch.reported` right before `batch.add` so a finished batch is never added to. `status` prints running/paused/stale/done with the heartbeat. Cost: 0 LLM calls.

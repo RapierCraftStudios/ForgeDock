@@ -1313,7 +1313,12 @@ const hostedLine = (id, res) => res.reopened ? `batch ${id}: finished batch reop
   : res.hosted ? `batch ${id}: hosted by the schedd; the runner picks it up on its next pass (within ~5s while lanes run; if it is finishing, the schedd re-hosts the batch)`
   : `batch ${id}: queued but NOT hosted (no schedd hosts it); run: forgedock orchestrate --resume ${id}`;
 
-async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
+/** #5314: `--add`/`--requeue` never exit 0 with nothing scheduled: no runner hosts the batch and none was started → a non-zero exit with the reason. */
+const unhostedFailure = (id, res, requireHost, result) => {
+  if (requireHost && !res.hosted && !res.reopened) throw Object.assign(new Error(`batch ${id}: the issues are queued in the batch but NOTHING is scheduled: no schedd hosts it. Start the runner: forgedock orchestrate --resume ${id}`), { code: "batch.not-hosted", result });
+};
+
+async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
   if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
@@ -1346,6 +1351,7 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
   if (out.added.length || out.requeued.length) print(hostedLine(id, res));
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
+  if (out.added.length || out.requeued.length) unhostedFailure(id, res, requireHost, out);
   return out;
 }
 
@@ -1403,7 +1409,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
  * written. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
  * cleared so `--resume` runs it again). The runner applies the entries and posts the FORGE:DECISION.
  */
-async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
+async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
   if (!id || String(id).startsWith("--") || !tokens.length) throw new Error(ORCH_USAGE);
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1435,7 +1441,7 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
   const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
   if (res.hosted !== undefined) { out.hosted = !!res.hosted; out.reopened = !!res.reopened; }
   print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
-  if (out.requeued.length) print(hostedLine(id, res));
+  if (out.requeued.length) { print(hostedLine(id, res)); unhostedFailure(id, res, requireHost, out); }
   return out;
 }
 
@@ -1522,7 +1528,7 @@ async function orchestrateClient(argv, deps = {}) {
   }
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue"), id = argv[i + 1];
-    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id) });
+    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
@@ -1533,7 +1539,7 @@ async function orchestrateClient(argv, deps = {}) {
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
+    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id), requireHost: true });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
@@ -1628,7 +1634,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue");
-    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const hid = flag(argv, `--${op}`);
@@ -1638,7 +1644,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
@@ -2494,6 +2500,7 @@ export async function schedFromCli(argv, deps = {}) {
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
     for (const l of schedMod.remoteLines(st)) console.log(l); // #4964
+    try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }
   if (sub === "cap") {
