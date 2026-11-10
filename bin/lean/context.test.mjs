@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
-import { closedResult, gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments, subjectTerms, subjectHistory, MAX_SUBJECT_ITEMS, MAX_SUBJECT_QUERIES } from "./context.mjs";
+import { closedResult, gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, resolveContextMode, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments, subjectTerms, subjectHistory, MAX_SUBJECT_ITEMS, MAX_SUBJECT_QUERIES } from "./context.mjs";
 
 const REPO = "o/r";
 const BOT = { author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
@@ -35,6 +35,7 @@ function fakes(o = {}) {
     102: [],
     103: [{ id: 3, body: "<!-- FORGE:DECISION -->\nUnrelated decision about logging.", ...BOT }],
     33: [{ id: 4, body: "<!-- FORGE:CONTRACT -->\nx", ...BOT }, ...(o.facts33 ?? [])],
+    51: o.facts51 ?? [],
   };
   const prs = { 101: { title: "feat: ranking", body: "Closes #33", head: "feat/issue-33-lean" }, 102: { title: "feat: speedup", body: "", head: "feat/issue-34-lean" }, 103: { title: "chore: logs", body: "", head: "x" } };
   const log = [
@@ -593,5 +594,30 @@ describe("#5152 builder context: delivered or moved scope never reads as dropped
     assert.equal(closedResult({ stateReason: "not_planned", labels: ["workflow:invalid"] }), "not_planned", "dropped scope keeps its reason");
     assert.equal(closedResult({ stateReason: "completed", labels: [] }), "completed");
     assert.equal(closedResult({ stateReason: null }), "closed");
+  });
+});
+
+describe("#5340 sibling-aware context", () => {
+  const base = (raw) => parseContextPackConfig(raw ?? {});
+  it("a milestone or parent lane defaults to on; explicit modes win; other lanes stay shadow; the parse default is unchanged", () => {
+    assert.equal(parseContextPackConfig({}).mode, "shadow");
+    assert.equal(resolveContextMode(undefined, base(), { milestone: "M1" }), "on");
+    assert.equal(resolveContextMode({}, base(), { parent: 7 }), "on");
+    assert.equal(resolveContextMode(undefined, base(), {}), "shadow");
+    for (const mode of ["shadow", "off", "ab"]) assert.equal(resolveContextMode({ mode }, base({ mode }), { milestone: "M1" }), mode);
+  });
+  it("sibling facts and in-flight declarations rank before other lanes' facts; milestone issues are read", async () => {
+    const rec = (file, approach) => `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ facts: { rejected: [{ approach, why: "w" }], hotspots: [{ at: `${file}:1`, why: "h" }] } }, { files: [file] }))}`;
+    const BOTC = { author: { login: "forge[bot]" }, authorAssociation: "NONE" };
+    const f = fakes({ facts33: [{ id: 5, body: rec("bin/lean/context.mjs", "overlap approach"), ...BOTC }], facts51: [{ id: 6, body: rec("other/file.md", "sibling approach"), ...BOTC }] });
+    const gh = f.io.gh;
+    f.io.gh = async (a) => (a[0] === "issue" && a[1] === "list" ? JSON.stringify([{ number: 52 }]) : gh(a));
+    f.io.declared = async () => [{ issue: 62, surfaces: ["api/routes.ts"], paths: ["api/routes.ts"] }];
+    const facts = await gather(f, { milestone: "M1" });
+    assert.ok(facts.siblings.includes(51) && facts.siblings.includes(52));
+    const t = compileContextPack(facts).text;
+    const at = (s) => { const i = t.indexOf(s); assert.ok(i >= 0, `missing ${s}\n${t}`); return i; };
+    assert.ok(at("#62 (in flight, sibling) will touch shared surface api/routes.ts") < at("sibling approach"));
+    assert.ok(at("sibling approach") < at("overlap approach"), t);
   });
 });

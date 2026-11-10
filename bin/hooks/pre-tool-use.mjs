@@ -1479,6 +1479,13 @@ function checkMainCheckoutMutation(command) {
       }
       for (const hit of mutatingGitHits(tokens)) {
       const targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir);
+      // #5333: refs/stash is shared by every worktree of the repo; a lane builder (FORGE_LANE_WORKTREE, set by the engine) must not touch it.
+      if (hit.name === "git stash" && process.env.FORGE_LANE_WORKTREE === "1") {
+        return (
+          "BLOCKED: `git stash` in a lane worktree: the stash stack is shared by every lane of this repo, so a pop can apply another lane's files.\n" +
+          "Use a WIP commit instead (`git add -A && git commit -m wip`); `git stash list` and `git stash show` stay allowed.\n"
+        );
+      }
       if (!isMainCheckout(targetDir)) continue;
       if (hit.branches) {
         // Ref-only verb: only the checked-out branch matters; unresolvable (detached HEAD, error) = allow.

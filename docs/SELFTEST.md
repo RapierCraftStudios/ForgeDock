@@ -5,6 +5,7 @@ The engine's unit tests mock `gh`, git and the pool transport, so defects such a
 ```
 forgedock selftest --static
 forgedock selftest --live [--repo <owner/sandbox>] [--lang node|python] [--pr <staging->main PR>]
+forgedock selftest --journey [--repo <owner/sandbox>] [--pr <N>] [--update-snapshots]
 ```
 
 `--live` also runs the static check. The sandbox repo comes from `--repo` or `selftest.sandbox_repo` in forge.yaml ([CONFIG.md](CONFIG.md#selftest-optional)). Run it on the host or the pool, not in GitHub Actions. The exit code is non-zero and the output names the failed step.
@@ -32,3 +33,13 @@ With `--pr N`, the PR head is read before the run (from `--release-repo`, else t
 ## Nightly run
 
 Off by default. Set `selftest.nightly_interval_hours` (see [CONFIG.md](CONFIG.md#selftest-optional)) and the schedd daemon starts `selftest --live --nightly-report <repo>` on the host, as a detached process, once that many hours have passed since that repo's last run (last run time cached per repo in `selftest-nightly-<owner>_<repo>.json` under the sched dir). The daemon never runs the harness itself, so a long run never holds its other sweeps. It never runs on GitHub Actions. A failing run, including one that cannot start (for example no `selftest.sandbox_repo`, step `config`) or a harness crash, files one issue titled `selftest --live failed at step <step> (nightly)` carrying `<!-- FORGE:SELFTEST_NIGHTLY -->`; the next failure edits that open issue instead of filing another. A passing run writes nothing. The issue lives in the repo schedd resolves for the working directory, and the sandbox repo must be set by `selftest.sandbox_repo`.
+
+## New-user journey
+
+`forgedock selftest --journey` (#5305) checks what a first-time user sees, which the mocked unit tests and `--live` do not. Run it on the host before each release, never in GitHub Actions.
+
+1. **Clean environment**: `npm pack`, then `npx --package <tarball> forgedock` in a container holding only Node and git (`docker run --rm`, image `node:22`, override with `FORGE_JOURNEY_IMAGE`; without Docker, a throwaway HOME and a PATH of only node, git and the shell basics). It runs the bare command (the not-ready output), `help`, `doctor` and an unknown command. It fails on: success wording on a machine without gh and Claude Code (steps `banner`), a doctor that exits 0 or does not name the missing tools (`doctor`), raw runtime error text (`errors`), placeholder values in a `forge.yaml` it wrote (`files`), and a CLI that does not start.
+2. **Sandbox repo**: needs `gh` authenticated and Claude Code; otherwise skipped with a note. In a fresh directory it runs `demo --repo <sandbox>` (`setup`), `doctor` (must exit 0), and `demo --run` (`first-merge`), then requires a PR merged after the start. It prints the time to first merged PR and every prompt shown, and always removes the directory and closes the issues it opened.
+3. **Snapshots**: the scrubbed output (ANSI, paths, versions and timings removed) is compared with `bin/tests/fixtures/journey-snapshots/*.txt` (`banner`, `help`, `doctor`, `errors`, and `not-ready` for exit codes and the files written). A wording change fails with the file and line; review it and run with `--update-snapshots` to accept it, so the change shows in the diff.
+
+The sandbox repo comes from `--repo` or `selftest.sandbox_repo`; the harness refuses the project repo and the release repo. With `--pr N` the result is posted on the release PR as `<!-- FORGE:JOURNEY result=pass|fail sha=<head> step=<failed step|none> ttfm=<seconds|na> -->`, next to the review's `GATE_PASS`. It is a separate marker from `FORGE:SELFTEST` and is informational: `review-staging` does not read it.

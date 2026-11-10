@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
+import { execFileSync } from "node:child_process";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, backupForgeYaml, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, maybeOfferFirstRun, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 // The installer, doctor and status resolve the Claude config dir from
@@ -229,6 +230,22 @@ describe("backfillForgeYaml (#1982)", () => {
     );
     backfillForgeYaml(dir);
     assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after a successful backfill");
+  });
+});
+
+describe("backupForgeYaml (#5315)", () => {
+  it("returns null when the file does not exist", () => {
+    assert.equal(backupForgeYaml(join(dir, "forge.yaml"), "x"), null);
+  });
+  it("records a config-history version and leaves no .bak in the repo", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(out, "x", "utf-8");
+    process.env.FORGE_CONFIG_HISTORY_DIR = join(dir, "history");
+    try { backupForgeYaml(out, "test"); } finally { delete process.env.FORGE_CONFIG_HISTORY_DIR; }
+    assert.ok(!existsSync(out));
+    assert.ok(!existsSync(join(dir, "forge.yaml.bak")));
+    const repos = readdirSync(join(dir, "history"));
+    assert.equal(readFileSync(join(dir, "history", repos[0], "1.yaml"), "utf-8"), "x");
   });
 });
 
@@ -470,6 +487,7 @@ describe("preflight", () => {
         "git --version": "git version 2.45.0",
         "gh --version": "gh version 2.52.0",
         "gh auth status": "Logged in to github.com",
+        "yq --version": "yq 4.44.1",
       },
     });
     const res = await preflight(ctx);
@@ -544,10 +562,12 @@ describe("preflight", () => {
         "git --version": "git version 2.45.0",
         "gh --version": "gh version 2.52.0",
         "gh auth status": "Logged in to github.com",
+        "yq --version": "yq 4.44.1",
       },
     });
     const res = await preflight(ctx);
-    assert.equal(res.checks.length, 7);
+    assert.equal(res.checks.length, 8);
+    assert.equal(res.checks[4].name, "yq");
     assert.equal(res.checks[3].name, "GitHub CLI");
     assert.equal(res.ghReady, true);
 
@@ -2681,6 +2701,8 @@ describe("review (Act IV)", () => {
     const cwd = tmpDir("fd-review-");
     const { ctx } = stubCtx({ cwd });
     const res0 = await read(ctx);
+    res0.draft.project.owner.value = "acme";
+    res0.draft.project.repo.value = "widgets";
     const res = await review(ctx, res0.draft, res0.description);
     assert.equal(res.written, true);
     assert.equal(res.aborted, false);
@@ -2769,12 +2791,18 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
       },
       meta: { remoteDetected: true },
     };
-    const res = await review(ctx, draft, { value: "", source: "" });
+    process.env.FORGE_CONFIG_HISTORY_DIR = join(cwd, "history");
+    let res;
+    try { res = await review(ctx, draft, { value: "", source: "" }); } finally { delete process.env.FORGE_CONFIG_HISTORY_DIR; }
 
     assert.equal(res.aborted, false);
     assert.equal(res.written, true);
-    assert.ok(existsSync(join(cwd, "forge.yaml.bak")), "the old file must be backed up");
-    assert.equal(readFileSync(join(cwd, "forge.yaml.bak"), "utf-8"), "precious: true\n");
+    // #5315: the prior file goes to the config history, never a forge.yaml.bak in the repo.
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no forge.yaml.bak in the repo");
+    const histDir = join(cwd, "history");
+    const repoDirs = readdirSync(histDir);
+    assert.equal(repoDirs.length, 1, "one repo history");
+    assert.equal(readFileSync(join(histDir, repoDirs[0], "1.yaml"), "utf-8"), "precious: true\n");
   });
 
   it("no existing config: confirmFn is never called (nothing to confirm)", async () => {
@@ -2788,6 +2816,8 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
       },
     });
     const res0 = await read(ctx);
+    res0.draft.project.owner.value = "acme";
+    res0.draft.project.repo.value = "widgets";
     const res = await review(ctx, res0.draft, res0.description);
 
     assert.equal(confirmCalled, false);
@@ -2819,8 +2849,7 @@ describe("celebrate (Act V)", () => {
     celebrate(ctx, { written: true, todoCount: 2, total: 24, hookStatus: "installed" });
     assert.match(w.text, /Forged\./);
     assert.match(w.text, /34s|3[0-9]s/);
-    assert.match(w.text, /npx forgedock doctor/);
-    assert.match(w.text, /\/issue/);
+    assert.match(w.text, /npx forgedock demo --run/);
     assert.match(w.text, /2/); // TODO count surfaces in the receipt
   });
 
@@ -2830,11 +2859,17 @@ describe("celebrate (Act V)", () => {
     assert.match(w.text, /hook skipped|NOT active/);
   });
 
-  it("what's next box includes GitHub App install as item 1", () => {
+  it("ends with exactly one recommended next command (#5304)", () => {
     const { ctx, w } = stubCtx({});
     celebrate(ctx, { written: true, todoCount: 0, total: 5, hookStatus: "installed" });
-    assert.match(w.text, /install GitHub App/i);
-    assert.match(w.text, /rapiercraft-forgedock/);
+    assert.equal((w.text.match(/npx forgedock (?!uninstall|help)[a-z-]+/g) || []).length, 1);
+    assert.doesNotMatch(w.text, /\b[2-8]\. /);
+  });
+
+  it("pickNextStep orders app, first PR, then demo (#5304)", () => {
+    assert.match(pickNextStep({ appFlow: true, firstPrFlow: true }).command, /install-app/);
+    assert.match(pickNextStep({ firstPrFlow: true }).command, /first-pr/);
+    assert.match(pickNextStep().command, /demo --run/);
   });
 
   it("mentions uninstall and the full help command so removal is discoverable (#1881)", () => {
@@ -2970,13 +3005,37 @@ describe("maybeOfferDemo (Act V.6)", () => {
   });
 });
 
+describe("maybeOfferFirstRun (#5290)", () => {
+  it("is skipped without a TTY and never asks", async () => {
+    const { ctx } = stubCtx({ isTTY: false, confirmFn: async () => { throw new Error("asked"); } });
+    assert.equal((await maybeOfferFirstRun(ctx)).offered, false);
+  });
+  it("declining runs nothing; accepting hands off to runFirstRunFn", async () => {
+    const { ctx } = stubCtx({ isTTY: true, confirmFn: async () => false, runFirstRunFn: async () => { throw new Error("ran"); } });
+    assert.deepEqual(await maybeOfferFirstRun(ctx), { offered: true, ran: false });
+    let called = false;
+    const { ctx: c2 } = stubCtx({ isTTY: true, confirmFn: async () => true, runFirstRunFn: async () => { called = true; } });
+    assert.deepEqual(await maybeOfferFirstRun(c2), { offered: true, ran: true });
+    assert.equal(called, true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Task 8: runJourney contract tests
 // ---------------------------------------------------------------------------
 
+const okExec = (cmd) => (cmd === "git" ? "git version 2.45.0" : "ok");
+const journeyHome = (name) => {
+  const home = tmpDir(name);
+  mkdirSyncFs(join(home, ".claude"), { recursive: true });
+  return home;
+};
+
 describe("runJourney", () => {
   it("fresh cwd: resolves exit code 0 and forge.yaml exists", async () => {
     const cwd = tmpDir("fd-journey-");
+    execFileSync("git", ["init", "-q"], { cwd });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/widgets.git"], { cwd });
     const forgeHome = tmpDir("fd-forge-journey-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
@@ -2987,7 +3046,8 @@ describe("runJourney", () => {
     const ctx = makeCtx({
       cwd,
       forgeHome,
-      home: tmpDir("fd-home-journey-"),
+      home: journeyHome("fd-home-journey-"),
+      exec: okExec,
       env: {},
       stdout: fakeWriter(),
       mode: "none",
@@ -3017,7 +3077,8 @@ describe("runJourney", () => {
     const ctx = makeCtx({
       cwd,
       forgeHome,
-      home: tmpDir("fd-home-journey2-"),
+      home: journeyHome("fd-home-journey2-"),
+      exec: okExec,
       env: {},
       stdout: fakeWriter(),
       mode: "none",
@@ -3032,6 +3093,48 @@ describe("runJourney", () => {
     assert.equal(postContent, preContent);
   });
 
+  it("missing prerequisites (clean room): not-ready summary, no banner, no forge.yaml, nothing installed (#5302)", async () => {
+    const cwd = tmpDir("fd-journey-clean-");
+    const forgeHome = tmpDir("fd-forge-journey-clean-");
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    const home = tmpDir("fd-home-journey-clean-"); // no ~/.claude
+    const w = fakeWriter();
+    const ctx = makeCtx({
+      cwd, forgeHome, home, env: {}, stdout: w, mode: "none", motion: false, linkStrategy: "copy",
+      platform: "linux",
+      isCliAvailableFn: () => false,
+      exec: () => { throw new Error("ENOENT"); }, // no git/gh/yq
+    });
+    const exitCode = await runJourney(ctx);
+    assert.equal(exitCode, 1);
+    assert.match(w.text, /Not ready yet: 4 things to install/);
+    assert.match(w.text, /Re-run `npx forgedock` when done/);
+    assert.match(w.text, /yq/);
+    assert.doesNotMatch(w.text, /Forged\./);
+    assert.ok(!existsSync(join(cwd, "forge.yaml")));
+    assert.ok(!existsSync(join(home, ".claude", "commands")));
+  });
+
+  it("prerequisites ok but owner/repo unknown: no placeholder forge.yaml, no banner (#5302)", async () => {
+    const cwd = tmpDir("fd-journey-noremote-");
+    const forgeHome = tmpDir("fd-forge-journey-noremote-");
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// stub\n", "utf-8");
+    const w = fakeWriter();
+    const ctx = makeCtx({
+      cwd, forgeHome, home: journeyHome("fd-home-journey-noremote-"), exec: okExec, env: {}, stdout: w,
+      mode: "none", motion: false, linkStrategy: "copy", isCliAvailableFn: () => false,
+    });
+    const exitCode = await runJourney(ctx);
+    assert.equal(exitCode, 1);
+    assert.ok(!existsSync(join(cwd, "forge.yaml")));
+    assert.doesNotMatch(w.text, /Forged\./);
+    assert.match(w.text, /forge\.yaml not written/);
+  });
+
   it("SIGINT listener is cleaned up after journey (or error)", async () => {
     const cwd = tmpDir("fd-journey3-");
     const forgeHome = tmpDir("fd-forge-journey3-");
@@ -3044,7 +3147,8 @@ describe("runJourney", () => {
     const ctx = makeCtx({
       cwd,
       forgeHome,
-      home: tmpDir("fd-home-journey3-"),
+      home: journeyHome("fd-home-journey3-"),
+      exec: okExec,
       env: {},
       stdout: fakeWriter(),
       mode: "none",

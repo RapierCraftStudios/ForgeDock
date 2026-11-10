@@ -18,6 +18,16 @@ version (the table embedded in the staging review summary). `--json` is machine-
 is resolved to its tag time minus one day; an unknown tag falls back to a full crawl and says so on stderr). Progress is
 printed to stderr while crawling, so `--json` stdout stays parseable.
 
+## Feature scoreboard (`--milestone <id|title>`, forge#5341)
+
+`forgedock stats --milestone <number|title> [--repo <owner/repo>] [--json]` grades a whole milestone from GitHub (its issues, PRs and
+epic FORGE:ACCEPTANCE comments) and the local run logs, with no manual input. Columns: journey status at ship (pass, fail or
+never-ran, per epic with head and time); minutes from the first lane merge to the first green journey; defects created after the last
+planned child closed, by class (`release-review`, `post-deploy`, `hotfix`, `other`, from labels or title); rework share (issues whose body
+says fix/redo/rework/follow-up of a sibling `#N`, or labelled `rework`); operator interventions (hand PRs whose head branch is not a
+`<type>/issue-N` lane branch, PRs labelled `manual-merge`, plus `needs-human` issues); cost from the run logs. A signal that cannot be read prints n/a. `--json`
+keeps the earlier verdict mix under `query.mix` and adds `query.scoreboard`. The feature benchmark is in `docs/eval/feature-bench.md`.
+
 ## Sources
 
 1. **GitHub (primary).** Issues, PRs and labels of the target repo, plus trusted `<!-- FORGE:TELEMETRY v1 -->` comments
@@ -124,8 +134,11 @@ for post-merge defect signals; `--offline` skips that crawl (defects print n/a, 
 
 Columns per cell: n, merge rate, first-pass rate, needs-human rate, median cost, median wall minutes, median wall/model
 time, review findings per lane (conformance failures + verifier findings) and the share of lanes with any, conformance
-failure rate, and the post-merge defect rate (a reopen, a revert naming the PR, or a `fix`/`bug` PR touching the same
-non-test files within 7 days) over merged lanes with known defect data.
+failure rate, and the post-merge defect rate over merged lanes with known defect data. A defect is any of the
+`--conformance-outcomes` signals within 7 days (#5364): reverted, reopened, cited (a later PR names the PR or issue as
+the cause), or `same_hunks` (a later fix PR's old-side lines git-blame to the lane's merge commit). `same_hunks` needs a
+local clone of the repo (run from it); without one a lane with no other signal is n/a, counted as unresolved. Each fix PR
+is blamed once per run (`same-hunks i/N` progress goes to stderr).
 
 Cells are grouped by verdict (eligible, ambiguous, ineligible) and by every reason and signal code (`hotspot`,
 `churn_high`, `label_docs`, `size_S`, ...), so outcomes can be attributed to each signal.
@@ -199,6 +212,10 @@ crawl). Every RUN_START slice of each log counts, so re-running an issue with th
 - Finished lanes without an `explore` tag (before #4391) are counted and left out.
 
 `--json` prints the same data as `query.explore_ab`.
+
+## Issue origin (`--origin`, forge#5294)
+
+`forgedock stats --origin [--repo owner/repo] [--since <date>] [--json]` splits the issues opened in the window (default: last 30 days) into requested (human author), production (`FORGE:PRODWATCH` marker or `prod-watch` label), review-finding (`review-finding`/`staging-review` labels), follow-up (`FORGE:DEFERRED_FROM`, rollup markers) and unknown (no positive evidence; never assumed requested). For each origin it prints the count, the cost from trusted `FORGE:TELEMETRY` runs and how many issues have no recorded cost (counted apart, never as $0). Outcomes are merged, closed-invalid (not planned, duplicate, `invalid`/`duplicate`/`wontfix` label), other-closed and open. The last line gives the pipeline-originated share of recorded cost.
 
 ## Sections (per version and repo)
 

@@ -49,6 +49,7 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
+import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, evaluateDispatchStall, firstHourReport, recordStallAlert, writeFirstHour } from "./batch-health.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { applySetExecution } from "./live-execution.mjs";
@@ -153,7 +154,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
+  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
   hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined } = {}) {
   const p = scheddPaths(dir);
   // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
@@ -390,6 +391,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     clearInterval(idleTimer);
     clearInterval(lockTimer);
     clearInterval(lagTimer);
+    clearInterval(stallTimer);
     clearInterval(beatTimer);
     for (const t of rehostTimers) clearTimeout(t);
     if (dueTimer) clearInterval(dueTimer);
@@ -440,6 +442,37 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (lag >= lagMs && now - lagLogged >= 60_000) { lagLogged = now; log(`schedd: event loop stalled ${Math.round(lag / 1000)}s (host overloaded?)`); }
   }, 1000);
   lagTimer.unref?.();
+  // #5314: a batch with ready issues, free lanes and no dispatch for `stallMin` is re-hosted once per ready set, else one needs-you
+  // alert is recorded (health.json, status, sched show); every batch also gets its first-hour report once, without operator action.
+  const rehostedStall = new Map();
+  const watchBatches = () => {
+    if (closing) return;
+    const now = Date.now();
+    for (const id of listBatches(root)) {
+      try {
+        const b = openBatch(root, id), plan = b.readPlan();
+        if (!plan?.daemon) continue;
+        const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.load(), created = Date.parse(plan.created ?? "");
+        const isHosted = hosted.has(id) || starting.has(id);
+        const stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported });
+        if (Number.isFinite(created) && (reported || now - created >= FIRST_HOUR_MIN * 60_000) && !existsSync(join(b.dir, FIRST_HOUR_FILE)) && now - created < 24 * 3600_000) {
+          if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), stall }))) log(`schedd: first-hour report written for batch ${id}`);
+        }
+        if (!stall) continue;
+        const sig = stall.ready.join(",");
+        if (!isHosted && rehostedStall.get(id) !== sig) {
+          rehostedStall.set(id, sig);
+          log(`schedd: re-hosting batch ${id} (${stall.detail})`);
+          const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+          starting.set(id, started);
+          started.catch((e) => { log(`schedd: re-host ${id} failed: ${e?.message ?? e}`); recordStallAlert(b, stall); }).finally(() => starting.delete(id));
+        } else if (recordStallAlert(b, stall)) log(`schedd: batch ${id} needs you: ${stall.detail}`);
+      } catch { /* advisory: one unreadable batch never stops the watchdog */ }
+    }
+  };
+  const stallTimer = setInterval(watchBatches, stallCheckMs);
+  stallTimer.unref?.();
+
   // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
   let dueRunning = false;
   const dueTimer = due ? setInterval(async () => {

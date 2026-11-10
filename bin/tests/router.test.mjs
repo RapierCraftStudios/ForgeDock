@@ -19,8 +19,16 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs")
 delete process.env.CLAUDE_CONFIG_DIR;
 
 function runCli(args, { cli = CLI, cwd, home, extraEnv } = {}) {
+  // Claude Code present: setup and doctor treat a missing ~/.claude as a blocking prerequisite (#5302).
+  if (home) mkdirSync(join(home, ".claude"), { recursive: true });
+  cwd ??= tmpDir("fd-cli-cwd-");
+  // ...and setup no longer writes a placeholder forge.yaml, so a fresh cwd needs a GitHub origin to resolve owner/repo.
+  if (args[0] === "install" && !existsSync(join(cwd, ".git")) && !existsSync(join(cwd, "forge.yaml"))) {
+    spawnSync("git", ["init", "-q"], { cwd });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/acme/widgets.git"], { cwd });
+  }
   return spawnSync(process.execPath, [cli, ...args], {
-    cwd: cwd ?? tmpDir("fd-cli-cwd-"),
+    cwd,
     env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1", ...extraEnv },
     encoding: "utf-8",
     timeout: 30000 });
@@ -44,7 +52,7 @@ describe("router", () => {
   });
 
   it("help lists the union of journey + engine commands — no phantom commands", () => {
-    const res = runCli(["help"], { home: tmpDir("fd-h-") });
+    const res = runCli(["help", "--all"], { home: tmpDir("fd-h-") });
     assert.equal(res.status, 0);
     // Journey/onboarding surface
     assert.match(res.stdout, /install/);
@@ -731,6 +739,7 @@ describe("router", () => {
     const home = tmpDir("fd-ccd-home-");
     const cwd = tmpDir("fd-ccd-cwd-");
     const cfg = join(tmpDir("fd-ccd-cfg-"), "profile");
+    mkdirSync(cfg, { recursive: true }); // Claude Code present
     writeFileSync(join(home, ".gitconfig"), "[user]\n\tname = Test User\n\temail = test@example.com\n", "utf-8");
     const stubBin = tmpDir("fd-ccd-stub-bin-");
     writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
@@ -908,7 +917,7 @@ describe("version command / --version, -v flags (#1981)", () => {
   });
 
   it("help lists the version command and flag", () => {
-    const res = runCli(["help"], { home: tmpDir("fd-ver-help-") });
+    const res = runCli(["help", "--all"], { home: tmpDir("fd-ver-help-") });
     assert.equal(res.status, 0);
     assert.match(res.stdout, /npx forgedock version/);
     assert.match(res.stdout, /--version/);
@@ -1463,7 +1472,9 @@ describe("doctor --fix (forge#1944)", () => {
       "utf-8",
     );
 
-    const before = runCli(["doctor"], { cwd, home, extraEnv });
+    const hidden = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.doesNotMatch(hidden.stdout, /CLAUDE\.md legacy block/i, "legacy warnings need --verbose (#5302)");
+    const before = runCli(["doctor", "--verbose"], { cwd, home, extraEnv });
     assert.equal(before.status, 0, before.stdout + before.stderr);
     assert.match(before.stdout, /CLAUDE\.md legacy block/i);
     assert.match(before.stdout, /legacy ForgeDock block found/i);

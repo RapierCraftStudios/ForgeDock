@@ -217,6 +217,7 @@ CI_FAILING=$(gh pr checks "$PR_NUMBER" -R "$GH_REPO" --json name,bucket \
   --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
 echo "CI_FAILING: $CI_FAILING"
 ```
+When the target branch's protection or rulesets (or `gate.required_checks` in forge.yaml) name required checks, only those count toward `CI_FAILING`; other red checks are listed as non-blocking warnings (`forgedock review-staging --summary` does this). With no readable required set every red check counts.
 `CI_FAILING` > 0 → BLOCK DEPLOY (unless autofixed in Phase 1F). A red `forgedock/verify` alone does not block, and neither do `forge/deploy-gate` or `Check for FORGE gate markers`: they report this review's own gate marker, so an earlier `GATE_FAILURE` never blocks the re-run that clears it.
 
 ### Phase 1F: CI Autofix
@@ -238,7 +239,7 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ## Phase 2: Material Change Analysis
 
-**Launched-agent bookkeeping (MANDATORY)**: Step 1 truncated the PR-keyed launched-agent file. Before launching **every** Phase 2-6 reviewer (the DISPATCH briefs and the spec-owned panel), append its lowercase marker domain (for example `security`, `bug-hunter-api` or `regression-risk`) to that file: `printf '%s\n' "<domain>" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/<PR>_launched_review_agents"`. Step 7A checks delivery for exactly these domains.
+**Launched-agent bookkeeping (MANDATORY)**: Step 1 writes the launch manifest (`<PR>_review_manifest.json`) and fills the PR-keyed launched-agent file from the DISPATCH briefs, so briefed domains need no append. Before launching each spec-owned Phase 2-6 reviewer (e.g. `bug-hunter-api`, `regression-risk`), append its lowercase marker domain: `printf '%s\n' "<domain>" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/<PR>_launched_review_agents"`. Reviewers post with `forgedock review-staging <PR> --post-reviewer <domain> --body-file <file>`: it writes the marker and the full `Reviewed-SHA:` from the manifest and refuses a domain that is not launched. Step 7A checks delivery for exactly these domains; on a shortfall it names each reviewer and why (stale SHA, no findings block, absent) with a `REDISPATCH <domain>` line: re-run only that reviewer.
 
 **Head SHA binding**: substitute `[REVIEW_SHA]` in every template below with the literal full head SHA from the manifest's `REVIEW_STAGING:` line before dispatch. The reviewer's post fence runs in a fresh shell, so it must never reference a shell variable and must never invent a value.
 
@@ -380,6 +381,8 @@ Invoke `/test-gate` with the manifest's `BUNDLE_PRS` and the default branch. Sav
 ```
 >>> INVOKE: Skill(skill="{FORGE_SKILL_PREFIX}test-gate", args="--prs \"<BUNDLE_PRS>\" --base <default branch>")
 ```
+
+**Feature acceptance (forge#5336, blocking)**: for a milestone release PR, `--summary` runs `npx forgedock acceptance gate --branch <head ref> --stage ship` itself: a red or never-run epic journey, or a test-gate SKIP on a milestone that has an epic, is BLOCK DEPLOY, never a pass.
 
 **Route reachability (forge#5087, blocking when declared)**: when `forge.yaml` declares `topology.route_reachability`, list the route paths the bundle adds (`git diff --name-only --diff-filter=A <default>...HEAD`, Next.js `app/**/route.*` / `pages/api/**` mapped to URL paths, route groups removed) and run the command with them as arguments. A non-zero exit is a BLOCK finding naming the path; unset = skip.
 

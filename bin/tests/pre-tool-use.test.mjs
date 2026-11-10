@@ -2302,6 +2302,17 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     assert.equal(run("git checkout main", mainDir, { FORGE_ALLOW_MAIN_CHECKOUT_GIT: "1" }).exitCode, 0);
   });
 
+  it("denies git stash push|pop|apply|drop in a lane worktree and names the WIP-commit alternative; list/show stay allowed (#5333)", () => {
+    const lane = { FORGE_LANE_WORKTREE: "1" };
+    for (const c of ["git stash", "git stash push -u", "git stash pop", "git stash apply stash@{1}", "git stash drop", "git -C . stash pop"]) {
+      const r = run(c, wtDir, lane);
+      assert.equal(r.exitCode, 2, c);
+      assert.match(r.stderr, /WIP commit/, c);
+    }
+    for (const c of ["git stash list", "git stash show -p"]) assert.equal(run(c, wtDir, lane).exitCode, 0, c);
+    assert.equal(run("git stash pop", wtDir).exitCode, 0, "outside a lane (no FORGE_LANE_WORKTREE) a linked worktree is unchanged");
+  });
+
   it("fails open in a non-git directory", () => {
     assert.equal(run("git checkout main", DEFAULT_MANAGED_DIR).exitCode, 0);
   });
