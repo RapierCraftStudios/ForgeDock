@@ -168,6 +168,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    A validate rerun that still times out (#4906) is infrastructure: `precheck()` counts it covered when CI verified the
    head, else `env.validate_timeout` (environment state, recoverable, no builder resume; teardown pushes the commits),
    never `conformance.unimplemented`.
+   Environment failures (#5371): `missingTool` also recognises exit-1 signatures of the executor (Docker daemon/socket, a
+   bind-mount source absent, Playwright browser missing, npm `ENOTFOUND`/`EAI_AGAIN`), so `substituteVerdict` is not `runs`
+   and the failure is `env.tool_missing`. Validate/repro failure details carry `outputTail()` (last 40 lines, secret-looking
+   values redacted). A remote-placed lane whose only failure is `validate_failed` ends `env.validate_placement`
+   (recoverable, mechanical); `orchestrate.mjs` `placeOf` recovers it, and any mechanical code whose failed run was remote,
+   locally. The local lane reruns the frozen command: a pass merges, a fail stays `conformance.unimplemented`.
    Lane head report (#4958): the exit checkpoint (`checkpoint`/`rescuePush`/`reportLaneHead` in `lean.mjs`) records
    `{branch, sha, pushedTo}` whenever the lane has commits ahead of base. When the normal push fails before git push
    (sign-off rewrite) or the push is rejected or exhausted, HEAD is pushed as is to the lane branch (not after a rejection), else to `forge-salvage/<issue>-<sha>`. The line goes into the terminal trajectory (or a `FORGE:LANE_BRANCH`

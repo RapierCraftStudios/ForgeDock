@@ -25,7 +25,7 @@ const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -1545,6 +1545,22 @@ describe("conformance shadow mode (the default)", () => {
       assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
     }
+  });
+  it("#5371 a remote lane whose frozen validate fails ends env.validate_placement (output tail kept); the local recovery lane keeps the real failure terminal", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const rerun = async () => ({ rc: 1, output: "1 failed\nTOKEN=abcd1234secretvalue\nassertion x" });
+    const w = world({ validation: v }); w.io.runCommand = rerun;
+    const r = await run(w, { conformance: "enforce", placement: { where: "remote", reason: "mode remote" } });
+    assert.equal(r.code, ENV_VALIDATE_PLACEMENT); assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 2, "no builder resume");
+    assert.match(nhBody(w), /assertion x/); assert.doesNotMatch(nhBody(w), /abcd1234secretvalue/);
+    const l = world({ validation: v }); l.io.runCommand = rerun;
+    const lr = await run(l, { conformance: "enforce", placement: { where: "local", reason: "x" } });
+    assert.notEqual(lr.code, ENV_VALIDATE_PLACEMENT);
+    const rec = world({ validation: v }); rec.io.runCommand = rerun;
+    assert.notEqual((await run(rec, { conformance: "enforce", placement: { where: "local", reason: "x" }, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } })).code, ENV_VALIDATE_PLACEMENT);
+    const ok = world({ validation: v }); ok.io.runCommand = async () => ({ rc: 0, output: "" });
+    assert.equal((await run(ok, { conformance: "enforce", placement: { where: "local", reason: "x" }, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } })).terminalReason, "merged");
   });
   it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];

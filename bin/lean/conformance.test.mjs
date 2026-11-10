@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
+import { outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -312,6 +312,31 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.equal(missingTool({ rc: 127, output: "bash: ./scripts/check.sh: No such file or directory" }, { command: "./scripts/check.sh" }), null);
     assert.equal(missingTool({ rc: 1, output: "ModuleNotFoundError: No module named 'app'" }, { repoHas: repoTracks(["app.py"]) }), null);
     assert.equal(missingTool({ rc: 1, output: "1 test failed: expected not found" }), null, "rc != 127 needs command not found");
+  });
+  it("#5371 substituteVerdict treats docker daemon, playwright browser and npm network failures as not runs", () => {
+    const sigs = [
+      "docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+      "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /x/infra",
+      "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium-1/chrome\nRun npx playwright install",
+      "npm ERR! code EAI_AGAIN\nnpm ERR! network request to https://registry.npmjs.org/x failed",
+      "npm error code ENOTFOUND",
+    ];
+    for (const output of sigs) {
+      assert.equal(substituteVerdict({ rc: 1, output }, { command: "x" }), "ok", output);
+      assert.equal(missingTool({ rc: 1, output })?.kind, "environment", output);
+    }
+    assert.equal(substituteVerdict({ rc: 1, output: "AssertionError: expected 1 to equal 2" }, { command: "x" }), "runs");
+  });
+  it("#5371 a failed validate detail carries a redacted last-40-line output tail; an env signature is env.tool_missing", () => {
+    const C = { requirements: [], validate: [{ id: "V1", command: "bash t.sh" }], deliverables: [{ id: "D1", path: "a.mjs", change: "x" }] };
+    const failed = { validation: [{ id: "V1", exit: 1 }], requirements: [] };
+    const out = Array.from({ length: 60 }, (_, i) => `line${i}`).join("\n") + "\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123\nAuthorization: Bearer abcdefghijklmnop1234";
+    const pc = precheck({ contract: C, result: failed, changedFiles: ["a.mjs"], validateRuns: { V1: { rc: 1, output: out } } });
+    const d = pc.failures.find((f) => f.kind === "validate_failed").detail;
+    assert.match(d, /line59/); assert.doesNotMatch(d, /line5\b/); assert.doesNotMatch(d, /ghp_abcdef|abcdefghijklmnop1234/); assert.match(d, /\[redacted\]/);
+    const env = precheck({ contract: C, result: failed, changedFiles: ["a.mjs"], validateRuns: { V1: { rc: 1, output: "Cannot connect to the Docker daemon" } } });
+    assert.deepEqual(env.failures.map((f) => f.code), ["env.tool_missing"]); assert.match(env.failures[0].detail, /Cannot connect/);
+    assert.equal(outputTail(""), "");
   });
   it("#5005 a missing forgedock install is env.tool_missing, not conformance; other absolute paths stay code defects", () => {
     const out = "node:internal/modules/cjs/loader\nError: Cannot find module '/opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
