@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -462,6 +462,26 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.equal(calls.length, 2, drains ? "drained: no further re-host" : "an add that cannot drain does not loop");
       } finally { release(); await d.close(); }
     }
+  });
+
+  it("#5314: a batch whose runner is gone with ready issues pending is re-hosted by the watchdog; a runner that dispatches nothing raises one alert", async () => {
+    const dir = tmpDir("schedd-stall-"), root = join(dir, "batches"), id = "b20261104-052317-5314";
+    const calls = [];
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", created: new Date(Date.now() - 90 * 60000).toISOString() });
+    b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], parallel: 2 });
+    const old = new Date(Date.now() - 30 * 60000);
+    utimesSync(join(b.dir, "state.json"), old, old);
+    const runBatch = async ({ argv, sink }) => { calls.push(argv); sink.batch({ id, dir: b.dir }); return await new Promise(() => {}); }; // a wedged runner
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false, stallCheckMs: 50, stallMin: 10 });
+    try {
+      await until(() => calls.length === 1, 8000);
+      assert.deepEqual(calls[0], ["--resume", id], "re-hosted without operator action");
+      await until(() => existsSync(join(b.dir, "first-hour.json")), 8000);
+      utimesSync(join(b.dir, "state.json"), old, old); // the wedged runner still dispatched nothing
+      await until(() => existsSync(join(b.dir, "health.json")) && readFileSync(join(b.dir, "health.json"), "utf8").includes("dispatch-stalled"), 8000);
+      assert.equal(calls.length, 1, "a hosted runner is not re-hosted again");
+    } finally { await d.close(); }
   });
 
   it("#4917: a resume that leaves the waiting issue unadmitted (breaker tripped, retry-at passed) is not re-hosted again", async () => {

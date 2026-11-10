@@ -446,6 +446,9 @@ describe("#4402: the batch report prints the efficiency lines, fail-soft", () =>
   });
 });
 
+// #5314: with no daemon the CLI queues the issues, then fails loudly (nothing is scheduled); the queued result rides on the error.
+const queued = (p) => p.catch((e) => { if (e?.code === "batch.not-hosted") return e.result; throw e; });
+
 describe("#4408: issues added to a running batch (forgedock orchestrate --add)", () => {
   const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
   it("one lane running: an added independent issue starts on the next pass, an added one that Depends on the running issue waits for its merge", async () => {
@@ -545,7 +548,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.unrunAdds(), [2, 3, 5]);
     const views = [];
     const io = { gh: async (a) => { if (a[0] === "api") return "OWNER\n"; views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
-    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io }));
+    const res = await queued(quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io })));
     assert.deepEqual(res.added, [6]);
     assert.deepEqual(res.skipped.map((x) => [x.issue, x.reason]).sort(), [[3, "already in batch"], [7, "closed"], [8, "unreadable"], ["x", "not an integer"]]);
     assert.ok(views.every((a) => a.includes("-R") && a.includes("o/r")), "state read against the batch's repo");
@@ -566,7 +569,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5", "6", "--lane", "staging"], { batchRoot: root, io })), /usage/);
     assert.deepEqual(views, ["6"]);
     assert.deepEqual(b.readAdded(), [6]);
-    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io }));
+    const res = await queued(quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io })));
     assert.deepEqual(res.added, [7]);
     assert.deepEqual(res.skipped, []);
     assert.deepEqual(b.readAdded(), [6, 7]);
@@ -1065,13 +1068,13 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.match(bad.refused[1].reason, /needs-human/);
     assert.deepEqual(b.readRequeued(), []);
     assert.ok(b.readReport(), "nothing changed");
-    const ok = await quiet(() => orchestrateFromCli(["--requeue", "b1", "5", "--reason", "decided"], { batchRoot: root, io }));
+    const ok = await queued(quiet(() => orchestrateFromCli(["--requeue", "b1", "5", "--reason", "decided"], { batchRoot: root, io })));
     assert.deepEqual(ok.requeued, [5]);
     assert.equal(b.readRequeued()[0].reason, "decided");
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
   });
 
-  it("#5000: --add/--requeue on a finished batch without a daemon clear the report and say it is not hosted", async () => {
+  it("#5000/#5314: --add/--requeue on a finished batch without a daemon queue the issue and fail loudly (nothing is scheduled)", async () => {
     const root = tmpDir("batch-add-finished-");
     const b = openBatch(root, "b1");
     b.writePlan({ argv: ["1"], repo: "o/r" });
@@ -1080,14 +1083,13 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     const io = { gh: async () => JSON.stringify({ state: "OPEN", labels: [], body: "", author: { login: "a" } }) };
     const lines = [];
     const run = async (argv) => { const l = console.log; console.log = (x) => lines.push(String(x)); try { return await orchestrateFromCli(argv, { batchRoot: root, io }); } finally { console.log = l; } };
-    const add = await run(["--add", "b1", "7"]);
-    assert.deepEqual(add.added, [7]);
+    await assert.rejects(run(["--add", "b1", "7"]), /NOTHING is scheduled.*--resume b1/);
+    assert.deepEqual(b.readAdded(), [7], "the add itself is kept");
     assert.equal(b.readReport(), null, "a plain add reopens the finished batch for --resume");
-    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)), "the CLI says nothing is scheduled yet");
+    assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
     b.writeReport({ rows: [], report: "x" });
     lines.length = 0;
-    const rq = await run(["--requeue", "b1", "5"]);
-    assert.deepEqual(rq.requeued, [5]);
+    await assert.rejects(run(["--requeue", "b1", "5"]), /NOTHING is scheduled/);
     assert.equal(b.readReport(), null);
     assert.ok(lines.some((l) => /NOT hosted.*--resume b1/.test(l)));
   });

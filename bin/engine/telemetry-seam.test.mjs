@@ -67,6 +67,11 @@ describe("engine telemetry seam", () => {
     assert.deepEqual(calls[0][1], { reason: "needs-human", code: "review.escalated", wall_ms: 60000 });
     assert.equal(calls[0][2].phase, undefined);
   });
+  it("#5339: RUN_TERMINAL carries verified as 0/1, omitted when absent", () => {
+    assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", verified: false, issue: 7 }, 10).payload.verified, 0);
+    assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", verified: true, issue: 7 }, 10).payload.verified, 1);
+    assert.equal("verified" in mapRecord({ event: "RUN_TERMINAL", reason: "merged", issue: 7 }, 10).payload, false);
+  });
   it("maps STRUCTURE_DELTA (forge#4159) to structure_delta with scalar counts and 0/1 flags", () => {
     const m = mapRecord({ event: "STRUCTURE_DELTA", issue: 7, edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: true, boundary_loosened: false }, 10);
     assert.deepEqual(m, { event: "structure_delta", phase: "implement", payload: { edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: 1, boundary_loosened: 0 } });
@@ -119,5 +124,17 @@ describe("engine telemetry seam", () => {
     const some = harness({ repo: null, resolveRepo: () => "a/b" });
     await some.emit(attempt);
     assert.equal(some.calls[0][2].repo, "a/b");
+  });
+});
+
+describe("first_review on run_terminal (#5345)", () => {
+  it("is flattened to scalar fr_* fields and read back by stats --first-review", async () => {
+    const { firstReviewLanes } = await import("../stats/first-review.mjs");
+    const first_review = { state: "fail", kinds: ["conformance.omission", "conformance.scope_creep"], rounds: 2, clean: false, incomplete: false, type: "bug", surfaces: ["auth"] };
+    const { payload } = mapRecord({ event: "RUN_TERMINAL", reason: "merged", code: 0, first_review }, 0);
+    assert.equal("first_review" in payload, false);
+    assert.deepEqual([payload.fr_state, payload.fr_kinds, payload.fr_rounds, payload.fr_clean, payload.fr_surfaces], ["fail", "conformance.omission,conformance.scope_creep", 2, 0, "auth"]);
+    const [lane] = firstReviewLanes([{ event: "run_terminal", issue: 7, ts: "2026-01-01", repo: "o/r", reason: "merged", ...payload }]);
+    assert.deepEqual([lane.clean, lane.rounds, lane.kinds, lane.surfaces, lane.type], [false, 2, first_review.kinds, ["auth"], "bug"]);
   });
 });

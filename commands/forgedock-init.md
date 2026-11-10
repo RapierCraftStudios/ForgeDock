@@ -579,10 +579,9 @@ For each optional section that is ALREADY ACTIVE in forge.yaml (detected in Phas
 
 ### 5D: Write the file
 
-Backup the existing file:
+Record the existing file in the config history (never a `forge.yaml.bak*` file in the repo; #5315):
 ```bash
-cp "$FORGE_YAML" "${FORGE_YAML}.bak"
-echo "Backed up: forge.yaml → forge.yaml.bak"
+npx forgedock config record "init edit"
 ```
 
 Write the complete new file: required sections (preserved verbatim) + active optional sections (newly generated) + inactive optional sections (left as commented-out blocks matching forge.yaml.example structure).
@@ -676,7 +675,7 @@ EOF
 
 Component options come from the Phase 5E domain-label list (fallback `core`), so board components and domain labels line up.
 
-**Write the IDs.** Re-run the Phase 3C field/option queries against `PROJECT_NUMBER`, then write the `project_board` section (Phase 5B schema) into `forge.yaml`, replacing any previous `project_board` block, and keep `forge.yaml.bak` from 5D. If any `gh project` call fails with a missing-scope error, print `gh auth refresh -h github.com -s read:project,project` and stop this step.
+**Write the IDs.** Re-run the Phase 3C field/option queries against `PROJECT_NUMBER`, then write the `project_board` section (Phase 5B schema) into `forge.yaml`, replacing any previous `project_board` block, and keep the config-history version recorded in 5D. If any `gh project` call fails with a missing-scope error, print `gh auth refresh -h github.com -s read:project,project` and stop this step.
 
 ---
 
@@ -751,7 +750,7 @@ Next steps:
   2. Test the pipeline:
        /work-on next
   3. If any WARNING appeared above, edit forge.yaml to fix the flagged values.
-  4. Backup file: forge.yaml.bak (delete when satisfied)
+  4. Previous version: npx forgedock config history (restore with: npx forgedock config rollback <n>)
   {If BOUNDARY_ALLOW_ALL (2G): "5. Your boundary config allows every package to import every package ({BOUNDARY_ALLOW_ALL_AT}). Consider tightening it per package once its design settles: core work-on reports import growth but only blocks undeclared package.json edges."}
 
 ForgeDock commands now use your project's config from forge.yaml.

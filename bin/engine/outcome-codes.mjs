@@ -68,6 +68,7 @@ export const OUTCOME_CODES = Object.freeze({
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
+  DESIGN_INVALIDATED: "design.invalidated", // forge#5342: a lane found the plan wrong; one spike amendment filed, siblings held; the rework-share rollup counts it
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   DEPENDENCY_BLOCKED: "dependency.blocked",
   // Lane resolution refusals (#4125): before any lease, comment or worktree; terminal reason `lane-refused`.
@@ -200,12 +201,14 @@ export function codeForTerminalReason(reason) {
 
 /** forge#4906: a validate command timed out (exit 124) on the engine's rerun: infrastructure, not an unimplemented contract item. Kept outside OUTCOME_CODES (the base enum guard lists that enum); recoverable and mechanical like the other env codes. */
 export const ENV_VALIDATE_TIMEOUT = "env.validate_timeout";
+/** forge#5371: a remote-placed lane's frozen validate failed in the sandbox; the host reruns it in a local recovery lane (a pass there is the change, a fail stays conformance.unimplemented). Outside OUTCOME_CODES like ENV_VALIDATE_TIMEOUT. */
+export const ENV_VALIDATE_PLACEMENT = "env.validate_placement";
 
 /**
  * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
  * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
  */
-export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED, OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_OMISSION, OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL]);
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED, OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_OMISSION, OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL]);
 /** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
 export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 
@@ -237,7 +240,7 @@ function classifyNeedsHumanBase(row) {
 }
 
 /** forge#4725: mechanical/environment codes recover on their own budget (`recovery.mechanicalMaxAttempts`), apart from conformance failures. */
-export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
+export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
 
 /** `mechanical` | `conformance`: the recovery budget class of a lane result row (a conflicting `ci-pending` is a base conflict). */
 export function recoveryClassOf(row) {
@@ -246,7 +249,7 @@ export function recoveryClassOf(row) {
 
 /** The code a recovery lane works on: a conflicting `ci-pending` is recovered as a base conflict. */
 export function recoveryCodeOf(row) {
-  return (row?.outcome ?? row?.terminalReason) === "ci-pending" ? OUTCOME_CODES.BASE_CONFLICT : normalizeCode(row?.code);
+  return (row?.outcome ?? row?.terminalReason) === "ci-pending" ? OUTCOME_CODES.BASE_CONFLICT : row?.code === ENV_VALIDATE_PLACEMENT ? ENV_VALIDATE_PLACEMENT : normalizeCode(row?.code); // #5371: kept outside OUTCOME_CODES, so normalizeCode alone would drop it
 }
 
 /** forge#4656: the label of a human-owned wait (an owner and an unblock condition are required in its comment). */

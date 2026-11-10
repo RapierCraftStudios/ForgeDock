@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, joinedNumbers, wilson, cites, reverts, sameHunks, warmSameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, verdictOf } from "./query.mjs";
 import { summariseLog } from "./local-source.mjs";
 import { buildReport, parseArgs, runStats } from "./index.mjs";
@@ -179,10 +179,96 @@ describe("conformance outcomes: read only (#5210 R3)", () => {
       { gh: graphqlGh(0), env: {}, now: () => NOW, git: null, releaseTimes: [], onProgress: () => {} });
     assert.equal(r.query.conformance_outcomes.min_n, 3);
   });
+  it("a 502 at first=100 retries the same page smaller and completes (#5363)", async () => {
+    const calls = [];
+    const inner = graphqlGh(150, calls);
+    const gh = async (args) => {
+      if (args.includes("first=100")) throw new Error("gh: HTTP 502: Bad Gateway");
+      return inner(args);
+    };
+    const out = await gatherConformanceOutcomes({ repo: "o/r", gh, since: at(0), now: NOW });
+    assert.ok(out.prs.length > 0);
+    assert.ok(calls.some((a) => a.includes("first=50")));
+  });
+  it("a persistent 502 fails naming a narrower --since (#5363)", async () => {
+    await assert.rejects(gatherConformanceOutcomes({ repo: "o/r", gh: async () => { throw new Error("HTTP 502"); }, since: at(0), now: NOW }), /narrower --since/);
+  });
   it("flag parsing", () => {
     assert.equal(parseArgs(["--conformance-outcomes"]).conformanceOutcomes, true);
     assert.equal(parseArgs(["--conformance-outcomes", "--window-days", "14"]).windowDays, 14);
     assert.throws(() => parseArgs(["--window-days", "7"]), /needs --conformance-outcomes/);
     assert.throws(() => parseArgs(["--conformance-outcomes", "--window-days", "0"]), /positive integer/);
   });
+});
+
+describe("conformance outcomes: surfaces and replay (#5283)", () => {
+  const stub = (files) => files.map((f) => (f.includes("migrations/") ? "domain:database" : f.includes("auth") ? "domain:auth" : f.endsWith(".tsx") ? "domain:frontend" : null)).filter(Boolean).sort();
+  const lane = (n, d, files) => pr(n, d, { files });
+  it("by_surface compares nonconforming vs conforming among PRs touching that surface; n/a under min n", () => {
+    const prs = [lane(1, 0, ["db/migrations/0543.sql"]), lane(2, 0, ["db/migrations/0544.sql"]), lane(3, 0, ["web/a.tsx"]), pr(4, 0)];
+    const v = verdicts([[1, "nonconforming", ["conformance.unimplemented"]], [2, "conforms"], [3, "conforms"], [4, "conforms"]]);
+    const r = conformanceOutcomes({ prs, verdicts: v, minN: 1, now: NOW, surfacesOf: stub });
+    const s = r.repos["o/r"].by_surface;
+    assert.deepEqual(Object.keys(s).sort(), ["domain:database", "domain:frontend"]);
+    assert.equal(s["domain:database"].nonconforming.n, 1);
+    assert.equal(s["domain:database"].conforming.n, 1);
+    assert.match(renderConformanceOutcomes(r), /surface domain:database/);
+    assert.equal(conformanceOutcomes({ prs, verdicts: v, minN: 5, now: NOW, surfacesOf: stub }).repos["o/r"].by_surface["domain:database"].nonconforming.rate, null);
+  });
+  it("replay: enforced when a configured surface is hit and the verdict is nonconforming, flagged when it would pass, none otherwise", () => {
+    const prs = [lane(1, 0, ["db/migrations/0543.sql"]), lane(2, 0, ["web/(site)/layout.tsx"]), lane(3, 0, ["docs/x.md"])];
+    const v = verdicts([[1, "nonconforming", ["conformance.unimplemented"]], [2, "conforms"], [3, "conforms"]]);
+    const r = replayPrs({ prs, verdicts: v, numbers: [1, 2, 3, 9], enforceDomains: "database,frontend", surfacesOf: stub });
+    assert.deepEqual(r.prs.map((x) => x.outcome), ["enforced", "flagged", "none"]);
+    assert.deepEqual(r.missing, [9]);
+    assert.equal(replayPrs({ prs, verdicts: v, numbers: [3], riskPaths: "docs/**", surfacesOf: stub }).prs[0].outcome, "flagged");
+    assert.match(renderReplay(r), /\| #2 \| shadow \| conforms \| domain:frontend \| flagged \|/);
+  });
+  it("buildReport wires --replay into the report (JSON) and reports PRs outside the fetched range as missing", async () => {
+    const r = await buildReport({ ...parseArgs(["--conformance-outcomes", "--replay", "1,99", "--enforce-domains", "frontend"]), repo: "o/r", cache: false, local: false },
+      { gh: graphqlGh(0), env: {}, now: () => NOW, git: null, releaseTimes: [], onProgress: () => {} });
+    const rp = r.query.conformance_outcomes.replay;
+    assert.deepEqual(rp.enforce_domains, ["frontend"]);
+    assert.ok(rp.missing.includes(99));
+  });
+  it("prsOfPage keeps changed file paths; parseArgs validates --replay and its companions", () => {
+    const data = { data: { search: { nodes: [{ number: 5, mergedAt: at(0), files: { nodes: [{ path: "a.ts" }] } }] } } };
+    assert.deepEqual(prsOfPage(data, "o/r")[0].files, ["a.ts"]);
+    assert.deepEqual(parseArgs(["--conformance-outcomes", "--replay", "1,2", "--enforce-domains", "auth"]).replay, [1, 2]);
+    assert.throws(() => parseArgs(["--replay", "1"]), /need --conformance-outcomes/);
+    assert.throws(() => parseArgs(["--conformance-outcomes", "--enforce-domains", "auth"]), /need --replay/);
+    assert.throws(() => parseArgs(["--conformance-outcomes", "--replay", "x"]), /comma list/);
+  });
+});
+
+describe("joinedNumbers (#5363)", () => {
+  it("lists each merged PR and its closing issues once, sorted", () => {
+    assert.deepEqual(joinedNumbers([{ number: 9, closingIssues: [{ number: 3 }, { number: 5 }] }, { number: 4, closingIssues: [{ number: 3 }] }]), [3, 4, 5, 9]);
+    assert.deepEqual(joinedNumbers(), []);
+  });
+});
+
+it("same-hunks blames each fix PR once (#5372)", () => {
+  const at = (d) => new Date(Date.UTC(2026, 0, 1 + d)).toISOString();
+  const NOW2 = Date.parse(at(60));
+  const lanes = Array.from({ length: 10 }, (_, i) => ({ repo: "o/r", number: 100 + i, title: `feat: ${i}`, body: "", mergedAt: at(i), mergeSha: `lane${i}`, closingIssues: [{ number: 200 + i }] }));
+  const fixes = Array.from({ length: 3 }, (_, i) => ({ repo: "o/r", number: 300 + i, title: `fix: ${i}`, body: "", mergedAt: at(i + 3), mergeSha: `fix${i}`, closingIssues: [] }));
+  const calls = { ranges: 0, blame: 0 };
+  const git = { oldRanges: () => { calls.ranges++; return [{ file: "a", start: 1, end: 2 }, { file: "b", start: 1, end: 2 }]; }, blame: (rev) => { calls.blame++; return rev === "fix1^" ? ["lane0"] : []; } };
+  const verdicts = new Map(lanes.map((l, i) => [`pr:${l.number}`, { state: "conforms", issue: 200 + i, kinds: [] }]));
+  const events = [];
+  const r = conformanceOutcomes({ prs: [...lanes, ...fixes], verdicts, now: NOW2, git, minN: 1, onProgress: (e) => events.push(e) });
+  assert.equal(calls.ranges, 3, "oldRanges once per fix PR");
+  assert.equal(calls.blame, 6, "blame calls are fix PRs x hunks");
+  assert.equal(r.prs.find((x) => x.pr === 100).signals.same_hunks, true);
+  assert.equal(r.prs.find((x) => x.pr === 101).signals.same_hunks, false);
+  assert.deepEqual(events.map((e) => [e.phase, e.done, e.total]), [["same-hunks", 1, 3], ["same-hunks", 2, 3], ["same-hunks", 3, 3]]);
+  warmSameHunks(fixes, git);
+  assert.equal(calls.blame, 6, "a second warm reuses the memo");
+});
+
+it("same-hunks keeps a hit when another range of the fix PR is unresolved (#5372)", () => {
+  const git = { oldRanges: () => [{ file: "a", start: 1, end: 2 }, { file: "b", start: 1, end: 2 }], blame: (_r, f) => (f === "a" ? null : ["lane0"]) };
+  assert.equal(sameHunks({ mergeSha: "lane0" }, [{ mergeSha: "fixU" }], git), true);
+  assert.equal(sameHunks({ mergeSha: "other" }, [{ mergeSha: "fixU" }], git), null);
 });

@@ -161,7 +161,7 @@ test("claims nothing below the threshold; at the threshold posts a plan, tags wi
   assert.ok(io.calls.some((a) => a[0] === "label" && a[1] === "create" && a.includes("release:billing-2026-10-30")));
   assert.equal(io.calls.filter((a) => a[1] === "edit" && a.includes("--add-label")).length, 3);
   await step(io, w, st); // batch not reported: one batch per release, nothing new
-  assert.equal(io.batches.length, 1); assert.equal(io.calls.filter((a) => a[0] === "pr").length, 0);
+  assert.equal(io.batches.length, 1); assert.equal(io.calls.filter((a) => a[0] === "pr" && !a.join(" ").includes("closingIssuesReferences")).length, 0);
   io.reported.add("b1"); io.closed.add(1);
   await step(io, w, st);
   const creates = io.calls.filter((a) => a[0] === "pr" && a[1] === "create");

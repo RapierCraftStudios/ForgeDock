@@ -90,7 +90,7 @@ UNCOVERED=$(awk '
 grep -q 'test_gate_verdict' "$POST" && grep -q 'launched_review_agents' "$POST" && ok || bad "TEST_GATE_VERDICT and LAUNCHED_REVIEW_AGENTS must be persisted to the scratchpad"
 # PR-keyed (concurrent runs in one cwd must not share state) and reset by an executable command, not prose
 if grep -qE '\$_SD/(test_gate_verdict|test_gate_reason|launched_review_agents)|\.forge-scratch\}/launched_review_agents' "$SPEC" "$POST"; then bad "gate/launched-agent scratch files must be keyed by \${PR_NUMBER}_"; else ok; fi
-grep -qF 'io.writeFile(launchedFile, "")' "$CLI" && grep -qF 'rm -f "${_SD:?}/${PR_NUMBER:?}_test_gate_verdict" "${_SD:?}/${PR_NUMBER:?}_test_gate_reason"' "$POST" && ok || bad "the pre-dispatch must truncate the launched-agent file and the test gate must rm -f the PR-keyed verdict files"
+grep -qF 'io.writeFile(launchedFile, briefs.map((b) => `${b.domain}\n`).join(""))' "$CLI" && grep -qF 'rm -f "${_SD:?}/${PR_NUMBER:?}_test_gate_verdict" "${_SD:?}/${PR_NUMBER:?}_test_gate_reason"' "$POST" && ok || bad "the pre-dispatch must reset the launched-agent file from the manifest and the test gate must rm -f the PR-keyed verdict files"
 if awk '/^### 7E:/,/^### 7F:/' "$SPEC" | grep -qF '{GH_REPO}'; then bad "7E must not use the {GH_REPO} template token"; else ok; fi
 # (8b) forge#3733: Phase 6.75 fails closed on an empty/absent launched-agent list or empty PR_NUMBER; Phase 6 fails closed on a bad SELECTED_AGENT_COUNT
 F675=$(blk "$POST" delivery-check)

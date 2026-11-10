@@ -38,6 +38,8 @@ export const MAX_LINKS = 20;
 export const MAX_LEDGER_PRS = 8;
 /** #4401: FORGE:FACTS records (earlier lanes) read into one pack: this issue's own attempts first, then the file-path ledger. */
 export const MAX_FACT_LANES = 6;
+/** #5340: sibling issues whose comments are read for FORGE:FACTS, and in-flight declarations kept, per pack. */
+export const MAX_SIBLING_READS = 12;
 /** #5085: subject-history bounds per pack: GitHub searches run, rows kept. */
 export const MAX_SUBJECT_QUERIES = 3;
 export const MAX_SUBJECT_ITEMS = 8;
@@ -63,6 +65,17 @@ export function parseContextPackConfig({ mode, sources, bytes, days, pitfallLane
   const picked = list ? CONTEXT_SOURCES.filter((s) => list.map((x) => String(x).trim().toLowerCase()).includes(s)) : [...CONTEXT_SOURCES];
   const pos = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; };
   return { mode: CONTEXT_MODES.includes(m) ? m : "shadow", sources: picked, budgetBytes: pos(bytes, DEFAULT_CONTEXT_BYTES), days: pos(days, DEFAULT_LEDGER_DAYS), pitfallLanes: pos(pitfallLanes, DEFAULT_PITFALL_LANES) };
+}
+
+/**
+ * #5340: the mode of a lane once its milestone and parent are known. An explicit forge.yaml engine.context_pack (any valid
+ * mode, `ab` included) always wins; unset, a lane with a milestone or a parent epic gets `on` so it sees its siblings,
+ * and every other lane keeps the shadow default. `cfg` is parseContextPackConfig's result (after any ab arm).
+ */
+export function resolveContextMode(raw, cfg, { milestone = null, parent = null } = {}) {
+  const explicit = CONTEXT_MODES.includes(String(raw?.mode ?? "").trim().toLowerCase());
+  if (explicit || cfg.mode !== "shadow") return cfg.mode;
+  return milestone || parent ? "on" : cfg.mode;
 }
 
 /**
@@ -302,8 +315,8 @@ async function recallStatus(io, dirs, index) {
  * base ref; `checkout` (the main checkout, optional) is where repo-fact files absent from the worktree are looked up.
  * Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
  */
-export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [], recallIndex = RECALL_INDEX }) {
-  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], errors: [], recall: null };
+export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [], recallIndex = RECALL_INDEX, milestone = null }) {
+  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], siblings: [], inflight: [], errors: [], recall: null };
   const body = String(iss?.body ?? "");
   const on = new Set(sources);
   const step = async (name, fn) => { if (!on.has(name)) return; try { await fn(); } catch (e) { facts.errors.push(`${name}: ${oneLine(e?.message ?? e, 120)}`); } };
@@ -332,6 +345,7 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
         for (const s of [...new Set(subs)].sort(byNum)) if (s !== Number(issue) && !rel.has(s)) rel.set(s, "sibling");
       } catch (e) { facts.errors.push(`graph: siblings ${oneLine(e?.message ?? e, 80)}`); }
     }
+    facts.siblings = [...rel.entries()].filter(([, r]) => r === "sibling").map(([n]) => n);
     const order = { parent: 0, "depends-on": 1, link: 2, "cross-ref": 3, sibling: 4 };
     const picked = [...rel.entries()].sort((a, b) => order[a[1]] - order[b[1]] || a[0] - b[0]).slice(0, MAX_LINKS);
     for (const [n, r] of picked) {
@@ -435,6 +449,15 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
       facts.lanes.push({ ref, issue: n, pr, ...rec });
     };
     for (const c of [...comments].reverse()) if (trusted(c)) add(parseFactsComment(c?.body), `#${issue} earlier attempt`, Number(issue), null);
+    // #5340: siblings first: the FORGE:FACTS of the lane's siblings (same parent, same milestone), whatever files they touched,
+    // and what in-flight sibling lanes declared they will add on shared surfaces (host declarations).
+    let ms = [];
+    if (milestone) { try { ms = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--milestone", String(milestone), "--state", "all", "--limit", "40", "--json", "number"]))).map((x) => Number(x?.number)); } catch (e) { facts.errors.push(`facts: milestone ${oneLine(e?.message ?? e, 80)}`); } }
+    facts.siblings = [...new Set([...facts.siblings, ...ms])].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue)).sort(byNum);
+    for (const n of facts.siblings.slice(0, MAX_SIBLING_READS)) {
+      try { for (const c of [...(await readComments(io.gh, repo, n))].reverse().filter(trusted)) add(parseFactsComment(c?.body), `#${n} sibling`, n, null); } catch (e) { facts.errors.push(`facts: sibling #${n} ${oneLine(e?.message ?? e, 80)}`); }
+    }
+    try { facts.inflight = ((await io.declared?.({ repo, except: issue })) ?? []).slice(0, MAX_SIBLING_READS); } catch (e) { facts.errors.push(`facts: in-flight ${oneLine(e?.message ?? e, 80)}`); }
     const overlaps = (files) => files.some((f) => paths.some((p) => f === p || f.startsWith(`${p.replace(/\/+$/, "")}/`) || p.startsWith(`${f}/`)));
     let prs = [];
     try { prs = await ledgerPrs(); } catch (e) { facts.errors.push(`facts: ledger ${oneLine(e?.message ?? e, 80)}`); }
@@ -463,6 +486,9 @@ const linkLine = (l) => { const fails = (Array.isArray(l.failures) ? l.failures 
 const pitfallLine = (p) => `- [${p.trigger}] ${oneLine(p.lesson, 160)}${p.globs?.length ? ` (${p.globs.join(", ")})` : ""}; seen ${p.count}×`;
 const ledgerLine = (p) => `- ${p.pr ? `PR #${p.pr}` : "commit"} ${p.sha}${p.revert ? " [revert]" : ""}${p.reverted ? ` [reverted by ${p.reverted}]` : ""} "${p.title}"${p.files?.length ? ` (${p.files.join(", ")})` : ""}${p.notes?.length ? ` — ${p.notes.join("; ")}` : ""}`;
 
+/** #5347: the files earlier merged PRs on the issue's symbols touched (the ledger's), unique, at most 8: the builder's cheap answer to "where to look". */
+const packFiles = (facts) => [...new Set((facts.ledger ?? []).flatMap((p) => p.files ?? []))].slice(0, 8);
+
 /**
  * The pack text for `facts`, ranked: explicit links (parent > Depends on > body links > cross-references > siblings),
  * prior attempts, recurring pitfalls of the repo (#4375, in the engine's selected order), the symbol ledger (newest first), repo-fact pointers. One line per item; a parent or dependency also
@@ -479,13 +505,16 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
   if (on.has("ledger")) for (const p of facts?.ledger ?? []) cand.push({ src: "ledger", line: ledgerLine(p) });
   if (on.has("facts")) {
     // #4401: earlier lanes' facts by kind (rejected approaches first, across lanes), then the repo-fact file pointers
-    const lanes = (facts?.lanes ?? []).map((l) => factsLines(l, l.ref));
-    for (const k of FACTS_RANK) for (const l of lanes) for (const line of l[k]) cand.push({ src: "facts", line: oneLine(line) });
+    // #5340: siblings first: what in-flight siblings declared they will add, then merged siblings' facts, then the rest
+    for (const d of facts?.inflight ?? []) cand.push({ src: "facts", line: oneLine(`- #${d.issue} (in flight, sibling) will touch shared surface ${(d.surfaces ?? []).join(", ")}${d.paths?.length ? `: ${d.paths.slice(0, 6).join(", ")}` : ""}`) });
+    const sib = new Set(facts?.siblings ?? []);
+    const all = (facts?.lanes ?? []).map((l) => ({ sib: sib.has(l.issue), lines: factsLines(l, l.ref) }));
+    for (const group of [all.filter((l) => l.sib), all.filter((l) => !l.sib)]) for (const k of FACTS_RANK) for (const l of group) for (const line of l.lines[k]) cand.push({ src: "facts", line: oneLine(line) });
     for (const f of facts?.facts ?? []) cand.push({ src: "facts", line: `- ${f} (repo facts file; read it if relevant)` });
   }
   const found = Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, cand.filter((c) => c.src === s).length]));
   const recall = facts?.recall && typeof facts.recall === "object" ? { present: Boolean(facts.recall.present), reason: oneLine(facts.recall.reason ?? "", 80) } : null;
-  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [], recall };
+  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [], recall, files: [] };
   if (!cand.length) return empty;
   const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts (this issue and the same subject)", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Facts from earlier lanes and repo facts" };
   const head = `Context pack for #${facts.issue}`;
@@ -506,7 +535,7 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
     if (rows.length) parts.push(`\n${titles[s]}:`, ...rows.map((r) => r.text));
   }
   const text = parts.join("\n");
-  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit), recall };
+  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit), recall, files: packFiles(facts) };
 }
 
 /** The pack text without its pitfalls section (#4375: pitfalls are local only and never posted). */

@@ -355,6 +355,9 @@ branches:
 #   # restarted fresh from the frozen contract, the diff and the last validate
 #   # result instead of carrying its whole history. 0 disables.
 #   context_ceiling_tokens: 120000
+#   # Per lane size (#5346); a size without an entry uses context_ceiling_tokens.
+#   # Unset until an A/B (experiment arm overrides) sets the values; 0 = no ceiling for that size.
+#   context_ceiling_by_size: "S=120000,M=120000,L=120000"
 #   # Turn budget (#4392): implement turns per lane size. Size is a `size:S|M|L`
 #   # label, else the frozen contract's deliverable paths (S <= 2, M <= 5, else L).
 #   # At the budget the builder is checkpointed and gets one short wrap-up to

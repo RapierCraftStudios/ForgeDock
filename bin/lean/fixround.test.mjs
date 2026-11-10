@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText, TRIGGERS, REWORK_TRIGGERS, firstPassOf, formatFirstPassSummary, sessionCostDelta } from "./fixround.mjs";
-import { fixSessionPrompt, ciFailurePrompt } from "./prompts.mjs";
+import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText, TRIGGERS, REWORK_TRIGGERS, firstPassOf, formatFirstPassSummary, sessionCostDelta, NARROW_PROMPT_MAX, NARROW_BASELINE_TOKENS, mergeNarrowTasks } from "./fixround.mjs";
+import { fixSessionPrompt, ciFailurePrompt, narrowFixPrompt } from "./prompts.mjs";
 
 describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
   it("every mechanical kind is fresh; block/contract/conflict kinds are not", () => {
@@ -121,5 +121,28 @@ describe("#4987 CI fix prompt: unrelated failures", () => {
     const p = ciFailurePrompt([{ job: "core-tests" }], "ci");
     assert.match(p, /not an amendment/);
     assert.match(p, /unknown amendment kinds are rejected/);
+  });
+});
+
+describe("#5348 narrow fix profile: prompt budget", () => {
+  const big = "x".repeat(200000);
+  const contract = { requirements: [{ id: "R1", quote: big }], deliverables: Array.from({ length: 200 }, (_, i) => ({ id: `D${i}`, path: `p/${i}.mjs`, change: big })), preserve: [{ id: "P1", what: big }], validate: [{ id: "V1", command: big }] };
+  it("stays under the cap and the 12k-token baseline on worst-case inputs (4 chars/token, 8k tokens left for system and tools)", () => {
+    const p = narrowFixPrompt({ task: big, contract, files: Array.from({ length: 500 }, (_, i) => `dir/file-${i}.test.mjs`) });
+    assert.ok(p.length <= NARROW_PROMPT_MAX, `${p.length} chars`);
+    assert.ok(Math.ceil(p.length / 4) + 8000 <= NARROW_BASELINE_TOKENS, "prompt tokens plus the fixed system overhead fit the baseline");
+  });
+  it("carries the contract excerpt, the failure and the files, and none of the diff, summary or lane text", () => {
+    const p = narrowFixPrompt({ task: "enumerating test a.test.mjs misses `foo`", contract: { deliverables: [{ id: "D1", path: "bin/x.mjs", change: "add foo" }], requirements: [{ quote: "SECRET-QUOTE" }] }, files: ["a.test.mjs"] });
+    assert.match(p, /bin\/x\.mjs/); assert.match(p, /misses `foo`/); assert.match(p, /- a\.test\.mjs/);
+    assert.doesNotMatch(p, /SECRET-QUOTE|## Diff|## Issue/);
+  });
+  it("is far smaller than the diff-carrying fix prompt", () => {
+    const diff = "+line\n".repeat(20000);
+    assert.ok(narrowFixPrompt({ task: "t", contract, files: ["a"] }).length < fixSessionPrompt({ task: "t", diff, contract }).length / 2);
+  });
+  it("mergeNarrowTasks: one task, a section per pending fix, empty ones dropped", () => {
+    assert.equal(mergeNarrowTasks([{ title: "A", text: "fix a" }, { title: "B", text: " " }, { title: "C", text: "fix c" }]), "### A\nfix a\n\n### C\nfix c");
+    assert.equal(mergeNarrowTasks(null), "");
   });
 });

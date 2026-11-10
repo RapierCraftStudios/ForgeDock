@@ -41,13 +41,13 @@ const isForgeMarker = (body) => /^\s*<!--\s*FORGE:/.test(String(body ?? ""));
  * a line of its own character at least as long; anything inside another fence (a quoted sample) or indented 4+ columns
  * (an indented code block) is content, never a declaration. An unclosed fence yields nothing.
  */
-function probeBlocks(text) {
+export function fencedBlocks(text, tag = "forge-probe") {
   const blocks = [];
   let open = null;
   for (const line of text.split("\n")) {
     const m = FENCE_RE.exec(line);
     if (!open) {
-      if (m && !(m[1][0] === "`" && m[2].includes("`"))) open = { ch: m[1][0], len: m[1].length, lines: m[2].trim() === "forge-probe" ? [] : null };
+      if (m && !(m[1][0] === "`" && m[2].includes("`"))) open = { ch: m[1][0], len: m[1].length, lines: m[2].trim() === tag ? [] : null };
     } else if (m && m[1][0] === open.ch && m[1].length >= open.len && !m[2].trim()) {
       if (open.lines) blocks.push(open.lines.join("\n"));
       open = null;
@@ -55,6 +55,8 @@ function probeBlocks(text) {
   }
   return blocks;
 }
+
+const probeBlocks = (text) => fencedBlocks(text, "forge-probe");
 
 /** The last top-level ```forge-probe block of `text`: {run, pass, timeoutS}, or null when absent or malformed. */
 export function parseProbe(text) {

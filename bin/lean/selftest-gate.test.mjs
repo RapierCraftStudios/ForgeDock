@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildMarker, parseMarker, selftestGate, readMarkerComments, postMarker } from "./selftest-gate.mjs";
+import { buildJourneyMarker, parseJourneyMarker, postJourneyMarker, buildMarker, parseMarker, selftestGate, readMarkerComments, postMarker } from "./selftest-gate.mjs";
 
 const H = "a".repeat(40), O = "b".repeat(40);
 describe("FORGE:SELFTEST gate (#4865)", () => {
@@ -38,3 +38,20 @@ describe("FORGE:SELFTEST gate (#4865)", () => {
   });
 });
 
+
+describe("FORGE:JOURNEY marker (#5305)", () => {
+  it("round-trips and never counts as a FORGE:SELFTEST result", () => {
+    const m = buildJourneyMarker({ result: "pass", sha: H, ttfm: 312 });
+    assert.deepEqual(parseJourneyMarker(m), { result: "pass", sha: H, step: "none", ttfm: 312 });
+    assert.equal(parseMarker(m), null);
+    assert.equal(selftestGate([m], H).ok, false);
+    assert.equal(parseJourneyMarker(buildMarker({ result: "pass", sha: H })), null);
+    assert.equal(parseJourneyMarker(`quote ${m}`), null);
+    assert.equal(parseJourneyMarker(buildJourneyMarker({ result: "fail", sha: H, step: "doctor" })).ttfm, null);
+  });
+  it("posts through gh", async () => {
+    const calls = [];
+    await postJourneyMarker(async (a) => { calls.push(a); return ""; }, "o/r", 5, { result: "fail", sha: H, step: "banner" });
+    assert.match(calls[0].at(-1), /^<!-- FORGE:JOURNEY result=fail sha=a{40} step=banner ttfm=na -->/);
+  });
+});

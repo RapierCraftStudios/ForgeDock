@@ -12,6 +12,7 @@
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
+import { backupToHistory } from "./config-history.mjs";
 
 // ---------------------------------------------------------------------------
 // forge.yaml generation (Task 4)
@@ -506,6 +507,14 @@ export function backupExisting(outputPath) {
 }
 
 /**
+ * Setup/agent edit of forge.yaml (#5315): record the current file as a config-history version (~/.forge/config-history/<repo>/)
+ * and move it away, instead of leaving a forge.yaml.bak in the repo. Same return shape as backupExisting.
+ */
+export function backupForgeYaml(outputPath, reason = "setup") {
+  return backupToHistory(outputPath, reason);
+}
+
+/**
  * Lightweight forge.yaml presence/shape check for the install receipt
  * (Issue #1946) — no YAML parser dependency, mirrors the regex-based
  * approach already used by resolveLabelsRepo() in bin/forgedock.mjs. Only
@@ -623,6 +632,7 @@ import {
   colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
 } from "./cinema.mjs";
 import { detectEnvironment, wslPathToWindows } from "./env-detect.mjs";
+import { checkPrereqs, formatNotReady, offerInstall } from "./prereqs.mjs";
 
 // ---------------------------------------------------------------------------
 // URL opener (default openFn implementation — injectable for tests)
@@ -712,7 +722,7 @@ const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
  * and the journey continues — advisory, never fatal. Includes informational
  * Platform/WSL/Shell rows (via env-detect.mjs) after the pass/fail checks —
  * those three always report `ok: true`, they surface state rather than gate it.
- * @returns {Promise<{ checks: Array<{name, ok, detail, fix?}>, ghReady: boolean }>}
+ * @returns {Promise<{ checks: Array<{name, ok, detail, fix?, blocking?}>, ghReady: boolean, blocking: Array }>}
  */
 export async function preflight(ctx) {
   const { stdout: w } = ctx;
@@ -721,61 +731,16 @@ export async function preflight(ctx) {
   w.write("\n  " + ember("F O R G E D O C K", ctx.mode) + "\n");
   w.write("  " + dimLine(ctx, `──── ${getLogoTagline("install")} ────────────────────`) + "\n\n");
 
-  const rows = [
-    {
-      label: "Node",
-      run: async () => {
-        const major = Number(ctx.nodeVersion.split(".")[0]);
-        return major >= 18
-          ? { ok: true, detail: `v${ctx.nodeVersion}` }
-          : { ok: false, detail: `v${ctx.nodeVersion} — need ≥18`, fix: ["Upgrade Node: https://nodejs.org/"] };
-      },
-    },
-    {
-      label: "git",
-      run: async () => {
-        try {
-          const v = ctx.exec("git", ["--version"]);
-          return { ok: true, detail: v.replace(/^git version\s*/, "") };
-        } catch {
-          return { ok: false, detail: "not found", fix: ["Install git: https://git-scm.com/downloads"] };
-        }
-      },
-    },
-    {
-      label: "Claude Code",
-      run: async () => {
-        const claudeDir = claudeDirOf(ctx);
-        return existsSync(claudeDir)
-          ? { ok: true, detail: `${claudeDir} found` }
-          : { ok: false, detail: `${claudeDir} not found`, fix: ["Install Claude Code: https://claude.com/claude-code"] };
-      },
-    },
-    {
-      label: "GitHub CLI",
-      run: async () => {
-        try {
-          ctx.exec("gh", ["--version"]);
-        } catch {
-          return {
-            ok: false,
-            detail: "not found",
-            fix: ["Install gh: https://cli.github.com/", "Windows: winget install GitHub.cli"],
-          };
-        }
-        try {
-          ctx.exec("gh", ["auth", "status"]);
-          return { ok: true, detail: "authenticated" };
-        } catch {
-          return { ok: false, detail: "not authenticated", fix: ["Run: gh auth login"] };
-        }
-      },
-    },
-  ];
+  // One list shared with `doctor` (prereqs.mjs, #5302). Probed once, shown as rows.
+  const prereqs = checkPrereqs({ exec: ctx.exec, nodeVersion: ctx.nodeVersion, claudeDir: claudeDirOf(ctx), platform: ctx.platform });
+  const rows = prereqs.map((p) => ({
+    label: p.label,
+    run: async () => (p.ok ? { ok: true, detail: p.detail } : { ok: false, detail: p.detail, fix: p.fix }),
+  }));
 
   // Environment reveal rows (platform/WSL/shell) — informational only, never
   // fail the preflight. Appended after the existing 4 checks so `named[3]`
-  // (GitHub CLI, used for `ghReady` below) keeps its index.
+  // (GitHub CLI, used for `ghReady` below) keeps its index; yq follows it.
   const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
   rows.push(
     {
@@ -799,8 +764,8 @@ export async function preflight(ctx) {
   );
 
   const results = await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
-  const named = rows.map((r, i) => ({ name: r.label, ...results[i] }));
-  return { checks: named, ghReady: named[3].ok };
+  const named = rows.map((r, i) => ({ name: r.label, ...results[i], ...(prereqs[i] ? { label: prereqs[i].label, blocking: prereqs[i].blocking, auto: prereqs[i].auto, id: prereqs[i].id } : {}) }));
+  return { checks: named, ghReady: named[3].ok, blocking: named.filter((c) => c.blocking) };
 }
 
 // ---------------------------------------------------------------------------
@@ -2486,6 +2451,7 @@ export async function forge(ctx) {
 import { detectConfig } from "./init-detect.mjs";
 import { enrich, resolveEnrichBackend } from "./init-enrich.mjs";
 import { isClaudeCliAvailable } from "./runner.mjs";
+import { installSplash } from "./splash-install.mjs";
 import { annotatedReviewScreen, box, confirm, getLogoTagline, input, select } from "./tui.mjs";
 import {
   defaultExec as repoExec, listOwners, listAppInstallations, ownerCoverageWarning,
@@ -2748,20 +2714,15 @@ export async function review(ctx, draft, description) {
     extraFields,
   });
 
-  // Hard-fail on unresolved identity placeholders when OVERWRITING an
-  // existing config (forge#1850 spec item 4): never destroy a working
-  // forge.yaml in favor of one that can't address a repo. A brand-new
-  // (non-existing) config is allowed to write placeholders — that's the
-  // existing, already-flagged (# TODO comments) greenfield-setup path, and
-  // there's nothing valuable to lose. Checked AFTER the review screen so an
-  // interactive edit that fixes the field still passes.
-  if (hasExisting && (accepted.owner === "your-github-org" || accepted.repo === "your-repo-name")) {
-    w.write("\n  Could not determine the GitHub owner/repo for this project.\n");
-    w.write("  " + dimLine(ctx, "Run this inside the target git repository, or edit those fields before accepting.") + "\n");
+  // Never write placeholder identity (#5302; overwrite case: forge#1850 item 4): a config that can't address
+  // a repo is worse than none. Checked AFTER the review screen so an interactive edit that fixes the field passes.
+  if (accepted.owner === "your-github-org" || accepted.repo === "your-repo-name") {
+    w.write("\n  Could not determine the GitHub owner/repo for this project" + (hasExisting ? "." : " — forge.yaml not written.") + "\n");
+    w.write("  " + dimLine(ctx, "Run this inside a git repository with a GitHub origin, then run: npx forgedock init") + "\n");
     return { written: false, todoCount: 0, backupName: null, aborted: true };
   }
 
-  const backup = backupExisting(outputPath);
+  const backup = backupForgeYaml(outputPath, "setup review");
   if (backup) w.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
 
   const { todoCount } = writeForgeYaml(accepted, accepted.lowConfidenceKeys, outputPath);
@@ -2771,6 +2732,20 @@ export async function review(ctx, draft, description) {
 // ---------------------------------------------------------------------------
 // Act V — Forged (Task 8)
 // ---------------------------------------------------------------------------
+
+/**
+ * The single recommended command after a green setup (#5304). Order: install
+ * the App (#5295), merge a first PR on the user's own repo (#5290), then the
+ * demo. The first two flows are not shipped yet, so flip their availability
+ * here when they land.
+ * @param {{appFlow?: boolean, firstPrFlow?: boolean}} [avail]
+ * @returns {{command: string, why: string}}
+ */
+export function pickNextStep({ appFlow = false, firstPrFlow = false } = {}) {
+  if (appFlow) return { command: "npx forgedock install-app", why: "give ForgeDock its own bot identity and rate limit" };
+  if (firstPrFlow) return { command: "npx forgedock first-pr", why: "merge your first PR on your own repo" };
+  return { command: "npx forgedock demo --run", why: "watch a PR merge on a risk-free demo repo (uses your Claude Code login)" };
+}
 
 /**
  * Act V: quench flash on the compact mark, receipt with real elapsed time,
@@ -2803,21 +2778,8 @@ export function celebrate(ctx, summary) {
   if (summary.isMinimal) {
     w.write("  " + dimLine(ctx, "see docs/CONFIG.md for optional sections") + "\n");
   }
-  w.write(
-    box(
-      [
-        `  1. install GitHub App       — github.com/apps/rapiercraft-forgedock`,
-        `  2. run npx forgedock labels setup — bootstrap GitHub labels`,
-        `  3. run npx forgedock doctor     — verify the install is green`,
-        `  4. open claude in this repo`,
-        `  5. run /issue <title> then /work-on <number>`,
-        `  6. run npx forgedock run-issue <N> — drive an issue via the durable engine`,
-        `  7. run npx forgedock watch      — monitor pipeline state`,
-        `  8. run npx forgedock guide      — how the workflow fits together`,
-      ],
-      { title: "what's next" },
-    ),
-  );
+  const next = pickNextStep();
+  w.write(box([`  ${next.command}`, `  ${next.why}`], { title: "next step" }));
   w.write("  " + dimLine(ctx, "not for you? npx forgedock uninstall removes everything · full command list: npx forgedock help") + "\n");
   w.write("  " + dimLine(ctx, "docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget") + "\n\n");
 }
@@ -3056,6 +3018,27 @@ export async function maybeOfferDemo(ctx) {
   }
 }
 
+/**
+ * #5290: offer the guided first run (propose small issues on this repo, run one to a PR). Default no; skipped
+ * without a TTY or with --fast. Best-effort: never fails the install.
+ */
+export async function maybeOfferFirstRun(ctx) {
+  const isTTY = ctx.isTTY ?? process.stdin.isTTY === true;
+  if (!isTTY || ctx.argv.includes("--fast")) return { offered: false };
+  try {
+    if (!(await ctx.confirmFn("Find 3 small issues in this repo and run one to a PR now?", false))) {
+      ctx.stdout.write("  " + dimLine(ctx, "Skipped, try it anytime: npx forgedock first-run") + "\n");
+      return { offered: true, ran: false };
+    }
+    const runFirstRunFn = ctx.runFirstRunFn ?? (async (o) => (await import("./first-run.mjs")).runFirstRun(o));
+    const { runFromCli } = await import("./engine-cli.mjs");
+    await runFirstRunFn({ cwd: ctx.cwd, exec: ctx.exec, confirmFn: ctx.confirmFn, runIssueFn: (n) => runFromCli([String(n)]), startedMs: ctx.startedAt });
+    return { offered: true, ran: true };
+  } catch {
+    return { offered: true, ran: false };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The full journey (Task 8)
 // ---------------------------------------------------------------------------
@@ -3083,25 +3066,41 @@ export async function runJourney(ctx) {
   };
   process.on("SIGINT", onSigint);
   try {
-    await preflight(ctx);
+    const pre = await preflight(ctx);
+    // #5302: a missing blocking prerequisite ends setup here: nothing is installed or written, no success banner.
+    let missing = pre.blocking;
+    if (missing.length > 0) {
+      const installed = await offerInstall(missing, { confirmFn: ctx.confirmFn, write: (t) => ctx.stdout.write(t) });
+      if (installed.length > 0) {
+        missing = checkPrereqs({ exec: ctx.exec, nodeVersion: ctx.nodeVersion, claudeDir: claudeDirOf(ctx), platform: ctx.platform }).filter((p) => p.blocking);
+      }
+    }
+    if (missing.length > 0) {
+      ctx.stdout.write(formatNotReady(missing) + "\n");
+      return 1;
+    }
     // Persist the toolset into ~/.forge/ before linking anything (#1943): when
     // not skipped (git-clone installs are exempt), reassign ctx.forgeHome so
     // every symlink/hook path forge() creates below originates from the
     // stable copy, not the ephemeral npm/npx/git source. Stashed on ctx so
     // forge()'s reporting block can surface the outcome (see isEphemeralCachePath
     // advisory extension above).
+    const splashPkgRoot = ctx.forgeHome;
     const persistResult = await persistHome(ctx);
     ctx.persistHomeResult = persistResult;
     if (!persistResult.skipped) {
       ctx.forgeHome = persistResult.forgeHome;
     }
     const forged = await forge(ctx);
+    const splash = installSplash({ pkgRoot: splashPkgRoot, home: ctx.home, env: ctx.env, argv: ctx.argv, exec: ctx.splashExec });
+    if (splash.line) ctx.stdout.write(`  ${splash.status === "installed" || splash.status === "already-installed" ? "✔" : "!"} ${splash.line}\n\n`);
     const { draft, description } = await setupAfterRead(ctx, await read(ctx));
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);
-    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
+    if (!reviewed.aborted) celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
     await writeInstallReceipt(ctx, { forged });
     if (!reviewed.aborted) await maybeOfferDemo(ctx);
+    if (!reviewed.aborted) await maybeOfferFirstRun(ctx);
     return reviewed.aborted ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", onSigint);

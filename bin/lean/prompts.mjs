@@ -5,9 +5,12 @@ import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
-import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
+import { sequenceBuildNote } from "./seqreserve.mjs";
+import { capText, FIX_CAPS, FIX_PROMPT_MAX, NARROW_CAPS, NARROW_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
+import { stampRule } from "./stagestamp.mjs";
+import { FINDING_PITFALLS, PLANNER_TIGHTENING } from "./selfreview.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
@@ -23,11 +26,16 @@ export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url)
 /** #4364: `forgedock check`, the engine's validate and pre-PR checks run in-session before the result is written. */
 export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
+/** #5347: every turn re-sends the whole session context, so independent read-only calls go out together, not one per turn. */
+const BATCH_RULE = `One turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.`;
+
 const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
-Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Issue independent read-only calls (reads, greps, git log/blame, gh) in the same turn or one shell call. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.`;
+Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.
+Never use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane's files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.
+${BATCH_RULE}`;
 
 /** #4450: the host-rules block of the builder prompts (toolchain, sparse and repo-facts lines included), reused by the light-lane prompt. */
-export const hostRules = ({ toolchain = null, sparse = null, facts = null } = {}) => `${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}`;
+export const hostRules = ({ toolchain = null, sparse = null, facts = null, stamp = null } = {}) => `${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
@@ -83,11 +91,22 @@ export function migrationGeneratorPrompt(problems, mode = "local") {
 /** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
 export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
 
+/** #5346: what the stopped session had established (files read and edited, its last tool call), so the next one does not re-explore. */
+function establishedBlock(e) {
+  if (!e || (!e.read?.length && !e.edited?.length && !e.last)) return "";
+  const list = (xs) => xs.map((x) => `- ${x}`).join("\n");
+  return `<established>
+${e.edited?.length ? `Files the previous session edited:\n${list(e.edited)}\n` : ""}${e.read?.length ? `Files it read (already understood; do not re-read them unless you must edit them):\n${list(e.read)}${e.readMore ? `\n- (+${e.readMore} more)` : ""}\n` : ""}${e.last ? `Its last tool call: ${e.last.name} ${e.last.input}\nThat call may not have completed: check the diff above, then do the next step of the contract.\n` : ""}</established>
+
+`;
+}
+
 /**
  * #4390: appended to the restart prompt when the engine stopped a builder session at the context ceiling: the fresh
  * session continues from the frozen contract, the branch (`git diff --stat` + bounded hunks) and the last validate result.
  */
-export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0 } = {}) {
+export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0, established = null } = {}) {
+  const est = establishedBlock(established);
   const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
   const c = String(check ?? "").trim();
   return `\n\nContext restart: the previous session on this lane reached the ${ceiling}-token context ceiling and the engine stopped it. Its history is gone, its work is not: ${CONTRACT_FILE} is still the frozen authority, and the branch holds the committed work (uncommitted edits were saved in a \`wip(forge): checkpoint\` commit, already pushed to the lane branch: do not amend, reword, squash, reset or rebase commits already on the branch; add new commits on top). Continue from this state; do not start over, and do not re-read what the summary below already shows.
@@ -100,7 +119,7 @@ ${String(stat ?? "").trim() || "(no changes yet)"}
 ${d || "(no changes yet)"}
 </diff>
 
-Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
+${est}Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
 /** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */
@@ -137,10 +156,10 @@ const factsRule = (f) => (f ? `\nRepo facts (toolchain pins, slow suites, layer 
 const sparseRule = (s) => (s?.excluded ? `\nThis worktree is a sparse checkout: ${s.excluded} tracked file(s) of ${s.maxKb} KB or more are not on disk (\`git ls-files -t | grep '^S'\` lists them). They are not deleted: never commit their removal. If you need one, run \`git sparse-checkout add /<path>\`.` : "");
 
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n, { toolchain = null, sparse = null, facts = null } = {}) {
+export function builderPlanPrompt(n, { toolchain = null, sparse = null, facts = null, stamp = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -165,13 +184,15 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one "bucket": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
+First reviews most often find defects in:
+${Object.entries(PLANNER_TIGHTENING).map(([k, x]) => `- ${k}: ${x}`).join("\n")}
 A new default-off flag or rollout key needs an activation row: defer, bucket \`owner:promote:<flag>\`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
 A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
-A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with "Build reads:", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.
 
-An added route needs its production ingress rule cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
+An added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
 
 ${BLOCK_RULES}`;
 }
@@ -180,7 +201,7 @@ ${BLOCK_RULES}`;
  * #4374: the conformance rubric, one definition shared verbatim by `reviewerPrompt` and the builder's self-review in
  * `builderImplementPrompt`, so the two cannot drift. Each question is answered yes (OK) or no; codebase-agnostic.
  */
-export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver? An out-of-band requirement is delivered by its instrumentation (budget test or bench committed, job configured), not its result. A [type:e2e] requirement is delivered only by a real end-to-end validate, not a unit test with stubbed I/O. Swapping e2e for mocks without a forge-probe, or a route without ingress evidence, is not delivery.
+export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver? An out-of-band requirement is delivered by its instrumentation (budget test or bench committed, job configured), not its result. A [type:e2e] requirement is delivered only by a real end-to-end validate, not a unit test with stubbed I/O. Swapping e2e for mocks without a forge-probe, a route without ingress evidence, or a topology.prod_parity surface without evidence, is not delivery.
 2. No regression: is the diff free of breakage of an existing caller, test or behaviour (a concrete path:line failure)?
 3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
 4. Scope: does the diff change only deliverable paths and tests?`;
@@ -195,11 +216,11 @@ export function investigationVerdict(md) {
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
+export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null, stamp = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, run the repo's formatter on the files you changed, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
@@ -216,6 +237,8 @@ A new workspace-package dependency in a package.json no deliverable names is blo
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
+A \`FAIL review\` line from check is a finding the reviewer would raise; fix it. Also:
+${Object.values(FINDING_PITFALLS).map((x) => `- ${x}`).join("\n")}
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -243,6 +266,18 @@ If you find you are blocked, write "status":"blocked" with a typed "block" inste
 export function contextPackNote(pack) {
   if (!pack?.text) return "";
   return `\n\nContext pack (hints, not proof; compiled by the engine from GitHub and git). The issue outranks the code, which outranks this pack: verify anything you rely on. Contract requirements quote only the issue and its trusted comments, never this pack. Open a link (gh issue view N / gh pr view N) yourself when you need more.\n${pack.text}`;
+}
+
+/**
+ * #5347: the implement prompt's opening batch, from facts: the frozen contract's deliverable paths, the context pack's file list
+ * and the test-map commands those paths select. "" when there is nothing to open. The build's first turn issues these reads together.
+ */
+export function buildOpeningNote({ paths = [], tests = [], packFiles = [] } = {}) {
+  const ps = [...new Set(paths.filter((p) => typeof p === "string" && p))].slice(0, 12);
+  const ts = [...new Set(tests.filter((t) => typeof t === "string" && t))].slice(0, 6);
+  const fs = [...new Set(packFiles.filter((p) => typeof p === "string" && p && !ps.includes(p)))].slice(0, 8);
+  if (!ps.length && !ts.length && !fs.length) return "";
+  return `\n\nOpening batch: your first turn reads these together as parallel tool calls (the "Build reads" you listed in the plan, plus):${ps.length ? `\nDeliverables: ${ps.join(", ")}` : ""}${fs.length ? `\nContext pack files (touched by earlier PRs on these symbols): ${fs.join(", ")}` : ""}${ts.length ? `\nMapped tests (test map): ${ts.join("; ")}` : ""}`;
 }
 
 /** #4271: the bug-lane plan addition (lean.repro_test prefer on a bug/type:bug issue); "" when off, so the prompt is unchanged. */
@@ -319,6 +354,9 @@ export function sequencePrompt(collisions, lane, mode = "local") {
   return `origin/${lane} already uses sequence numbers this change adds:\n${rows}\n\nFirst bring the branch up to date with \`git merge --no-edit origin/${lane}\` if it is not (already fetched; never rebase or force). ${RENUMBER_RULE} ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** #5235: the builder-prompt paragraph naming the numbers reserved for this lane before the build ("" when none). */
+export const sequenceBuildRule = (reservations) => sequenceBuildNote(reservations);
+
 /** #4322: the base-sync conflict addition when a conflicted file is a numbered migration or a journal; "" otherwise. */
 export function sequenceSyncNote(files) {
   const hit = (files ?? []).some((f) => seqNumber(f) || /(?:^|\/)_journal\.json$/.test(String(f)));
@@ -367,12 +405,31 @@ export function fixSessionPrompt({ task, diff = "", stat = "", base = "", contra
   return capText(p, FIX_PROMPT_MAX - 100);
 }
 
+/** The frozen contract reduced to what a narrow fix needs: deliverable paths with their change, preserve items, validate commands. */
+function contractExcerpt(contract) {
+  const c = typeof contract === "string" ? (() => { try { return JSON.parse(contract); } catch { return null; } })() : contract;
+  if (!c || typeof c !== "object") return capText(typeof contract === "string" ? contract : "", NARROW_CAPS.contract);
+  const pick = (xs, keys) => (Array.isArray(xs) ? xs.map((x) => Object.fromEntries(keys.filter((k) => x?.[k] != null).map((k) => [k, x[k]]))) : []);
+  return capText(JSON.stringify({ deliverables: pick(c.deliverables, ["path", "change"]), preserve: pick(c.preserve, ["what"]), validate: pick(c.validate, ["command"]) }), NARROW_CAPS.contract);
+}
+
+/**
+ * #5348: the narrow-fix prompt: a contract excerpt, the failing check output and the files it names. No diff, issue summary,
+ * context pack, structure delta or hotspot rules. Under NARROW_PROMPT_MAX characters.
+ */
+export function narrowFixPrompt({ task, contract = null, files = [] }) {
+  const list = capText((files ?? []).map((f) => `- ${f}`).join("\n") || "- (none named: read what the failure cites)", NARROW_CAPS.files);
+  const p = `${HOST_RULES}\n\nYou are fixing one narrow, mechanical failure on an existing branch in this worktree. You have no earlier session. Edit only the files named below (and any file the failure output names), as a minimal diff.\n\n## Contract excerpt (${CONTRACT_FILE})\n${contractExcerpt(contract)}\n\n## Files named by the failure\n${list}\n\n## The failure to fix\n${capText(task, NARROW_CAPS.task)}\n\nRe-run the check that failed (the scoped command), commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return capText(p, NARROW_PROMPT_MAX - 100);
+}
+
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
 export const HUMAN_BLOCK_REASONS = Object.freeze(["credentials", "spend", "promotion", "customer", "product-decision"]);
 
 const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"dependency","issues":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.
 - {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0],"files":["<path>"]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as "paths") only when every sub-issue's files are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, siblings editing the same hub (barrel or index export list, union type, shared fixture, index doc) get its slots pre-staged in the earliest sub-issue, which the others depend on, or their own per-feature files; the engine serialises sub-issues still sharing a file.
+- {"kind":"design-invalidated","decision":"<what no longer holds>","why":"","epic":N}: the design is wrong; the engine files one amendment and holds open siblings.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents. Optional "remainder":[{"title","body"}]: the agent-doable rest, filed as its own issue.
 "An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".
 A check that times out (rc 124) is host load, never a block: run the narrowest targeted command for your changed files and say the full one could not finish.

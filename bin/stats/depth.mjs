@@ -3,8 +3,8 @@
 /**
  * forge#5209: adaptive lane depth. `forgedock stats --depth` joins each lane's LIGHT_ELIGIBILITY verdict, reasons and
  * signals (bin/lean/light.mjs) with its outcome: merged / needs-human, first pass, cost, wall and model time, review
- * findings and conformance failures, and post-merge defect signals (a reopen, a revert, or a fix PR touching the same
- * non-test files within 7 days). It answers whether, for lanes the light gate would have taken, the plan and review steps
+ * findings and conformance failures, and post-merge defect signals within 7 days: the conformance-outcomes set (#5364),
+ * reverted, reopened, cited, and same_hunks (a later fix PR's old-side lines blame to the lane's merge commit). It answers whether, for lanes the light gate would have taken, the plan and review steps
  * caught anything or only added cost, and whether the #5052 light-lane promotion criterion is met:
  *   light-shaped lanes (light or upgraded) cost <= 1.2x eligible full lanes of the same size, wall <= 1.3x model time, and
  *   a defect rate no worse than those full lanes; any cell under min-n is "insufficient data".
@@ -12,11 +12,12 @@
  *
  * Sources: the run logs (~/.forge/runs/<issue>.jsonl, every RUN_START..RUN_TERMINAL slice); GitHub only for defect signals.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { firstPassOf } from "../lean/fixround.mjs";
-import { classifyPath } from "../lean/routing.mjs";
 import { DEFAULT_MIN_N } from "./aggregate.mjs";
+import { cacheDir } from "./cache.mjs";
+import { cites, isFix, reverts, sameHunks } from "./conformance-outcomes.mjs";
 import { sameRepo, WEEK_MS } from "./efficiency.mjs";
 
 export const VERDICTS = Object.freeze(["eligible", "ambiguous", "ineligible"]);
@@ -84,42 +85,81 @@ export function depthRows(events, { repo = null, sinceMs = null, issue = null } 
 }
 
 const lines = (raw) => String(raw ?? "").split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-const isFixPr = (p) => /^fix/i.test(String(p.title ?? "")) || (p.labels ?? []).some((l) => String(l).toLowerCase() === "bug");
-const isRevertOf = (p, pr) => /^revert/i.test(String(p.title ?? "")) && new RegExp(`#${pr}(?!\\d)`).test(`${p.title ?? ""}\n${p.body ?? ""}`);
-const nonTestFiles = (fs) => fs.filter((f) => classifyPath(f) !== "test");
+
+const DEFECT_CACHE_V = 2;
+const CONCURRENCY = 4;
+const defectCachePath = (repo, env) => join(cacheDir(repo, env), "depth-defects.json");
+function loadDefectCache(repo, env) {
+  try { const c = JSON.parse(readFileSync(defectCachePath(repo, env), "utf8")); if (c?.v === DEFECT_CACHE_V) return { v: DEFECT_CACHE_V, defects: c.defects ?? {}, shas: c.shas ?? {} }; } catch { /* refetch */ }
+  return { v: DEFECT_CACHE_V, defects: {}, shas: {} };
+}
+function saveDefectCache(repo, env, c) {
+  try { mkdirSync(cacheDir(repo, env), { recursive: true }); writeFileSync(defectCachePath(repo, env), JSON.stringify(c)); } catch { /* a cache never fails the report */ }
+}
+/** Run `fn` over `items` with at most `n` in flight. */
+async function mapLimit(items, n, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (next < items.length) await fn(items[next++]); }));
+}
 
 /**
- * Post-merge defect signals of merged rows with a PR, over the injected gh: Map issue -> {reopen, revert, fixPr, defect}.
+ * Post-merge defect signals of merged rows with a PR, over the injected gh: Map issue -> {reopen, revert, cited, same_hunks, defect}.
+ * The signals are those of conformance-outcomes.mjs (reverts, cites, sameHunks over the injected local `git` probes). same_hunks is
+ * null when git cannot resolve (no local clone); defect is then null (n/a) unless another signal is true.
  * A gh failure gives the rows it could not read null fields (rendered n/a), never false.
+ * Bounded crawl (#5318): reopens are read per issue (not repo-wide), the PR search is limited to the rows' merge window,
+ * per-PR merge shas are fetched with bounded concurrency, and a row whose window has closed (`now` past its end + window)
+ * is cached under cacheDir(repo) with the PR merge shas, so a warm run makes no gh calls for it. `useCache` false skips
+ * the cache; `refresh` ignores what is stored. `onProgress({phase, done, total})` is called as rows are resolved.
  */
-export async function gatherDefects({ repo, gh, rows = [], windowMs = WEEK_MS } = {}) {
+export async function gatherDefects({ repo, gh, rows = [], windowMs = WEEK_MS, now = null, env = process.env, useCache = false, refresh = false, onProgress = null, git = null } = {}) {
   const out = new Map();
   const merged = rows.filter((x) => x.merged && Number.isSafeInteger(x.pr) && ms(x.endTs) != null);
   if (!gh || !repo || !merged.length) return out;
+  const cache = useCache && !refresh ? loadDefectCache(repo, env) : { v: DEFECT_CACHE_V, defects: {}, shas: {} };
+  const settled = (x) => now != null && ms(x.endTs) + windowMs < now;
+  const hit = (x) => { const c = cache.defects[`${x.issue}:${x.pr}`]; return c && c.endTs === x.endTs ? c.value : null; };
+  const todo = [];
+  for (const x of merged) { const v = settled(x) ? hit(x) : null; if (v) out.set(x.issue, v); else todo.push(x); }
+  const total = merged.length;
+  let done = total - todo.length;
+  onProgress?.({ phase: "defect signals (cached)", done, total });
+  if (!todo.length) return out;
   try {
-    const reopens = lines(await gh(["api", "--paginate", `repos/${repo}/issues/events?per_page=100`, "--jq", '.[] | select(.event == "reopened") | {issue: .issue.number, ts: .created_at}']));
-    const from = new Date(Math.min(...merged.map((x) => ms(x.endTs)))).toISOString().slice(0, 10);
-    const prs = lines(await gh(["api", "--paginate", `search/issues?q=${encodeURIComponent(`repo:${repo} is:pr is:merged merged:>=${from}`)}&per_page=100`,
+    const from = new Date(Math.min(...todo.map((x) => ms(x.endTs)))).toISOString().slice(0, 10);
+    const to = new Date(Math.max(...todo.map((x) => ms(x.endTs))) + windowMs).toISOString().slice(0, 10);
+    const prs = lines(await gh(["api", "--paginate", `search/issues?q=${encodeURIComponent(`repo:${repo} is:pr is:merged merged:${from}..${to}`)}&per_page=100`,
       "--jq", ".items[] | {number, title, body, labels: [.labels[].name], merged_at: .pull_request.merged_at}"]));
-    const files = new Map();
-    const filesOf = async (n) => {
-      if (!files.has(n)) files.set(n, String(await gh(["api", "--paginate", `repos/${repo}/pulls/${n}/files?per_page=100`, "--jq", ".[].filename"])).split("\n").map((l) => l.trim()).filter(Boolean));
-      return files.get(n);
+    const shas = new Map(Object.entries(cache.shas).map(([k, v]) => [Number(k), v]));
+    const shaOf = async (n) => {
+      if (!shas.has(n)) shas.set(n, String(await gh(["api", `repos/${repo}/pulls/${n}`, "--jq", ".merge_commit_sha"])).trim() || null);
+      return shas.get(n);
     };
-    for (const x of merged) {
+    await mapLimit(todo, CONCURRENCY, async (x) => {
       const t0 = ms(x.endTs), inWin = (p) => p.number !== x.pr && ms(p.merged_at) != null && ms(p.merged_at) > t0 && ms(p.merged_at) <= t0 + windowMs;
-      const reopen = reopens.some((e) => e.issue === x.issue && (ms(e.ts) ?? 0) > t0);
-      const revert = prs.some((p) => inWin(p) && isRevertOf(p, x.pr));
-      let fixPr = false;
-      const cands = prs.filter((p) => inWin(p) && isFixPr(p));
-      if (cands.length) {
-        const own = new Set(nonTestFiles(await filesOf(x.pr)));
-        for (const p of cands) if (own.size && nonTestFiles(await filesOf(p.number)).some((f) => own.has(f))) { fixPr = true; break; }
+      const reopens = lines(await gh(["api", "--paginate", `repos/${repo}/issues/${x.issue}/events?per_page=100`, "--jq", '.[] | select(.event == "reopened") | {issue: .issue.number, ts: .created_at}']));
+      const reopen = reopens.some((e) => (e.issue ?? x.issue) === x.issue && (ms(e.ts) ?? 0) > t0);
+      const own = prs.find((p) => p.number === x.pr);
+      const lane = { repo, number: x.pr, title: own?.title ?? "", body: own?.body ?? "", closingIssues: [{ number: x.issue }] };
+      const later = prs.filter(inWin);
+      const revert = later.some((q) => reverts(q, lane, repo));
+      const cited = later.some((q) => cites(q, lane));
+      const fixes = later.filter(isFix);
+      let same_hunks = false;
+      if (fixes.length) {
+        lane.mergeSha = git ? await shaOf(x.pr) : null;
+        const withSha = lane.mergeSha ? await Promise.all(fixes.map(async (q) => ({ ...q, mergeSha: await shaOf(q.number) }))) : fixes;
+        same_hunks = sameHunks(lane, withSha, git);
       }
-      out.set(x.issue, { reopen, revert, fixPr, defect: reopen || revert || fixPr });
-    }
+      const hit = reopen || revert || cited || same_hunks === true;
+      const value = { reopen, revert, cited, same_hunks, defect: hit ? true : same_hunks === null ? null : false };
+      out.set(x.issue, value);
+      if (settled(x)) cache.defects[`${x.issue}:${x.pr}`] = { endTs: x.endTs, value };
+      onProgress?.({ phase: "defect signals", done: ++done, total });
+    });
+    if (useCache) { cache.shas = Object.fromEntries(shas); saveDefectCache(repo, env, cache); }
   } catch { // gh unavailable: the unread rows get null defect fields (n/a), never false
-    for (const x of merged) if (!out.has(x.issue)) out.set(x.issue, { reopen: null, revert: null, fixPr: null, defect: null });
+    for (const x of merged) if (!out.has(x.issue)) out.set(x.issue, { reopen: null, revert: null, cited: null, same_hunks: null, defect: null });
   }
   return out;
 }
@@ -166,6 +206,19 @@ export function promotion(rows, defects = new Map(), minN = DEFAULT_MIN_N) {
   return { met, sizes, n_treatment: t.length, n_control: c.length, min_n: minN, checks, note: "flipping lean.light.mode: on stays a config decision" };
 }
 
+/**
+ * The promotion recommendation from shadow data (#5318): eligible share of lanes, would-be saving (eligible full lanes x
+ * the median cost gap to light-shaped lanes) and the defect rate on eligible lanes. The decision follows promotion().met.
+ */
+export function recommendation(rows, defects, prom) {
+  const elig = rows.filter((x) => x.verdict === "eligible"), full = elig.filter((x) => x.shape === "full");
+  const light = rows.filter((x) => x.shape === "light" || x.shape === "upgraded");
+  const fullMed = median(full.map((x) => x.cost)), lightMed = median(light.map((x) => x.cost));
+  const saving = fullMed != null && lightMed != null ? r(full.length * (fullMed - lightMed), 100) : null;
+  const decision = prom.met === true ? "promote" : prom.met === false ? "do not promote" : INSUFFICIENT;
+  return { decision, eligible_share: r(per(elig.length, rows.length)), eligible_n: elig.length, would_be_saving_usd: saving, eligible_defect_rate: depthCell(elig, defects).defect_rate };
+}
+
 /** Pure report: per verdict, per reason/signal code, and the promotion verdict. */
 export function depthReport({ rows = [], defects = new Map(), minN = DEFAULT_MIN_N, defectsSource = "github" } = {}) {
   const byVerdict = {};
@@ -175,7 +228,9 @@ export function depthReport({ rows = [], defects = new Map(), minN = DEFAULT_MIN
   }
   const byCode = {};
   for (const code of [...new Set(rows.flatMap((x) => [...x.reasons, ...x.signals]))].sort()) byCode[code] = depthCell(rows.filter((x) => x.reasons.includes(code) || x.signals.includes(code)), defects);
-  return { lanes: rows.length, min_n: minN, defects_source: defectsSource, by_verdict: byVerdict, by_code: byCode, promotion: promotion(rows, defects, minN) };
+  const prom = promotion(rows, defects, minN);
+  const unresolved = rows.filter((x) => x.merged && defects.get(x.issue)?.defect === null).length;
+  return { lanes: rows.length, min_n: minN, defects_source: defectsSource, defects_unresolved: unresolved, by_verdict: byVerdict, by_code: byCode, promotion: prom, recommendation: recommendation(rows, defects, prom) };
 }
 
 const pct = (x) => (x == null ? "n/a" : `${Math.round(x * 100)}%`);
@@ -186,7 +241,7 @@ const cellLine = (label, c) => `  ${label}: n=${c.n}, merge ${pct(c.merge_rate)}
 
 /** Text lines of depthReport. */
 export function renderDepth(rep, { repo = null, since = null } = {}) {
-  const out = [`lane depth${repo ? ` ${repo}` : ""}${since ? ` since ${since}` : ""}: ${rep.lanes} lane(s) with a light-eligibility verdict; defect signals: ${rep.defects_source}`];
+  const out = [`lane depth${repo ? ` ${repo}` : ""}${since ? ` since ${since}` : ""}: ${rep.lanes} lane(s) with a light-eligibility verdict; defect signals: ${rep.defects_source}${rep.defects_unresolved ? `, ${rep.defects_unresolved} unresolved (n/a: same-hunks needs a local clone of the repo)` : ""}`];
   out.push("by verdict:");
   for (const [v, c] of Object.entries(rep.by_verdict)) out.push(cellLine(v, c));
   out.push("by reason/signal:");
@@ -199,11 +254,13 @@ export function renderDepth(rep, { repo = null, since = null } = {}) {
     + ` (treatment light|upgraded n=${p.n_treatment}, control eligible full n=${p.n_control}, sizes ${p.sizes.length ? p.sizes.join(",") : "none"})`);
   out.push(fmt("cost ratio", ck.cost, "x"), fmt("wall/model", ck.wall, "x"), fmt("defect rate", ck.defects, ""));
   out.push(`  ${p.note}`);
+  const rc = rep.recommendation;
+  if (rc) out.push(`recommendation: ${rc.decision}; eligible share ${pct(rc.eligible_share)} (n=${rc.eligible_n}), would-be saving ${rc.would_be_saving_usd == null ? "n/a" : `$${rc.would_be_saving_usd.toFixed(2)}`} over the window, defect rate on eligible lanes ${pct(rc.eligible_defect_rate)}`);
   return out.join("\n");
 }
 
 /** Every run log under `runsDir` -> rows -> defects (gh, unless null) -> report. */
-export async function buildDepth({ runsDir, repo = null, sinceMs = null, gh = null, minN = DEFAULT_MIN_N } = {}) {
+export async function buildDepth({ runsDir, repo = null, sinceMs = null, gh = null, minN = DEFAULT_MIN_N, now = null, env = process.env, useCache = false, refresh = false, onProgress = null, git = null } = {}) {
   const rows = [];
   if (runsDir && existsSync(runsDir)) {
     for (const f of readdirSync(runsDir).filter((x) => x.endsWith(".jsonl")).sort()) {
@@ -213,6 +270,6 @@ export async function buildDepth({ runsDir, repo = null, sinceMs = null, gh = nu
       rows.push(...depthRows(parseLog(text), { repo, sinceMs, issue: n ? Number(n[1]) : null }));
     }
   }
-  const defects = gh ? await gatherDefects({ repo, gh, rows }) : new Map();
+  const defects = gh ? await gatherDefects({ repo, gh, rows, now, env, useCache, refresh, onProgress, git }) : new Map();
   return depthReport({ rows, defects, minN, defectsSource: gh ? "github" : "offline" });
 }

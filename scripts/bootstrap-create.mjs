@@ -31,7 +31,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { validatePlan, formatErrors, resolvePlaceholders, isNeedsHuman } from "./bootstrap-validate.mjs";
+import { validatePlan, formatErrors, resolvePlaceholders, isNeedsHuman, isSkeleton } from "./bootstrap-validate.mjs";
 import { milestoneSlug } from "../bin/lean/lane.mjs";
 
 const SELF_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -218,7 +218,7 @@ export function createBacklog(plan, { io, repo, config = {}, base }) {
 
   // Labels: create only the missing ones (never overwrite an existing label's colour or description).
   const haveLabels = new Set((json(["label", "list", "-R", repo, "--limit", "1000", "--json", "name"]) ?? []).map((l) => l.name));
-  const issueLabels = (it) => [...(it.labels ?? []), priorityLabel(it), ...(isNeedsHuman(it) ? ["needs-human:external"] : [])].filter(Boolean); // #4660
+  const issueLabels = (it) => [...(it.labels ?? []), priorityLabel(it), ...(isNeedsHuman(it) ? ["needs-human:external"] : []), ...(isSkeleton(it) ? ["skeleton"] : [])].filter(Boolean); // #4660, #5337 (the label the admission hold and plan validate --live read)
   const wanted = new Set(plan.issues.flatMap(issueLabels));
   for (const l of wanted) if (!haveLabels.has(l)) gh(["label", "create", l, "-R", repo]);
 
