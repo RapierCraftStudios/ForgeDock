@@ -2843,3 +2843,13 @@ live-measurement issues is not part of this change.
 ## Entry 2026-11-10 — host preflight, draft release PR, mark ready (#5277)
 
 `release-preflight.mjs` adds two optional steps to `RELEASE_STEPS`: `host-preflight` (before `release-pr`) and `mark-ready` (after `fixes`). Both read forge.yaml `release.preflight_command` (flat keys `preflight_command`/`_timeout`/`_blocking`, `parsePreflightConfig`, `readReleaseConfig().preflight`) and run it through `io.rehearse` on the host. Unset: both return `{skipped:true}` and `runRelease` does not record them (`OPTIONAL_STEPS`), so state and `gh` calls are unchanged. Set: `host-preflight` runs on the staging head (`gh api commits/<staging>`) and a failure files one `release-blocker` per head+kind (`fileBlocker({kind:"preflight"})`, marker `FORGE:RELEASE_BLOCKER head=<sha> kind=preflight`) and stops, so no PR is opened on a failing head; `releasePrStep` then opens the PR with `--draft`; `fixStep` re-runs `runHostPreflight` on the new head before each delta review; `mark-ready` re-runs it on the final head and calls `gh pr ready` only on a pass. Actions CI is opted out of drafts by the repo (`docs/CONFIG.md`). `commands/deploy-pr.md` Phase 3 counts `pending` as not-passed: unfinished-only checks print `CI gate: PENDING` and defer to Phase 5, never PASSED.
+
+## Entry 2026-11-10 — Live-deferral close gate and real-browser check for interactive UI (#5285)
+
+`activation.mjs` `liveDeferralBlocks(contract, modes)`: when `rolloutModes` says a touched rollout flag is live (default-on) and a
+requirement is deferred for live/post-deploy verification (bucket post-deploy/verify-now/host, or live-acceptance wording), it returns
+`[{id, flag}]`. `closePlan({liveBlocks})` then returns `partial` with `liveBlocked`; `lean.mjs` keeps the issue open and posts a
+`FORGE:TRACKED` note naming the blockers (a default-off rollout still ships with its deferral). `e2e.mjs` `uiInteractiveChanged(files)`
+(dialog/CTA/layout component files) makes `e2eWanted` run the repo's e2e (CI label or workflow, never a local browser install). With no
+trigger configured the skip is a trajectory decision; on a `review.risk_paths` hit `precheck`'s `uiBrowser` input yields
+`conformance.e2e_unverified` kind `ui_browser_unverified`. Without `rollouts.files` default-on cannot be detected and the gate does not fire.

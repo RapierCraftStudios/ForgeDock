@@ -21,7 +21,7 @@ import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeplo
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
-import { readRollouts, detectNewOffKeys, rolloutModes } from "./activation.mjs";
+import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -55,7 +55,7 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
-import { e2eSpecs, e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
+import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { openRotator, rotatorRetry } from "./rotator.mjs";
 import { poolExhausted, exhaustedDeferral, quotaFacts } from "./quota.mjs"; // #5236
@@ -2488,6 +2488,14 @@ export async function runCore(o) {
       const cfg = readRollouts(wt);
       return cfg ? detectNewOffKeys(cfg, String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...cfg.files]).catch(() => ""))) : [];
     }
+    /** #5285: interactive UI files changed, whether a real-browser (e2e) check is configured for them, and whether a declared risk path is hit. */
+    function uiBrowserOf(fs) {
+      const ui = uiInteractiveChanged(fs);
+      if (!ui.length) return null;
+      const want = e2eWanted({ cfg: vcfg.e2e, files: fs, contract: effective });
+      if (!want.run) T.decisions.push(`Real-browser check skipped for interactive UI change (${ui.slice(0, 3).join(", ")}): ${want.reason} (#5285)`);
+      return { files: ui, ran: want.run, reason: want.reason, highRisk: riskPathHits(ui, riskPaths).length > 0 };
+    }
     let amendFixed = false;
     async function gate() {
       await refreshIssue("conformance");
@@ -2549,7 +2557,7 @@ export async function runCore(o) {
         const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
         if (!T.decisions.includes(note)) T.decisions.push(note);
       }
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, newOffKeys: await newOffKeysOf(), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
@@ -2733,10 +2741,13 @@ export async function runCore(o) {
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });
-    const closing = closePlan(effective, { title: iss.title, review, issueText });
     // #5240: a delivered change behind a rollout that is not live (shadow/off) is inert in production: say so, never claim the outcome
     const rcfg = readRollouts(wt);
-    const inert = (rcfg ? rolloutModes(rcfg, files, (f) => readFileSync(join(wt, f), "utf8")) : []).filter((m) => !m.live);
+    const modes = rcfg ? rolloutModes(rcfg, files, (f) => readFileSync(join(wt, f), "utf8")) : [];
+    const inert = modes.filter((m) => !m.live);
+    const liveBlocks = liveDeferralBlocks(effective, modes); // #5285
+    const closing = closePlan(effective, { title: iss.title, review, issueText, liveBlocks });
+    if (closing.liveBlocked) T.decisions.push(`Default-on rollout with live acceptance deferred (${liveBlocks.map((b) => `${b.id} on ${b.flag}`).join(", ")}): issue left open as partial (#5285)`);
     if (inert.length) T.decisions.push(`Inert in production: the change touches rollout ${inert.map((m) => `${m.flag} (mode ${m.mode})`).join(", ")}; the issue's production outcome is not claimed (#5240)`);
     if (closing.checklist) T.decisions.push(`Unticked acceptance criteria unmet (${closing.open.map((r) => r.id).join(", ")}): issue left open as partial (#5240)`);
     if (closing.reason === "partial" && !closing.checklist) { // #4398: an investigation whose question is not answered carries it forward
@@ -3199,10 +3210,13 @@ export async function runCore(o) {
       }
     }
     const partial = closing.reason === "partial";
-    if (closing.checklist) keepOpen = true; // #5240: an unmet acceptance checkbox is not closed as completed
+    if (closing.checklist || closing.liveBlocked) keepOpen = true; // #5240: an unmet acceptance checkbox is not closed as completed; #5285: nor a default-on change with live acceptance deferred
+    if (closing.liveBlocked) { // #5285: post what blocks the close
+      try { await post("FORGE:TRACKED", `## Left open: live acceptance deferred on a default-on change\nMerged by PR #${pr}, but the rollout is live and these requirements still need live verification:\n${closing.blocks.map((b) => `- ${b.id} (flag ${b.flag})`).join("\n")}\n\nKeep the flag default-off until they are verified, or verify them and close.${closing.tracked.length ? ` Tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the trajectory decision records it too */ }
+    }
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
     if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
-    if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
+    if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
       try { await post("FORGE:TRACKED", `## Left open: partial\nMerged by PR #${pr}, but these acceptance criteria are not met by it:\n${closing.unticked.map((u) => `- [ ] ${u}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}${inert.length ? `\n\nInert in production: the change takes effect only behind ${inert.map((m) => `\`${m.flag}\` (mode: ${m.mode})`).join(", ")}; the production outcome is not claimed.` : ""}`); } catch { /* the PR body and FORGE:STATE carry them */ }
     } else if (keepOpen) { // #5159: the issue is not closed while a follow-up is pending, so the note must not say it is
       if (partial || closing.tracked.length) try { await post("FORGE:TRACKED", `## Left open: follow-up pending\nMerged by PR #${pr}; the issue stays open until the pending follow-up is filed (FORGE:FOLLOWUP_PENDING).${partial ? " The investigation's stated question is not answered in this change." : ""}${closing.tracked.length ? ` Already tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body links them too */ }
