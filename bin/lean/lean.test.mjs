@@ -822,6 +822,16 @@ describe("core work-on", () => {
     assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
   });
 
+  it("#5331 a remote lane whose sandbox lacks a validate tool ends env.tool_missing before building; local placement is unchanged", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: tmpDir("lean-5331-"), ...remote });
+    assert.equal(r.code, "env.tool_missing");
+    const l = world({ contract }); l.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    assert.notEqual((await run(l, { placement: { where: "local", reason: "x" } })).code, "env.tool_missing");
+  });
+
   it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
     const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
@@ -2395,7 +2405,8 @@ describe("comment templates", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     const f = parseFactsComment(w.comments.find((c) => markerOf(c) === "FORGE:FACTS"));
     assert.deepEqual(f.rejected, [{ approach: "detection-only guard", why: "hides the cause" }]);
-    assert.deepEqual(f.baselines, [{ command: "node --test test/foo.test.js", exit: 0 }]);
+    assert.equal(f.baselines.length, 1); assert.deepEqual({ ...f.baselines[0], head: undefined }, { command: "node --test test/foo.test.js", exit: 0, head: undefined }); // #5331: the baseline also records the head it ran on
+    assert.match(f.baselines[0].head, /^[0-9a-f]{7,40}$/);
     assert.ok(f.files.length > 0 && !f.files.some((x) => x.startsWith(".forge-lean/")), JSON.stringify(f.files));
     assert.ok(!scopeText({ title: "t", body: "b" }, [{ body: w.comments.find((c) => markerOf(c) === "FORGE:FACTS") }]).includes("detection-only"));
   });

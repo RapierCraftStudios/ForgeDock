@@ -891,6 +891,16 @@ describe("host capabilities in placement (#4542)", () => {
     assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
   });
 
+  it("#5331 orchestrate: a lane whose frozen contract names a tool the sandbox lacks is placed locally before it starts", async () => {
+    const calls = [];
+    const contract = { validate: [{ id: "V3", command: "promtool check rules a.yml" }] };
+    const rows = await orchestrate({ issues: [5], parallel: 2, readBody: async () => "",
+      remote: { max: 2, isRemote: () => true, lacks: ["promtool"], contractOf: () => contract, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async (n, _l, ctx = {}) => { calls.push([ctx.placement?.where, ctx.placement?.reason]); return { terminalReason: "merged", pr: 9 }; } });
+    assert.deepEqual(calls, [["local", "host tool: sandbox lacks promtool"]]);
+    assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
+  });
+
   it("orchestrate: a remote lane that ends env.capability_remote is relaunched locally once", async () => {
     const calls = [];
     const rows = await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",

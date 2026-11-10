@@ -22,6 +22,7 @@ import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admi
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
+import { toolMisses } from "./toolplace.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -403,8 +404,8 @@ export async function runCore(o) {
   const pendingFollowups = []; // #5141: {req, why} whose filing kept failing in-lane; filed after the merge, else recorded
   const pendingRecord = () => pendingFollowups.filter((p) => !p.req.tracked).map((p) => ({ id: p.req.id, quote: String(p.req.quote ?? ""), disposition: p.req.disposition, why: p.why, marker: `FORGE:DEFERRED_FROM: #${issue}` }));
   let precheckMs = 0, precheckDeferred = 0, precheckRan = false; // #4331: pre-PR check wall time and deferrals, for the batch report
-  const addWait = (phase, ms, queued = 0) => {
-    if (Number.isFinite(ms) && ms > 0) waits[phase] = (waits[phase] ?? 0) + ms;
+  const addWait = (phase, ms, queued = 0, cause = "heavy_queue") => {
+    if (Number.isFinite(ms) && ms > 0) { waits[phase] = (waits[phase] ?? 0) + ms; phaseLedger.addWait(phase, cause, ms); } // #5349: by cause into the phase ledger
     if (Number.isInteger(queued)) heavyQueueMax = Math.max(heavyQueueMax, queued);
   };
   const lanePriority = () => priorityFromLabels(iss?.labels);
@@ -506,7 +507,7 @@ export async function runCore(o) {
     try { await io.sequenceLease?.undeclare?.({ repo, issue }); } catch { /* fail-open (#5340) */ }
     try { await io.sequenceLease?.unreserve?.({ repo, lane, issue }); } catch { /* fail-open (#4526) */ }
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
-      try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
+      try { const sw = sumWaits(await io.fs.read(heavyWaitsFile)); heavyQueueMax = Math.max(heavyQueueMax, sw.queueMax); for (const [ph, ms] of Object.entries(sw.waits)) addWait(ph, ms); } catch { /* no heavy step ran */ }
     }
     await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
@@ -555,7 +556,7 @@ export async function runCore(o) {
     if (!base) return;
     try {
       const result = await readResult();
-      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract() }) : null;
+      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract(), head: String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim() }) : null;
       if (!rec) return;
       const body = renderFactsRecord(rec);
       if (factsSeen.some((b) => String(b ?? "").includes(body))) return;
@@ -735,7 +736,9 @@ export async function runCore(o) {
         pauses++; pinned = null; // after the wait the shim picks again
         ev({ event: "PHASE_RATE_LIMITED", phase: args.role, resetAt: epoch, resetAtDisplay: e.resetAt ?? null, waitMs });
         onProgress({ event: "phase_paused", phase: args.role, reason: "session-limit", detail: `session limit hit; pausing until ${e.resetAt || new Date(now() + waitMs).toISOString()}` });
+        const limitedAt = now();
         await sleep(waitMs);
+        phaseLedger.addWait(args.role === "review" ? "review" : stage, "rate_limit", now() - limitedAt); // #5349
       }
     }
   }
@@ -831,12 +834,12 @@ export async function runCore(o) {
         try { ok = (await checkAdmission({ cfg: o.admission, host: io.host })).ok; } catch { ok = true; }
         const nowMs = Date.now();
         if (!ok && !paused && !forced && control.pause) { if (control.pause()) { paused = true; pausedAt = nowMs; ev({ event: "LANE_PAUSED", reason: "host over ceiling" }); onProgress({ event: "phase_paused", phase: "builder", reason: "host-busy", detail: "host over the admission ceiling; lane paused" }); } }
-        else if (ok && paused) { control.resume?.(); paused = false; forced = false; addWait(stage, nowMs - pausedAt); ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
+        else if (ok && paused) { control.resume?.(); paused = false; forced = false; addWait(stage, nowMs - pausedAt, 0, "host_load"); ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
         else if (ok) forced = false;
-        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; addWait(stage, nowMs - pausedAt); ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
+        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; addWait(stage, nowMs - pausedAt, 0, "host_load"); ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
       }
     })();
-    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; addWait(stage, Date.now() - pausedAt); } } };
+    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; addWait(stage, Date.now() - pausedAt, 0, "host_load"); } } };
   }
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
@@ -845,6 +848,7 @@ export async function runCore(o) {
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
   let decisionsNote = ""; // #4901: trusted FORGE:DECISION comments newer than the frozen contract, "" otherwise
+  let carriedPasses = []; // #5331: validate ids that passed on the resume head (resume digest); carried into the builder result while HEAD is unchanged
   let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
   /** #5334: records a builder session that ended without its result line (kill, signal) as one attempt; `at` = its start. */
@@ -1719,7 +1723,7 @@ export async function runCore(o) {
     }
     /** #4694: the engine appends guard-derived H preserve rows from the local index (one file read; the same contract when none apply). */
     const historyRows = (c) => { const w = withHistoryRows(c, { repo, issue }); const n = (w.preserve ?? []).length - (c.preserve ?? []).length; if (w !== c && n > 0) T.decisions.push(`History preserve rows: ${w.preserve.filter((p) => p.source === "guard").map((p) => p.id).join(", ")} from guards (#4694)`); return w; };
-    let frozen = null, hash = null, planned = false, files = [], split = null;
+    let frozen = null, hash = null, planned = false, files = [], split = null, planMisses = null; // planMisses (#5331): validate preflight misses from this run
     const impliedDocs = []; // add-deliverable amendments for doc edits the docs-freshness rule demanded (docs round, CI fix round)
     /** Doc files a fix round added to satisfy the freshness rule: recorded only when the rule failed before and passes after. */
     async function noteFreshnessDocs(before, wasFailing) {
@@ -1813,8 +1817,8 @@ export async function runCore(o) {
       }
       if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
         // #4400: the last run's own records as a bounded digest in the builder prompts; never in issueText (contract quotes)
-        const d = buildResumeDigest({ state: priorState, comments: trustedComments, contract: frozen, files: resumed ? await changedFiles().catch(() => []) : [], lane });
-        resumeNote = d.text;
+        const d = buildResumeDigest({ state: priorState, comments: trustedComments, contract: frozen, files: resumed ? await changedFiles().catch(() => []) : [], lane, head: String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim() });
+        resumeNote = d.text; carriedPasses = d.passes ?? [];
         if (d.text) {
           ev({ event: "RESUME_DIGEST", bytes: Buffer.byteLength(d.text, "utf8"), files: d.files, validates: d.validates, reason: d.reason });
           T.decisions.push(`Resume digest given to the builder: ${d.files} file(s), ${d.validates} validate result(s)${d.reason ? `, last run ${d.reason}` : ""}`);
@@ -1931,6 +1935,7 @@ export async function runCore(o) {
           vc = validateContract(contract, issueText, { repro: reproOn() });
           if (missed.length) misses = await preflightValidates(contract);
         }
+        planMisses = misses;
         if (missed.length) {
           ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
           if (misses.length) {
@@ -1959,6 +1964,12 @@ export async function runCore(o) {
         const relayed = new Set(o.relayCaps ?? []); // #4778: a relayed capability is served to the sandbox, so the lane builds there
         const hn = contractHostNeeds(frozen, o.hostCaps && { ...o.hostCaps, hostCapabilities: (o.hostCaps.hostCapabilities ?? []).filter((c) => !relayed.has(c)) });
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
+        // #5331: a tool the sandbox itself lacks (probed where the lane runs) ends the lane before the builder implements; the tool-missing recovery places it on the host (orchestrate placeOf)
+        const tm = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => []));
+        if (tm.tools.length) {
+          ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });
+          return await needsHuman(`Remote sandbox lacks ${tm.tools.join(", ")}, which the frozen contract's validate command(s) ${tm.ids.join(", ")} need; the lane is re-placed on the host before the builder implements.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+        }
       }
       T.plan = [`contract ${hash}${lightDone ? " (derived, light lane)" : ""}`, `${frozen.requirements.length} requirement(s)`];
       { // #4392, #4505: next size on a budget recovery; #4587: a big L contract and an L recovery get extra turns
@@ -1994,6 +2005,14 @@ export async function runCore(o) {
       }
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
+      if (carriedPasses.length && result && io.fs.write) { // #5331: a validate id that passed on this same head is not re-run: its row is carried, marked
+        const headNow = String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim(), rows = Array.isArray(result.validation) ? result.validation : [];
+        const carry = carriedPasses.filter((x) => x.head === headNow && !rows.some((r) => r?.id === x.id) && (frozen?.validate ?? []).some((v) => v.id === x.id));
+        if (carry.length) {
+          result = { ...result, validation: [...rows, ...carry.map((x) => ({ id: x.id, command: x.command, exit: 0, carried: true }))] };
+          try { await io.fs.write(`${wt}/${RESULT_FILE}`, `${JSON.stringify(result)}\n`); T.decisions.push(`Validate result(s) ${carry.map((x) => x.id).join(", ")} carried from an earlier run: passed on this same head`); } catch { /* the gate reads what is on disk */ }
+        }
+      }
       { // #4374: the builder's self-review against the shared rubric, log only
         const sr = readSelfReview(result);
         if (sr) ev(sr.state === "present" ? { event: "SELF_REVIEW", answers: sr.items.length, no: sr.no } : { event: "SELF_REVIEW_MISSING", state: sr.state });

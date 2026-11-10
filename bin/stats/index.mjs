@@ -90,7 +90,8 @@ Pool (forge#4549; local batch reports, no gh):
 
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
   --efficiency          $/merge, turns/merge, context/turn per size and model, retries/merge by cause, no-action
-                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
+                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion,
+                        non-model (wait) time by phase and cause
   --batch <id>          also report one batch (~/.forge/batches/<id>, FORGEDOCK_BATCH_DIR)
   --window <list>       trailing windows over the repo's batches (default 7d,30d)
   --compare <date|v>    before/after A/B around a deploy (date or release tag): equal-span cohorts of batches either side,
