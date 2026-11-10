@@ -94,7 +94,7 @@ export function renamedExport(symbol, path) {
   return lower ? `${prefix.charAt(0).toLowerCase()}${prefix.slice(1)}${cap(symbol)}` : `${prefix}${cap(symbol)}`;
 }
 
-const word = (s) => new RegExp(`(?<![\\w$])${s.replace(/[$]/g, "\\$&")}(?![\\w$])`, "g");
+const word = (s) => new RegExp(`(?<![\\w$])${s.replace(/[\\$]/g, "\\$&")}(?![\\w$])`, "g");
 
 /**
  * Duplicate exports: rename the lane's new export to `<AppPrefix><Symbol>` when the name occurs only in its declaring file

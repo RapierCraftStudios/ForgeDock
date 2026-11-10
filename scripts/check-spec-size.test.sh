@@ -122,6 +122,9 @@ run "stub plus a re-pasted resolver block fails" 1
 # Release PR skip (staging -> main only)
 reset; gen 100 >> commands/review-pr.md
 run "release PR skipped" 0 PR_HEAD_REF=staging PR_BASE_REF=main PR_SAME_REPO=true; has "skip reported" "SKIPPED"
+run "release/* branch to main skipped" 0 PR_HEAD_REF=release/20261110-2 PR_BASE_REF=main PR_SAME_REPO=true; has "skip reported" "SKIPPED"
+run "release/* fork branch still checked" 1 PR_HEAD_REF=release/20261110-2 PR_BASE_REF=main PR_SAME_REPO=false
+run "release/* to other base still checked" 1 PR_HEAD_REF=release/20261110-2 PR_BASE_REF=dev PR_SAME_REPO=true
 run "fork branch named staging still checked" 1 PR_HEAD_REF=staging PR_BASE_REF=main PR_SAME_REPO=false
 run "release PR without same-repo flag still checked" 1 PR_HEAD_REF=staging PR_BASE_REF=main
 run "hotfix to main still checked" 1 PR_HEAD_REF=hotfix PR_BASE_REF=main
