@@ -444,6 +444,8 @@ bash "$(forge_resolve milestone-drift.sh)" "{slug}" --format text
 
 ### Step 1: Pre-flight check
 
+**Re-plan (forge#5342)**: a lane or journey run that finds the design wrong ends with a `design-invalidated` block; the engine files one spike-amendment issue and holds the affected open siblings behind it. After it merges, run `npx forgedock replan apply --amendment N --repo {REPO}` to mark each open child unchanged, re-scoped or dropped and update the epic checklist.
+
 **Feature acceptance (forge#5336, hard gate)**: `npx forgedock acceptance gate --milestone "{TITLE}" --stage ship`. A non-zero exit (a journey is red or never ran on the branch head) blocks the ship; print its lines and stop. A milestone without an epic is not gated.
 
 ```bash
