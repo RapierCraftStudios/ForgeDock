@@ -109,3 +109,19 @@ test("#5313 a batch that reported between the settle check and the add is never 
   assert.deepEqual(io.batchOps.at(-1), ["start", [3]]);
   assert.ok(!io.batchOps.some((o) => o[0] === "add"));
 });
+
+test("#5313 the follow-up rules and skip reasons show in the --dry-run plan: defer-only claims, post-deploy-only folds, PR and skip label skipped", async () => {
+  const bot = { author: { login: "forgedock[bot]" } };
+  const deferBody = "- [ ] fix it — defer: later\n";
+  const pdBody = "- [ ] `check it` — post-deploy: live\n";
+  const issues = [iss(1, { ...bot, title: "Follow-up: a", body: deferBody }), iss(2, { ...bot, title: "Follow-up: b", body: pdBody }), iss(3, { labels: lbl("epic") }), iss(4, { url: "https://github.com/o/r/pull/4" }), iss(5)];
+  const io = bind(fakeIo(tmpDir("iwp-"), issues));
+  const watch = validateWatch("w", { mode: "batch", include_followups: "defer-only", postdeploy_rollup: 100 });
+  const plan = await planClaims({ watch, repo: "o/r", io, state: state() });
+  const out = formatClaimPlan(plan);
+  assert.deepEqual(plan.claim.map((c) => c.number), [1, 5]);
+  assert.deepEqual(plan.fold, [2]);
+  assert.match(out, /would fold #2/);
+  assert.match(out, /skip #3: skip label epic/);
+  assert.match(out, /skip #4: pull request/);
+});
