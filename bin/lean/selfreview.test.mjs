@@ -54,9 +54,18 @@ describe("compareSelfReview (#4374)", () => {
 describe("selfReviewFindings (#5345)", () => {
   const contract = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [{ id: "D1", path: "src/a.js" }], preserve: [{ id: "P1", what: "src/keep.js behaviour unchanged" }], validate: [] };
   it("catches scope creep and a preserved path touched without authorization", () => {
-    const f = selfReviewFindings({ contract, changedFiles: ["src/a.js", "src/keep.js", "src/b.js"] });
+    const f = selfReviewFindings({ contract, result: {}, changedFiles: ["src/a.js", "src/keep.js", "src/b.js"] });
     assert.ok(f.some((x) => x.code === "conformance.scope_creep" && x.section === "deliverables"));
     assert.ok(f.some((x) => x.code === "conformance.preserve_violated" && /P1: src\/keep\.js/.test(x.detail)));
+  });
+  it("selfReviewFindings applies add-deliverable amendments", () => {
+    const files = ["src/a.js", "src/b.js"];
+    const amendments = [{ kind: "add-deliverable", path: "src/b.js", why: "needed helper" }];
+    assert.ok(selfReviewFindings({ contract, result: { amendments }, changedFiles: files }).length === 0);
+    assert.ok(selfReviewFindings({ contract, result: { amendments: [] }, changedFiles: files }).some((x) => x.code === "conformance.scope_creep"));
+    assert.ok(!selfReviewFindings({ contract, changedFiles: files }).some((x) => x.code === "conformance.scope_creep"), "no result.json yet: scope_creep not judged");
+    const keep = selfReviewFindings({ contract, result: { amendments: [{ kind: "add-deliverable", path: "src/keep.js", why: "w" }] }, changedFiles: ["src/a.js", "src/keep.js"] });
+    assert.deepEqual(keep, []);
   });
   it("catches an unimplemented requirement only once the builder reported statuses", () => {
     assert.deepEqual(selfReviewFindings({ contract, changedFiles: ["src/a.js"] }), []);
@@ -64,7 +73,7 @@ describe("selfReviewFindings (#5345)", () => {
     assert.ok(f.some((x) => x.code === "conformance.unimplemented" && x.section === "requirements"));
   });
   it("a red review section makes the check fail and the record red, so the lane is fixed before review", async () => {
-    const review = selfReviewFindings({ contract, changedFiles: ["src/b.js"] });
+    const review = selfReviewFindings({ contract, result: {}, changedFiles: ["src/b.js"] });
     const r = await selfCheck({ review, contract, plan: { commands: [], budgetMs: 0, perCommandMs: 1 }, run: async () => ({ rc: 0 }) });
     assert.equal(r.ok, false);
     assert.match(formatCheckTable(r), /FAIL review {2}conformance\.scope_creep/);

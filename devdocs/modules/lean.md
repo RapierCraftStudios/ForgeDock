@@ -2969,6 +2969,10 @@ reply whose gaps are row ids (`reaskable()`) is repaired in place by `mergeRevie
 contract sections, and flags long-clean cells as light-lane candidates (never a risk surface, #5283). Recurring finding
 classes reach the builder as `FINDING_PITFALLS` in the implement prompt.
 
+`selfReviewFindings` applies the `result.json` typed amendments (`applyAmendments`, problems ignored — the engine gate
+reports them) to the frozen contract first, so an `add-deliverable` file is not `scope_creep` and an amended preserve
+path is authorized (#5380).
+
 ## Sibling awareness (#5340)
 
 - **Context pack default.** `resolveContextMode` (`context.mjs`): an explicit `engine.context_pack` (shadow|off|on|ab) always wins; unset, a lane with a milestone or a parent epic runs `on`, every other lane stays `shadow`. `parseContextPackConfig({})` is unchanged. Sibling facts (same parent or milestone, at most `MAX_SIBLING_READS`) rank before other lanes' facts, after the declarations of in-flight siblings.
