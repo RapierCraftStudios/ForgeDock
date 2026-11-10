@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { scrub, assertStage1, compareSnapshots, runNewUserJourney, parseCleanOutput, journeyFromCli, CASES } from "./selftest-journey.mjs";
 import { selftestFromCli } from "./selftest-live.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 const GOOD = {
   banner: { code: 0, output: "ForgeDock v1.2.3\n  ✖ Claude Code  not found\n" },
@@ -25,7 +25,7 @@ const io2 = (over = {}) => ({
   gh: async (a) => (a[0] === "pr" ? JSON.stringify([{ number: 1, mergedAt: new Date(5000).toISOString() }]) : "[]"),
   ...over,
 });
-const run = (io, o = {}) => { const dir = mkdtempSync(join(tmpdir(), "jt-")); return runNewUserJourney({ repo: "o/sandbox", io, snapshotDir: dir, update: true, ...o }).then(() => runNewUserJourney({ repo: "o/sandbox", io, snapshotDir: dir, ...o, update: false })); };
+const run = (io, o = {}) => { const dir = tmpDir("jt-"); return runNewUserJourney({ repo: "o/sandbox", io, snapshotDir: dir, update: true, ...o }).then(() => runNewUserJourney({ repo: "o/sandbox", io, snapshotDir: dir, ...o, update: false })); };
 
 describe("journey scrub", () => {
   it("removes paths, versions, ansi and timings", () => {
@@ -55,7 +55,7 @@ describe("assertStage1 (the 2026-11-10 regression classes)", () => {
 
 describe("snapshots", () => {
   it("a missing snapshot fails naming the update flag; a changed one names the line", () => {
-    const dir = mkdtempSync(join(tmpdir(), "jt-"));
+    const dir = tmpDir("jt-");
     const res = { cases: GOOD, files: {} };
     assert.throws(() => compareSnapshots(res, { dir }), /--update-snapshots/);
     compareSnapshots(res, { dir, update: true });
@@ -73,7 +73,7 @@ describe("runNewUserJourney", () => {
     assert.ok(r.ttfmMs > 0);
   });
   it("fails stage 1 on a wording regression against the snapshot", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "jt-"));
+    const dir = tmpDir("jt-");
     await runNewUserJourney({ repo: "o/s", io: { ...stage1Io(), ...io2() }, snapshotDir: dir, update: true });
     const r = await runNewUserJourney({ repo: "o/s", io: { ...stage1Io({ help: { code: 0, output: "Usage: forgedock <thing>\n" } }), ...io2() }, snapshotDir: dir });
     assert.equal(r.ok, false);
@@ -116,7 +116,7 @@ describe("clean output parsing and the CLI", () => {
   });
   it("selftest --journey routes here, refuses the project repo and posts the marker", async () => {
     await assert.rejects(selftestFromCli(["--journey"], { cwd: "/nonexistent", print: () => {}, io: {} }), /no sandbox repo/);
-    const calls = [], out = [], head = "c".repeat(40), dir = mkdtempSync(join(tmpdir(), "jt-"));
+    const calls = [], out = [], head = "c".repeat(40), dir = tmpDir("jt-");
     const gh = async (a) => { calls.push(a); return a[0] === "pr" && a[1] === "view" ? head : a[0] === "pr" ? JSON.stringify([]) : "[]"; };
     const io = { ...stage1Io(), ...io2({ gh }) };
     await runNewUserJourney({ repo: "o/s", io, snapshotDir: dir, update: true });
