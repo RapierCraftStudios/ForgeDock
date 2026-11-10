@@ -9,7 +9,7 @@ argument-hint: "<free text | path to docs> [--dry-run] [--spike <path>]"
 
 **Input**: $ARGUMENTS
 
-This spec holds only judgment. All GitHub writes run in `scripts/bootstrap-create.mjs`. Templates live in `$(forge_root)/templates/bootstrap/`.
+This spec holds only judgment. All GitHub writes run in `scripts/bootstrap-create.mjs`.
 
 ```bash
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
@@ -25,7 +25,7 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 6. **Plan JSON** in `$TMPDIR` (shape: header of `bootstrap-validate.mjs` and `bootstrap-create.mjs`):
    - Milestones as dependency layers, foundation first: each depends only on earlier ones (#4659).
    - A thin deployable slice (CI deploy workflow, staging env, seed) in milestone 1 or 2, never last.
-   - A `SPIKE` parent issue.
+   - A `SPIKE` parent (epic) with a `forge-acceptance` journey (`acceptance check`).
    - Sub-issues from `issue-body.md` with planned paths, `[type:*]` tags, `priority` and `component`.
    - `"ui": true` issues carry the full design spec. `"hero": true` issues route to `/design`.
    - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues reference it as `#{{KEY}}`, never depend on it, and name the mock that keeps dev and CI green.
@@ -34,4 +34,4 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 7. **Validate.** Run `node "$VALIDATE" <plan>`. Fix the plan until it exits 0. Heed `deploy-last` warnings. Never create from an invalid plan.
 8. **Create.** Run `node "$CREATE" <plan>`, adding `--dry-run` when the input has it (preview only, GitHub untouched). It reuses existing issues, so on an error re-run it to resume.
 9. **Hand off.** Print the script's hand-off verbatim: created (links), needs a human (links), and the `/orchestrate` command per milestone, in order.
-10. Later: `npx forgedock plan validate --live` (#4659).
+10. Later: `npx forgedock plan validate --live`.
