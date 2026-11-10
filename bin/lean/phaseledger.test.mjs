@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { phasesOf } from "./orchestrate.mjs";
 import { aggregate } from "../stats/aggregate.mjs";
-import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatLedgerSummary } from "./phaseledger.mjs";
+import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatLedgerSummary, WAIT_CAUSES, summarizeWaits } from "./phaseledger.mjs";
 
 const clock = () => { let t = 1000; const f = () => t; f.tick = (ms) => { t += ms; }; return f; };
 
@@ -68,5 +68,34 @@ describe("phase ledger (#4908)", () => {
     const t = aggregate({ runs: [run({ plan: { ms: 40 }, implement: { ms: 60 } }), run({}), run(undefined)] }).groups?.[0]?.time;
     assert.equal(t?.ledger.n, 1);
     assert.equal(t.ledger.largest.phase, "implement");
+  });
+
+  it("attributes non-model time to named causes that close to the phase wall (#5349)", () => {
+    const now = clock(), L = createLedger(now);
+    L.enter("plan"); now.tick(100000);
+    L.addModel("plan", 30000, 0.1);
+    L.addWait("plan", "heavy_queue", 20000); L.addWait("plan", "rate_limit", 10000); L.addWait("plan", "bogus", 5); L.addWait("nope", "host_load", 1000);
+    L.enter("implement"); now.tick(50000);
+    const p = L.snapshot();
+    assert.deepEqual(p.plan.wait, { heavy_queue: 20000, rate_limit: 10000, host_load: 1000, command: 39000 });
+    assert.equal(p.plan.model_ms + Object.values(p.plan.wait).reduce((a, b) => a + b, 0), p.plan.ms);
+    assert.deepEqual(p.implement.wait, { command: 50000 });
+    assert.equal(createLedger(clock()).snapshot().plan, undefined);
+    const first = createLedger(now); now.tick(7000);
+    assert.deepEqual(first.snapshot().sandbox_start.wait, { sandbox: 7000 });
+    assert.ok(WAIT_CAUSES.includes("host_load"));
+  });
+
+  it("wait round-trips through the flattened telemetry keys and aggregates by cause; old rows stay n/a (#5349)", () => {
+    const p = { plan: { ms: 10, model_ms: 4, wait: { heavy_queue: 3, command: 3 } }, merge: { ms: 7 } };
+    const flat = flattenPhases(p);
+    assert.equal(flat.phase_plan_wait_heavy_queue_ms, 3);
+    assert.deepEqual(unflattenPhases(flat), p);
+    const s = summarizeWaits([p, { plan: { ms: 5 } }, null]);
+    assert.equal(s.n, 1);
+    assert.deepEqual(s.total, { ms: 17, model_ms: 4, wait: { heavy_queue: 3, command: 3 } });
+    assert.equal(summarizeWaits([{ plan: { ms: 5 } }]).n, 0);
+    const q = summarizeWaits([1, 2, 3, 4].map((n) => ({ plan: { ms: 10 * n, wait: { heavy_queue: n * 1000 } } })));
+    assert.deepEqual(q.phases.plan.pct.heavy_queue, { p50: 2500, p90: 4000 });
   });
 });

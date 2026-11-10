@@ -403,8 +403,8 @@ export async function runCore(o) {
   const pendingFollowups = []; // #5141: {req, why} whose filing kept failing in-lane; filed after the merge, else recorded
   const pendingRecord = () => pendingFollowups.filter((p) => !p.req.tracked).map((p) => ({ id: p.req.id, quote: String(p.req.quote ?? ""), disposition: p.req.disposition, why: p.why, marker: `FORGE:DEFERRED_FROM: #${issue}` }));
   let precheckMs = 0, precheckDeferred = 0, precheckRan = false; // #4331: pre-PR check wall time and deferrals, for the batch report
-  const addWait = (phase, ms, queued = 0) => {
-    if (Number.isFinite(ms) && ms > 0) waits[phase] = (waits[phase] ?? 0) + ms;
+  const addWait = (phase, ms, queued = 0, cause = "heavy_queue") => {
+    if (Number.isFinite(ms) && ms > 0) { waits[phase] = (waits[phase] ?? 0) + ms; phaseLedger.addWait(phase, cause, ms); } // #5349: by cause into the phase ledger
     if (Number.isInteger(queued)) heavyQueueMax = Math.max(heavyQueueMax, queued);
   };
   const lanePriority = () => priorityFromLabels(iss?.labels);
@@ -506,7 +506,7 @@ export async function runCore(o) {
     try { await io.sequenceLease?.undeclare?.({ repo, issue }); } catch { /* fail-open (#5340) */ }
     try { await io.sequenceLease?.unreserve?.({ repo, lane, issue }); } catch { /* fail-open (#4526) */ }
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
-      try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
+      try { const sw = sumWaits(await io.fs.read(heavyWaitsFile)); heavyQueueMax = Math.max(heavyQueueMax, sw.queueMax); for (const [ph, ms] of Object.entries(sw.waits)) addWait(ph, ms); } catch { /* no heavy step ran */ }
     }
     await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
@@ -735,7 +735,9 @@ export async function runCore(o) {
         pauses++; pinned = null; // after the wait the shim picks again
         ev({ event: "PHASE_RATE_LIMITED", phase: args.role, resetAt: epoch, resetAtDisplay: e.resetAt ?? null, waitMs });
         onProgress({ event: "phase_paused", phase: args.role, reason: "session-limit", detail: `session limit hit; pausing until ${e.resetAt || new Date(now() + waitMs).toISOString()}` });
+        const limitedAt = now();
         await sleep(waitMs);
+        phaseLedger.addWait(args.role === "review" ? "review" : stage, "rate_limit", now() - limitedAt); // #5349
       }
     }
   }
@@ -831,12 +833,12 @@ export async function runCore(o) {
         try { ok = (await checkAdmission({ cfg: o.admission, host: io.host })).ok; } catch { ok = true; }
         const nowMs = Date.now();
         if (!ok && !paused && !forced && control.pause) { if (control.pause()) { paused = true; pausedAt = nowMs; ev({ event: "LANE_PAUSED", reason: "host over ceiling" }); onProgress({ event: "phase_paused", phase: "builder", reason: "host-busy", detail: "host over the admission ceiling; lane paused" }); } }
-        else if (ok && paused) { control.resume?.(); paused = false; forced = false; addWait(stage, nowMs - pausedAt); ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
+        else if (ok && paused) { control.resume?.(); paused = false; forced = false; addWait(stage, nowMs - pausedAt, 0, "host_load"); ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
         else if (ok) forced = false;
-        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; addWait(stage, nowMs - pausedAt); ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
+        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; addWait(stage, nowMs - pausedAt, 0, "host_load"); ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
       }
     })();
-    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; addWait(stage, Date.now() - pausedAt); } } };
+    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; addWait(stage, Date.now() - pausedAt, 0, "host_load"); } } };
   }
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
