@@ -836,6 +836,8 @@ issue_watch:
 | `include_followups` | string | No | `none` (default) or `defer-only`. |
 | `trust_app` | boolean | No | Claim issues authored by this repo's ForgeDock App. Other bots and `NONE`-association authors stay untrusted. Default false. |
 | `trust_app_labels` | list | No | Needs `trust_app`: an App-authored issue must carry one of these labels. |
+| `skip_labels` | list | No | Issues carrying any of these labels are skipped. Default for `mode: batch`: `epic, needs-human, post-deploy, workflow:merged, awaiting-promotion, host-task`; `[]` for the other modes and to switch it off. |
+| `release_pause` | boolean | No | Pause the watch while a `forgedock release` job is in flight; it resumes by itself. Default true in `mode: batch`. |
 | `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
 | `sweep_needs_human` | boolean | No | Also settle `needs-human` escalations that predate the watch (the backlog). Default false; `forgedock issue-watch run --dry-run` classifies them first and writes nothing. |
 | `max_launches` | integer | No | Total lane launches (claims plus requeues by the decision engine); at N the watch drains. Default: none. Decision-stage issues also count against `max_issues`. |

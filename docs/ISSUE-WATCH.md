@@ -69,6 +69,29 @@ The lane follows the repo rule: a milestone issue goes to `milestone/<slug>` (fo
 
 When agents and `gh` run as the ForgeDock App, the issues they file are authored by `rapiercraft-forgedock[bot]` with association `NONE`, so a watch skips them. `trust_app: true` (default false) claims issues authored by this repo's own ForgeDock App. Other bots and outsiders (`NONE` humans) stay excluded. It is an explicit opt-in because the App also files issues from untrusted inputs (prod-watch, ingestion). `trust_app_labels: [operator]` (needs `trust_app`) narrows it further: the App issue must carry one of those labels. `follow-up:` issues from the App still follow `include_followups`.
 
+## Parity with an owner-run intake script
+
+A watch never claims a pull request: only issues are listed, a PR-shaped item is dropped, a `search` that selects PRs (`is:pr`, `type:pr`) fails the watch at load, and an issue an open PR closes is skipped (`skip #N: open closing PR #M`). `skip_labels` (default for `mode: batch`: `epic`, `needs-human`, `post-deploy`, `workflow:merged`, `awaiting-promotion`, `host-task`) skips by label. One watch per selector gives each its own created-since window:
+
+```yaml
+issue_watch:
+  watches:
+    nomilestone: { milestone: none, since: 2026-11-08T00:00:00Z, include_followups: defer-only, postdeploy_rollup: 100, mode: batch }
+    release-1-5: { milestone: "1.5", since: 2026-11-01T00:00:00Z, include_followups: defer-only, postdeploy_rollup: 100, mode: batch }
+```
+
+`--dry-run` lists what each would claim. A batch that reported is never added to: the next claims start a new one.
+
+## Release pause and liveness
+
+With `release_pause` (default in `mode: batch`) the watch pauses while a `forgedock release` job is in flight (its `~/.forge/releases/<id>/state.json` has no end `status` and was written in the last 6 hours): no claims, retries or decisions. The next pass after the job ends resumes by itself. Every pass writes `heartbeat` to `status.json`, and `forgedock issue-watch status` prints it:
+
+```
+  state: paused (release r20261110-110000-9 in flight (preflight))  last heartbeat: 2026-11-10T12:00:00.000Z (30s ago)
+```
+
+`running`, `paused`, `stale` (no heartbeat for 3 intervals: the watch is not running) or `done`. `watchLiveness` (`bin/lean/issuewatch-parity.mjs`) is the read for tools such as doctor; it never greps processes.
+
 ## Dry run
 
 In `per-issue` and `batch` mode, `forgedock issue-watch run --name <w> --dry-run` prints what one pass would claim and why, then the needs-human classification. It writes nothing: no claim, no status, no launch.
