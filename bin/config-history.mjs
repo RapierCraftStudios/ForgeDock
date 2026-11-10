@@ -15,7 +15,7 @@ export function historyRoot(env = process.env) {
 }
 
 /** `<owner>__<repo>` from the forge.yaml project block, else the checkout directory name. */
-export function repoKey(cwd, text = "") {
+export function historyRepoKey(cwd, text = "") {
   const o = text.match(/^\s+owner:\s+"?([\w.-]+)"?/m)?.[1], r = text.match(/^\s+repo:\s+"?([\w.-]+)"?/m)?.[1];
   return o && r ? `${o}__${r}` : basename(cwd);
 }
@@ -101,7 +101,7 @@ export function importBak({ root = historyRoot(), repo, dir, del = false, now })
 export function backupToHistory(outputPath, reason, opts = {}) {
   if (!existsSync(outputPath)) return null;
   const text = readFileSync(outputPath, "utf8");
-  const repo = repoKey(dirname(outputPath), text);
+  const repo = historyRepoKey(dirname(outputPath), text);
   const { n } = recordVersion({ root: opts.root, repo, text, reason, now: opts.now });
   unlinkSync(outputPath);
   return { backupName: `config-history ${repo} v${n}` };
@@ -111,7 +111,7 @@ export function backupToHistory(outputPath, reason, opts = {}) {
 export function runConfigCommand(sub, rest, { cwd, out = (s) => console.log(s), env = process.env, confirm } = {}) {
   const file = join(cwd, "forge.yaml");
   const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const repo = repoKey(cwd, text), root = historyRoot(env);
+  const repo = historyRepoKey(cwd, text), root = historyRoot(env);
   const n = rest.find((a) => /^\d+$/.test(a));
   if (sub === "history") {
     const vs = listVersions({ root, repo });

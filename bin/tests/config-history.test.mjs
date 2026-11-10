@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { recordVersion, listVersions, readVersion, diffVersion, rollback, importBak, backupToHistory, runConfigCommand, repoKey } from "../config-history.mjs";
+import { recordVersion, listVersions, readVersion, diffVersion, rollback, importBak, backupToHistory, runConfigCommand, historyRepoKey } from "../config-history.mjs";
 import { backupForgeYaml } from "../journey.mjs";
 
 const setup = () => { const d = tmpDir("fd-cfghist-"); const root = join(d, "hist"); const repo = join(d, "repo"); return { root, repo, file: join(repo, "forge.yaml"), d }; };
@@ -74,7 +74,7 @@ describe("config history (#5315)", () => {
     assert.equal(runConfigCommand("rollback", ["1"], { cwd: repo, env, out }), 0);
     assert.equal(readFileSync(file, "utf8"), "a: 1\n");
     assert.equal(runConfigCommand("rollback", [], { cwd: repo, env, out }), 1);
-    assert.equal(repoKey(repo, ""), "repo");
+    assert.equal(historyRepoKey(repo, ""), "repo");
   });
 });
 import { mkdirSync } from "node:fs";
