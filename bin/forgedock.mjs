@@ -4419,6 +4419,17 @@ switch (command) {
     }
     break;
   }
+  case "ci": {
+    // Actions-minutes budget and CI placement policy (#5278): `forgedock ci budget`.
+    const { ciFromCli } = await import("./lean/ci-budget.mjs");
+    try {
+      exitCode = await ciFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "probe": {
     const { probeFromCli } = await import("./engine-cli.mjs");
     try {

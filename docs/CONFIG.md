@@ -594,6 +594,28 @@ pipeline:
 
 ---
 
+### `ci` budget and placement (forge#5278)
+
+Actions-minutes awareness and where CI runs. Keys are flat under `ci:` (the parser is one level deep; they coexist with the `milestone_integration` keys above).
+
+```yaml
+ci:
+  mode: auto               # remote | local-first | local-attested | auto (default)
+  monthly_minutes: 40000   # budget; default: the plan's included minutes
+  reserve_pct: 10          # headroom under the budget before auto switches (0-90, default 10)
+  # included_minutes: 50000  # override the built-in plan table (free 2000, pro/team 3000, enterprise 50000)
+  # plan: enterprise         # override the detected plan
+```
+
+| `mode` | Behaviour |
+|---|---|
+| `remote` | Current behaviour: `verify.mode` ci/hybrid push and wait for Actions. |
+| `local-first` | Host checks must pass before anything is pushed that triggers paid CI; `verify.mode` ci/hybrid run as `local`. Paid CI runs once on the release head. |
+| `local-attested` | As `local-first`, and the host result is posted as a `forgedock/ci-local` commit status; paid CI only for release/nightly. Trust trade-off: the status is attested by ForgeDock, not run by Actions, the same trust as a self-hosted runner. |
+| `auto` | `remote` while the projected month stays under `monthly_minutes` less `reserve_pct`; otherwise `local-first`, announced in the next batch/release report. A public repo (free hosted minutes) is never switched; an unreadable billing API stays `remote`. |
+
+`forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]]` prints the plan, included minutes, month-to-date usage across the account (billing usage API: needs a token that can read the org or user billing), the projection, the active mode, alerts (projected overage, a new burn source such as a repo flipped private) and the parity hit rate (local green -> remote red, per suite). `--digest` adds the per-repo and per-workflow month digest; `--propose` lists the runnable local jobs derived from the repo's workflow files (same tool pins). `--set-mode`, `--budget`, `--reserve`, `--plan` write the `ci` block (see `/forgedock-ci-setup`). Runner minutes are weighted by OS (Linux 1, Windows 2, macOS 10). Caches live in `~/.forge/ci-budget/` (`FORGEDOCK_CI_BUDGET_DIR`).
+
 ## `execution` (OPTIONAL)
 
 Owner opt-in for the paid API agent backend (#4257). The API backend is **never the default**: under `--backend auto` (the default) ForgeDock uses the `claude` CLI, and when no CLI is available it fails with `CLI_BACKEND_UNAVAILABLE` instead of billing `ANTHROPIC_API_KEY`.
