@@ -130,6 +130,10 @@ Deeper: [How it works](docs/site/how-it-works.md) · [GitHub is your agents' mem
 - [Troubleshooting & recovery](docs/site/troubleshooting.md) · [Outcome codes](docs/OUTCOME-CODES.md) · [Stats](docs/STATS.md)
 - [Start a new project](docs/site/start-a-new-project.md) · [Comparison with other approaches](docs/comparison.md) · [Release eval scorecards](docs/eval/README.md)
 
+## FAQ
+
+**Does it create its own work?** Some issues are pipeline-found (review findings, follow-ups, production signals). `npx forgedock stats --origin` prints the split of requested vs pipeline-generated issues, how the pipeline-found ones closed, and their share of cost; see [Issue origin](docs/STATS.md#issue-origin---origin-forge5294).
+
 ## For companies
 
 The core is AGPL-3.0 and stays that way. A [commercial license](COMMERCIAL-LICENSE.md) is available for proprietary use, and an org-wide fleet layer is in development with design partners. See [ForgeDock for companies](docs/site/for-companies.md) or write to [support@rapiercraftstudios.com](mailto:support@rapiercraftstudios.com).

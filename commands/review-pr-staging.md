@@ -217,6 +217,7 @@ CI_FAILING=$(gh pr checks "$PR_NUMBER" -R "$GH_REPO" --json name,bucket \
   --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
 echo "CI_FAILING: $CI_FAILING"
 ```
+When the target branch's protection or rulesets (or `gate.required_checks` in forge.yaml) name required checks, only those count toward `CI_FAILING`; other red checks are listed as non-blocking warnings (`forgedock review-staging --summary` does this). With no readable required set every red check counts.
 `CI_FAILING` > 0 → BLOCK DEPLOY (unless autofixed in Phase 1F). A red `forgedock/verify` alone does not block, and neither do `forge/deploy-gate` or `Check for FORGE gate markers`: they report this review's own gate marker, so an earlier `GATE_FAILURE` never blocks the re-run that clears it.
 
 ### Phase 1F: CI Autofix

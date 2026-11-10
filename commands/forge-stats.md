@@ -11,7 +11,7 @@ install: internal
 
 **Input**: $ARGUMENTS (default: `diff`; modes: `diff`, `baseline`, `full`, `cost`)
 
-Tracks the size of every Forge command file over time. Detects bloat by comparing current sizes against the git-tracked baseline and per-command thresholds.
+Run-level reports (cost, flow, issue origin via `forgedock stats --origin`) live in the CLI: see docs/STATS.md. Tracks the size of every Forge command file over time. Detects bloat by comparing current sizes against the git-tracked baseline and per-command thresholds.
 
 ## Config
 

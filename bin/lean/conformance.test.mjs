@@ -642,6 +642,22 @@ describe("conformance review: the engine computes the verdict from complete rows
 });
 
 describe("close plan and follow-up items", () => {
+  it("#5285: a live default-on change with live acceptance deferred closes partial and names the blocker", () => {
+    const k = { requirements: [{ id: "R3", disposition: "defer", bucket: "post-deploy" }] };
+    const p = closePlan(k, { liveBlocks: [{ id: "R3", flag: "pool" }] });
+    assert.equal(p.reason, "partial");
+    assert.equal(p.liveBlocked, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R3"]);
+    assert.equal(closePlan(k).reason, "completed");
+  });
+  it("#5285: interactive UI on a high-risk surface with no browser check fails precheck; with one, or off a risk surface, it passes", () => {
+    const k = { requirements: [{ id: "R1", disposition: "deliver" }], deliverables: [{ id: "D1", path: "web/Cta.tsx" }] };
+    const res = { requirements: [{ id: "R1", status: "implemented" }], validation: [] };
+    const run = (uiBrowser) => precheck({ contract: k, result: res, changedFiles: ["web/Cta.tsx"], uiBrowser }).failures.filter((f) => f.kind === "ui_browser_unverified");
+    assert.equal(run({ files: ["web/Cta.tsx"], ran: false, highRisk: true, reason: "no e2e_label or e2e_workflow configured" }).length, 1);
+    assert.equal(run({ files: ["web/Cta.tsx"], ran: true, highRisk: true, reason: "x" }).length, 0);
+    assert.equal(run({ files: ["web/Cta.tsx"], ran: false, highRisk: false, reason: "x" }).length, 0);
+  });
   it("links every tracking issue once; nothing tracked when everything is delivered", () => {
     assert.deepEqual(closePlan(C), { reason: "completed", tracked: [] });
     const k = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "defer", tracked: "#9" }, { id: "R3", disposition: "post-deploy", tracked: "#9" }] };

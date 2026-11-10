@@ -743,6 +743,15 @@ selftest:
 
 ---
 
+## `gate` (OPTIONAL)
+
+```yaml
+gate:
+  required_checks: ["CI"]   # extra checks the staging review treats as required
+```
+
+`forgedock review-staging --summary` blocks only on the required checks of the target branch (branch protection and rulesets, read from the GitHub API) plus this explicit list; the list is never inferred. Other red checks are reported as non-blocking warnings. When no required checks can be read, every red check blocks.
+
 ## `release` (OPTIONAL)
 
 Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review and fixes are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). Post-merge is automated (#5213): it confirms a publish run for the merge commit (dispatching one when none appears), waits for `artifact_check`, then opens and merges the version-sync PR; a bound that runs out stops the job as blocked and `--resume <id>` retries. `--watch` is accepted and has no effect until the review step lands.
@@ -1505,6 +1514,9 @@ verification:
 
 topology:
   route_reachability: "bash scripts/check-ingress.sh"   # optional; blocking when declared
+  prod_parity:                                         # optional; block map {path glob: command | "note: how to verify"}
+    "db/migrations/**": "bash scripts/check-migration-role.sh"
+    "web/app/**": "note: run under the production ISR runtime"
 ```
 
 | Field | Type | Required | Description |
@@ -1525,6 +1537,7 @@ topology:
 | `coupled_files` | map (glob → glob list) | No | Default unset (#5079). "If file A changes, file B must change": a block map `{when glob: required glob[, glob]}`, e.g. `"infra/guard/bootstrap.sh": "infra/guard/MANIFEST.sha256"`. A key prefixed `added:` fires only for files the lane adds (`"added:scripts/tests/test_*.py": ".github/workflows/ci.yml"`). A lane that changes a `when` file without a matching required file fails precheck with `coupled_file_missing` (`conformance.unimplemented`, builder resumed once). Quote keys that contain `*`, and list alternatives as separate keys: brace globs (`*.{ts,tsx}`) are not expanded. |
 | `validate.recipes` | map (regex → replacement) | No | Default unset. A top-level `validate:` block with a block-style `recipes:` map, e.g. `"poetry run pytest": "uv run --with-requirements r.txt pytest"`. Each key is a regex source; the first recipe that matches a frozen validate or `repro_test` command rewrites it at contract freeze (`applyValidateRecipes`), recorded as a decision. Use it for commands whose environment is not installed in lane sandboxes. |
 | `topology.route_reachability` | string (command) | No | Default unset (no check, no behaviour change). A repo-supplied command that takes the route paths a diff adds (Next.js `app/**/route.*`, `pages/api/**`; URL form, route groups removed) as arguments and exits non-zero when the production ingress does not deliver them to the service that implements them. Runs in the lean lane after validate and in `review-pr-staging`; a non-zero exit blocks (`conformance.unimplemented`, kind `route_unreachable`). Read by `readEnvConfig` (`bin/engine-cli.mjs`), run by `bin/lean/routecheck.mjs`. |
+| `topology.prod_parity` | block map | No | Default unset (no check, no behaviour change; #5284). Production-only facts the lane tests cannot exercise (runtime build mode, migration role vs app role, env-file scope, ingress). Key: path glob; value: a check command, run once with the matching changed paths as arguments (non-zero or cannot-start blocks, `conformance.unimplemented` kind `prod_parity_failed`), or `note: <how to verify>`, which blocks (kind `prod_parity_unjustified`) until `.forge-lean/result.json` carries `parity: [{surface: <glob>, justification}]`. Read by `readEnvConfig`, run by `bin/lean/prodparity.mjs`. |
 
 **Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
 
@@ -1816,21 +1829,28 @@ systemctl --user daemon-reload && systemctl --user enable --now forgedock-bot-to
 
 ## GitHub App Install
 
-During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`) on your account or org.
+During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`). Installing alone changes nothing; to run the pipeline as the App's bot (its own API budget, `<app>[bot]` authorship) sign in with `forgedock auth login`. Without a login, every pipeline `gh` call uses your own `gh auth`, exactly as before.
 
-**What installing it does today**: registers the app against the account/org you choose. That's it.
+### Broker sign-in
 
-**What it does NOT do (yet)**:
-- It does **not** create a bot token. GitHub App *installation* tokens can only be minted with the app's private key, and that key is held solely by RapierCraft Studios (the app's owner) — your installation grants *your* installation ID against *RapierCraft's* app, not a key you can use yourself.
-- It does **not** auto-refresh anything, and there is no background process managing token expiry.
-- It does **not** change which `gh` auth context pipeline commands (`/work-on`, `/orchestrate`, etc.) use. Every pipeline `gh` call always uses whatever auth is currently active in your shell — your personal token unless you've manually configured something else.
-- It does **not** wire up webhook-driven "automatic pipeline triggers" — no webhook receiver exists yet.
+```
+forgedock auth login --broker-url https://<broker> --client-id <App client id> [--installation N]
+forgedock auth status
+forgedock auth logout
+```
 
-**Why this matters**: GitHub App installation tokens get materially higher API rate limits than a personal access token, and actions taken with them are attributed to the bot (`rapiercraft-forgedock[bot]`) rather than your personal account. Those benefits are real, but delivering them to arbitrary installers requires a hosted token-minting backend service that doesn't exist yet (tracked as forge#1890). Installing the app today is safe and free, but on its own changes nothing about how the pipeline authenticates.
+- Login uses the GitHub App **device flow** (client ID only; no secret on your machine). The CLI stores the user token and installation under `~/.forge/app-auth.json` (mode 0600; `FORGE_HOME_DIR` overrides the directory). `FORGEDOCK_BROKER_URL` and `FORGEDOCK_APP_CLIENT_ID` can replace the flags.
+- On every CLI start the stored login yields a short-lived installation token, scoped to your repository ids and the permissions the pipeline uses, which is set as `GH_TOKEN` in the CLI process env only. It is not a global credential: no `gh auth login`, no git credential helper (#4565). It is refreshed when under 10 minutes remain.
+- If the broker is unreachable or refuses, one warning line is printed and the pipeline continues on your own `gh` auth. `FORGEDOCK_NO_APP_AUTH=1` skips the App identity.
+- Broker contract (client side): `POST {broker}/v1/token` with `Authorization: Bearer <user token>` and body `{installation_id, repository_ids, permissions}`, answering `{token, expires_at}`. The broker server, quotas, mint logs, revocation and security page live on the platform side.
 
-`npx forgedock doctor` reports this status explicitly (Check 12: "GitHub App / bot token") so you aren't left guessing whether a bot token is active.
+### Bring your own App
 
-**If you want bot-token behavior today**: you'd need to register your own GitHub App (with your own private key), and drive your own token-refresh loop (mint an installation token via the app's `/app/installations/{id}/access_tokens` API, then `gh auth login --with-token`, repeating before the ~1-hour expiry). This is an advanced, self-hosted setup — ForgeDock does not package a generic version of this for you.
+`forgedock auth login --byo [--org ORG] [--installation N]` runs GitHub's App manifest flow through a loopback page, stores the App id and private key (`~/.forge/app-byo.pem`, 0600) and mints installation tokens locally. No third-party broker is involved.
+
+### Doctor
+
+`npx forgedock doctor` (Check 12, "GitHub App / bot token") shows the active identity, its source (`broker`, `byo` or personal fallback) and the `core.limit` of the active token. Without a login it keeps the earlier messages, including the refresh-stamp check for the self-hosted `scripts/refresh-bot-token.sh` setup.
 
 ---
 

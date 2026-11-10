@@ -2586,7 +2586,7 @@ Delta review of #5072: `decisionStep` hands `settle` only trusted comments (OWNE
   Superseded by #5207: host items go to ONE host aggregate per batch (`FORGE:HOST_BATCH: <batch>`, `followup:host` + `host-task`, never `needs-human`).
 - files class external into ONE aggregate per batch (`FORGE:EXTERNAL_BATCH: <FORGE_BATCH_ID|adhoc>`). It uses the same trusted lookup, lowest-number canonical and post-create re-check as the rollup, adds items under `### #<parent>` with normalized dedup, and is labelled `followup:external`, `external-prerequisite` and `needs-human`. An older per-parent external follow-up is still appended to.
 - files class backlog (`[bucket:new-issue]` items, #5188) into ONE issue per batch (`FORGE:BACKLOG_BATCH: <FORGE_BATCH_ID|adhoc>`) through the same aggregate path: trusted lookup, lowest-number canonical, post-create re-check, `### #<parent>` sections with normalized dedup, labels `followup:engineering` and `followup:backlog`, no `needs-human`. `followupClass` (conformance.mjs) maps new-issue to backlog.
-  Superseded by #5207: backlog is removed; an engineering/backlog row (explicit class, `[bucket:new-issue]`, no prefix) exits 2 (`engineering deferral: build it in-lane (#5207)`, `DEFERRED_TSV=INVALID`), nothing filed. `verify-now` and ops join the rollup and the external aggregate; no per-parent issue is read or filed for any class (existing ones are left as they are). `forgedock stats --self-filed [--repo R] [--since D]` (`bin/stats/selffiled.mjs`) reports the pipeline-filed share of new issues by kind against a 15% target. Decision: `devdocs/decisions/5207-no-self-filed-followups.md`.
+  Superseded by #5207: backlog is removed; an engineering/backlog row (explicit class, `[bucket:new-issue]`, no prefix) exits 2 (`engineering deferral: build it in-lane (#5207)`, `DEFERRED_TSV=INVALID`), nothing filed. `verify-now` and ops join the rollup and the external aggregate; no per-parent issue is read or filed for any class (existing ones are left as they are). `forgedock stats --self-filed [--repo R] [--since D]` (`bin/stats/selffiled.mjs`) reports the pipeline-filed share of new issues by kind against a 15% target. Decision: `devdocs/decisions/5207-no-self-filed-followups.md`. `forgedock stats --origin [--repo R] [--since D] [--json]` (`bin/stats/origin.mjs`, #5294) splits issues by origin (requested via a human author, production via the FORGE:PRODWATCH marker, review-finding, follow-up; otherwise unknown) and reports pipeline-originated outcomes (merged, closed-invalid, other-closed, open) and their share of recorded telemetry cost.
 `fileFollowups` passes `batchId`/`rollupLabel` as `FORGE_BATCH_ID`/`FORGE_ROLLUP_LABEL`. `track()` records `followups: [{issue, class, count}]` on the lane result, and `formatOutcomeLists` prints one `follow-ups appended: #N (<class>: k item(s) from #a,#b)` line grouped by issue, naming the rollup. Decision: `devdocs/decisions/5078-followup-routing.md`.
 
 Tests: `file-deferred-followups.test.sh` "routing:" / "external batch:" / "engineering:", `conformance.test.mjs` "#5078 owner is narrowed", `decision-engine.test.mjs` "#5078 the batch report lists follow-ups appended". Cost: 0 LLM calls.
@@ -2771,6 +2771,11 @@ How to read it:
   with property checks (#4149). That decision is separate work.
 - Read only: one GraphQL search per 100 PRs plus local `git blame` (same-hunks is `null` outside a clone of the repo). No
   lane-path cost, no LLM. Definitions: `docs/STATS.md`.
+- By surface and replay (#5283): PR changed files (first 100 per PR) give each lane PR its surfaces, `domain:*` from
+  `pathDomains` (`review-roster.sh`) and `risk:*` from `riskClassOf`; each repo gains `surface <s>` rows (same 2x2, n/a under min n).
+  `--replay <pr,...> [--enforce-domains d,.. --risk-paths glob,..]` (window-free) lists per PR mode, shadow verdict, surfaces and
+  `enforced` (configured surface hit and nonconforming), `flagged` (hit, but the review would pass: enforce cannot block a passing
+  review) or `none`. The global default stays shadow; enforcement is set per repo with `review.enforce_domains`/`review.risk_paths`.
 
 ## Entry 2026-11-07 — experiment arm-scoped config overrides (#5206)
 
@@ -2847,3 +2852,17 @@ live-measurement issues is not part of this change.
 ## Entry 2026-11-10 — host preflight, draft release PR, mark ready (#5277)
 
 `release-preflight.mjs` adds two optional steps to `RELEASE_STEPS`: `host-preflight` (before `release-pr`) and `mark-ready` (after `fixes`). Both read forge.yaml `release.preflight_command` (flat keys `preflight_command`/`_timeout`/`_blocking`, `parsePreflightConfig`, `readReleaseConfig().preflight`) and run it through `io.rehearse` on the host. Unset: both return `{skipped:true}` and `runRelease` does not record them (`OPTIONAL_STEPS`), so state and `gh` calls are unchanged. Set: `host-preflight` runs on the staging head (`gh api commits/<staging>`) and a failure files one `release-blocker` per head+kind (`fileBlocker({kind:"preflight"})`, marker `FORGE:RELEASE_BLOCKER head=<sha> kind=preflight`) and stops, so no PR is opened on a failing head; `releasePrStep` then opens the PR with `--draft`; `fixStep` re-runs `runHostPreflight` on the new head before each delta review; `mark-ready` re-runs it on the final head and calls `gh pr ready` only on a pass. Actions CI is opted out of drafts by the repo (`docs/CONFIG.md`). `commands/deploy-pr.md` Phase 3 counts `pending` as not-passed: unfinished-only checks print `CI gate: PENDING` and defer to Phase 5, never PASSED.
+
+## Entry 2026-11-10 — Live-deferral close gate and real-browser check for interactive UI (#5285)
+
+`activation.mjs` `liveDeferralBlocks(contract, modes)`: when `rolloutModes` says a touched rollout flag is live (default-on) and a
+requirement is deferred for live/post-deploy verification (bucket post-deploy/verify-now/host, or live-acceptance wording), it returns
+`[{id, flag}]`. `closePlan({liveBlocks})` then returns `partial` with `liveBlocked`; `lean.mjs` keeps the issue open and posts a
+`FORGE:TRACKED` note naming the blockers (a default-off rollout still ships with its deferral). `e2e.mjs` `uiInteractiveChanged(files)`
+(dialog/CTA/layout component files) makes `e2eWanted` run the repo's e2e (CI label or workflow, never a local browser install). With no
+trigger configured the skip is a trajectory decision; on a `review.risk_paths` hit `precheck`'s `uiBrowser` input yields
+`conformance.e2e_unverified` kind `ui_browser_unverified`. Without `rollouts.files` default-on cannot be detected and the gate does not fire.
+
+## Entry 2026-11-10 — production parity beyond ingress (#5284)
+
+forge.yaml `topology.prod_parity` (block map `{path glob: command | "note: how to verify"}`, read by `readEnvConfig` → `prodParity`) generalises `route_reachability` (#5087) to runtime build mode, DB role/ownership and env scope. `bin/lean/prodparity.mjs` matches the lane's changed files to the globs; a command rule runs once with the matching paths (non-zero or rc 127 → `conformance.unimplemented` kind `prod_parity_failed`), a note rule needs `parity: [{surface, justification}]` in the result file (else kind `prod_parity_unjustified`). Failures enter `precheck` as `prodParityFailures`, beside `routeFailures`. The plan prompt lists touched surfaces and the review rubric treats a surface with no evidence as not delivered. No key, no check. Record: `devdocs/decisions/5284-prod-parity.md`.

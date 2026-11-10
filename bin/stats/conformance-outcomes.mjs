@@ -13,6 +13,8 @@
  * and a Wilson 95% interval; a cell under min n prints n/a. Read only: GitHub reads are one GraphQL search per page of 100
  * merged PRs, no writes. The report core is pure; `gatherConformanceOutcomes` supplies the GitHub and git inputs.
  */
+import { pathDomains, riskClassOf, riskPathHits, parseEnforceDomains, parseRiskPaths } from "../lean/review-trigger.mjs";
+
 export const DEFAULT_OUTCOME_MIN_N = 20;
 export const DEFAULT_WINDOW_DAYS = 7;
 export const DEFAULT_LOOKBACK_DAYS = 30;
@@ -102,7 +104,7 @@ export function sameHunks(p, laterFixes, git) {
  * verdicts: Map from conformanceVerdicts (keys pr:N, issue:N). A PR whose window has not elapsed by `now` is pending and left
  * out of the cells. A PR with no verdict is not a lane PR.
  */
-export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEFAULT_OUTCOME_MIN_N, windowDays = DEFAULT_WINDOW_DAYS, now = Date.now(), git = null, graphqlCalls = null, since = null }) {
+export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEFAULT_OUTCOME_MIN_N, windowDays = DEFAULT_WINDOW_DAYS, now = Date.now(), git = null, graphqlCalls = null, since = null, surfacesOf = surfacesOfFiles }) {
   const win = windowDays * DAY;
   const merged = prs.filter((p) => ms(p.mergedAt) != null).sort((a, b) => ms(a.mergedAt) - ms(b.mergedAt));
   const sinceMs = ms(since);
@@ -123,7 +125,7 @@ export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEF
     };
     if (signals.same_hunks === null) unresolved++;
     rows.push({ repo: p.repo ?? null, pr: p.number, issue: v.issue ?? null, merged_at: p.mergedAt, mode: v.mode ?? null, state: v.state, kinds: v.kinds ?? [],
-      source: v.source ?? null, signals, defect: SIGNALS.some((s) => signals[s] === true) });
+      source: v.source ?? null, signals, defect: SIGNALS.some((s) => signals[s] === true), ...(p.files?.length ? { surfaces: surfacesOf(p.files) } : {}) });
   }
   const repos = {};
   for (const repo of [...new Set(rows.map((r) => r.repo ?? "unknown"))].sort()) {
@@ -137,7 +139,9 @@ export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEF
     }
     const by_mode = {};
     for (const m of [...new Set(rs.map((r) => r.mode ?? "unknown"))].sort()) by_mode[m] = twoByTwo(rs.filter((r) => (r.mode ?? "unknown") === m), minN);
-    repos[repo] = { overall: twoByTwo(rs, minN), by_kind, by_mode };
+    const by_surface = {};
+    for (const sf of [...new Set(rs.flatMap((r) => r.surfaces ?? []))].sort()) by_surface[sf] = twoByTwo(rs.filter((r) => r.surfaces?.includes(sf)), minN);
+    repos[repo] = { overall: twoByTwo(rs, minN), by_kind, by_mode, by_surface };
   }
   const overall = twoByTwo(rows, minN);
   return {
@@ -145,6 +149,41 @@ export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEF
     sources: { merged_prs: merged.length, lane_prs: rows.length, pending, unjoined, same_hunks_unresolved: unresolved, git: Boolean(git), graphql_calls: graphqlCalls },
     repos, overall, conclusion: overall.conclusion, prs: rows,
   };
+}
+
+/** #5283: the risk surfaces a PR's files touch: `domain:<d>` (review-roster path rules) and `risk:<class>` (built-in risk words). */
+export function surfacesOfFiles(files = []) {
+  const domains = pathDomains(files) ?? [];
+  const classes = files.map(riskClassOf).filter(Boolean);
+  return [...new Set([...domains.map((d) => `domain:${d}`), ...classes.map((c) => `risk:${c}`)])].sort();
+}
+
+/**
+ * #5283: replay named PRs against a would-be enforcement config (review.enforce_domains / review.risk_paths), window-free.
+ * Per PR: `enforced` = a configured surface was hit and the shadow verdict is nonconforming (the lane would block);
+ * `flagged` = a configured surface was hit but the verdict would pass (enforce cannot block a passing review);
+ * `none` = no configured surface hit. `missing` lists numbers not among `prs`.
+ */
+export function replayPrs({ prs = [], verdicts = new Map(), numbers = [], enforceDomains = [], riskPaths = [], surfacesOf = surfacesOfFiles }) {
+  const doms = parseEnforceDomains(enforceDomains), globs = parseRiskPaths(riskPaths);
+  const rows = [], missing = [];
+  for (const n of numbers) {
+    const p = prs.find((x) => x.number === n);
+    if (!p) { missing.push(n); continue; }
+    const v = verdicts.get(`pr:${n}`) ?? (p.closingIssues ?? []).map((i) => verdicts.get(`issue:${i.number}`)).find(Boolean) ?? null;
+    const surfaces = surfacesOf(p.files ?? []);
+    const hits = [...surfaces.filter((s) => s.startsWith("domain:") && doms.includes(s.slice(7))), ...riskPathHits(p.files ?? [], globs).map((f) => `path:${f}`)];
+    const state = v?.state ?? null;
+    rows.push({ repo: p.repo ?? null, pr: n, mode: v?.mode ?? null, state, surfaces, hits, outcome: !hits.length ? "none" : state === "nonconforming" ? "enforced" : "flagged" });
+  }
+  return { enforce_domains: doms, risk_paths: globs, prs: rows, missing };
+}
+
+export function renderReplay(r) {
+  const out = [`replay (enforce_domains: ${r.enforce_domains.join(",") || "-"}; risk_paths: ${r.risk_paths.join(",") || "-"})`, "", "| PR | mode | shadow verdict | surfaces | outcome |", "|---|---|---|---|---|",
+    ...r.prs.map((x) => `| #${x.pr} | ${x.mode ?? "n/a"} | ${x.state ?? "no verdict"} | ${x.surfaces.join(", ") || "-"} | ${x.outcome} |`)];
+  if (r.missing.length) out.push("", `not found in the fetched PRs (widen --since): ${r.missing.map((n) => `#${n}`).join(", ")}`);
+  return out.join("\n");
 }
 
 const pct = (x) => (x == null ? "n/a" : `${Math.round(x * 1000) / 10}%`);
@@ -158,7 +197,7 @@ export function renderConformanceOutcomes(r) {
     + `, same-hunks ${s.git ? `${s.same_hunks_unresolved} unresolved` : "n/a (no local clone of the repo)"}${s.graphql_calls != null ? `, ${s.graphql_calls} GraphQL call(s)` : ""}`];
   for (const [repo, x] of Object.entries(r.repos)) {
     out.push("", `## ${repo}`, "", ...HEAD, row("all", x.overall), ...Object.entries(x.by_mode).map(([m, y]) => row(`mode ${m}`, y)),
-      ...Object.entries(x.by_kind).map(([k, y]) => row(`kind ${k}`, y)));
+      ...Object.entries(x.by_kind).map(([k, y]) => row(`kind ${k}`, y)), ...Object.entries(x.by_surface ?? {}).map(([k, y]) => row(`surface ${k}`, y)));
   }
   if (!Object.keys(r.repos).length) out.push("", "no merged lane PR with an elapsed window");
   out.push("", `conclusion: ${r.conclusion}`);
@@ -168,7 +207,7 @@ export function renderConformanceOutcomes(r) {
 const QUERY = `query($q: String!, $first: Int!, $after: String) {
   search(type: ISSUE, query: $q, first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { ... on PullRequest { number title body mergedAt mergeCommit { oid } repository { nameWithOwner }
+    nodes { ... on PullRequest { number title body mergedAt mergeCommit { oid } repository { nameWithOwner } files(first: 100) { nodes { path } }
       closingIssuesReferences(first: 10) { nodes { number timelineItems(itemTypes: [REOPENED_EVENT], first: 10) { nodes { ... on ReopenedEvent { createdAt } } } } } } }
   }
 }`;
@@ -177,6 +216,7 @@ const QUERY = `query($q: String!, $first: Int!, $after: String) {
 export function prsOfPage(data, repo) {
   return (data?.data?.search?.nodes ?? []).filter((n) => Number.isSafeInteger(n?.number) && n.mergedAt).map((n) => ({
     repo: n.repository?.nameWithOwner ?? repo, number: n.number, title: n.title ?? "", body: n.body ?? "", mergedAt: n.mergedAt, mergeSha: n.mergeCommit?.oid ?? null,
+    files: (n.files?.nodes ?? []).map((f) => f?.path).filter(Boolean),
     closingIssues: (n.closingIssuesReferences?.nodes ?? []).filter((i) => Number.isSafeInteger(i?.number))
       .map((i) => ({ number: i.number, reopenedAt: (i.timelineItems?.nodes ?? []).map((e) => e?.createdAt).filter(Boolean) })),
   }));

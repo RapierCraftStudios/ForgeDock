@@ -162,8 +162,9 @@ export function demoUsage() {
     "  --open           Launch Claude Code in the demo directory if available.",
     "  --no-open        Do not launch Claude Code (default).",
     "  --run            Automatically run the seeded issue through /work-on to a",
-    "                   merged PR (requires ANTHROPIC_API_KEY; falls back to",
-    "                   print-only instructions when the key is absent).",
+    "                   merged PR. Uses your logged-in `claude` CLI (subscription),",
+    "                   falling back to ANTHROPIC_API_KEY; opens `forgedock watch`",
+    "                   and ends with the merged PR link and cost.",
     "  -h, --help       Show this help.",
   ].join("\n");
 }
@@ -227,8 +228,8 @@ export function renderNextSteps({ target, source, claudeAvailable, apiKeyAvailab
   if (!apiKeyAvailable) {
     lines.push(
       "",
-      "Tip: set ANTHROPIC_API_KEY and re-run with --run to execute the pipeline",
-      "automatically and watch a PR merge without opening Claude Code.",
+      "Tip: re-run with --run to execute the pipeline automatically (uses your",
+      "Claude Code login, or ANTHROPIC_API_KEY) and watch a PR merge.",
     );
   }
 
@@ -264,6 +265,39 @@ function defaultCommandExists(bin) {
 /** Launch an interactive process in `cwd`, inheriting stdio. */
 function defaultLaunch(bin, launchArgs, opts = {}) {
   spawn(bin, launchArgs, { stdio: "inherit", ...opts });
+}
+
+/** Readiness of the execution backend: CLI first, API key fallback (#5304). */
+async function defaultBackendCheck({ cwd, apiKey }) {
+  const { checkExecutionBackend } = await import("./runner.mjs");
+  return checkExecutionBackend({ cwd, apiKey });
+}
+
+/** Start `forgedock watch` for the demo repo, inheriting stdio. Returns the child or null. */
+function defaultSpawnWatch({ forgeHome, cwd, repo }) {
+  if (!forgeHome) return null;
+  try {
+    return spawn(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "watch", "--repo", repo], {
+      cwd,
+      stdio: "inherit",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function stopWatcher(watcher) {
+  try {
+    watcher?.kill?.();
+  } catch { /* already gone */ }
+}
+
+/** Human cost string from a runCommand result (cost in USD, else token usage). */
+export function formatDemoCost(result) {
+  if (Number.isFinite(result?.costUsd)) return `$${result.costUsd.toFixed(2)}`;
+  const u = result?.usage;
+  if (u) return `${(u.input_tokens || 0) + (u.output_tokens || 0)} tokens`;
+  return "unavailable";
 }
 
 const defaultLogger = {
@@ -304,6 +338,9 @@ export async function runDemo(opts = {}) {
     commandExists = defaultCommandExists,
     launch = defaultLaunch,
     logger = defaultLogger,
+    backendCheck = defaultBackendCheck,
+    spawnWatch = defaultSpawnWatch,
+    runCommandFn = null,
   } = opts;
 
   const parsed = parseDemoArgs(args);
@@ -393,13 +430,15 @@ export async function runDemo(opts = {}) {
   const claudeAvailable = commandExists("claude");
   const apiKeyAvailable = Boolean(apiKey);
 
-  // --run: drive the seeded issue through /work-on automatically.
-  // Requires ANTHROPIC_API_KEY; falls back to print-only instructions gracefully.
+  // --run: drive the seeded issue through /work-on automatically. Uses the
+  // logged-in `claude` CLI (subscription) first, then ANTHROPIC_API_KEY
+  // (#5304); falls back to print-only instructions when neither is usable.
   if (parsed.run) {
-    if (!apiKeyAvailable) {
+    const backend = await backendCheck({ cwd: target, apiKey });
+    if (!backend.ready) {
       logger.log(
-        "\nANTHROPIC_API_KEY is not set — cannot run the pipeline automatically.\n" +
-        "Export your key and re-run with --run, or open Claude Code manually:\n",
+        "\nNo logged-in `claude` CLI and no ANTHROPIC_API_KEY — cannot run the pipeline automatically.\n" +
+        "Log in to Claude Code (or export your key) and re-run with --run, or open Claude Code manually:\n",
       );
       logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable: false }));
       return { status: "ok", target, source };
@@ -419,9 +458,9 @@ export async function runDemo(opts = {}) {
       "\nRunning /work-on 1 in the demo repo — watch the full pipeline execute…\n",
     );
 
-    let runCommand;
+    let runCommand = runCommandFn;
     try {
-      ({ runCommand } = await import("./runner.mjs"));
+      if (!runCommand) ({ runCommand } = await import("./runner.mjs"));
     } catch {
       logger.error(
         "Could not load bin/runner.mjs. Falling back to manual instructions.",
@@ -429,6 +468,11 @@ export async function runDemo(opts = {}) {
       logger.log(renderNextSteps({ target, source, claudeAvailable, apiKeyAvailable }));
       return { status: "ok", target, source };
     }
+
+    const watcher = exec("gh", ["auth", "status"], { cwd: target }).status === 0
+      ? spawnWatch({ forgeHome, cwd: target, repo: demoRepo })
+      : null;
+    if (!watcher) logger.log("gh is not authenticated — skipping the live view (run `gh auth login`).");
 
     try {
       const result = await runCommand({
@@ -439,9 +483,19 @@ export async function runDemo(opts = {}) {
         apiKey,
         logger: { log: logger.log, error: logger.error },
       });
+      stopWatcher(watcher);
       logger.log(`\nDemo pipeline finished with status: ${result.status}`);
+      const pr = exec(
+        "gh",
+        ["pr", "list", "--state", "merged", "--limit", "1", "--json", "url", "-q", ".[0].url"],
+        { cwd: target },
+      );
+      const prUrl = pr.status === 0 ? pr.stdout.trim() : "";
+      logger.log(`Merged PR: ${prUrl || "(not found — check the demo repo's pull requests)"}`);
+      logger.log(`Cost: ${formatDemoCost(result)}`);
       return { status: result.status === "ok" ? "ok" : result.status, target, source };
     } catch (err) {
+      stopWatcher(watcher);
       if (err.code === "NO_SDK") {
         logger.error(
           "\n@anthropic-ai/sdk is not installed. Install it with:\n" +

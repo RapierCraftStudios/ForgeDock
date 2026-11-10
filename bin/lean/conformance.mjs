@@ -931,7 +931,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -939,6 +939,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
+  // #5285: interactive UI changed on a high-risk surface with no real-browser check configured: a recorded skip that blocks
+  if (uiBrowser?.files?.length && uiBrowser.highRisk && !uiBrowser.ran) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "ui_browser_unverified", detail: `interactive UI changed (${uiBrowser.files.slice(0, 5).join(", ")}) on a high-risk surface but no real-browser check runs (${uiBrowser.reason}); configure verify.e2e_label/e2e_workflow or add a Playwright spec` });
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -1003,6 +1005,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
+  failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
@@ -1366,9 +1369,11 @@ export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(tit
  * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
  * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
  */
-export function closePlan(contract, { title = null, review = null, issueText = null } = {}) {
+export function closePlan(contract, { title = null, review = null, issueText = null, liveBlocks = [] } = {}) {
   const reqs = contract.requirements ?? [];
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
+  // #5285: a default-on change whose live acceptance is deferred is not closed as completed
+  if (liveBlocks.length) return { reason: "partial", tracked, liveBlocked: true, blocks: liveBlocks, open: reqs.filter((r) => liveBlocks.some((b) => b.id === r.id)) };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
   if (!isInvestigation(title)) {
     const unticked = unmetChecklist(reqs, rows, issueText);
