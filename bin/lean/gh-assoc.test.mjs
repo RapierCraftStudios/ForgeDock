@@ -68,7 +68,7 @@ test("orchestrate --add adds an open issue on a gh that rejects unknown fields",
     const id = newBatchId();
     openBatch(root, id).writePlan({ repo: "o/r" });
     const io = { gh: strictGh({ 5: { assoc: "OWNER", body: "Blocked by #6" }, 6: { assoc: "OWNER" }, 9: { assoc: "NONE", body: "Blocked by #6" } }) };
-    const out = await orchestrateFromCli(["--add", id, "5", "6", "9"], { io });
+    const out = await orchestrateFromCli(["--add", id, "5", "6", "9"], { io }).catch((e) => { if (e.code === "batch.not-hosted") return e.result; throw e; }); // #5314: unhosted add fails loudly, result rides the error
     assert.ok(!out.skipped.some((s) => s.reason === "unreadable"), JSON.stringify(out.skipped));
     assert.deepEqual(out.added, [5, 6, 9]);
     assert.deepEqual(out.edges, [{ from: 5, to: 6 }]); // the untrusted #9 adds no edge
