@@ -382,6 +382,8 @@ Invoke `/test-gate` with the manifest's `BUNDLE_PRS` and the default branch. Sav
 >>> INVOKE: Skill(skill="{FORGE_SKILL_PREFIX}test-gate", args="--prs \"<BUNDLE_PRS>\" --base <default branch>")
 ```
 
+**Feature acceptance (forge#5336, blocking)**: for a milestone release PR, `--summary` runs `npx forgedock acceptance gate --branch <head ref> --stage ship` itself: a red or never-run epic journey, or a test-gate SKIP on a milestone that has an epic, is BLOCK DEPLOY, never a pass.
+
 **Route reachability (forge#5087, blocking when declared)**: when `forge.yaml` declares `topology.route_reachability`, list the route paths the bundle adds (`git diff --name-only --diff-filter=A <default>...HEAD`, Next.js `app/**/route.*` / `pages/api/**` mapped to URL paths, route groups removed) and run the command with them as arguments. A non-zero exit is a BLOCK finding naming the path; unset = skip.
 
 Do not judge the result yourself. Step 7A reads the output's last `FORGE:TEST_GATE:RESULT=` marker through `scripts/review-staging-post.sh test-gate`. A missing or invalid marker (gate result missing/invalid) is BLOCK, never SKIP (fail closed). The step then applies the override and the posture. It posts `FORGE:GATE_PASS` (PASS) or `FORGE:GATE_FAILURE` (blocking BLOCK, with `RESULT: BLOCK DEPLOY`), and persists the verdict for Phase 8.

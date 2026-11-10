@@ -27,7 +27,7 @@ const RESERVE_TTL_MS = 24 * 3600 * 1000;
  * `acquire({repo, lane, dirs, issue, maxWaitS})` takes every dir's lease in sorted order (no lock-order deadlock).
  * @returns {{acquire: (e:object) => Promise<{waitMs:number, timedOut:boolean, release:Function}>}}
  */
-export function makeSequenceLeaseIo({ dir = join(schedDir(), "seq-lease"), pickDir = join(schedDir(), "seq-pick"), open = openHeavy, acquire = acquireHeavy, pollMs, alive = pidAlive, now = () => Date.now() } = {}) {
+export function makeSequenceLeaseIo({ dir = join(schedDir(), "seq-lease"), pickDir = join(schedDir(), "seq-pick"), declDir = join(schedDir(), "surface-declared"), open = openHeavy, acquire = acquireHeavy, pollMs, alive = pidAlive, now = () => Date.now() } = {}) {
   const reservedDirs = new Map(); // `${repo}\0${lane}\0${issue}` -> dirs reserved in, for unreserve
   /** Run `fn(entries) => entries'` on one key's reservations under its pick lock; returns what `fn` set as `out`. */
   const locked = async ({ repo, lane, dir: d }, fn) => {
@@ -46,7 +46,41 @@ export function makeSequenceLeaseIo({ dir = join(schedDir(), "seq-lease"), pickD
       return r.out;
     } finally { try { g.release(); } catch { /* fail-open */ } }
   };
+  /** #5340: run `fn(entries) => entries'` on one repo's surface declarations under their own lock; entries of dead pids or older than 24h are dropped first. */
+  const lockedDecl = async (repo, fn) => {
+    const kd = join(declDir, createHash("sha1").update(String(repo)).digest("hex").slice(0, 16)), file = join(kd, "declared.json");
+    const h = open(kd, { cfg: { max: 1, max_wait_s: 60 }, env: {}, host: NO_MEM });
+    const g = await acquire(h, { phase: "surface-declare" }, ...(pollMs ? [{ pollMs }] : []));
+    try {
+      let entries = [];
+      try { const o = JSON.parse(readFileSync(file, "utf8")); if (Array.isArray(o?.entries)) entries = o.entries; } catch { /* none yet */ }
+      const t = now();
+      entries = entries.filter((e) => Array.isArray(e?.surfaces) && alive(e.pid) && t - Number(e.at ?? 0) < RESERVE_TTL_MS);
+      const r = fn(entries);
+      mkdirSync(kd, { recursive: true });
+      writeFileSync(`${file}.tmp`, `${JSON.stringify({ entries: r.entries }, null, 2)}\n`);
+      renameSync(`${file}.tmp`, file);
+      return r.out;
+    } finally { try { g.release(); } catch { /* fail-open */ } }
+  };
+  const declared = new Set(); // `${repo}\0${issue}` declared by this process, for undeclare
   return {
+    /** #5340: record what `issue` will add on shared surfaces, for sibling context packs. Fail-open (never throws). */
+    async declare({ repo, issue = null, surfaces = [], paths = [], pid = process.pid } = {}) {
+      try {
+        declared.add(`${repo}\0${issue}`);
+        await lockedDecl(repo, (entries) => ({ entries: [...entries.filter((e) => String(e.issue) !== String(issue)), { issue, pid, surfaces, paths: paths.slice(0, 40), at: now() }] }));
+      } catch { /* fail-open */ }
+    },
+    /** #5340: drop `issue`'s declaration (run end). Never throws. */
+    async undeclare({ repo, issue = null } = {}) {
+      if (!declared.delete(`${repo}\0${issue}`)) return;
+      try { await lockedDecl(repo, (entries) => ({ entries: entries.filter((e) => String(e.issue) !== String(issue)) })); } catch { /* fail-open */ }
+    },
+    /** #5340: live declarations of in-flight lanes in `repo`, other than `except`: [{issue, surfaces, paths}]; [] on error. */
+    async declared({ repo, except = null } = {}) {
+      try { return await lockedDecl(repo, (entries) => ({ entries, out: entries.filter((e) => String(e.issue) !== String(except)).map(({ issue, surfaces, paths }) => ({ issue, surfaces, paths })) })); } catch { return []; }
+    },
     /**
      * #4526: `count` consecutive numbers above max(floor, every other issue's live reservation) in (repo, lane, dir),
      * recorded for `issue` (its earlier entries there replaced). @returns {Promise<{numbers:number[]}|null>} null on error.

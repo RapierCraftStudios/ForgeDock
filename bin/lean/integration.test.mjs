@@ -147,6 +147,15 @@ describe("makeIntegration seam", () => {
     assert.equal(st.created.length, 1);
     assert.match(st.created[0].body, /#11, #12/);
   });
+  it("runs the journeys after a child merge even with no integration cfg (#5336)", async () => {
+    const { io } = fake({});
+    const calls = [];
+    const seam = makeIntegration({ repo: "o/r", io, cfg: null, journeys: async (m) => { calls.push(m.title); } });
+    await seam.onMerged(1, {}, { milestone: "M One", pr: 11 });
+    await seam.settle();
+    assert.deepEqual(calls, ["M One"]);
+    assert.equal(seam.holds(1, { lane: "milestone/m-one" }), null);
+  });
   it("orchestrate ends a held lane `held` and starts nothing while the streak is red", async () => {
     const started = [];
     const integration = { holds: (n, { lane }) => (lane === "milestone/m-one" ? "2 consecutive red integration runs on milestone/m-one" : null) };

@@ -153,6 +153,8 @@ ISSUE_CREATE_SCRIPT=$(forge_resolve issue-create.sh)
 bash "$ISSUE_CREATE_SCRIPT" --title "{TITLE}" --body-file "$BODY_FILE" --label "{PRIORITY_LABEL}" --label "{CATEGORY_LABEL}" {--milestone "M"} {--repo OWNER/NAME} {--dry-run}
 ```
 
+**Epic gate (forge#5336)**: when a label is `epic`, first run `npx forgedock acceptance check --body-file "$BODY_FILE"`; a non-zero exit refuses the creation (the body needs a ```` ```forge-acceptance ```` block with at least one journey).
+
 Report `**#{N}**: {title}`, URL, labels, milestone, and "Run `/work-on {N}` to start the pipeline."
 
 **Batch**: draft every issue, create each in order (no confirmation prompt), and report a table `| # | Issue | Priority | Category | Deps |`. With `--dry-run`, print the draft table plus each body and create nothing.
