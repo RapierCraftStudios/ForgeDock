@@ -17,11 +17,19 @@ export const TARGET_INCOMPLETE_RATE = 0.02;
 const rate = (k, n) => (n ? Math.round((k / n) * 1000) / 1000 : null);
 const isRisk = (surfaces) => surfaces.length > 0;
 
+/** The first-round record of a run_terminal: the nested object, or the scalar `fr_*` fields the telemetry seam writes. */
+function frOf(r) {
+  if (r?.first_review && typeof r.first_review === "object") return r.first_review;
+  if (r?.fr_state == null && r?.fr_clean == null) return null;
+  const list = (v) => (typeof v === "string" && v !== "none" ? v.split(",").filter(Boolean) : []);
+  return { state: r.fr_state, kinds: list(r.fr_kinds), rounds: r.fr_rounds, clean: Number(r.fr_clean) === 1, incomplete: Number(r.fr_incomplete) === 1, type: r.fr_type, surfaces: list(r.fr_surfaces) };
+}
+
 /** The latest first_review per issue (later run_terminal wins), oldest first. */
 export function firstReviewLanes(records = [], repo = null) {
   const byIssue = new Map();
   for (const r of records) {
-    const f = r?.event === "run_terminal" ? r.first_review : null;
+    const f = r?.event === "run_terminal" ? frOf(r) : null;
     if (!f || typeof f !== "object" || r.issue == null) continue;
     const cur = byIssue.get(r.issue);
     if (!cur || String(r.ts ?? "") >= String(cur.ts ?? "")) byIssue.set(r.issue, { issue: r.issue, ts: String(r.ts ?? ""), repo: r.repo ?? repo, merged: r.reason === "merged", state: f.state, kinds: Array.isArray(f.kinds) ? f.kinds : [], rounds: Number(f.rounds) || 1, clean: f.clean === true, incomplete: f.incomplete === true, type: f.type ?? "other", surfaces: Array.isArray(f.surfaces) ? f.surfaces : [] });
