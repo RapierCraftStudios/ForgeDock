@@ -69,14 +69,16 @@ export function applyEnumerating({ missing = [], cwd, fsx = fs } = {}) {
     const groups = new Map();
     for (const m of rows) { const k = `${m.line}\0${m.module}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(m); }
     let changed = false;
+    const mine = []; // this test's applied rows: a failed write moves only these, never another test's
     // bottom-up: an insertion only shifts the lines below it, so the detector's line numbers stay valid
     for (const g of [...groups.values()].sort((a, b) => b[0].line - a[0].line)) {
       const r = insertIntoList(text, g[0].line, g.map((m) => m.symbol));
       const done = new Set(r.inserted);
-      for (const m of g) (done.has(m.symbol) ? applied : remaining).push(m);
+      for (const m of g) (done.has(m.symbol) ? mine : remaining).push(m);
       if (r.inserted.length) { text = r.text; changed = true; }
     }
-    if (changed) { try { fsx.writeFileSync(join(cwd, test), text); } catch { for (const m of applied.splice(applied.length - rows.length)) remaining.push(m); } }
+    if (changed) { try { fsx.writeFileSync(join(cwd, test), text); } catch { remaining.push(...mine); continue; } }
+    applied.push(...mine);
   }
   return { applied, remaining };
 }
