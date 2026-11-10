@@ -24,7 +24,7 @@ import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
 import { batchRoot } from "../lean/batch.mjs";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, readBatchRows } from "./query.mjs";
 import { gitProbes } from "./compounding.mjs";
 
@@ -119,6 +119,9 @@ Conformance outcomes (forge#5210; read only: one GraphQL search per 100 merged P
                         touching the same hunks via local git blame); defect rate, n and a Wilson 95% interval of
                         nonconforming-merged vs conforming-merged per repo, mode and failure kind; n/a under --min-n
                         (default ${DEFAULT_OUTCOME_MIN_N} per cell); the last line is the conclusion or "insufficient data"
+  --replay <pr,...>     with --conformance-outcomes: per named PR, its mode, shadow verdict and risk surfaces, and whether the
+                        --enforce-domains <list> / --risk-paths <globs> config would have enforced (nonconforming), only flagged
+                        (verdict would pass) or not touched it; the cells also gain per-surface rows (domain:*, risk:*)
   --window-days N       post-merge defect window in days (default ${DEFAULT_WINDOW_DAYS}); --since defaults to 30 days ago
 
 Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
@@ -161,6 +164,9 @@ export function parseArgs(argv) {
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
     else if (name === "--conformance-outcomes") o.conformanceOutcomes = true;
     else if (name === "--window-days") { const v = take(); if (!/^[1-9]\d*$/.test(v)) throw new Error("--window-days must be a positive integer"); o.windowDays = Number(v); }
+    else if (name === "--replay") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--replay must be a comma list of PR numbers"); o.replay = v.split(",").map(Number); }
+    else if (name === "--enforce-domains") o.enforceDomains = take();
+    else if (name === "--risk-paths") o.riskPaths = take();
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--depth") o.depth = true;
     else if (name === "--pool") o.pool = true;
@@ -192,6 +198,8 @@ export function parseArgs(argv) {
   if (o.compare && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
   if (o.offline && !o.efficiency && !o.depth) throw new Error("--compare and --offline need --efficiency (--offline also works with --depth)");
   if (o.windowDays != null && !o.conformanceOutcomes) throw new Error("--window-days needs --conformance-outcomes");
+  if ((o.replay || o.enforceDomains || o.riskPaths) && !o.conformanceOutcomes) throw new Error("--replay, --enforce-domains and --risk-paths need --conformance-outcomes");
+  if ((o.enforceDomains || o.riskPaths) && !o.replay) throw new Error("--enforce-domains and --risk-paths need --replay");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
   return o;
 }
@@ -370,6 +378,7 @@ export async function buildReport(opts, deps = {}) {
     const report = conformanceOutcomes({ prs: input.prs, verdicts, minN: opts.minNSet ? opts.minN : DEFAULT_OUTCOME_MIN_N, windowDays: opts.windowDays ?? DEFAULT_WINDOW_DAYS,
       now, git, graphqlCalls: input.graphqlCalls, since: input.since });
     if (input.capped) report.sources.capped = true;
+    if (opts.replay) report.replay = replayPrs({ prs: input.prs, verdicts, numbers: opts.replay, enforceDomains: opts.enforceDomains ?? "", riskPaths: opts.riskPaths ?? "" });
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { conformance_outcomes: report } };
   }
   const model = toModel(repo, gh);
@@ -425,7 +434,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
-    if (report.query?.conformance_outcomes && !opts.json) { process.stdout.write(`${renderConformanceOutcomes(report.query.conformance_outcomes)}\n`); return 0; }
+    if (report.query?.conformance_outcomes && !opts.json) { const co = report.query.conformance_outcomes; process.stdout.write(`${renderConformanceOutcomes(co)}${co.replay ? `\n\n${renderReplay(co.replay)}` : ""}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
