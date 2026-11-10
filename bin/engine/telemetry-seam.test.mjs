@@ -126,3 +126,15 @@ describe("engine telemetry seam", () => {
     assert.equal(some.calls[0][2].repo, "a/b");
   });
 });
+
+describe("first_review on run_terminal (#5345)", () => {
+  it("is flattened to scalar fr_* fields and read back by stats --first-review", async () => {
+    const { firstReviewLanes } = await import("../stats/first-review.mjs");
+    const first_review = { state: "fail", kinds: ["conformance.omission", "conformance.scope_creep"], rounds: 2, clean: false, incomplete: false, type: "bug", surfaces: ["auth"] };
+    const { payload } = mapRecord({ event: "RUN_TERMINAL", reason: "merged", code: 0, first_review }, 0);
+    assert.equal("first_review" in payload, false);
+    assert.deepEqual([payload.fr_state, payload.fr_kinds, payload.fr_rounds, payload.fr_clean, payload.fr_surfaces], ["fail", "conformance.omission,conformance.scope_creep", 2, 0, "auth"]);
+    const [lane] = firstReviewLanes([{ event: "run_terminal", issue: 7, ts: "2026-01-01", repo: "o/r", reason: "merged", ...payload }]);
+    assert.deepEqual([lane.clean, lane.rounds, lane.kinds, lane.surfaces, lane.type], [false, 2, first_review.kinds, ["auth"], "bug"]);
+  });
+});

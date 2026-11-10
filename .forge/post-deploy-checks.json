@@ -23,6 +23,12 @@
     "timeout": 120,
     "for": "7d"
   },
+  "R4-metric": {
+    "run": "npx --no-install forgedock stats --first-review --json --since \"$(date -u -d '14 days ago' +%Y-%m-%d)\" | node -e 'const r=JSON.parse(require(\"fs\").readFileSync(0,\"utf8\")).query.first_review.overall;process.exit(r.n>0&&r.clean_rate>=0.85&&r.incomplete_rate<=0.02?0:1)'",
+    "pass": "exit 0",
+    "timeout": 300,
+    "for": "14d"
+  },
   "ceiling-ab-posted": {
     "run": "test \"$(gh issue view 5346 --json comments --jq '[.comments[]|select(.body|contains(\"FORGE:CEILING_AB\"))]|length')\" -ge 1",
     "pass": "exit 0",

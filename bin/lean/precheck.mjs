@@ -193,7 +193,7 @@ export function selfCheckState(record, fingerprint) {
  * heavy binaries. ok = every command that ran exited 0 (deferred and `ci` are not failures, as in the engine).
  * @param {{contract:object, plan:{mode?:string, commands:string[], budgetMs:number, perCommandMs:number}, parallelism?:number, now?:() => number, run:Function}} p
  */
-export async function selfCheck({ contract, plan, parallelism = 1, now = () => Date.now(), run }) {
+export async function selfCheck({ contract, plan, parallelism = 1, now = () => Date.now(), run, review = [] }) {
   const vals = (Array.isArray(contract?.validate) ? contract.validate : []).filter((v) => v && String(v.command ?? "").trim());
   const ci = plan?.mode === "ci", per = Number(plan?.perCommandMs) > 0 ? Number(plan.perCommandMs) : 300000;
   const validate = [];
@@ -207,8 +207,9 @@ export async function selfCheck({ contract, plan, parallelism = 1, now = () => D
   }
   const pre = await runChecks({ commands: plan?.commands ?? [], parallelism, budgetMs: plan?.budgetMs ?? 0, perCommandMs: per, now, run });
   const commands = [...pre.results];
-  const ok = [...validate, ...commands].every((x) => x.status || x.rc === 0);
-  return { ok, validate, commands, deferred: pre.deferred };
+  // #5345: the reviewer's deterministic findings (selfreview.mjs) are failures of the check, so a red tree is never sent to review
+  const ok = [...validate, ...commands].every((x) => x.status || x.rc === 0) && review.length === 0;
+  return { ok, validate, commands, deferred: pre.deferred, ...(review.length ? { review } : {}) };
 }
 
 /** #4390: summary lines naming a failing test, as common runners print them (pytest, TAP/node --test, jest/vitest, go, cargo). */
@@ -242,6 +243,7 @@ export function formatCheckTable(r, cap = LOG_CAP) {
   const failed = rows.filter((x) => !x.status && x.rc !== 0);
   const per = Math.max(500, Math.floor(cap / Math.max(1, failed.length))); // verify.mjs capLogs share
   for (const f of failed) out.push("", `--- ${f.label} (exit ${f.rc})`, quietFailure(f.output, { maxChars: per, logPath: f.logPath ?? null }));
-  out.push("", r.ok ? "check: PASS" : `check: FAIL (${failed.length} failing)`);
+  for (const f of r.review ?? []) out.push(`FAIL review  ${f.code}: ${f.detail}`);
+  out.push("", r.ok ? "check: PASS" : `check: FAIL (${failed.length + (r.review?.length ?? 0)} failing)`);
   return out.join("\n");
 }
