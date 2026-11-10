@@ -2769,12 +2769,18 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
       },
       meta: { remoteDetected: true },
     };
-    const res = await review(ctx, draft, { value: "", source: "" });
+    process.env.FORGE_CONFIG_HISTORY_DIR = join(cwd, "history");
+    let res;
+    try { res = await review(ctx, draft, { value: "", source: "" }); } finally { delete process.env.FORGE_CONFIG_HISTORY_DIR; }
 
     assert.equal(res.aborted, false);
     assert.equal(res.written, true);
-    assert.ok(existsSync(join(cwd, "forge.yaml.bak")), "the old file must be backed up");
-    assert.equal(readFileSync(join(cwd, "forge.yaml.bak"), "utf-8"), "precious: true\n");
+    // #5315: the prior file goes to the config history, never a forge.yaml.bak in the repo.
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no forge.yaml.bak in the repo");
+    const histDir = join(cwd, "history");
+    const repoDirs = readdirSync(histDir);
+    assert.equal(repoDirs.length, 1, "one repo history");
+    assert.equal(readFileSync(join(histDir, repoDirs[0], "1.yaml"), "utf-8"), "precious: true\n");
   });
 
   it("no existing config: confirmFn is never called (nothing to confirm)", async () => {
