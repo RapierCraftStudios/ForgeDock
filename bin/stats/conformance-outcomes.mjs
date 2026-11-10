@@ -212,6 +212,9 @@ const QUERY = `query($q: String!, $first: Int!, $after: String) {
   }
 }`;
 
+/** Sorted unique PR and closing-issue numbers of `prs`: the only items whose telemetry the report needs (#5363). */
+export const joinedNumbers = (prs = []) => [...new Set(prs.flatMap(refsOf))].sort((a, b) => a - b);
+
 /** One GraphQL search page -> normalized PRs. */
 export function prsOfPage(data, repo) {
   return (data?.data?.search?.nodes ?? []).filter((n) => Number.isSafeInteger(n?.number) && n.mergedAt).map((n) => ({

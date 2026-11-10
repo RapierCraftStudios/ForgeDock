@@ -376,6 +376,35 @@ describe("cache", () => {
     await fetchGithubRecords({ repo: "o/r", gh, useCache: false, env: ENV, rateCheck: true, now: () => 1_000_000_000, sleep: async (ms) => { slept.push(ms); } });
     assert.ok(slept.length > 0 && slept[0] === 101000, `slept ${slept}`);
   });
+  it("comments scan never requests past page 300 and completes when gh 422s beyond it (#5363)", async () => {
+    const comments = Array.from({ length: 30050 }, (_, i) => telemetryComment(1 + (i % 5), `e${i}`, "x", ts(1 + Math.floor(i / 100))));
+    const base = storeGh(mkItems(5), { comments });
+    const pages = [];
+    const gh = (args) => {
+      const m = /issues\/comments\?.*page=(\d+)/.exec(args.join(" "));
+      if (m) { pages.push(Number(m[1])); if (Number(m[1]) > 300) throw new Error("gh: HTTP 422: pagination is limited for this resource"); }
+      return base.gh(args);
+    };
+    const r = await fetchGithubRecords({ repo: "o/r", gh, useCache: false, env: ENV });
+    assert.ok(Math.max(...pages) <= 300 && pages.length > 300);
+    assert.equal(r.items.length, 5);
+  });
+  it("a 422 pagination error names a --since bound to retry with (#5363)", async () => {
+    const gh = (args) => { if (/issues\/comments\?/.test(args.join(" "))) throw new Error("HTTP 422: pagination is limited for this resource"); return "[]"; };
+    await assert.rejects(fetchGithubRecords({ repo: "o/r", gh, useCache: false, env: ENV, since: ts(1) }), /narrower --since/);
+  });
+  it("numbers mode crawls only the given issues: no listing, no comments scan, cache untouched (#5363)", async () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-numbers") };
+    const comments = [telemetryComment(2, "e1", "x", ts(2)), telemetryComment(4, "e2", "x", ts(3))];
+    const h = storeGh(mkItems(50), { comments });
+    const events = [];
+    const r = await fetchGithubRecords({ repo: "o/r", gh: h.gh, env, numbers: [4, 2, 2], onProgress: (e) => events.push(e) });
+    assert.deepEqual(r.items.map((i) => i.number).sort((a, b) => a - b), [2, 4]);
+    assert.equal(r.records.length, 2);
+    assert.ok(h.calls.every((c) => /issues\/(2|4)(\/comments)?$/.test(c)), h.calls.join(","));
+    assert.ok(events.some((e) => e.phase === "telemetry" && e.total === 2));
+    assert.throws(() => readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
+  });
   it("never skips an item updated mid-crawl (keyset crawl, not page-number pagination)", async () => {
     const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-midcrawl") };
     const ts = (n) => new Date(Date.UTC(2026, 9, 1) + n * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");

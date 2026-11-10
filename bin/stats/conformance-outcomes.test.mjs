@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, joinedNumbers, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, verdictOf } from "./query.mjs";
 import { summariseLog } from "./local-source.mjs";
 import { buildReport, parseArgs, runStats } from "./index.mjs";
@@ -224,5 +224,12 @@ describe("conformance outcomes: surfaces and replay (#5283)", () => {
     assert.throws(() => parseArgs(["--replay", "1"]), /need --conformance-outcomes/);
     assert.throws(() => parseArgs(["--conformance-outcomes", "--enforce-domains", "auth"]), /need --replay/);
     assert.throws(() => parseArgs(["--conformance-outcomes", "--replay", "x"]), /comma list/);
+  });
+});
+
+describe("joinedNumbers (#5363)", () => {
+  it("lists each merged PR and its closing issues once, sorted", () => {
+    assert.deepEqual(joinedNumbers([{ number: 9, closingIssues: [{ number: 3 }, { number: 5 }] }, { number: 4, closingIssues: [{ number: 3 }] }]), [3, 4, 5, 9]);
+    assert.deepEqual(joinedNumbers(), []);
   });
 });
