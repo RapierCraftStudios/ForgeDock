@@ -87,3 +87,13 @@ describe("firstReviewRecord (#5345)", () => {
     assert.equal(firstReviewRecord({ rounds: [{ state: "review.incomplete", failures: [] }] }).incomplete, true);
   });
 });
+
+describe("planner tightening (#5345 R5)", () => {
+  it("every contract section first-round findings map to has a planner rule, rendered in the plan prompt", async () => {
+    const { PLANNER_TIGHTENING, KIND_SECTION } = await import("./selfreview.mjs");
+    const { builderPlanPrompt } = await import("./prompts.mjs");
+    for (const s of new Set(Object.values(KIND_SECTION).filter((x) => ["requirements", "deliverables", "preserve"].includes(x)))) assert.ok(PLANNER_TIGHTENING[s], s);
+    const p = builderPlanPrompt(1);
+    for (const x of Object.values(PLANNER_TIGHTENING)) assert.ok(p.includes(x));
+  });
+});

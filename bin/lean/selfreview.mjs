@@ -61,6 +61,13 @@ export const FINDING_PITFALLS = Object.freeze({
   "conformance.preserve_violated": "Open each preserve item's path before finishing and confirm the behaviour is unchanged; a preserve path you edited needs a deliverable that covers it and a test.",
 });
 
+/** R5: the planner rule per contract section the first-round findings trace to (rendered into the plan prompt). */
+export const PLANNER_TIGHTENING = Object.freeze({
+  requirements: "One requirement per issue sentence or checklist item, quoted verbatim, each with a deliverable and a validate that exercises it; split a compound sentence into one requirement per clause (omission is the top first-review finding).",
+  deliverables: "List every file the change touches, tests and sibling-list tests included, with its path; scope_creep is raised for any changed file no deliverable names.",
+  preserve: "Name each caller, contract or behaviour with its file path, and list the deliverable that edits a preserved path, if any; a preserve row with no path cannot be checked.",
+});
+
 const PATH_RE = /[\w@.-]+(?:\/[\w@.*-]+)+\.\w+|[\w@.-]+\/[\w@.*-]+\/?/g;
 const NEEDS_RESULT = new Set(["requirement_unimplemented", "untracked_deferral"]);
 
