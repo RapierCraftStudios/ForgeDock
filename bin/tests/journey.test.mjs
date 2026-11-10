@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlink
 import { join } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, backupForgeYaml, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, backupForgeYaml, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, maybeOfferFirstRun, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 // The installer, doctor and status resolve the Claude config dir from
@@ -3002,6 +3002,21 @@ describe("maybeOfferDemo (Act V.6)", () => {
     const result = await maybeOfferDemo(ctx);
     assert.equal(result.offered, false);
     assert.equal(result.ranDemo, false);
+  });
+});
+
+describe("maybeOfferFirstRun (#5290)", () => {
+  it("is skipped without a TTY and never asks", async () => {
+    const { ctx } = stubCtx({ isTTY: false, confirmFn: async () => { throw new Error("asked"); } });
+    assert.equal((await maybeOfferFirstRun(ctx)).offered, false);
+  });
+  it("declining runs nothing; accepting hands off to runFirstRunFn", async () => {
+    const { ctx } = stubCtx({ isTTY: true, confirmFn: async () => false, runFirstRunFn: async () => { throw new Error("ran"); } });
+    assert.deepEqual(await maybeOfferFirstRun(ctx), { offered: true, ran: false });
+    let called = false;
+    const { ctx: c2 } = stubCtx({ isTTY: true, confirmFn: async () => true, runFirstRunFn: async () => { called = true; } });
+    assert.deepEqual(await maybeOfferFirstRun(c2), { offered: true, ran: true });
+    assert.equal(called, true);
   });
 });
 

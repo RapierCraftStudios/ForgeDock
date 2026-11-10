@@ -3409,6 +3409,8 @@ function help() {
     ["npx forgedock review-staging [<PR>] --summary [--filed <N>]...", "Staging->main review Phase 8: verdict and summary comment with the FORGE:GATE_PASS / FORGE:GATE_FAILURE marker"],
     ["npx forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | release verify <sha> [--repo owner/repo]", "Staging->default release as one resumable job: preflight, release PR, review, fixes, promotion (stops at GATE_PASS unless --merge or release.auto_merge), post-merge; release.mode: snapshot cuts release/<id> from staging (lanes keep merging, fixes are cherry-picked, FORGE:RELEASE records them); verify checks a release head against that record"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
+    ["npx forgedock first-run", "On this repo: propose 3 small issues, file them on approval, run one to a PR (stats --first-merge reports time to first merged PR)"],
+    ["npx forgedock stats --first-merge [--repo owner/repo]", "Setup start to first merged PR for a first-run repo, against the 15 min target (#5290)"],
     ["npx forgedock stats --origin [--repo R] [--since D] [--json]", "Requested vs pipeline-generated issues by origin, how pipeline-found ones closed, and their cost share (#5294)"],
     ["npx forgedock stats --self-filed [--repo R] [--since D]", "Share of new issues the pipeline filed itself, by kind, against the 15% target (#5207)"],
     ["npx forgedock stats --conformance-outcomes [--repo owner/repo] [--since <date>] [--window-days 7] [--replay <pr,...> --enforce-domains <list>]", "Read-only: do conformance blocks predict post-merge defects (2x2 per repo, failure kind and risk surface; --replay a PR list against an enforce config)"],
@@ -3985,10 +3987,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4447,6 +4449,20 @@ switch (command) {
   case "demo":
     await demo();
     break;
+  case "first-run": {
+    // #5290: propose/file small issues on this repo and run one to a PR
+    const { runFirstRun } = await import("./first-run.mjs");
+    const { execFileSync } = await import("node:child_process");
+    const { confirm } = await import("./tui.mjs");
+    const { runFromCli } = await import("./engine-cli.mjs");
+    const r = await runFirstRun({
+      exec: (cmd, args) => execFileSync(cmd, args, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 30000 }).trim(),
+      confirmFn: confirm,
+      runIssueFn: (n) => runFromCli([String(n)]),
+    });
+    if (r.status === "error") exitCode = 1;
+    break;
+  }
   case "auth": {
     const { authFromCli } = await import("./auth/app-token.mjs");
     exitCode = await authFromCli(restArgs);
