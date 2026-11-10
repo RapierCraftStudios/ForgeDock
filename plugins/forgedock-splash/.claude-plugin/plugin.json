@@ -1,0 +1,11 @@
+{
+  "name": "forgedock-splash",
+  "description": "Animated ForgeDock startup splash for Claude Code: the F mark is forged, Clawd bonks the top bar, the wordmark settles on 'supercharged'. Uses Claude Code's early-access hooks-module API, so it is kept apart from the main forgedock plugin. Disable with /plugin disable forgedock-splash.",
+  "version": "0.1.0",
+  "author": {
+    "name": "RapierCraft Studios"
+  },
+  "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+  "repository": "https://github.com/RapierCraftStudios/ForgeDock",
+  "license": "AGPL-3.0"
+}

@@ -20,6 +20,20 @@
       "license": "AGPL-3.0",
       "category": "dev-workflow",
       "tags": ["ai-agents", "autonomous", "github", "pipeline", "code-review", "claude-code"]
+    },
+    {
+      "name": "forgedock-splash",
+      "displayName": "ForgeDock Splash",
+      "source": "./plugins/forgedock-splash",
+      "description": "Animated ForgeDock startup splash above the Claude Code prompt. Separate from the main plugin because it uses the early-access hooks-module API; /plugin disable forgedock-splash turns it off.",
+      "author": {
+        "name": "RapierCraft Studios"
+      },
+      "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+      "repository": "https://github.com/RapierCraftStudios/ForgeDock",
+      "license": "AGPL-3.0",
+      "category": "dev-workflow",
+      "tags": ["splash", "animation", "claude-code"]
     }
   ]
 }
