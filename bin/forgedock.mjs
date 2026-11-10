@@ -93,7 +93,7 @@ import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import { runConfigCommand } from "./config-history.mjs";
 import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
-import { applyAuthEnv, doctorAppAuth } from "./auth/app-token.mjs";
+import { applyAuthEnv, startAuthRefresh, doctorAppAuth } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
   classifyCommandChanges,
@@ -3928,6 +3928,8 @@ if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command
 let exitCode = 0;
 // #5301: an App login puts a scoped installation token in this process's env (GH_TOKEN) for child gh calls; no login, no change.
 if (command !== "auth") await applyAuthEnv();
+// #5381: installation tokens live 1h; long-running commands re-resolve before expiry so later gh calls and lanes inherit a fresh one.
+if (["orchestrate", "schedd", "watch", "issue-watch", "prod-watch"].includes(command)) startAuthRefresh();
 switch (command) {
   case "install": {
     const c = ctx();

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { statSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { resolveAuth, applyAuthEnv, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, assertSecureBroker, authFromCli, doctorAppAuth, clearState } from "./app-token.mjs";
+import { resolveAuth, applyAuthEnv, startAuthRefresh, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, assertSecureBroker, authFromCli, doctorAppAuth, clearState } from "./app-token.mjs";
 
 const mkEnv = (extra = {}) => ({ FORGE_HOME_DIR: tmpDir("app-auth-"), ...extra });
 const NOW = Date.parse("2026-01-01T00:00:00Z");
@@ -46,12 +46,12 @@ test("token under 10 min left is refreshed via the broker with scoped body and p
 });
 
 test("broker outage falls back to personal auth with exactly one warning line and no token leak", async () => {
-  const env = mkEnv({ GH_TOKEN: "personal" });
+  const env = mkEnv();
   writeState(brokerState({ token: "old", expiresAt: iso(-1000) }), env);
   const warns = [];
   const r = await applyAuthEnv({ env, now: NOW, fetch: async () => json({}, 503), warn: (m) => warns.push(m) });
   assert.equal(r.source, "personal");
-  assert.equal(env.GH_TOKEN, "personal");
+  assert.equal(env.GH_TOKEN, undefined); // no operator token: gh uses the user's own auth
   assert.equal(warns.length, 1);
   assert.ok(!warns[0].includes("\n") && !warns[0].includes("ghu_USER") && !warns[0].includes("old"));
   const thrown = await resolveAuth({ env, now: NOW, fetch: async () => { throw new Error("ECONNREFUSED"); } });
@@ -132,6 +132,38 @@ test("a broker URL that is not https is refused before the user token is sent (l
   assert.match(lines.join("\n"), /must be https/);
 });
 
-test("the BYO manifest state comes from crypto randomness, not Math.random", () => {
-  assert.doesNotMatch(readFileSync(new URL("./app-token.mjs", import.meta.url), "utf8"), /Math\.random/);
+test("startAuthRefresh refreshes env.GH_TOKEN past expiry with a fake clock", async () => {
+  const env = mkEnv();
+  writeState(brokerState({ token: "ghs_OLD", expiresAt: iso(30 * 60000) }), env);
+  await applyAuthEnv({ env, now: NOW, fetch: () => assert.fail("no network") });
+  assert.equal(env.GH_TOKEN, "ghs_OLD");
+  let clock = NOW;
+  const timers = [];
+  const fetch = async () => json({ token: "ghs_FRESH", expires_at: iso(2 * 3600000) });
+  const stop = startAuthRefresh({ env, now: () => clock, fetch, setTimer: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; }, clearTimer: () => {} });
+  assert.equal(timers.length, 1);
+  assert.ok(timers[0].ms <= 20 * 60000 + 1000);
+  clock = NOW + 31 * 60000; // past the old token's expiry
+  await timers[0].fn();
+  assert.equal(env.GH_TOKEN, "ghs_FRESH");
+  assert.deepEqual({ ...env }.GH_TOKEN, "ghs_FRESH"); // a lane env copied now carries the fresh token
+  assert.equal(timers.length, 2);
+  stop();
+});
+
+test("startAuthRefresh: an operator-exported GH_TOKEN is never overridden or refreshed", async () => {
+  const env = mkEnv({ GH_TOKEN: "operator" });
+  writeState(brokerState({ token: "ghs_X", expiresAt: iso(-1000) }), env);
+  const r = await applyAuthEnv({ env, now: NOW, fetch: () => assert.fail("no network") });
+  assert.equal(r.source, "personal");
+  assert.equal(env.GH_TOKEN, "operator");
+  const stop = startAuthRefresh({ env, now: () => NOW, fetch: () => assert.fail("no network"), setTimer: () => assert.fail("no timer") });
+  stop();
+  assert.equal(env.GH_TOKEN, "operator");
+});
+
+test("BYO manifest state is 32 hex chars from crypto, not Math.random", () => {
+  const src = readFileSync(new URL("./app-token.mjs", import.meta.url), "utf8");
+  assert.match(src, /randomBytes\(16\)\.toString\("hex"\)/);
+  assert.ok(!/Math\.random/.test(src));
 });
