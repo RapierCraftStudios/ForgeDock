@@ -188,12 +188,16 @@ export function pathCovers(d, f) {
   if (/[*?]/.test(p)) return globRe(p).test(file);
   return p === file;
 }
+/** #5365: explicit coupling map: editing `when` (a deliverable) also puts `also` in scope (a test asserts parity between them). */
+const COUPLED_PATHS = [{ when: "bin/engine/outcome-codes.mjs", also: ["docs/OUTCOME-CODES.md"] }];
 /** The deliverable id that authorizes `f`, "test", "incidental", or null. */
 export function authorizationOf(contract, f) {
   const d = (contract.deliverables ?? []).find((x) => pathCovers(x.path, f));
   if (d) return d.id;
   if (isTestPath(f)) return "test";
   if (isIncidentalPath(f)) return "incidental";
+  // #5365: a file a parity test reads alongside a changed deliverable is in scope with it
+  if (COUPLED_PATHS.some((c) => c.also.some((g) => pathCovers(g, f)) && (contract.deliverables ?? []).some((x) => pathCovers(x.path, c.when) || pathCovers(c.when, x.path)))) return "coupled";
   return null;
 }
 // A doc a freshness rule can demand: a prose file under a docs directory. Build and dependency files (`requirements.txt`,
@@ -651,7 +655,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       applied.push({ kind: a.kind, target: r.id, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
-      if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
+      if (c.requirements.some((r) => r.id === a.requirement.id)) {
+        // #5365: a taken id is renumbered to the next free R<n>, never a failure; the remap is recorded in `applied`
+        const was = a.requirement.id, free = `R${Math.max(0, ...c.requirements.map((r) => Number(/^R(\d+)$/.exec(String(r.id))?.[1] ?? 0))) + 1}`;
+        a = { ...a, requirement: { ...a.requirement, id: free } };
+        applied.push({ kind: "add-requirement", target: `${was} -> ${free}`, why: `id ${was} already in the contract; renumbered to ${free}` });
+      }
       let snapTo = null;
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) {
         snapTo = snapQuote(a.requirement.quote, issueText);
@@ -1287,7 +1296,7 @@ export function decide(raw, ctx) {
   const rv = fillEngineRows(raw, ctx);
   const comp = checkCompleteness(rv, ctx);
   if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
-  const f = [];
+  const f = [], converted = [];
   const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
   const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
   for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
@@ -1306,21 +1315,22 @@ export function decide(raw, ctx) {
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
     }
     // #5207: in-lane engineering work is never deferrable, whatever the reviewer says; one failure per row.
-    if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
+    if (TRACKED.includes(r.disposition) && row.status === "implemented" && (inLaneDeferral(r) || row.deferral_ok === false)) converted.push({ id: r.id, evidence: String(row.evidence ?? "") }); // #5365: delivered in the diff
+    else if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
     else if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
   for (const s of rv.scope) {
     if (!blank(s.authorized_by)) continue;
     const engine = authorizationOf(ctx.contract, s.file);
-    if (engine === "test" || engine === "incidental") continue; // always allowed; a reviewer "none" here is a misreading, not creep
+    if (engine === "test" || engine === "incidental" || engine === "coupled") continue; // always allowed; a reviewer "none" here is a misreading, not creep
     f.push({ code: C.CONFORMANCE_SCOPE_CREEP, detail: `${s.file}: ${s.note || "not authorized by the contract"}` });
   }
   for (const p of rv.preserve ?? []) if (p.status !== "intact") f.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, detail: `${p.id} ${p.status}${p.evidence ? ` (${p.evidence})` : ""}${p.note ? `: ${p.note}` : ""}` });
   for (const r of rv.regressions ?? []) f.push({ code: C.CONFORMANCE_REGRESSION, detail: `${r?.at ?? "?"}: ${r?.failure ?? ""}` });
-  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv };
+  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted };
   // A NONCONFORMING verdict with every row passing gives the builder nothing to fix: re-ask the reviewer.
   if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }], missing: ["verdict"], review: rv };
-  return { state: "conforms", failures: [], review: rv };
+  return { state: "conforms", failures: [], review: rv, converted };
 }
 
 /** The ids (or sections) a targeted re-ask must fill: requirement ids without a valid row, issue_coverage problems, ...; [] when complete. */
@@ -1368,6 +1378,15 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
 }
 
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */
+/** #5365: flips the requirements `converted` names (decide) to deliver, keeping the original row in amended_from; returns a new contract. */
+export function convertDelivered(contract, converted) {
+  const by = new Map((converted ?? []).map((x) => [x.id, x.evidence]));
+  return { ...contract, requirements: (contract.requirements ?? []).map((r) => {
+    if (!by.has(r.id) || !TRACKED.includes(r.disposition)) return r;
+    const { bucket, why, check, tracked, class: cls, ...rest } = r;
+    return { ...rest, disposition: "deliver", amended: true, amended_from: r.amended_from ?? Object.fromEntries(["quote", "disposition", "why", "bucket", "check", "tracked", "class"].filter((k) => r[k] != null).map((k) => [k, r[k]])), amendment: { text: `delivered in the diff (${by.get(r.id) || "reviewer evidence"})`, why: "reviewer found the deferred requirement delivered" } };
+  }) };
+}
 /** #5207: in-lane engineering deferrals are never filed (decide() sends them back to the builder). */
 export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked && !inLaneDeferral(r));
 
