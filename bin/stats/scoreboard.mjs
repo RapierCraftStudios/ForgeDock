@@ -6,7 +6,7 @@
  *   - minutes from the first lane merge to the first green end-to-end run (journey record)
  *   - defects found after the last planned child merged, by class (release-review, post-deploy, hotfix, other)
  *   - rework share: issues that fix or redo a sibling of the same milestone
- *   - operator interventions: hand PRs (head branch is not a lane branch) and needs-human issues, plus needs-human run logs
+ *   - operator interventions: hand PRs (head branch is not a lane branch), manual merges (PRs labelled manual-merge) and needs-human issues, plus needs-human run logs
  * Deterministic: GitHub (milestone issues, PRs, epic comments) and optional local run logs; no model, no clock; the gh runner is
  * injected. A missing signal is null (printed n/a), never 0.
  */
@@ -66,6 +66,7 @@ export function scoreboard({ milestone, issues = [], prs = [], epics = [], runs 
     for (const m of String(i.body ?? "").matchAll(REWORK_RE)) if (Number(m[1]) !== i.number && nums.has(Number(m[1]))) rework.add(i.number);
   }
   const handPrs = prs.filter((p) => p.head_ref && !LANE_BRANCH_RE.test(p.head_ref) && !/^milestone\//.test(p.head_ref)).map((p) => p.number);
+  const manualMerges = issues.filter((i) => i.pull_request && labelsOf(i).some((l) => /^(?:manual[- ]merge|merged[- ]by[- ]hand)$/i.test(l))).map((i) => i.number);
   const needsHuman = children.filter((i) => labelsOf(i).includes("needs-human")).map((i) => i.number);
   const mine = runs.filter((r) => nums.has(Number(r.issue)));
   const costs = mine.map((r) => r.usd ?? r.cost_usd).filter((x) => Number.isFinite(x));
@@ -78,7 +79,7 @@ export function scoreboard({ milestone, issues = [], prs = [], epics = [], runs 
     last_child_merged_at: lastChild != null ? new Date(lastChild).toISOString() : null,
     defects_after_last_child: lastChild != null ? { total: defectIssues.length, by_class: defects, issues: defectIssues } : null,
     rework: children.length ? { issues: [...rework].sort((a, b) => a - b), share: Math.round((rework.size / children.length) * 1e4) / 1e4 } : null,
-    interventions: { hand_prs: handPrs, needs_human_issues: needsHuman, needs_human_runs: mine.filter((r) => r.reason === "needs-human").length, total: handPrs.length + needsHuman.length },
+    interventions: { hand_prs: handPrs, needs_human_issues: needsHuman, manual_merges: manualMerges, needs_human_runs: mine.filter((r) => r.reason === "needs-human").length, total: handPrs.length + manualMerges.length + needsHuman.length },
     cost_usd: costs.length ? Math.round(costs.reduce((a, b) => a + b, 0) * 100) / 100 : null,
   };
 }
@@ -118,7 +119,7 @@ export function renderScoreboard(s) {
     `| first lane merge to first green journey | ${fmt(s.minutes_first_merge_to_first_green, (m) => `${m}m`)} |`,
     `| defects after last child | ${d ? `${d.total} (${DEFECT_CLASSES.map((c) => `${c} ${d.by_class[c]}`).join(", ")})` : NA} |`,
     `| rework share | ${s.rework ? `${Math.round(s.rework.share * 100)}% (${s.rework.issues.length} issues)` : NA} |`,
-    `| operator interventions | ${iv.total} (hand PRs ${iv.hand_prs.length}, needs-human ${iv.needs_human_issues.length}) |`,
+    `| operator interventions | ${iv.total} (hand PRs ${iv.hand_prs.length}, manual merges ${iv.manual_merges.length}, needs-human ${iv.needs_human_issues.length}) |`,
     `| cost | ${fmt(s.cost_usd, (x) => `$${x.toFixed(2)}`)} |`,
     ...(s.journeys.length ? ["", "| epic | journeys | status | head | at |", "|---|---|---|---|---|", ...s.journeys.map((j) => `| #${j.epic} | ${j.journeys} | ${j.status} | ${j.head ? String(j.head).slice(0, 7) : NA} | ${j.at ?? NA} |`)] : [])].join("\n");
 }

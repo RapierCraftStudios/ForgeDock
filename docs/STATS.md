@@ -25,7 +25,7 @@ epic FORGE:ACCEPTANCE comments) and the local run logs, with no manual input. Co
 never-ran, per epic with head and time); minutes from the first lane merge to the first green journey; defects created after the last
 planned child closed, by class (`release-review`, `post-deploy`, `hotfix`, `other`, from labels or title); rework share (issues whose body
 says fix/redo/rework/follow-up of a sibling `#N`, or labelled `rework`); operator interventions (hand PRs whose head branch is not a
-`<type>/issue-N` lane branch, plus `needs-human` issues); cost from the run logs. A signal that cannot be read prints n/a. `--json`
+`<type>/issue-N` lane branch, PRs labelled `manual-merge`, plus `needs-human` issues); cost from the run logs. A signal that cannot be read prints n/a. `--json`
 keeps the earlier verdict mix under `query.mix` and adds `query.scoreboard`. The feature benchmark is in `docs/eval/feature-bench.md`.
 
 ## Sources

@@ -21,6 +21,11 @@ const ISSUES = [
 const PRS = [{ number: 20, merged_at: "2026-11-02T00:00:00Z", head_ref: "feat/issue-2-x" }, { number: 21, merged_at: "2026-11-03T00:00:00Z", head_ref: "hand-fix" }];
 
 describe("feature scoreboard", () => {
+  it("counts PRs labelled manual-merge as operator interventions", () => {
+    const s = scoreboard({ milestone: ms, issues: [iss(2), iss(30, { pull_request: {}, labels: [{ name: "manual-merge" }] })], prs: [] });
+    assert.deepEqual(s.interventions.manual_merges, [30]);
+    assert.equal(s.interventions.total, 1);
+  });
   it("classifies defects by label or title", () => {
     assert.equal(defectClass(iss(1, { labels: ["release-review"] })), "release-review");
     assert.equal(defectClass(iss(1, { title: "hotfix: x" })), "hotfix");
