@@ -307,6 +307,7 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
 
 export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
+  const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
   return {
     ghCache: (root) => makeGhCache({ root }),
@@ -409,7 +410,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     /** #4375: the repo's learned-pitfall ledger, local only (~/.forge/pitfalls, FORGE_PITFALLS_DIR). */
     pitfalls: makePitfallStore(),
     /** forge#4275: the context pack's facts for one issue (bin/lean/context.mjs), from gh and git only; sources fail independently. */
-    contextFacts: (args) => gatherContextFacts({ ...args, io: { gh: run("gh"), git: run("git"), exists: async (p) => existsSync(p) } }),
+    contextFacts: (args) => gatherContextFacts({ ...args, io: { gh: run("gh"), git: run("git"), exists: async (p) => existsSync(p), declared: (a) => seqLeaseIo.declared(a) } }), // #5340: in-flight sibling declarations
     /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given; config = the host forge.yaml, #5163); null on any failure. */
     async hotspots({ cwd, base = null, paths = [], config = null }) {
       const args = [script("hotspots.sh"), ...(config ? ["--config", config] : []), ...(base ? ["--base", base] : []), "--", ...paths];
@@ -419,7 +420,13 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     enumeratingTests: ({ cwd, paths = [] }) => enumeratingTests({ git: (a) => run("git")(a, { cwd }), cwd, paths }),
     enumeratingMissing: ({ cwd, base }) => missingEntries({ git: (a) => run("git")(a, { cwd }), cwd, base }),
     /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
-    sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
+    // #5340: also against the default branch(es) in `extraBases`, which a milestone lane would otherwise not see
+    sequenceCheck: async ({ cwd, base, extraBases = [] }) => {
+      const git = (a) => run("git")(a, { cwd });
+      const out = [...(await sequenceCollisions({ git, base }))];
+      for (const b of extraBases) { try { out.push(...(await sequenceCollisions({ git, base: b }))); } catch { /* fail-open */ } }
+      return out;
+    },
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
     /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
@@ -435,7 +442,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     },
     /** #4588: deterministic base-merge resolution of union / JSON-map / generated files (bin/lean/conflictres.mjs). */
     conflictResolve: ({ cwd, files, cfg }) => resolveBaseConflicts({ git: (a) => run("git")(a, { cwd }), cwd, files, cfg }),
-    sequenceLease: makeSequenceLeaseIo(),
+    sequenceLease: seqLeaseIo,
     /** #4591: lane-added migrations the repo's generator did not produce (no journal entry or snapshot); [] on failure. */
     /** #4661: plus journal `when` stamps not above the base max (newest-only migrators skip them). */
     migrationGenerator: async ({ cwd, base }) => { const git = (a) => run("git")(a, { cwd }); return [...await generatorProblems({ git, base }), ...await journalOrderProblems({ git, base })]; },

@@ -2907,3 +2907,9 @@ middle tier) and flagged `cost_estimated: true`. A kill that streamed nothing ca
 Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issue>.jsonl` (`runLogPath`); the bare
 `<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
 does, and take the repo from the RUN_START slice, never from the number alone.
+
+## Sibling awareness (#5340)
+
+- **Context pack default.** `resolveContextMode` (`context.mjs`): an explicit `engine.context_pack` (shadow|off|on|ab) always wins; unset, a lane with a milestone or a parent epic runs `on`, every other lane stays `shadow`. `parseContextPackConfig({})` is unchanged. Sibling facts (same parent or milestone, at most `MAX_SIBLING_READS`) rank before other lanes' facts, after the declarations of in-flight siblings.
+- **Shared surfaces.** `engine.shared_surfaces` in `forge.yaml` lists globs (comma scalar or block list). After the contract freezes, a lane whose deliverables touch one takes a one-slot host reservation per surface (`surfaces.mjs` `claimSurfaces`, over `seqlease.mjs`; key spans every lane branch, so the milestone lane and the default branch share it) until teardown, and declares what it adds (`declare`/`declared`/`undeclare`, `surface-declared` under the sched dir). `glob => command` marks an append-only registry: never reserved, and the builder is told to run the command instead of hand-editing. The merge-gate sequence check also runs against the default branch(es). No declaration, no behaviour change; a failed lease is fail-open.
+- **Prerequisite pull-in.** `orchestrate` calls `prereq.mjs` `openPrerequisites` after reading dependencies and adds an open, non-`needs-human` prerequisite outside the batch, so `edges()` orders it first. The `dependency-open` admission refusal and requeue remain the fallback.
