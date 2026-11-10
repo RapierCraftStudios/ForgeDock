@@ -3389,6 +3389,7 @@ function help() {
     ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes] [--sandboxes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes, orphaned lane sandboxes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
+    ["npx forgedock replay --timelapse <batch|epic> [--repo owner/repo] [--out dir] [--format gif|mp4] [--duration 30-90]", "Read-only 30-90 s time-lapse (frames, vhs tape, GIF/MP4 when vhs is installed) of a recorded batch or epic from the lifecycle event log"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]", "Bootstrap ForgeDock-managed labels on a GitHub repo, plus optional per-repo domain labels (idempotent)"],
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
@@ -3399,6 +3400,7 @@ function help() {
     ["npx forgedock review-staging [<PR>] --summary [--filed <N>]...", "Staging->main review Phase 8: verdict and summary comment with the FORGE:GATE_PASS / FORGE:GATE_FAILURE marker"],
     ["npx forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | release verify <sha> [--repo owner/repo]", "Staging->default release as one resumable job: preflight, release PR, review, fixes, promotion (stops at GATE_PASS unless --merge or release.auto_merge), post-merge; release.mode: snapshot cuts release/<id> from staging (lanes keep merging, fixes are cherry-picked, FORGE:RELEASE records them); verify checks a release head against that record"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
+    ["npx forgedock stats --origin [--repo R] [--since D] [--json]", "Requested vs pipeline-generated issues by origin, how pipeline-found ones closed, and their cost share (#5294)"],
     ["npx forgedock stats --self-filed [--repo R] [--since D]", "Share of new issues the pipeline filed itself, by kind, against the 15% target (#5207)"],
     ["npx forgedock stats --conformance-outcomes [--repo owner/repo] [--since <date>] [--window-days 7] [--replay <pr,...> --enforce-domains <list>]", "Read-only: do conformance blocks predict post-merge defects (2x2 per repo, failure kind and risk surface; --replay a PR list against an enforce config)"],
     ["npx forgedock stats --depth [--since <ver|date>] [--min-n N] [--offline] [--repo owner/repo] [--json]", "Light-eligible vs ineligible lane outcomes, by reason/signal, and the #5052 light-lane promotion verdict"],
@@ -4415,6 +4417,16 @@ switch (command) {
     try {
       const result = await resumeStalledFromCli(restArgs);
       if (result && result.failed && result.failed.length > 0) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "replay": {
+    const { replayFromCli } = await import("./replay-timelapse.mjs");
+    try {
+      exitCode = await replayFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

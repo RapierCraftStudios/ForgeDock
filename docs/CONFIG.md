@@ -1505,6 +1505,9 @@ verification:
 
 topology:
   route_reachability: "bash scripts/check-ingress.sh"   # optional; blocking when declared
+  prod_parity:                                         # optional; block map {path glob: command | "note: how to verify"}
+    "db/migrations/**": "bash scripts/check-migration-role.sh"
+    "web/app/**": "note: run under the production ISR runtime"
 ```
 
 | Field | Type | Required | Description |
@@ -1525,6 +1528,7 @@ topology:
 | `coupled_files` | map (glob → glob list) | No | Default unset (#5079). "If file A changes, file B must change": a block map `{when glob: required glob[, glob]}`, e.g. `"infra/guard/bootstrap.sh": "infra/guard/MANIFEST.sha256"`. A key prefixed `added:` fires only for files the lane adds (`"added:scripts/tests/test_*.py": ".github/workflows/ci.yml"`). A lane that changes a `when` file without a matching required file fails precheck with `coupled_file_missing` (`conformance.unimplemented`, builder resumed once). Quote keys that contain `*`, and list alternatives as separate keys: brace globs (`*.{ts,tsx}`) are not expanded. |
 | `validate.recipes` | map (regex → replacement) | No | Default unset. A top-level `validate:` block with a block-style `recipes:` map, e.g. `"poetry run pytest": "uv run --with-requirements r.txt pytest"`. Each key is a regex source; the first recipe that matches a frozen validate or `repro_test` command rewrites it at contract freeze (`applyValidateRecipes`), recorded as a decision. Use it for commands whose environment is not installed in lane sandboxes. |
 | `topology.route_reachability` | string (command) | No | Default unset (no check, no behaviour change). A repo-supplied command that takes the route paths a diff adds (Next.js `app/**/route.*`, `pages/api/**`; URL form, route groups removed) as arguments and exits non-zero when the production ingress does not deliver them to the service that implements them. Runs in the lean lane after validate and in `review-pr-staging`; a non-zero exit blocks (`conformance.unimplemented`, kind `route_unreachable`). Read by `readEnvConfig` (`bin/engine-cli.mjs`), run by `bin/lean/routecheck.mjs`. |
+| `topology.prod_parity` | block map | No | Default unset (no check, no behaviour change; #5284). Production-only facts the lane tests cannot exercise (runtime build mode, migration role vs app role, env-file scope, ingress). Key: path glob; value: a check command, run once with the matching changed paths as arguments (non-zero or cannot-start blocks, `conformance.unimplemented` kind `prod_parity_failed`), or `note: <how to verify>`, which blocks (kind `prod_parity_unjustified`) until `.forge-lean/result.json` carries `parity: [{surface: <glob>, justification}]`. Read by `readEnvConfig`, run by `bin/lean/prodparity.mjs`. |
 
 **Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
 

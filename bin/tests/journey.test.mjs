@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlink
 import { join } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 // The installer, doctor and status resolve the Claude config dir from
@@ -2827,8 +2827,7 @@ describe("celebrate (Act V)", () => {
     celebrate(ctx, { written: true, todoCount: 2, total: 24, hookStatus: "installed" });
     assert.match(w.text, /Forged\./);
     assert.match(w.text, /34s|3[0-9]s/);
-    assert.match(w.text, /npx forgedock doctor/);
-    assert.match(w.text, /\/issue/);
+    assert.match(w.text, /npx forgedock demo --run/);
     assert.match(w.text, /2/); // TODO count surfaces in the receipt
   });
 
@@ -2838,11 +2837,17 @@ describe("celebrate (Act V)", () => {
     assert.match(w.text, /hook skipped|NOT active/);
   });
 
-  it("what's next box includes GitHub App install as item 1", () => {
+  it("ends with exactly one recommended next command (#5304)", () => {
     const { ctx, w } = stubCtx({});
     celebrate(ctx, { written: true, todoCount: 0, total: 5, hookStatus: "installed" });
-    assert.match(w.text, /install GitHub App/i);
-    assert.match(w.text, /rapiercraft-forgedock/);
+    assert.equal((w.text.match(/npx forgedock (?!uninstall|help)[a-z-]+/g) || []).length, 1);
+    assert.doesNotMatch(w.text, /\b[2-8]\. /);
+  });
+
+  it("pickNextStep orders app, first PR, then demo (#5304)", () => {
+    assert.match(pickNextStep({ appFlow: true, firstPrFlow: true }).command, /install-app/);
+    assert.match(pickNextStep({ firstPrFlow: true }).command, /first-pr/);
+    assert.match(pickNextStep().command, /demo --run/);
   });
 
   it("mentions uninstall and the full help command so removal is discoverable (#1881)", () => {
