@@ -238,7 +238,7 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ## Phase 2: Material Change Analysis
 
-**Launched-agent bookkeeping (MANDATORY)**: Step 1 truncated the PR-keyed launched-agent file. Before launching **every** Phase 2-6 reviewer (the DISPATCH briefs and the spec-owned panel), append its lowercase marker domain (for example `security`, `bug-hunter-api` or `regression-risk`) to that file: `printf '%s\n' "<domain>" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/<PR>_launched_review_agents"`. Step 7A checks delivery for exactly these domains.
+**Launched-agent bookkeeping (MANDATORY)**: Step 1 writes the launch manifest (`<PR>_review_manifest.json`) and fills the PR-keyed launched-agent file from the DISPATCH briefs, so briefed domains need no append. Before launching each spec-owned Phase 2-6 reviewer (e.g. `bug-hunter-api`, `regression-risk`), append its lowercase marker domain: `printf '%s\n' "<domain>" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/<PR>_launched_review_agents"`. Reviewers post with `forgedock review-staging <PR> --post-reviewer <domain> --body-file <file>`: it writes the marker and the full `Reviewed-SHA:` from the manifest and refuses a domain that is not launched. Step 7A checks delivery for exactly these domains; on a shortfall it names each reviewer and why (stale SHA, no findings block, absent) with a `REDISPATCH <domain>` line: re-run only that reviewer.
 
 **Head SHA binding**: substitute `[REVIEW_SHA]` in every template below with the literal full head SHA from the manifest's `REVIEW_STAGING:` line before dispatch. The reviewer's post fence runs in a fresh shell, so it must never reference a shell variable and must never invent a value.
 
