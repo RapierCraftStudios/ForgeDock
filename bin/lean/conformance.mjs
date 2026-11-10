@@ -1419,10 +1419,13 @@ export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(tit
 export function closePlan(contract, { title = null, review = null, issueText = null, liveBlocks = [] } = {}) {
   const reqs = contract.requirements ?? [];
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
-  // #5285: a default-on change whose live acceptance is deferred is not closed as completed
-  if (liveBlocks.length) return { reason: "partial", tracked, liveBlocked: true, blocks: liveBlocks, open: reqs.filter((r) => liveBlocks.some((b) => b.id === r.id)) };
   // #5339: an e2e/manual requirement that was not run in the lane is transferred to the epic, not met: the issue stays partial
   const transferred = reqs.filter((r) => r.disposition === "post-deploy" && wantsE2e(r));
+  // #5285: a default-on change whose live acceptance is deferred is not closed as completed; #5382: it still transfers its e2e/manual rows
+  if (liveBlocks.length) {
+    const live = reqs.filter((r) => liveBlocks.some((b) => b.id === r.id));
+    return { reason: "partial", tracked, liveBlocked: true, blocks: liveBlocks, open: live, ...(transferred.length ? { transferred: true, transfer: transferred } : {}) };
+  }
   if (transferred.length) return { reason: "partial", tracked, transferred: true, open: transferred };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
   if (!isInvestigation(title)) {

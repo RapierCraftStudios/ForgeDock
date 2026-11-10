@@ -10,6 +10,7 @@
  */
 import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { PIPELINE_PERMISSIONS, API, mintInstallationToken, findInstallation, buildAppManifest, convertManifestCode, receiveManifestCode } from "./app-manifest.mjs";
@@ -76,8 +77,16 @@ export async function discoverInstallation({ userToken, installationId, fetch: f
   return { installationId: id, repositoryIds: repos.map((r) => r.id) };
 }
 
+/** The user token travels as a Bearer: the broker must be https (plain http only for a loopback host). */
+export function assertSecureBroker(url) {
+  let u;
+  try { u = new URL(url); } catch { throw new Error(`broker URL is not a valid URL: ${url}`); }
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname))) throw new Error("broker URL must be https (the GitHub user token is sent as a Bearer)");
+}
+
 /** Ask the broker for a scoped installation token. @returns {{token:string, expiresAt:string}} */
 export async function mintViaBroker({ brokerUrl: url, userToken, installationId, repositoryIds, permissions = PIPELINE_PERMISSIONS, fetch: fetchFn = fetch }) {
+  assertSecureBroker(url);
   const res = await fetchFn(`${url}/v1/token`, {
     method: "POST", headers: { ...UA, Authorization: `Bearer ${userToken}` },
     body: JSON.stringify({ installation_id: installationId, repository_ids: repositoryIds, permissions }),
@@ -157,6 +166,7 @@ export async function authFromCli(args, { env = process.env, out = (m) => consol
     const url = brokerUrl(env) || (flag("broker-url") ?? "").replace(/\/+$/, "");
     const clientId = flag("client-id") || env.FORGEDOCK_APP_CLIENT_ID;
     if (!url || !clientId) throw new Error("set --broker-url and --client-id (or FORGEDOCK_BROKER_URL and FORGEDOCK_APP_CLIENT_ID)");
+    assertSecureBroker(url);
     const userToken = await deviceFlowLogin({ clientId, fetch: fetchFn, sleep: io.sleep, onCode: ({ userCode, verificationUri }) => out(`Open ${verificationUri} and enter code ${userCode}`) });
     const inst = await discoverInstallation({ userToken, installationId: flag("installation"), fetch: fetchFn });
     writeState({ mode: "broker", brokerUrl: url, clientId, userToken, ...inst }, env);
@@ -169,7 +179,7 @@ export async function authFromCli(args, { env = process.env, out = (m) => consol
 }
 
 async function byoLogin({ env, out, fetchFn, org, installationId, openUrl, ...io }) {
-  const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const state = randomBytes(16).toString("hex");
   const code = await receiveManifestCode({
     state, org, manifest: (port) => buildAppManifest({ redirectUrl: `http://127.0.0.1:${port}/callback` }),
     onListening: (url) => (openUrl ? openUrl(url) : out(`Open ${url} to create your GitHub App`)),

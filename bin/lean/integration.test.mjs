@@ -162,6 +162,32 @@ describe("walking skeleton and journey gate (#5337)", () => {
     assert.ok(state.firstMergeAt && state.firstJourneyGreenAt);
     assert.ok(events.some((d) => /first green journey on milestone\/m-one/.test(d)));
   });
+  it("#5382: the integration-red issue itself is admitted, and a merge during a running journey run queues a rerun that clears the hold", async () => {
+    const { st, io } = fake({});
+    let release, runs = 0;
+    const gate = new Promise((r) => { release = r; });
+    const results = [{ summary: "fail", red: true, ran: true, head: SHA }, { summary: "pass", red: false, ran: true, head: SHA2 }];
+    const seam = makeIntegration({ repo: "o/r", io: withSkeleton(io, []), cfg: null, skeleton: true, nowFn: () => NOW,
+      journeys: async () => { const r = results[Math.min(runs++, 1)]; if (runs === 1) await gate; return r; } });
+    await seam.prime();
+    const first = seam.onMerged(1, {}, { milestone: "M One", pr: 11 });
+    await first;
+    await seam.onMerged(2, {}, { milestone: "M One", pr: 12 }); // lands while run 1 is in flight
+    assert.equal(runs, 1, "no concurrent run");
+    release();
+    await seam.settle();
+    assert.equal(runs, 2, "the merge that landed mid-run got its own run");
+    assert.equal(seam.holds(3, { lane: LANE }), null, "the rerun was green: hold cleared");
+    assert.deepEqual(st.closed, ["900"]);
+    // and while red, only the red issue is admitted
+    const red = fake({});
+    const seam2 = makeIntegration({ repo: "o/r", io: withSkeleton(red.io, []), cfg: null, skeleton: true, nowFn: () => NOW, journeys: async () => ({ summary: "fail", red: true, ran: true, head: SHA }) });
+    await seam2.prime();
+    await seam2.onMerged(1, {}, { milestone: "M One", pr: 11 });
+    await seam2.settle();
+    assert.match(seam2.holds(2, { lane: LANE }), /integration-red #900/);
+    assert.equal(seam2.holds(900, { lane: LANE }), null, "the red issue is the exit");
+  });
   it("a red journey before the skeleton merged files nothing and holds nothing extra", async () => {
     const { st, io } = fake({});
     const seam = makeIntegration({ repo: "o/r", io: withSkeleton(io), cfg: null, skeleton: true, journeys: async () => ({ summary: "fail", red: true, ran: true, head: SHA }), nowFn: () => NOW });

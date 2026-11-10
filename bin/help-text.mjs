@@ -47,6 +47,8 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock first-run", "On this repo: propose 3 small issues, file them on approval, run one to a PR (stats --first-merge reports time to first merged PR)"],
     ["npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]", "Bootstrap ForgeDock-managed labels on a GitHub repo, plus optional per-repo domain labels (idempotent)"],
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
+    ["npx forgedock config history | diff <n> | rollback <n> | record [reason] | import-bak [--delete]", "Versioned forge.yaml: list its saved versions, diff or roll back to one, record the current one, import old .bak files"],
+    ["npx forgedock auth login [--byo] [--broker-url URL] [--client-id ID] [--installation N] [--org ORG] | status | logout", "Sign in as a GitHub App so pipeline calls use a short-lived installation token instead of your own gh auth (the broker URL must be https)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
     ["npx forgedock doctor --verbose", "Also show internal and legacy checks (FORGE_HOME, Playwright MCP, version-gated features, resource hygiene)"],
@@ -73,6 +75,8 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> [--before s|--after s] | --show <id>", "Unattended multi-milestone train: one durable state file (order, active set, lifecycle), typed STOP reasons, resumable; never edits forge.yaml"],
     ["npx forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--dry-run] | status [--name <w>]", "Named, scoped, capped watches (forge.yaml issue_watch.watches) that claim matching open issues into lanes or one long-lived orchestrate batch, or (mode: release) pool them and cut themed releases; see docs/ISSUE-WATCH.md"],
     ["npx forgedock prod-watch run [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status", "Production-side watcher (forge.yaml prod_watch): read-only signal sources -> triage -> governor -> issues, kill-switch file, owner digest; see docs/PROD-WATCH.md"],
+    ["npx forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]] [--set-mode MODE] [--budget MINUTES] [--reserve PCT] [--plan PLAN]", "Actions-minutes budget: month-to-date usage, projection and where CI runs (remote or local-first); sets the mode and budget"],
+    ["npx forgedock replan apply --amendment N --repo owner/repo", "After an amendment merged, re-evaluate the open sibling issues held behind it"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery: re-dispatch issues whose run stopped holding its claim"],
   ]],
   ["Watch and report", [

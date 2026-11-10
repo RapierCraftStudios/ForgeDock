@@ -29,7 +29,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
 import { gateByRef } from "./lean/acceptance.mjs";
 import { DEFAULT_FEATURE_PATTERN } from "./lean/lane.mjs";
-import { requiredChecksFor } from "./lean/effects.mjs";
+import { requiredChecksRead } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
@@ -527,6 +527,14 @@ const parseChecks = (out) => { try { const j = JSON.parse(out); return Array.isA
 const isRed = (k) => k?.bucket === "fail" || k?.bucket === "cancel";
 
 /**
+ * The required-check set classifyChecks gets. An unreadable protection read (e.g. a non-admin token) must not let
+ * gate.required_checks alone demote the protection-required red checks to warnings: it yields [] (every red check blocks).
+ */
+export function requiredSet({ checks = [], unreadable = false } = {}, extra = []) {
+  return unreadable ? [] : [...new Set([...checks, ...extra])];
+}
+
+/**
  * Red checks outside CI_EXCLUDED_CHECKS, split by whether they block. With a non-empty `required` set (branch protection,
  * rulesets and forge.yaml gate.required_checks) only required red checks block and the rest are warnings. An empty set
  * (no protection, or a failed read: indistinguishable) keeps every red check blocking (fail closed).
@@ -586,7 +594,8 @@ async function summary(a, io) {
   const checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
   let warnings = [];
   if (checks) {
-    const required = [...new Set([...(await requiredChecksFor({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch })), ...c.extraRequiredChecks])];
+    const read = await requiredChecksRead({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch });
+    const required = requiredSet(read, c.extraRequiredChecks);
     ({ blocking: ciFailing, warnings } = classifyChecks(checks, required));
   }
 

@@ -97,8 +97,6 @@ export function preserveTouched(contract, changedFiles = [], ignore = []) {
   return out;
 }
 
-export const formatSelfReview = (findings = []) => (findings.length ? findings.map((f) => `FAIL review  ${f.code}: ${f.detail}`).join("\n") : "");
-
 /** The change type of a lane from its issue labels: bug|feature|chore|docs|other. */
 export function changeTypeOf(labels = []) {
   const names = (Array.isArray(labels) ? labels : []).map((l) => String(l?.name ?? l).toLowerCase());

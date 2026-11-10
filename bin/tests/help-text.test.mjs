@@ -43,7 +43,7 @@ describe("help --all", () => {
   });
   const text = fullHelp({ width: 100 });
   it("keeps every command, grouped by purpose", () => {
-    for (const w of ["Set up", "Run work", "Release", "fix-close-reasons", "schedd", "review-staging", "doctor --lanes"]) assert.ok(text.includes(w), w);
+    for (const w of ["Set up", "Run work", "Release", "fix-close-reasons", "schedd", "review-staging", "doctor --lanes", "auth login", "ci budget", "replan apply", "config history", "import-bak"]) assert.ok(text.includes(w), w);
   });
 });
 

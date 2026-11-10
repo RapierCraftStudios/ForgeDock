@@ -677,6 +677,15 @@ describe("close plan and follow-up items", () => {
     assert.deepEqual(p.open.map((r) => r.id), ["R3"]);
     assert.equal(closePlan(k).reason, "completed");
   });
+  it("#5382: a default-on live-blocked lane still transfers its e2e/manual post-deploy rows to the epic", () => {
+    const k = { requirements: [{ id: "R3", disposition: "defer", bucket: "post-deploy" }, { id: "R4", quote: "[type:e2e] checkout works", disposition: "post-deploy" }] };
+    const p = closePlan(k, { liveBlocks: [{ id: "R3", flag: "pool" }] });
+    assert.equal(p.liveBlocked, true);
+    assert.equal(p.transferred, true);
+    assert.deepEqual(p.transfer.map((r) => r.id), ["R4"]);
+    assert.deepEqual(p.open.map((r) => r.id), ["R3"]);
+    assert.equal(closePlan({ requirements: [k.requirements[0]] }, { liveBlocks: [{ id: "R3", flag: "pool" }] }).transferred, undefined);
+  });
   it("#5285: interactive UI on a high-risk surface with no browser check fails precheck; with one, or off a risk surface, it passes", () => {
     const k = { requirements: [{ id: "R1", disposition: "deliver" }], deliverables: [{ id: "D1", path: "web/Cta.tsx" }] };
     const res = { requirements: [{ id: "R1", status: "implemented" }], validation: [] };
