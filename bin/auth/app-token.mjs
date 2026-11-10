@@ -11,7 +11,6 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { PIPELINE_PERMISSIONS, API, mintInstallationToken, findInstallation, buildAppManifest, convertManifestCode, receiveManifestCode } from "./app-manifest.mjs";
