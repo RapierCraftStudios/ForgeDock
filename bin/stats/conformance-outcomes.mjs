@@ -87,14 +87,17 @@ function blamedBy(q, git) {
   if (!memo) blameMemo.set(git, (memo = new Map()));
   if (memo.has(q.mergeSha)) return memo.get(q.mergeSha);
   const ranges = q.mergeSha ? git.oldRanges(q.mergeSha) : null;
-  let set = ranges ? new Set() : null;
-  for (const r of ranges ?? []) {
-    const shas = git.blame(`${q.mergeSha}^`, r.file, r.start, r.end);
-    if (shas == null) { set = null; break; }
-    for (const s of shas) set.add(s);
+  let entry = null;
+  if (ranges) {
+    entry = { shas: new Set(), unresolved: false };
+    for (const r of ranges) {
+      const shas = git.blame(`${q.mergeSha}^`, r.file, r.start, r.end);
+      if (shas == null) { entry.unresolved = true; continue; }
+      for (const s of shas) entry.shas.add(s);
+    }
   }
-  memo.set(q.mergeSha, set);
-  return set;
+  memo.set(q.mergeSha, entry);
+  return entry;
 }
 
 /** Blame each fix PR once up front, reporting {phase: "same-hunks", done, total, etaMs} so a long run is not silent. */
@@ -118,9 +121,10 @@ export function sameHunks(p, laterFixes, git) {
   if (!git || !p.mergeSha) return null;
   let unresolved = false;
   for (const q of laterFixes) {
-    const set = blamedBy(q, git);
-    if (!set) { unresolved = true; continue; }
-    if (set.has(p.mergeSha)) return true;
+    const entry = blamedBy(q, git);
+    if (!entry) { unresolved = true; continue; }
+    if (entry.shas.has(p.mergeSha)) return true;
+    if (entry.unresolved) unresolved = true;
   }
   return unresolved ? null : false;
 }

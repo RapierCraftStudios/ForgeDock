@@ -266,3 +266,9 @@ it("same-hunks blames each fix PR once (#5372)", () => {
   warmSameHunks(fixes, git);
   assert.equal(calls.blame, 6, "a second warm reuses the memo");
 });
+
+it("same-hunks keeps a hit when another range of the fix PR is unresolved (#5372)", () => {
+  const git = { oldRanges: () => [{ file: "a", start: 1, end: 2 }, { file: "b", start: 1, end: 2 }], blame: (_r, f) => (f === "a" ? null : ["lane0"]) };
+  assert.equal(sameHunks({ mergeSha: "lane0" }, [{ mergeSha: "fixU" }], git), true);
+  assert.equal(sameHunks({ mergeSha: "other" }, [{ mergeSha: "fixU" }], git), null);
+});
