@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readRollouts, detectNewOffKeys, activationFailures, dormancyReport, coversFlag, rolloutModes } from "./activation.mjs";
+import { readRollouts, detectNewOffKeys, activationFailures, dormancyReport, coversFlag, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { precheck } from "./conformance.mjs";
 
 const cfg = { files: ["config/rollouts.json"], days: 14 };
@@ -84,5 +84,19 @@ describe("#5240 rolloutModes", () => {
     assert.deepEqual(rolloutModes(null, ["svc/retry.py"], read), []);
     assert.deepEqual(rolloutModes(cfg, ["svc/retry.py"], () => { throw new Error("x"); }), []);
     assert.deepEqual(rolloutModes(cfg, ["gone.py"], read), []);
+  });
+});
+
+describe("liveDeferralBlocks (#5285)", () => {
+  const c = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R3", disposition: "defer", bucket: "post-deploy", why: "live acceptance run" }] };
+  it("a live rollout with deferred live acceptance blocks (the #38819 replay)", () => {
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "alterlab_google_pool", mode: "on", live: true }]), [{ id: "R3", flag: "alterlab_google_pool" }]);
+  });
+  it("a default-off (inert) rollout or no rollout ships with the deferral", () => {
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "alterlab_google_pool", mode: "off", live: false }]), []);
+    assert.deepEqual(liveDeferralBlocks(c, []), []);
+  });
+  it("a deferral that is not about live verification does not block", () => {
+    assert.deepEqual(liveDeferralBlocks({ requirements: [{ id: "R2", disposition: "defer", bucket: "owner:rotate key", why: "needs a credential" }] }, [{ flag: "f", mode: "on", live: true }]), []);
   });
 });

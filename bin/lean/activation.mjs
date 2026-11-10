@@ -94,3 +94,20 @@ export function rolloutModes(cfg, changedFiles, read) {
   for (const f of changedFiles ?? []) { if (inRegistry(cfg, f)) continue; try { texts.push(String(read(f))); } catch { /* deleted or unreadable */ } }
   return [...modes].filter(([flag]) => texts.some((t) => flagRe(flag).test(t))).map(([flag, mode]) => ({ flag, mode, live: LIVE_MODES.test(mode) })).sort((a, b) => a.flag.localeCompare(b.flag));
 }
+
+const LIVE_ACCEPTANCE_RE = /\b(?:live|production|prod|post-deploy|real[- ]browser|measur\w*)\b/i;
+/**
+ * #5285: a requirement deferred for live or post-deploy verification while a live (default-on) rollout is touched ships
+ * unverified in production. `modes` is rolloutModes' output; returns `[{id, flag}]` of the deferred rows that block close.
+ */
+export function liveDeferralBlocks(contract, modes) {
+  const live = (modes ?? []).filter((m) => m.live).map((m) => m.flag);
+  if (!live.length) return [];
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r?.disposition !== "defer" && r?.disposition !== "post-deploy") continue;
+    const b = String(r.bucket ?? "");
+    if (r.disposition === "post-deploy" || b === "post-deploy" || b === "verify-now" || b === "host" || LIVE_ACCEPTANCE_RE.test(`${r.quote ?? ""} ${r.why ?? ""}`)) out.push({ id: r.id, flag: live.join(", ") });
+  }
+  return out;
+}
