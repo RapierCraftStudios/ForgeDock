@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { parseIntegration } from "./integration.mjs";
 import {
@@ -12,7 +12,7 @@ import {
   attestPayload, recordHostCheck, budgetAlerts, formatDigest, writeCiBlock, ciFromCli, budgetReportLine, effectiveModeSync, readParity,
 } from "./ci-budget.mjs";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "cib-"));
+const tmp = () => tmpDir("cib-");
 const NOW = Date.parse("2026-11-10T12:00:00Z"); // day 10 of 30
 const item = (q, o = {}) => ({ product: "actions", unitType: "Minutes", sku: "actions_linux", quantity: q, repositoryName: "AlterLab", ...o });
 /** gh stub: repo meta, billing usage, org plan. */
