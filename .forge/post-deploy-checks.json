@@ -24,7 +24,7 @@
     "for": "7d"
   },
   "adversarial-bench-run": {
-    "run": "ls docs/eval/published/adversarial-*.md >/dev/null 2>&1 && grep -q \"corpus revision\" docs/eval/published/adversarial-*.md",
+    "run": "ls docs/eval/published/adversarial-*.md >/dev/null 2>&1 && grep -qi \"corpus revision\" docs/eval/published/adversarial-*.md",
     "pass": "exit 0",
     "timeout": 60,
     "for": "30d"
