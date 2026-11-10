@@ -1980,7 +1980,9 @@ export async function runCore(o) {
       if (result?.status === "fixed" && sessionId && !result.amendments?.length) { // #5345: a red self-check on the final tree is fixed before any reviewer runs
         let rec = null; try { rec = JSON.parse(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)); } catch { /* none recorded */ }
         const red = (await selfCheckNow()) === "red" ? selfCheckFailures(rec) : [];
-        if (red.length) { ev({ event: "SELF_CHECK_RED", codes: red.map((f) => f.code) }); await fixRound("conformance", conformanceResumePrompt(red, vcfg.mode, lane), red, "conformance", failureLog(red)); result = (await readResult()) ?? result; }
+        if (red.length) ev({ event: "SELF_CHECK_RED", codes: red.map((f) => f.code) });
+        if (red.length) await fixRound("conformance", conformanceResumePrompt(red, vcfg.mode, lane), red, "conformance", failureLog(red));
+        if (red.length) result = (await readResult()) ?? result;
       }
       {
         const blocked = await endIfBlocked();

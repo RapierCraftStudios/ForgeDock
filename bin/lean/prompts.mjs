@@ -181,7 +181,7 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one "bucket": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
-Contract sections where first reviews most often find defects (measured by \`forgedock stats --first-review\`), so write them carefully:
+First reviews most often find defects in:
 ${Object.entries(PLANNER_TIGHTENING).map(([k, x]) => `- ${k}: ${x}`).join("\n")}
 A new default-off flag or rollout key needs an activation row: defer, bucket \`owner:promote:<flag>\`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
@@ -234,7 +234,7 @@ A new workspace-package dependency in a package.json no deliverable names is blo
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
-\`forgedock check\` also runs the reviewer's deterministic checks (scope, requirement statuses, preserve paths): a \`FAIL review\` line is a finding the reviewer would raise, so fix it first. Recurring first-review findings, so check them yourself:
+A \`FAIL review\` line from check is a finding the reviewer would raise; fix it. Also:
 ${Object.values(FINDING_PITFALLS).map((x) => `- ${x}`).join("\n")}
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):

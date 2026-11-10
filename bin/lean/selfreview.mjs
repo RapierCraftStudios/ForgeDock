@@ -56,16 +56,16 @@ export const sectionOfKind = (code) => KIND_SECTION[code] ?? "other";
 
 /** Builder pitfall per recurring finding kind (the three that are 80% of first-round findings). */
 export const FINDING_PITFALLS = Object.freeze({
-  "conformance.omission": "Before finishing, re-read every issue requirement and checklist item and point each at the diff line that delivers it; an omitted requirement is the most common first-review finding.",
-  "conformance.scope_creep": "Change only the files the contract lists (tests aside). A file you need that is not listed goes in as an add-deliverable amendment before the edit, never silently.",
-  "conformance.preserve_violated": "Open each preserve item's path before finishing and confirm the behaviour is unchanged; a preserve path you edited needs a deliverable that covers it and a test.",
+  "conformance.omission": "Map every issue requirement to the diff line that delivers it; omission is the top finding.",
+  "conformance.scope_creep": "Edit only contract-listed files (tests aside); amend a needed extra file in first.",
+  "conformance.preserve_violated": "Re-check each preserve path is unchanged; an edited one needs a covering deliverable.",
 });
 
 /** R5: the planner rule per contract section the first-round findings trace to (rendered into the plan prompt). */
 export const PLANNER_TIGHTENING = Object.freeze({
-  requirements: "One requirement per issue sentence or checklist item, quoted verbatim, each with a deliverable and a validate that exercises it; split a compound sentence into one requirement per clause (omission is the top first-review finding).",
-  deliverables: "List every file the change touches, tests and sibling-list tests included, with its path; scope_creep is raised for any changed file no deliverable names.",
-  preserve: "Name each caller, contract or behaviour with its file path, and list the deliverable that edits a preserved path, if any; a preserve row with no path cannot be checked.",
+  requirements: "One requirement per sentence or clause, each with a deliverable and a validate (omission is the top finding).",
+  deliverables: "List every changed file, tests included (scope_creep flags unnamed ones).",
+  preserve: "Give each preserve row a file path; it cannot be checked without one.",
 });
 
 const PATH_RE = /[\w@.-]+(?:\/[\w@.*-]+)+\.\w+|[\w@.-]+\/[\w@.*-]+\/?/g;
