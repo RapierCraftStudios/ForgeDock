@@ -13,9 +13,9 @@ const json = (p) => JSON.parse(readFileSync(new URL(p, root), "utf8"));
 
 describe("mark parity with bin/cinema.mjs", () => {
   it("uses the same art and brand stops", () => {
-    assert.deepEqual(scene.HERO_MARK, HERO_MARK);
-    assert.deepEqual(scene.CHROME_STOPS, CHROME_STOPS);
-    assert.deepEqual(scene.EMBER_STOPS, EMBER_STOPS);
+    assert.deepEqual(scene.SPLASH_MARK, HERO_MARK);
+    assert.deepEqual(scene.SPLASH_CHROME_STOPS, CHROME_STOPS);
+    assert.deepEqual(scene.SPLASH_EMBER_STOPS, EMBER_STOPS);
   });
 });
 

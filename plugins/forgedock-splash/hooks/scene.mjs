@@ -14,10 +14,10 @@ export const WIDTH = 56;
 export const HEIGHT = 9;
 export const DURATION_MS = 6500;
 
-export const CHROME_STOPS = ["#f7f3ea", "#d9cfba", "#a99a82", "#6e6252"];
-export const EMBER_STOPS = ["#ff4d00", "#ff8c1a", "#ffd166"];
+export const SPLASH_CHROME_STOPS = ["#f7f3ea", "#d9cfba", "#a99a82", "#6e6252"];
+export const SPLASH_EMBER_STOPS = ["#ff4d00", "#ff8c1a", "#ffd166"];
 
-export const HERO_MARK = [
+export const SPLASH_MARK = [
   "            ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
   "        ▄▄██████████████████",
   "     ▄█████████████▀▀▀▀▀▀▀▀▀",
@@ -33,7 +33,7 @@ const LIGHT_CHROME_STOPS = ["#6e6252", "#51463a", "#3a3027", "#241c15"];
 const LIGHT_EMBER_STOPS = ["#c23a00", "#b85c00", "#9a6a00"];
 
 const THEMES = {
-  dark: { chrome: CHROME_STOPS, ember: EMBER_STOPS, dim: "#6e6252", spark: "#ffd166", clawd: "#e07a4f", bg: "#121212", bar: "#a99a82", shine: "#ffffff" },
+  dark: { chrome: SPLASH_CHROME_STOPS, ember: SPLASH_EMBER_STOPS, dim: "#6e6252", spark: "#ffd166", clawd: "#e07a4f", bg: "#121212", bar: "#a99a82", shine: "#ffffff" },
   light: { chrome: LIGHT_CHROME_STOPS, ember: LIGHT_EMBER_STOPS, dim: "#8a7d6b", spark: "#b85c00", clawd: "#a8451f", bg: "#fafafa", bar: "#51463a", shine: "#000000" },
 };
 
@@ -132,7 +132,7 @@ export function frame(ms, theme = "dark") {
   // The mark: swept in left to right as molten ember, cooling to chrome.
   const sweep = clamp((ms - 0) / T.forgeEnd) * (MARK_WIDTH + 4);
   const heat = clamp(1 - (ms - T.forgeEnd) / (T.cooled - T.forgeEnd));
-  HERO_MARK.forEach((line, r) => {
+  SPLASH_MARK.forEach((line, r) => {
     [...line].forEach((ch, c) => {
       if (ch === " " || c > sweep) return;
       const near = clamp(1 - (sweep - c) / 8);
