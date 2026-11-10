@@ -5550,6 +5550,25 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(log.findIndex((e) => e.event === "PRECHECK_COMMANDS") < log.findIndex((e) => e.event === "PR_OPENED"));
   });
 
+  it("#5332 a precheck round whose only non-zero result is rc 124 does not resume the builder or end ci.red, and is never self_check green", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
+    const r = await run(w, { dir, precheck: { commands: ["make slow"] } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
+    const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.deepEqual(pre.map((e) => e.results[0].rc), [124]); assert.equal(pre.length, 1);
+    assert.equal(pre[0].self_check, "timed_out");
+  });
+  it("#5332 with verify.precheck_block a timed-out check ends env.validate_timeout (not ci.red) naming the command and limit", async () => {
+    const w = world();
+    w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
+    const r = await run(w, { precheck: { commands: ["make slow"] }, verify: { ...parseVerify({}), precheckBlock: true } });
+    assert.equal(r.code, ENV_VALIDATE_TIMEOUT); assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0);
+    assert.match((w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? ""), /`make slow` \(timed out after 1 s, exit 124\)/);
+  });
+
   it("#4585 verify.invariants run in the pre-PR round even with no learned commands, and the prompts carry the checklist", async () => {
     const w = world(); const ran = [];
     w.io.runCommand = async ({ command }) => { ran.push(command); return { rc: 0, output: "" }; };
