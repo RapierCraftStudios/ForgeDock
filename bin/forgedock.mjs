@@ -4379,6 +4379,16 @@ switch (command) {
     }
     break;
   }
+  case "replay": {
+    const { replayFromCli } = await import("./replay-timelapse.mjs");
+    try {
+      exitCode = await replayFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "demo":
     await demo();
     break;

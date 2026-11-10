@@ -19,7 +19,33 @@
       "repository": "https://github.com/RapierCraftStudios/ForgeDock",
       "license": "AGPL-3.0",
       "category": "dev-workflow",
-      "tags": ["ai-agents", "autonomous", "github", "pipeline", "code-review", "claude-code"]
+      "tags": [
+        "ai-agents",
+        "autonomous",
+        "github",
+        "pipeline",
+        "code-review",
+        "claude-code"
+      ]
+    },
+    {
+      "name": "forgedock-splash",
+      "displayName": "ForgeDock Splash",
+      "source": "./plugins/forgedock-splash",
+      "description": "Startup splash for ForgeDock in Claude Code: the F mark is forged, Clawd bonks it, sparks fly, then it settles on 'supercharged'. Turn off with /plugin disable forgedock-splash.",
+      "author": {
+        "name": "RapierCraft Studios"
+      },
+      "homepage": "https://github.com/RapierCraftStudios/ForgeDock",
+      "repository": "https://github.com/RapierCraftStudios/ForgeDock",
+      "license": "AGPL-3.0",
+      "category": "dev-workflow",
+      "tags": [
+        "forgedock",
+        "splash",
+        "branding",
+        "claude-code"
+      ]
     }
   ]
 }

@@ -171,7 +171,7 @@ A validate or repro command must not read a $TMPDIR file it did not create: each
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop.
 
-An added route needs its production ingress rule cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
+An added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
 
 ${BLOCK_RULES}`;
 }
@@ -180,7 +180,7 @@ ${BLOCK_RULES}`;
  * #4374: the conformance rubric, one definition shared verbatim by `reviewerPrompt` and the builder's self-review in
  * `builderImplementPrompt`, so the two cannot drift. Each question is answered yes (OK) or no; codebase-agnostic.
  */
-export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver? An out-of-band requirement is delivered by its instrumentation (budget test or bench committed, job configured), not its result. A [type:e2e] requirement is delivered only by a real end-to-end validate, not a unit test with stubbed I/O. Swapping e2e for mocks without a forge-probe, or a route without ingress evidence, is not delivery.
+export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver? An out-of-band requirement is delivered by its instrumentation (budget test or bench committed, job configured), not its result. A [type:e2e] requirement is delivered only by a real end-to-end validate, not a unit test with stubbed I/O. Swapping e2e for mocks without a forge-probe, a route without ingress evidence, or a topology.prod_parity surface without evidence, is not delivery.
 2. No regression: is the diff free of breakage of an existing caller, test or behaviour (a concrete path:line failure)?
 3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
 4. Scope: does the diff change only deliverable paths and tests?`;
