@@ -8,6 +8,7 @@ import { seqNumber } from "./sequence.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
+import { FINDING_PITFALLS } from "./selfreview.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
@@ -216,6 +217,8 @@ A new workspace-package dependency in a package.json no deliverable names is blo
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
+\`forgedock check\` also runs the reviewer's deterministic checks (scope, requirement statuses, preserve paths): a \`FAIL review\` line is a finding the reviewer would raise, so fix it first. Recurring first-review findings, so check them yourself:
+${Object.values(FINDING_PITFALLS).map((x) => `- ${x}`).join("\n")}
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach

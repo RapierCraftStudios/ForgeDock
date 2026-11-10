@@ -1166,10 +1166,13 @@ export function evidencePathOnly(problems = []) {
 }
 /**
  * #5164: true when every problem of an incomplete review is a reviewer slip a targeted re-ask can fix: an evidence path that
- * did not resolve (#4327) or an issue_coverage misquote. A real coverage gap is never one, so it keeps the two-run limit.
+ * did not resolve (#4327) or an issue_coverage misquote. #5345: so is any single missing or invalid row (requirement, preserve,
+ * scope, issue_coverage, verdict): the reply is repaired in place for those ids, never a new review round. A whole absent
+ * `requirements` section is not a slip: it keeps the two-run limit. A real coverage gap is a failure, not an incompleteness.
  */
+const ROW_GAP_RE = /needs exactly one row|status invalid|needs deferral_ok|needs instrumented|needs path:line evidence|needs validated_by|has no scope row|needs a row with status|issue_coverage is missing or empty|verdict must be|regressions must be/;
 export function reaskable(problems = []) {
-  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX));
+  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX) || ROW_GAP_RE.test(String(p)));
 }
 const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)));
 
