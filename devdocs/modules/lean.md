@@ -2786,6 +2786,8 @@ Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs`
 
 `fixStep` skips a fix issue already closed as merged (`seam.issueMerged`: CLOSED + `workflow:merged`), so a resume after an intake lane or an earlier round merged the fix goes straight to the recut/pick and the delta review instead of blocking on an `invalid` lane; `fileCiIssue` reuses the issue filed for the same release head (exact title) instead of filing a duplicate.
 
+`gateState` (promotion) reads `forge/deploy-gate` from the head's check runs and, when absent there, from its combined commit status: `gate-marker-check.yml` posts the gate as a commit status, so a check-runs-only read never saw it.
+
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
 
 - `light.mjs` `lightEligibility` takes `hotspots` (scripts/hotspots.sh `files` rows `{path, lines, commits_90d, over}`). A predicted non-test file with `over` (beyond `maintenance.hotspot.file_lines`) is a new hard reason `hotspot` (`<path> (<lines> lines)`).
