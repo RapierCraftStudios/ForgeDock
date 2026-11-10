@@ -25,7 +25,7 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 6. **Plan JSON** in `$TMPDIR` (shape: header of `bootstrap-validate.mjs` and `bootstrap-create.mjs`):
    - Milestones as dependency layers, foundation first: each depends only on earlier ones (#4659).
    - A thin deployable slice (CI deploy workflow, staging env, seed) in milestone 1 or 2, never last.
-   - A `SPIKE` parent issue, which is the epic: its body carries a ```` ```forge-acceptance ```` block of at least one user journey (forge#5336). `node "$VALIDATE"` is followed by `npx forgedock acceptance check --body-file <spike body>`; refuse to create without it.
+   - A `SPIKE` parent issue (the epic): `forge-acceptance` journey, `forgedock acceptance check`.
    - Sub-issues from `issue-body.md` with planned paths, `[type:*]` tags, `priority` and `component`.
    - `"ui": true` issues carry the full design spec. `"hero": true` issues route to `/design`.
    - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues reference it as `#{{KEY}}`, never depend on it, and name the mock that keeps dev and CI green.
