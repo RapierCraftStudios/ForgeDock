@@ -81,4 +81,14 @@ describe("#4467: App comments in gh issue view shape", () => {
     assert.ok(buildResumeDigest({ state, comments: [ghShape("rapiercraft-forgedock")] }).text.includes("- FORGE:NEEDS_HUMAN: CI red on lint"));
     assert.ok(!buildResumeDigest({ state, comments: [ghShape("someone")] }).text.includes("FORGE:NEEDS_HUMAN"));
   });
+  it("keeps the best result per validate id: a later tool-missing row never replaces a pass (#5331)", () => {
+    const comments = [
+      { body: facts([{ command: "npm run lint", exit: 0 }]), ...BOT },
+      { body: facts([{ command: "npm run lint", exit: 127 }, { command: "npm test -- a.test.ts", exit: 1 }]), ...BOT },
+    ];
+    const d = buildResumeDigest({ comments, contract: CONTRACT });
+    assert.match(d.text, /V2 `npm run lint`: exit 0 \(already passed/);
+    assert.doesNotMatch(d.text, /exit 127/);
+    assert.match(d.text, /V1 `npm test -- a.test.ts`: exit 1 \(failing\)/);
+  });
 });

@@ -11,6 +11,7 @@
 import { noComments } from "./render.mjs";
 import { parseFactsComment } from "./facts.mjs";
 import { isTrustedIssueComment as trusted } from "./prefilter.mjs";
+import { bestResults, passedOnHead } from "./validatebest.mjs";
 
 export const RESUME_DIGEST_BYTES = 2048;
 const LINE_MAX = 200;
@@ -33,10 +34,9 @@ const recordLine = (body) => one(noComments(String(body ?? "")).split("\n").map(
  * branch's changed files, `lane` the base branch. The text never exceeds `maxBytes` (UTF-8): whole lines are dropped from
  * the end, so the end reason and validate results (first) survive longest.
  */
-export function buildResumeDigest({ state = null, comments = [], contract = null, files = [], lane = "", maxBytes = RESUME_DIGEST_BYTES } = {}) {
+export function buildResumeDigest({ state = null, comments = [], contract = null, files = [], lane = "", head: laneHead = "", maxBytes = RESUME_DIGEST_BYTES } = {}) {
   try {
     const tc = (Array.isArray(comments) ? comments : []).filter(trusted);
-    const facts = [...tc].reverse().map((c) => parseFactsComment(c?.body)).find(Boolean) ?? null;
     const last = [...tc].reverse().find((c) => ["NEEDS_HUMAN", "FIX_CI"].includes(markerOf(c?.body)));
     const validate = Array.isArray(contract?.validate) ? contract.validate : [];
     const idOf = (cmd) => validate.find((v) => one(v?.command) === cmd)?.id ?? null;
@@ -46,8 +46,10 @@ export function buildResumeDigest({ state = null, comments = [], contract = null
     const fails = Array.isArray(state?.failureClasses) ? [...new Set(state.failureClasses.map(code).filter(Boolean))].sort().slice(0, 5) : [];
     const why = last ? `FORGE:${markerOf(last.body)}: ${recordLine(last.body)}` : "";
     if (reason || why) sections.push(["How the last run ended:", ...(reason ? [`- ${reason}${tcode && tcode !== "unclassified" ? ` (${tcode})` : ""}${fails.length ? `; failures ${fails.join(", ")}` : ""}`] : []), ...(why ? [`- ${why}`] : [])]);
-    const base = facts?.baselines ?? [];
-    if (base.length) sections.push(["Validate results of the last run (command: exit):", ...base.map((b) => { const id = idOf(b.command); return `- ${id ? `${one(id, 20)} ` : ""}\`${b.command.replace(/`/g, "'")}\`: exit ${b.exit}${b.exit === 0 ? "" : " (failing)"}`; })]);
+    // #5331: the best result per validate id over every trusted record, not the newest record alone; a tool-missing row never replaces a pass
+    const rows = [...tc].map((c) => parseFactsComment(c?.body)).filter(Boolean).flatMap((f) => f.baselines.map((b) => ({ id: idOf(b.command), command: b.command, exit: b.exit })));
+    const base = bestResults(rows);
+    if (base.length) sections.push(["Validate results of the last run (command: exit):", ...base.map((b) => `- ${b.id ? `${one(b.id, 20)} ` : ""}\`${b.command.replace(/`/g, "'")}\`: exit ${b.exit}${b.exit === 0 ? (passedOnHead(b, laneHead) ? " (already passed: do not re-run unless you changed what it covers)" : "") : " (failing)"}`)]);
     const reqs = (Array.isArray(contract?.requirements) ? contract.requirements : []).filter((r) => r?.disposition === "deliver");
     if (reqs.length) sections.push(["Requirements to deliver (frozen contract); verify each against the branch and finish what is missing:", ...reqs.map((r) => `- ${one(r.id, 20)}: ${one(r.quote, 160)}`)]);
     const changed = (Array.isArray(files) ? files : []).map((f) => one(f)).filter(Boolean);
