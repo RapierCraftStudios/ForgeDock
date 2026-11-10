@@ -40,7 +40,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --conformance-outcomes [--repo <owner/repo>] [--since <date>] [--window-days 7] [--min-n 20] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
-       forgedock stats --card [--week|--month] [--include-repo-names] [--out <dir>] [--repo <owner/repo>]
+       forgedock stats --card [--week|--month] [--include-repo-names] [--public-repo] [--out <dir>] [--repo <owner/repo>]
        forgedock stats --depth [--since <version|date>] [--min-n N] [--offline] [--repo <owner/repo>] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
@@ -50,7 +50,8 @@ delta against the previous version and a low-n flag for samples under 10. Missin
                         also bounds the GitHub crawl to that window
   --repo <owner/repo>   target repo (default: forge.yaml project, else the git origin remote)
   --card                shareable aggregate-only card (Markdown on stdout, or stats-card.svg + stats-card.md in --out);
-                        --week/--month bound it to the last 7/30 days; --include-repo-names adds the repo name
+                        --week/--month bound it to the last 7/30 days; --include-repo-names adds the repo name;
+                        --public-repo (repo is public) also adds a run-history link
   --json                machine-readable output
   --refresh             ignore the local cache and re-read everything from GitHub
   (progress is printed to stderr while crawling)
@@ -139,7 +140,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { card: false, week: false, month: false, includeRepoNames: false, out: null, depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { card: false, week: false, month: false, includeRepoNames: false, publicRepo: false, out: null, depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -186,6 +187,7 @@ export function parseArgs(argv) {
     else if (name === "--week") o.week = true;
     else if (name === "--month") o.month = true;
     else if (name === "--include-repo-names") o.includeRepoNames = true;
+    else if (name === "--public-repo") o.publicRepo = true;
     else if (name === "--out") o.out = take();
     else if (name === "--json") o.json = true;
     else if (name === "--refresh") o.refresh = true;
@@ -195,7 +197,7 @@ export function parseArgs(argv) {
     else if (name === "--help" || name === "-h") o.help = true;
     else throw new Error(`unknown argument: ${a}`);
   }
-  if ((o.week || o.month || o.includeRepoNames || o.out) && !o.card) throw new Error("--week, --month, --include-repo-names and --out need --card");
+  if ((o.week || o.month || o.includeRepoNames || o.publicRepo || o.out) && !o.card) throw new Error("--week, --month, --include-repo-names, --public-repo and --out need --card");
   if (o.week && o.month) throw new Error("--week and --month are mutually exclusive");
   if (o.card && (o.depth || o.pool || o.efficiency || o.compounding || o.selfFiled || o.conformanceOutcomes || o.contextAb || o.exploreAb || o.tiers || o.laneProfile || o.edge || o.milestone || o.experiment || o.by)) throw new Error("--card cannot be combined with another query mode");
   if (o.card && (o.week || o.month) && o.since) throw new Error("--week/--month and --since are mutually exclusive");
@@ -435,7 +437,7 @@ export async function runStats(argv, deps = {}) {
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
     if (opts.card) {
-      const card = buildCard(report, { includeRepoNames: opts.includeRepoNames, attribution: readAttribution(), repo: opts.repo,
+      const card = buildCard(report, { includeRepoNames: opts.includeRepoNames, publicRepo: opts.publicRepo, attribution: readAttribution(), repo: opts.repo,
         windowLabel: opts.week ? "last 7 days" : opts.month ? "last 30 days" : opts.since ? `since ${opts.since}` : "all time" });
       if (opts.out) {
         mkdirSync(opts.out, { recursive: true });

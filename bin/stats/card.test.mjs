@@ -48,6 +48,14 @@ describe("stats card (forge#5291)", () => {
     assert.ok(!renderCardSvg(buildCard(report, { attribution: false })).includes("Made with"));
     assert.ok(!renderCardSvg(buildCard({ groups: [group({ repo: "a<b>&c" })] }, { includeRepoNames: true })).includes("a<b>"));
   });
+  it("--public-repo links the run history; default never does", () => {
+    const one = { groups: [group()] };
+    assert.ok(!renderCardMarkdown(buildCard(one, { repo: REPO })).includes("github.com/secret-org"));
+    const c = buildCard(one, { repo: REPO, publicRepo: true });
+    assert.match(renderCardMarkdown(c), /\[Run history\]\(https:\/\/github.com\/secret-org\/private-repo\/pulls/);
+    assert.match(renderCardSvg(c), /Run history: https:\/\/github.com\/secret-org/);
+    assert.throws(() => parseArgs(["--public-repo"]), /need --card/);
+  });
   it("validates flags", () => {
     assert.equal(parseArgs(["--card", "--week", "--include-repo-names", "--out", "x"]).card, true);
     assert.throws(() => parseArgs(["--week"]), /need --card/);

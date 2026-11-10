@@ -13,7 +13,7 @@ const isNum = (x) => typeof x === "number" && Number.isFinite(x);
 const n0 = (x) => (isNum(x) ? x : 0);
 
 /** Sum the report groups (all versions; one repo or all repos) into aggregate card numbers. */
-export function buildCard(report, { includeRepoNames = false, attribution = true, windowLabel = "all time", repo = null } = {}) {
+export function buildCard(report, { includeRepoNames = false, publicRepo = false, attribution = true, windowLabel = "all time", repo = null } = {}) {
   const groups = report?.groups ?? [];
   let merged = 0, completed = 0, closedBeforeCode = 0, gateCatches = 0, usd = 0;
   const repos = new Set();
@@ -26,9 +26,12 @@ export function buildCard(report, { includeRepoNames = false, attribution = true
     gateCatches += n0(q.acceptance?.blocked) + n0(q.diffSize?.blocked) + n0(q.ci?.blocked) + n0(q.liveness?.blocked);
     usd += n0(g.cost?.usdTotal);
   }
+  // `publicRepo` is the user's assertion that the repo is public: it names the repo and links its merged-PR run history.
+  const named = (includeRepoNames || publicRepo) && repos.size === 1;
+  const runHistory = publicRepo && repo && repos.size === 1 && /^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://github.com/${repo}/pulls?q=is%3Apr+is%3Amerged` : null;
   return {
-    window: windowLabel,
-    scope: includeRepoNames && repos.size === 1 ? [...repos][0] : repos.size === 1 ? "1 repo" : `${repos.size} repos`,
+    window: windowLabel, runHistory,
+    scope: named ? [...repos][0] : repos.size === 1 ? "1 repo" : `${repos.size} repos`,
     prsMerged: merged, issuesCompleted: completed, costPerMerge: merged ? usd / merged : null,
     closedBeforeCode, gateCatches, hoursSavedEstimate: merged * HOURS_SAVED_PER_MERGE,
     footer: attribution ? CARD_URL : null,
@@ -46,16 +49,18 @@ const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 export function renderCardMarkdown(c) {
   const out = [`# ForgeDock stats card: ${c.scope}, ${c.window}`, "", "| metric | value |", "|---|---|", ...rows(c).map(([a, b]) => `| ${a} | ${b} |`), "",
     `Time saved is an estimate (${HOURS_SAVED_PER_MERGE}h per merged PR), not a measurement.`];
+  if (c.runHistory) out.push("", `[Run history](${c.runHistory})`);
   if (c.footer) out.push("", `Made with [ForgeDock](${c.footer})`);
   return out.join("\n");
 }
 
 export function renderCardSvg(c) {
-  const r = rows(c), h = 120 + r.length * 36 + (c.footer ? 30 : 0);
+  const r = rows(c), h = 120 + r.length * 36 + (c.footer ? 30 : 0) + (c.runHistory ? 20 : 0);
   const lines = r.map(([a, b], i) => `<text x="24" y="${96 + i * 36}" font-size="16">${esc(a)}</text><text x="576" y="${96 + i * 36}" font-size="18" font-weight="bold" text-anchor="end">${esc(b)}</text>`);
   return [`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="${h}" viewBox="0 0 600 ${h}" font-family="sans-serif">`,
     `<rect width="600" height="${h}" rx="12" fill="#0d1117"/><g fill="#e6edf3">`,
     `<text x="24" y="40" font-size="22" font-weight="bold">ForgeDock stats</text><text x="24" y="64" font-size="14" fill="#8b949e">${esc(c.scope)}, ${esc(c.window)}</text>`,
     ...lines, `<text x="24" y="${h - (c.footer ? 36 : 12)}" font-size="11" fill="#8b949e">Time saved is an estimate (${HOURS_SAVED_PER_MERGE}h per merged PR).</text>`,
+    ...(c.runHistory ? [`<text x="24" y="${h - (c.footer ? 52 : 28)}" font-size="11" fill="#58a6ff">Run history: ${esc(c.runHistory)}</text>`] : []),
     ...(c.footer ? [`<text x="24" y="${h - 12}" font-size="12" fill="#58a6ff">Made with ForgeDock: ${esc(c.footer)}</text>`] : []), "</g></svg>"].join("\n");
 }

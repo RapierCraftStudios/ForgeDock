@@ -36,13 +36,13 @@ With no local state at all, `forgedock stats --repo <r>` reproduces the report f
 
 ## Shareable card (`--card`, forge#5291)
 
-`forgedock stats --card [--week|--month] [--include-repo-names] [--out <dir>] [--repo <owner/repo>]` prints a Markdown
+`forgedock stats --card [--week|--month] [--include-repo-names] [--public-repo] [--out <dir>] [--repo <owner/repo>]` prints a Markdown
 card and, with `--out`, also writes `stats-card.svg` and `stats-card.md`. It reuses the normal stats crawl (no extra
 network calls) and shows aggregates only: PRs merged, issues completed, cost per merge, issues closed before code
 (invalid or duplicate), release-gate catches (blocked acceptance, diff-size, CI and liveness gates) and a time-saved
 estimate (1.5 h per merged PR, labelled as an estimate). `--week` and `--month` bound the window to 7 or 30 days.
 Issue titles are never included, and the repo name only with `--include-repo-names`. The footer link follows
-`branding.show_attribution` in `forge.yaml` (default on). PNG output is not provided.
+`branding.show_attribution` in `forge.yaml` (default on). `--public-repo` asserts the repo is public: it names the repo and adds a link to its merged-PR history (no network lookup is made to verify visibility). PNG output is not provided: the issue allows SVG or PNG, and SVG ships without a rasterizer dependency.
 
 ## Efficiency (`--efficiency`, forge#4402)
 
