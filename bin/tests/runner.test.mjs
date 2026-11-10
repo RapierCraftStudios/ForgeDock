@@ -4417,3 +4417,28 @@ describe("#5334 a killed stream session carries the usage it streamed", () => {
     assert.equal(estimateCostUsd(null), null);
   });
 });
+
+describe("runCliBackendAsync context ceiling never stops mid-edit (#5346)", () => {
+  const asst = (id, ctx, tool) => JSON.stringify({ type: "assistant", message: { id, content: tool ? [{ type: "tool_use", id: `t-${id}`, name: tool, input: { file_path: "a.js" } }] : [{ type: "text", text: "x" }], usage: { input_tokens: ctx, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } });
+  const res = (id) => JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: `t-${id}`, content: "ok" }] } });
+  const run = async (lines, contextMax) => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const d = tmpDir("core-ctxedit-");
+    writeFileSync(`${d}/fake`, `#!/bin/sh\n${lines.map((l) => (l === "SLEEP" ? "sleep 2" : `echo '${l}'`)).join("\n")}\nexec sleep 30\n`); chmodSync(`${d}/fake`, 0o755);
+    return runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true, contextMax });
+  };
+  it("a ceiling crossed with an Edit pending stops only after that edit's tool_result", async () => {
+    const t0 = Date.now();
+    await assert.rejects(run([asst("m1", 50), asst("m2", 120, "Edit"), "SLEEP", res("m2"), asst("m3", 130)], 100), (e) => {
+      assert.equal(e.code, "CLI_CONTEXT"); assert.equal(e.context, 120, "the context at the crossing, stopped at the safe point"); return true;
+    });
+    assert.ok(Date.now() - t0 >= 1800, "the kill waited for the edit's tool_result");
+  });
+  it("a ceiling crossed by a non-edit tool stops at once", async () => {
+    await assert.rejects(run([asst("m1", 120, "Read"), asst("m2", 130, "Read")], 100), (e) => { assert.equal(e.context, 120); return true; });
+  });
+  it("the hard cap (1.25x) stops even with an edit still pending", async () => {
+    await assert.rejects(run([asst("m1", 120, "Edit"), asst("m2", 126, "Edit")], 100), (e) => { assert.equal(e.context, 126); return true; });
+  });
+});

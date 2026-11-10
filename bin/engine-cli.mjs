@@ -33,6 +33,7 @@ import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
+import { parseCeilingBySize } from "./lean/ceiling.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
@@ -396,6 +397,7 @@ export function readHeavy(cwd = process.cwd()) {
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`), plus `tasks_max` (#4690, default 1024). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
  * `engine.cli_busy_minutes` (default 45, #4405): extra silence allowed while the builder has a live heavy step or heavy-queue entry.
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
+ * #5346: `engine.context_ceiling_by_size` ("S=..,M=..,L=.."; a size without an entry uses context_ceiling_tokens).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
@@ -411,6 +413,7 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
       ...(posNum(y.engine?.cli_busy_minutes) ? { cliBusyMinutes: posNum(y.engine.cli_busy_minutes) } : {}),
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
+      ...(parseCeilingBySize(y.engine) ? { contextCeilingBySize: parseCeilingBySize(y.engine) } : {}), // #5346
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
   } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
