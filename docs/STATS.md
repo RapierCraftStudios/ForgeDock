@@ -190,6 +190,10 @@ crawl). Every RUN_START slice of each log counts, so re-running an issue with th
 
 `--json` prints the same data as `query.explore_ab`.
 
+## Issue origin (`--origin`, forge#5294)
+
+`forgedock stats --origin [--repo owner/repo] [--since <date>] [--json]` splits the issues opened in the window (default: last 30 days) into requested (human author), production (`FORGE:PRODWATCH` marker or `prod-watch` label), review-finding (`review-finding`/`staging-review` labels), follow-up (`FORGE:DEFERRED_FROM`, rollup markers) and unknown (no positive evidence; never assumed requested). For each origin it prints the count, the cost from trusted `FORGE:TELEMETRY` runs and how many issues have no recorded cost (counted apart, never as $0). Outcomes are merged, closed-invalid (not planned, duplicate, `invalid`/`duplicate`/`wontfix` label), other-closed and open. The last line gives the pipeline-originated share of recorded cost.
+
 ## Sections (per version and repo)
 
 - **Cost**: cache-read tokens per issue (mean, median), per phase (mean over all runs, so phases add up to the per-issue

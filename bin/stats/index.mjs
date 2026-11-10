@@ -22,6 +22,7 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
+import { gatherOriginIssues, originReport, renderOrigin } from "./origin.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
@@ -36,6 +37,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
+       forgedock stats --origin [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --conformance-outcomes [--repo <owner/repo>] [--since <date>] [--window-days 7] [--min-n 20] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
@@ -94,6 +96,10 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
                         their delta and full-lane cohorts matched per size (forge#4491)
   --offline             skip the GitHub crawl for merged issues (issue quality and acceptance print n/a)
 
+Issue origin (#5294; GitHub issues and telemetry):
+  --origin              requested vs pipeline-generated issues (production, review-finding, follow-up; unknown stays unknown),
+                        how the pipeline-originated ones closed and their share of cost; --since <date> (default: last 30 days)
+
 Self-filed issues (#5207; GitHub issues only):
   --self-filed          share of new issues the pipeline filed itself, by kind (follow-up, review-finding, staging-review,
                         rollup), against the 15% target; --since <date> bounds the window (default: the last 30 days)
@@ -135,7 +141,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -156,6 +162,7 @@ export function parseArgs(argv) {
     else if (name === "--tiers") o.tiers = true;
     else if (name === "--compounding") o.compounding = true;
     else if (name === "--self-filed") o.selfFiled = true;
+    else if (name === "--origin") o.origin = true;
     else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
@@ -313,6 +320,15 @@ export async function buildReport(opts, deps = {}) {
     const issues = await gatherIssues({ gh: deps.gh ?? defaultGh, repo, since });
     return { repo, query: { self_filed: selfFiledReport({ issues, since, repo }) } };
   }
+  if (opts.origin) { // #5294: GitHub issues plus trusted telemetry runs for cost
+    const p = parseSince(opts.since);
+    if (p.sinceVersion) throw new Error("--origin: --since must be a date (YYYY-MM-DD)");
+    const since = new Date(p.sinceMs ?? (deps.now?.() ?? Date.now()) - 30 * 86400000).toISOString().slice(0, 10);
+    const gh = deps.gh ?? defaultGh;
+    const issues = await gatherOriginIssues({ gh, repo, since });
+    const fetched = await fetchGithubRecords({ repo, since: `${since}T00:00:00Z`, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env, onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
+    return { repo, query: { origin: originReport({ issues, runs: toModel(repo, fetched).runs, since, repo }) } };
+  }
   let releaseTimes = [];
   if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
   else if (deps.releaseTimes) releaseTimes = deps.releaseTimes;
@@ -427,6 +443,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.conformance_outcomes && !opts.json) { process.stdout.write(`${renderConformanceOutcomes(report.query.conformance_outcomes)}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
+    if (report.query?.origin && !opts.json) { process.stdout.write(`${renderOrigin(report.query.origin)}\n`); return 0; }
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
