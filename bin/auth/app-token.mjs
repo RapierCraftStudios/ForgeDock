@@ -8,7 +8,7 @@
  * Broker contract (assumed, documented in docs/CONFIG.md): `POST {broker}/v1/token`, `Authorization: Bearer <user token>`,
  * body `{installation_id, repository_ids, permissions}` → `{token, expires_at}`. Tokens are never logged.
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -125,22 +125,36 @@ export async function resolveAuth({ env = process.env, now = Date.now(), fetch: 
 }
 
 // The token this module last wrote to an env: a GH_TOKEN that differs from it was exported by the operator and is never touched (#5381).
+// Ownership crosses exec as a fingerprint in FORGEDOCK_APP_TOKEN_FP (#5392): a child that inherits the env (auto-spawned schedd,
+// its version respawn, a spawned watch) recognises the App token as ForgeDock's and keeps refreshing it. Never the raw token.
+export const OWNED_FP_VAR = "FORGEDOCK_APP_TOKEN_FP";
 let ownedToken = null;
 let ownedExpiry = 0;
-const operatorOwns = (env) => Boolean(env.GH_TOKEN) && env.GH_TOKEN !== ownedToken;
+const fingerprint = (token) => createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+const inheritedOwned = (env) => Boolean(env.GH_TOKEN) && Boolean(env[OWNED_FP_VAR]) && fingerprint(env.GH_TOKEN) === env[OWNED_FP_VAR];
+const operatorOwns = (env) => Boolean(env.GH_TOKEN) && env.GH_TOKEN !== ownedToken && !inheritedOwned(env);
 
 function adopt(env, r) {
   if (!r.env.GH_TOKEN) return;
   env.GH_TOKEN = r.env.GH_TOKEN;
+  env[OWNED_FP_VAR] = fingerprint(r.env.GH_TOKEN);
   ownedToken = r.env.GH_TOKEN;
   ownedExpiry = Date.parse(r.expiresAt) || 0;
+}
+
+function drop(env) {
+  delete env.GH_TOKEN;
+  delete env[OWNED_FP_VAR];
+  ownedToken = null;
 }
 
 /** Startup hook: put the App token in `env` (the CLI process env, inherited by child `gh` calls). Prints one warning on fallback. An operator-exported GH_TOKEN wins. */
 export async function applyAuthEnv({ env = process.env, warn = (m) => process.stderr.write(`${m}\n`), ...rest } = {}) {
   if (operatorOwns(env)) return { env: {}, source: "personal", operator: true };
+  const inherited = Boolean(env.GH_TOKEN) && env.GH_TOKEN !== ownedToken; // not operator-owned here, so a token a parent ForgeDock set
   const r = await resolveAuth({ env, ...rest });
-  adopt(env, r);
+  if (r.env.GH_TOKEN) adopt(env, r);
+  else if (inherited) drop(env); // the inherited App token can no longer be refreshed: fall back to the user's own gh auth
   if (r.warning) warn(r.warning);
   return r;
 }
@@ -168,7 +182,7 @@ export function startAuthRefresh({ env = process.env, now = Date.now, fetch: fet
       return schedule(ownedExpiry - now() - REFRESH_BEFORE_MS + 1000);
     }
     if (!warned && r.warning) { warned = true; warn(r.warning); }
-    if (ownedExpiry <= t) { delete env.GH_TOKEN; ownedToken = null; } // expired: let gh fall back to the user's own auth
+    if (ownedExpiry <= t) drop(env); // expired: let gh fall back to the user's own auth
     schedule(60000);
   };
   schedule(ownedExpiry - now() - REFRESH_BEFORE_MS + 1000);
