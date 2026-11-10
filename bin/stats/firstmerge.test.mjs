@@ -31,4 +31,11 @@ describe("stats --first-merge (#5290)", () => {
     assert.match(renderFirstMerge(rep.query.first_merge), /10\.0 min.*met/);
     await assert.rejects(gatherFirstRunIssues({ gh: async () => "oops", repo: "o/r" }), /unreadable/);
   });
+  it("--repo a,b reports the median across repos", async () => {
+    const by = { "o/a": [iss(1, T0, [T0 + 5 * 60000])], "o/b": [iss(1, T0, [T0 + 25 * 60000])], "o/c": [iss(1, T0, [T0 + 9 * 60000])] };
+    const gh = async (a) => JSON.stringify(by[a[a.indexOf("-R") + 1]]);
+    const rep = await buildReport({ firstMerge: true, repo: "o/a,o/b,o/c" }, { gh });
+    assert.equal(rep.query.first_merge.median_minutes, 9);
+    assert.match(renderFirstMerge(rep.query.first_merge), /median time to first merged PR over 3 repos: 9\.0 min/);
+  });
 });

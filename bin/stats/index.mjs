@@ -22,7 +22,7 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
-import { firstMergeReport, gatherFirstRunIssues, renderFirstMerge } from "./firstmerge.mjs";
+import { firstMergeReport, gatherFirstRunIssues, medianMinutes, renderFirstMerge } from "./firstmerge.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
@@ -36,7 +36,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
-       forgedock stats --first-merge [--repo <owner/repo>] [--json]
+       forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --conformance-outcomes [--repo <owner/repo>] [--since <date>] [--window-days 7] [--min-n 20] [--json]
@@ -311,8 +311,13 @@ export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
   const repo = opts.repo;
   if (opts.firstMerge) { // #5290: GitHub issues + closing PRs only
-    const issues = await gatherFirstRunIssues({ gh: deps.gh ?? defaultGh, repo });
-    return { repo, query: { first_merge: firstMergeReport({ issues, repo }) } };
+    const gh = deps.gh ?? defaultGh;
+    const repos = String(repo).split(",");
+    const reports = [];
+    for (const r of repos) reports.push(firstMergeReport({ issues: await gatherFirstRunIssues({ gh, repo: r }), repo: r }));
+    if (repos.length === 1) return { repo, query: { first_merge: reports[0] } };
+    const med = medianMinutes(reports);
+    return { repo, query: { first_merge: { repo, repos: reports, median_minutes: med, target_minutes: 15, met: med == null ? null : med <= 15 } } };
   }
   if (opts.selfFiled) { // #5207: GitHub issues only, no telemetry crawl
     const p = parseSince(opts.since);
@@ -416,8 +421,9 @@ export async function runStats(argv, deps = {}) {
     process.stderr.write(`forgedock stats: --require-met needs --experiment <id>\n`);
     return 2;
   }
-  opts.repo = resolveRepo(opts.repo);
-  if (!opts.repo || !isValidRepo(opts.repo)) {
+  const multi = opts.firstMerge && opts.repo?.includes(","); // #5290: --repo a/x,b/y reports the median across repos
+  if (!multi) opts.repo = resolveRepo(opts.repo);
+  if (!opts.repo || !(multi ? opts.repo.split(",").every(isValidRepo) : isValidRepo(opts.repo))) {
     process.stderr.write(`forgedock stats: could not resolve a valid owner/repo (pass --repo owner/repo)\n`);
     return 2;
   }
@@ -450,6 +456,12 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.context_ab && !opts.json) { process.stdout.write(`${renderContextAb(report.query.context_ab)}\n`); return 0; }
     if (report.query?.explore_ab && !opts.json) { process.stdout.write(`${renderExploreAb(report.query.explore_ab)}\n`); return 0; }
     process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
+    if (!opts.json && !report.query) { // #5290: activation metric on the default report; best-effort, silent when absent
+      try {
+        const fm = firstMergeReport({ issues: await gatherFirstRunIssues({ gh: deps.gh ?? defaultGh, repo: opts.repo }), repo: opts.repo });
+        if (fm.started) process.stdout.write(`\n${renderFirstMerge(fm)}\n`);
+      } catch { /* no first-run data */ }
+    }
     return 0;
   } catch (err) {
     process.stderr.write(`forgedock stats: ${err.message}\n`);

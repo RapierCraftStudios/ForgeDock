@@ -33,6 +33,7 @@ export async function gatherFirstRunIssues({ gh, repo }) {
 }
 
 export function renderFirstMerge(r) {
+  if (r.repos) return `${r.repos.map(renderFirstMerge).join("\n")}\nmedian time to first merged PR over ${r.repos.length} repos: ${r.median_minutes == null ? "n/a" : `${r.median_minutes.toFixed(1)} min (target <= ${r.target_minutes}: ${r.met ? "met" : "not met"})`}`;
   if (!r.started) return `time to first merged PR, ${r.repo ?? "?"}: no first-run issues found (run: npx forgedock first-run)`;
   if (r.minutes == null) return `time to first merged PR, ${r.repo ?? "?"}: not merged yet (setup started ${r.started}, ${r.issues} first-run issue${r.issues === 1 ? "" : "s"})`;
   return `time to first merged PR, ${r.repo ?? "?"}: ${r.minutes.toFixed(1)} min (target <= ${r.target_minutes}: ${r.met ? "met" : "not met"}); setup ${r.started}, merged ${r.merged}`;
