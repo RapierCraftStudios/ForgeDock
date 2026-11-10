@@ -14,6 +14,23 @@ import { loadavg, cpus } from "node:os";
 import { scopeChecks, selectCommands, mergeChecks } from "./testmap.mjs";
 import { LOG_CAP } from "./verify.mjs";
 
+/**
+ * #5332: a check that hit its own timeout even after the one longer retry (rc 124) is host load, not a failing check.
+ * `failed` are the real failures (builder-visible, ci.red); `timedOut` are left to CI or end a recoverable timeout code.
+ */
+export function splitPrecheckResults(results) {
+  const list = Array.isArray(results) ? results : [];
+  return { failed: list.filter((r) => r.rc !== 0 && r.rc !== TIMEOUT_RC), timedOut: list.filter((r) => r.rc === TIMEOUT_RC) };
+}
+
+/** #5332: names each timed-out command and its limit (the `(timed out after Ns)` the run reported, i.e. the retry's, else `limitMs`). */
+export function timedOutDetail(timedOut, limitMs) {
+  return (timedOut ?? []).map((t) => {
+    const m = /\(timed out after (\d+)s\)/.exec(String(t.output ?? "")), s = m ? Number(m[1]) : Number(limitMs) > 0 && Number.isFinite(Number(limitMs)) ? Math.round(Number(limitMs) / 1000) : null;
+    return `\`${t.command}\` (timed out${s ? ` after ${s} s` : ""}, exit 124)`;
+  }).join(", ");
+}
+
 /** #4364: the engine's check plan for `forgedock check` (written beside contract.json) and the CLI's last run record. */
 export const CHECK_PLAN_FILE = ".forge-lean/check-plan.json";
 export const SELF_CHECK_FILE = ".forge-lean/self-check.json";

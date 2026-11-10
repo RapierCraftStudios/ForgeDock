@@ -160,7 +160,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
    #5079: `verify.precheck_block: true` makes that exhausted / no-commit case `needsHuman` `ci.red` (recoverable) instead. forge.yaml `verification.coupled_files` (`readEnvConfig` → `coupledFiles`; `coupled.mjs`) is a block map `{when glob: required glob[, glob]}` (`added:` prefix = newly added files only); a miss is a `coupled_file_missing` `conformance.unimplemented` failure passed to `precheck()` as `coupledFailures`. Path-scoped suites are `.forge/test-map.json` entries.
    Timeout (rc 124, #4589/#4620): retried once longer if the round budget has room; a spent budget defers the
-   command to CI, but a command that hit its own timeout with no room for a longer retry stays a failing rc 124.
+   command to CI. #5332: a command still at rc 124 after that is host load, never a failing check
+   (`precheck.mjs` `splitPrecheckResults`/`timedOutDetail`): no builder resume, never `ci.red`, `PRECHECK_COMMANDS`
+   `self_check` is `timed_out` (not green). Without `verify.precheck_block` it is a `deferred-to-ci` anomaly naming
+   command and limit; with it (or a failing guard) the lane ends `env.validate_timeout` (recoverable) with that detail.
    A validate rerun that still times out (#4906) is infrastructure: `precheck()` counts it covered when CI verified the
    head, else `env.validate_timeout` (environment state, recoverable, no builder resume; teardown pushes the commits),
    never `conformance.unimplemented`.
