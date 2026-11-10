@@ -3,9 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createVerify } from "node:crypto";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { createAppJwt, mintInstallationToken, findInstallation, buildAppManifest, convertManifestCode, receiveManifestCode, PIPELINE_PERMISSIONS } from "./app-manifest.mjs";
 import { authFromCli, resolveAuth, readState, statePath } from "./app-token.mjs";
 
@@ -54,7 +54,7 @@ test("loopback receiver returns the code only for the matching state", async () 
 });
 
 test("auth login --byo end to end: manifest, conversion, PEM 0600, install lookup, local mint on refresh", async () => {
-  const env = { FORGE_HOME_DIR: mkdtempSync(join(tmpdir(), "byo-")) };
+  const env = { FORGE_HOME_DIR: tmpDir("byo-") };
   const lines = [];
   const fetchFn = async (url, init) => {
     if (url.includes("/app-manifests/")) return json({ id: 5, slug: "mine", pem: privateKey });

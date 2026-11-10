@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, statSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { statSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveAuth, applyAuthEnv, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, authFromCli, doctorAppAuth, clearState } from "./app-token.mjs";
 
-const mkEnv = (extra = {}) => ({ FORGE_HOME_DIR: mkdtempSync(join(tmpdir(), "app-auth-")), ...extra });
+const mkEnv = (extra = {}) => ({ FORGE_HOME_DIR: tmpDir("app-auth-"), ...extra });
 const NOW = Date.parse("2026-01-01T00:00:00Z");
 const iso = (ms) => new Date(NOW + ms).toISOString();
 const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
