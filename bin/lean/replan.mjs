@@ -7,7 +7,7 @@ import { parentOf } from "./context.mjs";
 import { selectChildren, readChildList } from "./autochildren.mjs";
 
 export const REPLAN_MARKER = "FORGE:REPLAN";
-export const DISPOSITIONS = Object.freeze(["unchanged", "re-scoped", "dropped"]);
+export const CHILD_DISPOSITIONS = Object.freeze(["unchanged", "re-scoped", "dropped"]);
 export const DISPOSITIONS_TAG = "forge-replan-dispositions";
 const TEXT_MAX = 600;
 
@@ -60,7 +60,7 @@ export function amendmentBody({ inv, epic, from, children }) {
     "## Spike amendment", `Invalidated by #${from}: **${inv.decision}**`, "", `Why: ${inv.why}`, ...(inv.supersedes ? ["", `Supersedes decision ${inv.supersedes}.`] : []), "",
     "Update the spike and the epic so the design holds again, and record the replacement decision (`supersedes`). Then give every held child a disposition in one fenced block:", "",
     `\`\`\`${DISPOSITIONS_TAG}`, JSON.stringify({ children: Object.fromEntries(children.map((n) => [n, { disposition: "unchanged" }])) }, null, 2), "```", "",
-    `\`${DISPOSITIONS.join("`, `")}`.concat("` (a re-scoped child carries `body`, regenerated from the amended design; a dropped child is closed as superseded)."), "",
+    `\`${CHILD_DISPOSITIONS.join("`, `")}`.concat("` (a re-scoped child carries `body`, regenerated from the amended design; a dropped child is closed as superseded)."), "",
     `Held until this merges: ${children.length ? children.map((n) => `#${n}`).join(", ") : "none"}.`].join("\n");
 }
 
@@ -91,7 +91,7 @@ export function validateDispositions(d, affected) {
   const rows = [];
   for (const n of affected) {
     const e = d?.children?.[n] ?? d?.children?.[`#${n}`];
-    if (!e || !DISPOSITIONS.includes(e.disposition)) return { ok: false, problem: `open child #${n} has no valid disposition (${DISPOSITIONS.join(", ")})` };
+    if (!e || !CHILD_DISPOSITIONS.includes(e.disposition)) return { ok: false, problem: `open child #${n} has no valid disposition (${CHILD_DISPOSITIONS.join(", ")})` };
     if (e.disposition === "re-scoped" && !text(e.body, 100000)) return { ok: false, problem: `re-scoped child #${n} carries no regenerated body` };
     rows.push({ n, disposition: e.disposition, ...(e.disposition === "re-scoped" ? { body: String(e.body) } : {}) });
   }
