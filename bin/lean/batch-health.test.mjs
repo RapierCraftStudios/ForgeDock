@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch } from "./batch.mjs";
 import { DEFAULT_HEALTH, parseHealthConfig, rootsOf, evaluateHealth, formatAlert, runCheck, scheduleChecks, scheduleLine, runNotify, deliverAlert,
-  resolvedOnGithub, recordRefusal, readRefusals, statusLines, REFUSAL_KEEP } from "./batch-health.mjs";
+  resolvedOnGithub, recordRefusal, readRefusals, statusLines, REFUSAL_KEEP,
+  evaluateDispatchStall, firstHourReport, writeFirstHour, readFirstHour, recordStallAlert, summaryLines } from "./batch-health.mjs";
 
 // #1 and #3 are roots; #2 depends on #1, #4 on #3.
 const base = (results, extra = {}) => ({ order: [1, 2, 3, 4], deps: { 2: [1], 4: [3] }, results, running: {}, pending: [], ...extra });
@@ -185,5 +186,57 @@ describe("#5243 health re-reads GitHub before declaring root-failed", () => {
     const gh = async (a) => { if (a[0] === "pr") return JSON.stringify({ state: a[2] === "9" ? "MERGED" : "CLOSED" }); if (a[2] === "6") throw new Error("boom"); return JSON.stringify(views[a[2]]); };
     const cands = [1, 2, 3, 4, 5, 6].map((issue) => ({ issue, outcome: "needs-human" }));
     assert.deepEqual(await resolvedOnGithub(cands, gh, "o/r"), [1, 3]);
+  });
+});
+
+describe("#5314 dispatch stall and first-hour report", () => {
+  const NOW = 10_000_000, MIN = 60000;
+  const st = (extra = {}) => ({ order: [1, 2, 3], deps: { 3: [1] }, results: { 1: { outcome: "merged" } }, running: {}, pending: [2, 3], parallel: 2, ...extra });
+  const stall = (state, o = {}) => evaluateDispatchStall(state, { lastProgressMs: NOW - 12 * MIN, now: NOW, windowMin: 10, ...o });
+
+  it("ready pending issues, a free lane and no progress for the window: stalled, naming the batch's ready issues and who hosts", () => {
+    const r = stall(st());
+    assert.equal(r.code, "dispatch-stalled");
+    assert.deepEqual(r.ready, [2, 3]);
+    assert.match(r.detail, /no runner hosts the batch/);
+    assert.match(stall(st(), { hosted: true }).detail, /runner is alive but not dispatching/);
+  });
+
+  it("not stalled: recent progress, full lanes, held, retry-at ahead, unmet dependency, cancelled, reported, tripped breaker", () => {
+    assert.equal(stall(st(), { lastProgressMs: NOW - 2 * MIN }), null);
+    assert.equal(stall(st({ running: { 9: {} }, parallel: 1 })), null);
+    assert.equal(stall(st(), { held: [2, 3] }), null);
+    assert.equal(stall(st({ notBefore: { 2: NOW + MIN, 3: NOW + MIN } })), null);
+    assert.deepEqual(stall(st({ results: {} }))?.ready, [2], "#3 waits on #1");
+    assert.equal(stall(st(), { cancelled: true }), null);
+    assert.equal(stall(st(), { reported: true }), null);
+    assert.equal(stall(st({ breaker: { errors: 3 } })), null);
+    assert.equal(stall(st(), { lastProgressMs: null }), null);
+  });
+
+  it("the first-hour report counts dispatched / running / merged / stuck with reasons, is written once, and reaches summaryLines", () => {
+    const root = tmpDir("first-hour-"), b = openBatch(root, "b1");
+    b.writePlan({ daemon: true, repo: "o/r" });
+    const state = st({ running: { 2: {} }, pending: [3], results: { 1: { outcome: "merged" } } });
+    b.store.save(state);
+    const rep = firstHourReport(state, { batchId: "b1", now: NOW, held: [3] });
+    assert.deepEqual(rep.counts, { total: 3, dispatched: 2, running: 1, merged: 1, stuck: 1 });
+    assert.match(rep.summary, /2\/3 dispatched, 1 running, 1 merged, 1 stuck \(#3 held\)/);
+    assert.equal(writeFirstHour(b, rep), true);
+    assert.equal(writeFirstHour(b, rep), false, "once per batch");
+    assert.equal(readFirstHour(b.dir).summary, rep.summary);
+    assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /first hour: 2\/3 dispatched/);
+    assert.ok(summaryLines(root, { now: NOW }).some((l) => l.includes("batch b1: first hour")));
+  });
+
+  it("recordStallAlert raises one needs-you item per ready set and statusLines shows it", () => {
+    const root = tmpDir("stall-alert-"), b = openBatch(root, "b1");
+    b.writePlan({ daemon: true, repo: "o/r" });
+    const s1 = stall(st());
+    assert.equal(recordStallAlert(b, s1, { now: NOW }), true);
+    assert.equal(recordStallAlert(b, s1, { now: NOW }), false);
+    assert.equal(recordStallAlert(b, { ...s1, ready: [2] }, { now: NOW }), true, "a different ready set is a new item");
+    assert.ok(statusLines(root, { now: Date.now() }).some((l) => /BATCH UNHEALTHY b1/.test(l) || /dispatch-stalled/.test(l)));
+    assert.ok(summaryLines(root, { now: Date.parse(new Date(NOW).toISOString()) }).some((l) => /DISPATCH STALLED/.test(l)));
   });
 });

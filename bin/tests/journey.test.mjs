@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlink
 import { join } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, backupForgeYaml, detectDescription, makeCtx, preflight, forge, read, review, celebrate, pickNextStep, connect, maybeOfferDemo, maybeOfferFirstRun, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 // The installer, doctor and status resolve the Claude config dir from
@@ -230,6 +230,22 @@ describe("backfillForgeYaml (#1982)", () => {
     );
     backfillForgeYaml(dir);
     assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after a successful backfill");
+  });
+});
+
+describe("backupForgeYaml (#5315)", () => {
+  it("returns null when the file does not exist", () => {
+    assert.equal(backupForgeYaml(join(dir, "forge.yaml"), "x"), null);
+  });
+  it("records a config-history version and leaves no .bak in the repo", () => {
+    const out = join(dir, "forge.yaml");
+    writeFileSync(out, "x", "utf-8");
+    process.env.FORGE_CONFIG_HISTORY_DIR = join(dir, "history");
+    try { backupForgeYaml(out, "test"); } finally { delete process.env.FORGE_CONFIG_HISTORY_DIR; }
+    assert.ok(!existsSync(out));
+    assert.ok(!existsSync(join(dir, "forge.yaml.bak")));
+    const repos = readdirSync(join(dir, "history"));
+    assert.equal(readFileSync(join(dir, "history", repos[0], "1.yaml"), "utf-8"), "x");
   });
 });
 
@@ -2775,12 +2791,18 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
       },
       meta: { remoteDetected: true },
     };
-    const res = await review(ctx, draft, { value: "", source: "" });
+    process.env.FORGE_CONFIG_HISTORY_DIR = join(cwd, "history");
+    let res;
+    try { res = await review(ctx, draft, { value: "", source: "" }); } finally { delete process.env.FORGE_CONFIG_HISTORY_DIR; }
 
     assert.equal(res.aborted, false);
     assert.equal(res.written, true);
-    assert.ok(existsSync(join(cwd, "forge.yaml.bak")), "the old file must be backed up");
-    assert.equal(readFileSync(join(cwd, "forge.yaml.bak"), "utf-8"), "precious: true\n");
+    // #5315: the prior file goes to the config history, never a forge.yaml.bak in the repo.
+    assert.ok(!existsSync(join(cwd, "forge.yaml.bak")), "no forge.yaml.bak in the repo");
+    const histDir = join(cwd, "history");
+    const repoDirs = readdirSync(histDir);
+    assert.equal(repoDirs.length, 1, "one repo history");
+    assert.equal(readFileSync(join(histDir, repoDirs[0], "1.yaml"), "utf-8"), "precious: true\n");
   });
 
   it("no existing config: confirmFn is never called (nothing to confirm)", async () => {
@@ -2980,6 +3002,21 @@ describe("maybeOfferDemo (Act V.6)", () => {
     const result = await maybeOfferDemo(ctx);
     assert.equal(result.offered, false);
     assert.equal(result.ranDemo, false);
+  });
+});
+
+describe("maybeOfferFirstRun (#5290)", () => {
+  it("is skipped without a TTY and never asks", async () => {
+    const { ctx } = stubCtx({ isTTY: false, confirmFn: async () => { throw new Error("asked"); } });
+    assert.equal((await maybeOfferFirstRun(ctx)).offered, false);
+  });
+  it("declining runs nothing; accepting hands off to runFirstRunFn", async () => {
+    const { ctx } = stubCtx({ isTTY: true, confirmFn: async () => false, runFirstRunFn: async () => { throw new Error("ran"); } });
+    assert.deepEqual(await maybeOfferFirstRun(ctx), { offered: true, ran: false });
+    let called = false;
+    const { ctx: c2 } = stubCtx({ isTTY: true, confirmFn: async () => true, runFirstRunFn: async () => { called = true; } });
+    assert.deepEqual(await maybeOfferFirstRun(c2), { offered: true, ran: true });
+    assert.equal(called, true);
   });
 });
 

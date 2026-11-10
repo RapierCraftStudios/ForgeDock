@@ -95,6 +95,14 @@ for c in missing noblock untrusted otherhead; do
     grep -qF 'review-degraded' "$FIX/edits" 2>/dev/null && ok || bad "$c: shortfall must label the PR review-degraded"
   fi
 done
+# (4b) stale SHA: the reviewer is named with its found SHA and is the only REDISPATCH line; a block-less one is named too
+newfix stale; printf 'security\nmaterial-change\n' > "$FIX/sd/42_launched_review_agents"; mkdir -p "$FIX/sd/review-staging-42"; : > "$FIX/sd/review-staging-42/brief-security.md"
+{ cm "$(agent security "${HEAD:0:7}")"; cm "$(agent material-change)"; } | comments
+OUT=$(deliver)
+case "$OUT" in *"security: stale or wrong Reviewed-SHA ${HEAD:0:7} (expected $HEAD)"*) ok ;; *) bad "stale: reviewer and SHA must be named (got: $OUT)" ;; esac
+[ "$(printf '%s\n' "$OUT" | grep -c '^REDISPATCH ')" = 1 ] && printf '%s\n' "$OUT" | grep -q "^REDISPATCH security $FIX/sd/review-staging-42/brief-security.md$" && ok || bad "stale: only security may be re-dispatched (got: $OUT)"
+newfix noblock2; printf 'security\n' > "$FIX/sd/42_launched_review_agents"; cm "$(agent security "$HEAD" 'no block')" | comments
+OUT=$(deliver); case "$OUT" in *"security: posted at the right SHA but without"*"REDISPATCH security"*) ok ;; *) bad "noblock: reason must be given (got: $OUT)" ;; esac
 # empty / absent launched list fails closed
 newfix empty; : > "$FIX/sd/42_launched_review_agents"; cm "$(agent security)" | comments
 OUT=$(deliver); case "$OUT" in *"rc=1") ok ;; *) bad "empty launched list must fail (got: $OUT)" ;; esac

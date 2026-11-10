@@ -28,7 +28,7 @@ import {
   findMarkdownFiles,
   parseInstallTier,
   writeForgeYaml,
-  backupExisting,
+  backupForgeYaml,
   backfillForgeYaml,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
@@ -69,10 +69,10 @@ import {
 import { renderMark, ember } from "./cinema.mjs";
 import { checkPrereqs, offerInstall } from "./prereqs.mjs";
 import { guideText, guideWidth, useAnsi } from "./guide.mjs";
+import { topLevelHelp, fullHelp } from "./help-text.mjs";
 import {
   renderLogo,
   getLogoTagline,
-  box,
   table,
   input,
   confirm,
@@ -90,6 +90,8 @@ import {
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
 import { checkContext, refreshContextFlow } from "./review-context.mjs";
+import { runConfigCommand } from "./config-history.mjs";
+import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
 import { applyAuthEnv, doctorAppAuth } from "./auth/app-token.mjs";
 import {
@@ -259,7 +261,8 @@ const flags = rawArgs.filter((a) => FLAGS.has(a));
 // with existing invocations, but is otherwise a no-op — see the install-mode
 // path resolution block above (global is now the only install location).
 const positional = rawArgs.filter((a) => !FLAGS.has(a) && a !== "--global");
-const command = positional[0] || "install";
+// `setup` is the plain-language name of the guided install (#5303).
+const command = !positional[0] || positional[0] === "setup" ? "install" : positional[0];
 const cmdIdx = rawArgs.findIndex((a) => !FLAGS.has(a) && a !== "--global");
 const restArgs = cmdIdx === -1 ? [] : rawArgs.slice(cmdIdx + 1).filter((a) => a !== "--global");
 
@@ -1087,7 +1090,7 @@ async function initFlow(c) {
     return refreshContextFlow({
       cwd: c.cwd,
       out: c.stdout,
-      deps: { interactive: process.stdin.isTTY === true, confirm, backup: backupExisting, write: atomicWriteFile },
+      deps: { interactive: process.stdin.isTTY === true, confirm, backup: (p) => backupForgeYaml(p, "refresh-context"), write: atomicWriteFile },
     });
   }
   const hasExisting = existsSync(outputPath);
@@ -1128,7 +1131,7 @@ async function initFlow(c) {
       c.stdout.write("  Run this inside the target git repository, or use interactive init (npx forgedock init) to edit those fields.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init (minimal)");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const content = buildMinimalForgeYaml({
       projectName: draft.project.name.value,
@@ -1167,7 +1170,7 @@ async function initFlow(c) {
       c.stdout.write("  Enter real values, or run this inside the target git repository.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
@@ -2764,6 +2767,8 @@ async function doctor(fix = false, verbose = false) {
             }
           } catch { /* advisory check: never fail doctor */ }
 
+          for (const f of validateForgeYaml(content)) (f.level === "error" ? fail : warn)(`forge.yaml ${f.code}`, f.message);
+
           const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
           const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
           if (
@@ -3366,88 +3371,11 @@ async function doctor(fix = false, verbose = false) {
   return failures > 0 ? 1 : 0;
 }
 
-function help() {
-  // splash() already rendered the logo to stderr — the command table itself
-  // goes to stdout (help output is the requested artifact).
-  const commands = [
-    ["Command", "Description"],
-    ["npx forgedock", "Guided setup: install commands + configure repo (default)"],
-    ["npx forgedock guide", "How the workflow fits together: core commands, issue -> staging -> main, where a run ends, how to resume"],
-    ["npx forgedock install", "Install commands to ~/.claude/"],
-    ["npx forgedock init", "Generate forge.yaml config for your project"],
-    ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
-    ["npx forgedock enable [dir]", "Activate ForgeDock in a directory"],
-    ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
-    ["npx forgedock fix-close-reasons <owner/repo> [--milestone <m>] [--apply]", "Re-close issues that were closed not planned but carry workflow:merged or workflow:decomposed (delivered, not dropped) as completed, with a comment; dry run unless --apply; workflow:invalid issues are never touched"],
-    ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
-    ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
-    ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
-    ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
-    ["npx forgedock plan validate --live [--repo owner/repo] [--json]", "Re-run the bootstrap dependency-order rules on live GitHub state: each cross-milestone Depends-on edge is ok, held or invalid (exit 1 on invalid)"],
-    ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
-    ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --set-max-remote <id> N | --set-placement <id> remote|hybrid|local | --add <id> N... | --requeue <id> N... [--reason \"...\"] | --cancel <id> | --hold <id> N... | --release <id> N... | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, change its max_remote or placement mode live (remote/hybrid need a batch started with a remote provider; running lanes are not stopped), add issues to a running (or held) batch under its K and DAG, requeue a terminal issue (and the dependents skipped behind it) after an operator decision (refused while it is labelled needs-human or closed; a finished batch is reopened), or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume), or hold/release single issues of a batch (a held issue is not admitted until released or named by --resume), or print (secrets redacted), set or unset a batch's pinned lane env (applies to newly launched lanes)"],
-    ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
-    ["npx forgedock probe [issue...] [--dry-run]", "Run declared acceptance probes for closed issues whose fix is on the default branch; a fail reopens the issue"],
-    ["npx forgedock check [--base REF] [--json]", "Run the lane's frozen validate commands and change-scoped pre-PR checks locally in this worktree, as the engine will (no GitHub, no Actions)"],
-    ["npx forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> [--before s|--after s] | --show <id>", "Unattended multi-milestone train: one durable state file (order, active set, lifecycle), typed STOP reasons, resumable; never edits forge.yaml"],
-    ["npx forgedock guards list [--path p] [--json] | backfill --since <date> [--dry-run]", "Fix guards: list the FORGE:GUARD records (test files + protected hunks of merged fixes) covering a path, or build them for already-merged lean lanes"],
-    ["npx forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--dry-run] | status [--name <w>]", "Named, scoped, capped watches (forge.yaml issue_watch.watches) that claim matching open issues into lanes or one long-lived orchestrate batch, or (mode: release) pool them and cut themed releases; see docs/ISSUE-WATCH.md"],
-    ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; see docs/SELFTEST.md"],
-    ["npx forgedock prod-watch run [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status", "Production-side watcher (forge.yaml prod_watch): read-only signal sources -> triage -> governor -> issues, kill-switch file, owner digest; see docs/PROD-WATCH.md"],
-    ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
-    ["npx forgedock decisions list [--stale] [--refresh]", "List anchored decisions (FORGE:DECISION); --stale shows those with an anchor missing on the base"],
-    ["npx forgedock sched show | cap <N>|--clear | weight <owner/repo> <N>|--clear", "Show the host lane registry, set the host-wide lane cap shared by orchestrate batches, or set a repo's share of slots within a priority (default equal)"],
-    ["npx forgedock schedd [status | watchdog]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid, batches and last tick; watchdog restarts a stalled daemon"],
-    ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
-    ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes] [--sandboxes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes, orphaned lane sandboxes; unowned resources and unpushed work are only reported"],
-    ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
-    ["npx forgedock replay --timelapse <batch|epic> [--repo owner/repo] [--out dir] [--format gif|mp4] [--duration 30-90]", "Read-only 30-90 s time-lapse (frames, vhs tape, GIF/MP4 when vhs is installed) of a recorded batch or epic from the lifecycle event log"],
-    ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
-    ["npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]", "Bootstrap ForgeDock-managed labels on a GitHub repo, plus optional per-repo domain labels (idempotent)"],
-    ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
-    ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
-    ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
-    ["npx forgedock review-staging [<PR>] [--thorough] [--json]", "Staging->main review pre-dispatch: route marker, open-finding gate, scope, prepare, roster; writes one reviewer brief per domain"],
-    ["npx forgedock review-staging [<PR>] --finalize --test-gate-output <file>", "Staging->main review post-dispatch: delivery, test-gate verdict, extract/classify/file-prepare; prints the findings to file"],
-    ["npx forgedock review-staging [<PR>] --summary [--filed <N>]...", "Staging->main review Phase 8: verdict and summary comment with the FORGE:GATE_PASS / FORGE:GATE_FAILURE marker"],
-    ["npx forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | release verify <sha> [--repo owner/repo]", "Staging->default release as one resumable job: preflight, release PR, review, fixes, promotion (stops at GATE_PASS unless --merge or release.auto_merge), post-merge; release.mode: snapshot cuts release/<id> from staging (lanes keep merging, fixes are cherry-picked, FORGE:RELEASE records them); verify checks a release head against that record"],
-    ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
-    ["npx forgedock stats --origin [--repo R] [--since D] [--json]", "Requested vs pipeline-generated issues by origin, how pipeline-found ones closed, and their cost share (#5294)"],
-    ["npx forgedock stats --self-filed [--repo R] [--since D]", "Share of new issues the pipeline filed itself, by kind, against the 15% target (#5207)"],
-    ["npx forgedock stats --conformance-outcomes [--repo owner/repo] [--since <date>] [--window-days 7] [--replay <pr,...> --enforce-domains <list>]", "Read-only: do conformance blocks predict post-merge defects (2x2 per repo, failure kind and risk surface; --replay a PR list against an enforce config)"],
-    ["npx forgedock stats --depth [--since <ver|date>] [--min-n N] [--offline] [--repo owner/repo] [--json]", "Light-eligible vs ineligible lane outcomes, by reason/signal, and the #5052 light-lane promotion verdict"],
-    ["npx forgedock doctor", "Check installation health"],
-    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
-    ["npx forgedock doctor --verbose", "Also show internal and legacy checks (FORGE_HOME, Playwright MCP, version-gated features, resource hygiene)"],
-    ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
-    ["npx forgedock update", "Pull latest & reinstall"],
-    ["npx forgedock --no-splash", "Run setup without installing the startup splash plugin (or set FORGEDOCK_NO_SPLASH=1)"],
-    ["npx forgedock uninstall", "Remove commands"],
-    ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
-    ["npx forgedock opencode status", "Check the OpenCode adapter"],
-    ["npx forgedock opencode uninstall", "Remove ForgeDock-owned OpenCode files"],
-    ["npx forgedock version", "Print the installed version and check for updates"],
-    ["npx forgedock help", "Show this help"],
-  ];
-  const flagRows = [
-    ["Flag", "Description"],
-    ["--fast", "Skip animation/motion"],
-    ["--manual", "Plain text prompts instead of the review screen (init)"],
-    ["--verbose", "Show detection sources for every field (init)"],
-    ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
-    ["--refresh-context", "Regenerate review.context/tech_stack from manifests and show a diff for approval (init)"],
-    ["--version, -v", "Print the installed version and check for updates"],
-  ];
-
-  // Fit the terminal (100 columns when stdout is not a TTY: CI logs, pipes); the box adds 4.
-  const maxWidth = guideWidth(process.stdout) - 4;
-  process.stdout.write("New to ForgeDock? npx forgedock guide explains the workflow in one screen.\n\n");
-  process.stdout.write(
-    box(table(commands, { header: true, maxWidth }), { title: "Usage" }) + "\n",
-  );
-  process.stdout.write(
-    box(table(flagRows, { header: true, maxWidth }), { title: "Flags" }) + "\n",
-  );
+function help(all = false) {
+  // splash() already rendered the logo to stderr; the help text itself goes to stdout (it is the requested artifact).
+  // Fit the terminal (100 columns when stdout is not a TTY: CI logs, pipes).
+  const width = guideWidth(process.stdout);
+  process.stdout.write((all ? fullHelp({ width }) : topLevelHelp({ width })) + "\n");
 }
 
 /**
@@ -3989,10 +3917,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4451,6 +4379,20 @@ switch (command) {
   case "demo":
     await demo();
     break;
+  case "first-run": {
+    // #5290: propose/file small issues on this repo and run one to a PR
+    const { runFirstRun } = await import("./first-run.mjs");
+    const { execFileSync } = await import("node:child_process");
+    const { confirm } = await import("./tui.mjs");
+    const { runFromCli } = await import("./engine-cli.mjs");
+    const r = await runFirstRun({
+      exec: (cmd, args) => execFileSync(cmd, args, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 30000 }).trim(),
+      confirmFn: confirm,
+      runIssueFn: (n) => runFromCli([String(n)]),
+    });
+    if (r.status === "error") exitCode = 1;
+    break;
+  }
   case "auth": {
     const { authFromCli } = await import("./auth/app-token.mjs");
     exitCode = await authFromCli(restArgs);
@@ -4530,11 +4472,14 @@ switch (command) {
         console.log(`\n  Sections already present (unchanged): ${result.alreadyPresent.join(", ") || "none"}`);
         console.log(`\n  All added sections are commented out — edit forge.yaml to enable the ones you need.`);
       }
+    } else if (["history", "diff", "rollback", "record", "import-bak"].includes(subcommand)) {
+      exitCode = runConfigCommand(subcommand, restArgs.slice(1), { cwd: process.cwd() });
     } else {
       console.log(`${RED}Unknown config subcommand: ${subcommand ?? "(none)"}${RESET}`);
       console.log(
         `Usage: ${CYAN}npx forgedock config migrate [dir]${RESET}\n` +
-          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).`,
+          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).\n` +
+          `       ${CYAN}npx forgedock config history | diff <n> | rollback <n> | record [reason] | import-bak [--delete]${RESET}`,
       );
       exitCode = 1;
     }
@@ -4602,7 +4547,7 @@ switch (command) {
   case "help":
   case "--help":
   case "-h":
-    help();
+    help(positional.includes("--all") || process.argv.includes("--all"));
     break;
   case "guide":
     process.stdout.write(guideText({ width: guideWidth(process.stdout), ansi: useAnsi(process.stdout) }) + "\n");

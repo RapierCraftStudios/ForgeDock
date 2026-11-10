@@ -28,7 +28,7 @@ describe("#4773: --add reports the edges it created", () => {
       const lines = [], log = console.log;
       console.log = (l) => lines.push(String(l));
       let out;
-      try { out = await orchestrateFromCli(["--add", id, "5", "6", "9"], { io }); } finally { console.log = log; }
+      try { out = await orchestrateFromCli(["--add", id, "5", "6", "9"], { io }).catch((e) => { if (e.code === "batch.not-hosted") return e.result; throw e; }); } finally { console.log = log; }
       assert.deepEqual(out.edges, [{ from: 5, to: 6 }]);
       assert.ok(lines.some((l) => l === `batch ${id}: edges #5 blocked by #6`), lines.join("\n"));
     } finally { if (prev === undefined) delete process.env.FORGEDOCK_BATCH_DIR; else process.env.FORGEDOCK_BATCH_DIR = prev; }

@@ -22,6 +22,7 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
+import { firstMergeReport, gatherFirstRunIssues, medianMinutes, renderFirstMerge } from "./firstmerge.mjs";
 import { gatherOriginIssues, originReport, renderOrigin } from "./origin.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
 import { batchRoot } from "../lean/batch.mjs";
@@ -36,6 +37,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --origin [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
@@ -101,6 +103,7 @@ Issue origin (#5294; GitHub issues and telemetry):
                         how the pipeline-originated ones closed and their share of cost; --since <date> (default: last 30 days)
 
 Self-filed issues (#5207; GitHub issues only):
+  --first-merge         setup start to first merged PR on a first-run repo, against the 15 min target (#5290)
   --self-filed          share of new issues the pipeline filed itself, by kind (follow-up, review-finding, staging-review,
                         rollup), against the 15% target; --since <date> bounds the window (default: the last 30 days)
 
@@ -147,7 +150,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -168,6 +171,7 @@ export function parseArgs(argv) {
     else if (name === "--tiers") o.tiers = true;
     else if (name === "--compounding") o.compounding = true;
     else if (name === "--self-filed") o.selfFiled = true;
+    else if (name === "--first-merge") o.firstMerge = true;
     else if (name === "--origin") o.origin = true;
     else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
@@ -324,6 +328,15 @@ export function readAlertConfig(cwd = process.cwd()) {
 export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
   const repo = opts.repo;
+  if (opts.firstMerge) { // #5290: GitHub issues + closing PRs only
+    const gh = deps.gh ?? defaultGh;
+    const repos = String(repo).split(",");
+    const reports = [];
+    for (const r of repos) reports.push(firstMergeReport({ issues: await gatherFirstRunIssues({ gh, repo: r }), repo: r }));
+    if (repos.length === 1) return { repo, query: { first_merge: reports[0] } };
+    const med = medianMinutes(reports);
+    return { repo, query: { first_merge: { repo, repos: reports, median_minutes: med, target_minutes: 15, met: med == null ? null : med <= 15 } } };
+  }
   if (opts.selfFiled) { // #5207: GitHub issues only, no telemetry crawl
     const p = parseSince(opts.since);
     if (p.sinceVersion) throw new Error("--self-filed: --since must be a date (YYYY-MM-DD)");
@@ -442,8 +455,9 @@ export async function runStats(argv, deps = {}) {
     process.stderr.write(`forgedock stats: --require-met needs --experiment <id>\n`);
     return 2;
   }
-  opts.repo = resolveRepo(opts.repo);
-  if (!opts.repo || !isValidRepo(opts.repo)) {
+  const multi = opts.firstMerge && opts.repo?.includes(","); // #5290: --repo a/x,b/y reports the median across repos
+  if (!multi) opts.repo = resolveRepo(opts.repo);
+  if (!opts.repo || !(multi ? opts.repo.split(",").every(isValidRepo) : isValidRepo(opts.repo))) {
     process.stderr.write(`forgedock stats: could not resolve a valid owner/repo (pass --repo owner/repo)\n`);
     return 2;
   }
@@ -461,6 +475,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.conformance_outcomes && !opts.json) { const co = report.query.conformance_outcomes; process.stdout.write(`${renderConformanceOutcomes(co)}${co.replay ? `\n\n${renderReplay(co.replay)}` : ""}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
+    if (report.query?.first_merge && !opts.json) { process.stdout.write(`${renderFirstMerge(report.query.first_merge)}\n`); return 0; }
     if (report.query?.origin && !opts.json) { process.stdout.write(`${renderOrigin(report.query.origin)}\n`); return 0; }
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
@@ -476,6 +491,12 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.context_ab && !opts.json) { process.stdout.write(`${renderContextAb(report.query.context_ab)}\n`); return 0; }
     if (report.query?.explore_ab && !opts.json) { process.stdout.write(`${renderExploreAb(report.query.explore_ab)}\n`); return 0; }
     process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
+    if (!opts.json && !report.query) { // #5290: activation metric on the default report; best-effort, silent when absent
+      try {
+        const fm = firstMergeReport({ issues: await gatherFirstRunIssues({ gh: deps.gh ?? defaultGh, repo: opts.repo }), repo: opts.repo });
+        if (fm.started) process.stdout.write(`\n${renderFirstMerge(fm)}\n`);
+      } catch { /* no first-run data */ }
+    }
     return 0;
   } catch (err) {
     process.stderr.write(`forgedock stats: ${err.message}\n`);

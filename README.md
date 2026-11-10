@@ -4,7 +4,9 @@
 
 <h1>ForgeDock</h1>
 
-<p><strong>From GitHub issues to reviewed, tested, merged changes, autonomously.</strong></p>
+<p><strong>An AI engineering team that ships to production</strong></p>
+
+<p>From GitHub issues to reviewed, tested, merged changes, autonomously.</p>
 
 <p>ForgeDock runs AI coding agents through validation, implementation, review, CI and merge, one issue per lane, many lanes in parallel. Every step is recorded on GitHub, so runs survive crashes, later agents build on earlier ones, and you can audit everything.</p>
 
