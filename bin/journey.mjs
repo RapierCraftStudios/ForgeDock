@@ -12,6 +12,7 @@
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
+import { backupToHistory } from "./config-history.mjs";
 
 // ---------------------------------------------------------------------------
 // forge.yaml generation (Task 4)
@@ -503,6 +504,14 @@ export function backupExisting(outputPath) {
   }
   renameSync(outputPath, baseBak);
   return { backupName: basename(baseBak) };
+}
+
+/**
+ * Setup/agent edit of forge.yaml (#5315): record the current file as a config-history version (~/.forge/config-history/<repo>/)
+ * and move it away, instead of leaving a forge.yaml.bak in the repo. Same return shape as backupExisting.
+ */
+export function backupForgeYaml(outputPath, reason = "setup") {
+  return backupToHistory(outputPath, reason);
 }
 
 /**
@@ -2712,7 +2721,7 @@ export async function review(ctx, draft, description) {
     return { written: false, todoCount: 0, backupName: null, aborted: true };
   }
 
-  const backup = backupExisting(outputPath);
+  const backup = backupForgeYaml(outputPath, "setup review");
   if (backup) w.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
 
   const { todoCount } = writeForgeYaml(accepted, accepted.lowConfidenceKeys, outputPath);

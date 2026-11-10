@@ -1623,6 +1623,31 @@ the gate is DEGRADED and reported in `verification_skipped`, never a silent pass
 
 ---
 
+## Schema check and config history (#5315)
+
+forge.yaml is parsed tolerantly, so a setting nobody reads used to be silent. `bin/config-schema.mjs` now checks it:
+
+| Finding | Level | Meaning |
+|---------|-------|---------|
+| `unknown-key` | error | A top-level key outside the sections in this document, or an unknown child of a closed section (`verification.ci_local`) |
+| `ignored-on-path` | error | The key is set, but the active `engine.path` never reads it (the legacy `full` path ignores `env`, `verify`, `lean`, `engine.conformance`, `engine.conformance_kinds`) |
+| `wrong-type` | error | A typed key has the wrong shape (for example `verification.ci_local.extra_commands` that is not a list, `engine.path` outside `core\|full\|lean\|auto`) |
+| `deprecated-alias` | warning | `pipeline.token_budget_per_batch`, `build.diff_size.threshold` |
+
+`npx forgedock doctor` reports errors as failures and aliases as warnings; `orchestrate` prints one `config: ...` line per finding at batch start, naming the key.
+
+### Config history
+
+Every setup or agent edit of forge.yaml records a version under `~/.forge/config-history/<owner>__<repo>/` (override the root with `FORGE_CONFIG_HISTORY_DIR`), never a `forge.yaml.bak-*` file in the repo.
+
+| Command | Does |
+|---------|------|
+| `forgedock config history` | Lists versions with date and reason |
+| `forgedock config diff <n>` | Diffs version `n` against the current forge.yaml |
+| `forgedock config rollback <n>` | Restores version `n`; the current content is recorded first, so a rollback can be undone |
+| `forgedock config record [reason]` | Records the current forge.yaml as a version |
+| `forgedock config import-bak [--delete]` | One-time import of `forge.yaml.bak*` files in the repo into the history (idempotent); `--delete` removes them |
+
 ## Credentials File Format
 
 If `paths.credentials.file` is set, the file at that path is expected to be a YAML file with this structure:

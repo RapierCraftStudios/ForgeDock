@@ -28,7 +28,7 @@ import {
   findMarkdownFiles,
   parseInstallTier,
   writeForgeYaml,
-  backupExisting,
+  backupForgeYaml,
   backfillForgeYaml,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
@@ -89,6 +89,8 @@ import {
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
 import { checkContext, refreshContextFlow } from "./review-context.mjs";
+import { runConfigCommand } from "./config-history.mjs";
+import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
 import { applyAuthEnv, doctorAppAuth } from "./auth/app-token.mjs";
 import {
@@ -1086,7 +1088,7 @@ async function initFlow(c) {
     return refreshContextFlow({
       cwd: c.cwd,
       out: c.stdout,
-      deps: { interactive: process.stdin.isTTY === true, confirm, backup: backupExisting, write: atomicWriteFile },
+      deps: { interactive: process.stdin.isTTY === true, confirm, backup: (p) => backupForgeYaml(p, "refresh-context"), write: atomicWriteFile },
     });
   }
   const hasExisting = existsSync(outputPath);
@@ -1127,7 +1129,7 @@ async function initFlow(c) {
       c.stdout.write("  Run this inside the target git repository, or use interactive init (npx forgedock init) to edit those fields.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init (minimal)");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const content = buildMinimalForgeYaml({
       projectName: draft.project.name.value,
@@ -1166,7 +1168,7 @@ async function initFlow(c) {
       c.stdout.write("  Enter real values, or run this inside the target git repository.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
@@ -2759,6 +2761,8 @@ async function doctor(fix = false, verbose = false) {
               warn("review context", `REVIEW_CONTEXT_STALE: generated ${ctxCheck.generated_at}, ${ctxCheck.merged_since} PRs merged since (limit ${ctxCheck.max_merged_prs}). Run: npx forgedock init --refresh-context`);
             }
           } catch { /* advisory check: never fail doctor */ }
+
+          for (const f of validateForgeYaml(content)) (f.level === "error" ? fail : warn)(`forge.yaml ${f.code}`, f.message);
 
           const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
           const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
@@ -4522,11 +4526,14 @@ switch (command) {
         console.log(`\n  Sections already present (unchanged): ${result.alreadyPresent.join(", ") || "none"}`);
         console.log(`\n  All added sections are commented out — edit forge.yaml to enable the ones you need.`);
       }
+    } else if (["history", "diff", "rollback", "record", "import-bak"].includes(subcommand)) {
+      exitCode = runConfigCommand(subcommand, restArgs.slice(1), { cwd: process.cwd() });
     } else {
       console.log(`${RED}Unknown config subcommand: ${subcommand ?? "(none)"}${RESET}`);
       console.log(
         `Usage: ${CYAN}npx forgedock config migrate [dir]${RESET}\n` +
-          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).`,
+          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).\n` +
+          `       ${CYAN}npx forgedock config history | diff <n> | rollback <n> | record [reason] | import-bak [--delete]${RESET}`,
       );
       exitCode = 1;
     }
