@@ -2773,6 +2773,20 @@ export async function review(ctx, draft, description) {
 // ---------------------------------------------------------------------------
 
 /**
+ * The single recommended command after a green setup (#5304). Order: install
+ * the App (#5295), merge a first PR on the user's own repo (#5290), then the
+ * demo. The first two flows are not shipped yet, so flip their availability
+ * here when they land.
+ * @param {{appFlow?: boolean, firstPrFlow?: boolean}} [avail]
+ * @returns {{command: string, why: string}}
+ */
+export function pickNextStep({ appFlow = false, firstPrFlow = false } = {}) {
+  if (appFlow) return { command: "npx forgedock install-app", why: "give ForgeDock its own bot identity and rate limit" };
+  if (firstPrFlow) return { command: "npx forgedock first-pr", why: "merge your first PR on your own repo" };
+  return { command: "npx forgedock demo --run", why: "watch a PR merge on a risk-free demo repo (uses your Claude Code login)" };
+}
+
+/**
  * Act V: quench flash on the compact mark, receipt with real elapsed time,
  * next-steps box.
  */
@@ -2803,21 +2817,8 @@ export function celebrate(ctx, summary) {
   if (summary.isMinimal) {
     w.write("  " + dimLine(ctx, "see docs/CONFIG.md for optional sections") + "\n");
   }
-  w.write(
-    box(
-      [
-        `  1. install GitHub App       — github.com/apps/rapiercraft-forgedock`,
-        `  2. run npx forgedock labels setup — bootstrap GitHub labels`,
-        `  3. run npx forgedock doctor     — verify the install is green`,
-        `  4. open claude in this repo`,
-        `  5. run /issue <title> then /work-on <number>`,
-        `  6. run npx forgedock run-issue <N> — drive an issue via the durable engine`,
-        `  7. run npx forgedock watch      — monitor pipeline state`,
-        `  8. run npx forgedock guide      — how the workflow fits together`,
-      ],
-      { title: "what's next" },
-    ),
-  );
+  const next = pickNextStep();
+  w.write(box([`  ${next.command}`, `  ${next.why}`], { title: "next step" }));
   w.write("  " + dimLine(ctx, "not for you? npx forgedock uninstall removes everything · full command list: npx forgedock help") + "\n");
   w.write("  " + dimLine(ctx, "docs: github.com/RapierCraftStudios/ForgeDock · ⭐ a star is the whole marketing budget") + "\n\n");
 }
