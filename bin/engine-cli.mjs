@@ -24,6 +24,7 @@ import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/ev
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane, makeLaneCache } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
+import { coerceVerify as coerceCiVerify, budgetReportLine, recordHostCheck } from "./lean/ci-budget.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
@@ -425,7 +426,7 @@ export function readVerify(cwd = process.cwd()) {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
     const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
-    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) });
+    return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -2096,6 +2097,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
+  report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396
@@ -2457,6 +2459,10 @@ export async function checkFromCli(argv, deps = {}) {
   const strip = (x) => (x.status ? { ...(x.id ? { id: x.id } : {}), command: x.command, status: x.status } : { ...(x.id ? { id: x.id } : {}), command: x.command, rc: x.rc, ms: x.ms });
   const record = { v: 1, at: new Date((deps.now ?? Date.now)()).toISOString(), base, fingerprint, ok: r.ok, validate: r.validate.map(strip), commands: [...r.commands.map(strip), ...r.deferred.map((command) => ({ command, status: "deferred-to-ci" }))] };
   try { await (deps.writeFile ?? ((p, t) => fsp.writeFile(p, t)))(join(repo, pre.SELF_CHECK_FILE), `${JSON.stringify(record)}\n`); } catch { /* .forge-lean missing: still print */ }
+  try { // #5278: parity row for the local green -> remote red hit rate; the attested status in ci.mode local-attested
+    const suites = [...record.validate, ...record.commands].filter((x) => !x.status).map((x) => ({ name: x.id ?? x.command, ok: x.rc === 0 }));
+    await recordHostCheck({ cwd: repo, head: String(await git(["rev-parse", "HEAD"])).trim(), ok: r.ok, suites });
+  } catch { /* best effort */ }
   out(o.json ? JSON.stringify({ ...r, base, fingerprint }, null, 2) : pre.formatCheckTable(r));
   return { ...r, base, fingerprint, files, exitCode: r.ok ? 0 : 1 };
 }

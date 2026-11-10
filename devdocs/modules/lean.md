@@ -2771,6 +2771,11 @@ How to read it:
   with property checks (#4149). That decision is separate work.
 - Read only: one GraphQL search per 100 PRs plus local `git blame` (same-hunks is `null` outside a clone of the repo). No
   lane-path cost, no LLM. Definitions: `docs/STATS.md`.
+- By surface and replay (#5283): PR changed files (first 100 per PR) give each lane PR its surfaces, `domain:*` from
+  `pathDomains` (`review-roster.sh`) and `risk:*` from `riskClassOf`; each repo gains `surface <s>` rows (same 2x2, n/a under min n).
+  `--replay <pr,...> [--enforce-domains d,.. --risk-paths glob,..]` (window-free) lists per PR mode, shadow verdict, surfaces and
+  `enforced` (configured surface hit and nonconforming), `flagged` (hit, but the review would pass: enforce cannot block a passing
+  review) or `none`. The global default stays shadow; enforcement is set per repo with `review.enforce_domains`/`review.risk_paths`.
 
 ## Entry 2026-11-07 — experiment arm-scoped config overrides (#5206)
 
@@ -2840,9 +2845,23 @@ live-measurement issues is not part of this change.
 
 `release.mjs` `promotionStep` now runs `gh pr view --json state,mergeCommit,headRefOid` before any gate or opt-in check. A `MERGED` PR (merged by hand after the default GATE_PASS stop, or by a `--merge` run that crashed after `gh pr merge`) returns `{merged:true, alreadyMerged:true, mergeCommit, head}` so `--resume` reaches post-merge with the merge sha; it never gates and never calls `pr merge` again. A `CLOSED` PR returns `{stopped:true}`. An `OPEN` PR keeps the existing flow (GATE_PASS, opt-in stop, deploy-gate, `--match-head-commit` merge).
 
+## Entry 2026-11-10 — Actions-minutes budget and `ci.mode` placement (#5278)
+
+`ci-budget.mjs` detects repo visibility, plan and month-to-date Actions usage across the owner (billing usage API, runner-rate weighted), projects the month and resolves `ci.mode` (`remote|local-first|local-attested|auto`, default `auto`; flat keys `mode`, `monthly_minutes`, `reserve_pct`, `included_minutes`, `plan` because the forge.yaml parser is one level deep). Public repos are free and never auto-switched; an unreadable billing API stays `remote`. The effective mode is recomputed from GitHub each time; `~/.forge/ci-budget/` (FORGEDOCK_CI_BUDGET_DIR) holds only rebuildable caches (last effective mode, parity rows, seen repos). `engine-cli.mjs` `readVerify` coerces verify.mode `ci|hybrid` to `local` under `local-first`/`local-attested` (for `auto`, the cached resolution); the batch report and `forgedock release` print one budget line that says when `auto` switched. `checkFromCli` appends a parity row (local green -> remote red hit rate, paired later from check runs by `forgedock ci budget`) and, in `local-attested`, posts the `forgedock/ci-local` commit status. `forgedock ci budget [--digest] [--propose] [--set-mode] [--budget]` is the CLI; setup skill: `commands/forgedock-ci-setup.md`.
+
 ## Entry 2026-11-10 — host preflight, draft release PR, mark ready (#5277)
 
 `release-preflight.mjs` adds two optional steps to `RELEASE_STEPS`: `host-preflight` (before `release-pr`) and `mark-ready` (after `fixes`). Both read forge.yaml `release.preflight_command` (flat keys `preflight_command`/`_timeout`/`_blocking`, `parsePreflightConfig`, `readReleaseConfig().preflight`) and run it through `io.rehearse` on the host. Unset: both return `{skipped:true}` and `runRelease` does not record them (`OPTIONAL_STEPS`), so state and `gh` calls are unchanged. Set: `host-preflight` runs on the staging head (`gh api commits/<staging>`) and a failure files one `release-blocker` per head+kind (`fileBlocker({kind:"preflight"})`, marker `FORGE:RELEASE_BLOCKER head=<sha> kind=preflight`) and stops, so no PR is opened on a failing head; `releasePrStep` then opens the PR with `--draft`; `fixStep` re-runs `runHostPreflight` on the new head before each delta review; `mark-ready` re-runs it on the final head and calls `gh pr ready` only on a pass. Actions CI is opted out of drafts by the repo (`docs/CONFIG.md`). `commands/deploy-pr.md` Phase 3 counts `pending` as not-passed: unfinished-only checks print `CI gate: PENDING` and defer to Phase 5, never PASSED.
+
+## Entry 2026-11-10 — Live-deferral close gate and real-browser check for interactive UI (#5285)
+
+`activation.mjs` `liveDeferralBlocks(contract, modes)`: when `rolloutModes` says a touched rollout flag is live (default-on) and a
+requirement is deferred for live/post-deploy verification (bucket post-deploy/verify-now/host, or live-acceptance wording), it returns
+`[{id, flag}]`. `closePlan({liveBlocks})` then returns `partial` with `liveBlocked`; `lean.mjs` keeps the issue open and posts a
+`FORGE:TRACKED` note naming the blockers (a default-off rollout still ships with its deferral). `e2e.mjs` `uiInteractiveChanged(files)`
+(dialog/CTA/layout component files) makes `e2eWanted` run the repo's e2e (CI label or workflow, never a local browser install). With no
+trigger configured the skip is a trajectory decision; on a `review.risk_paths` hit `precheck`'s `uiBrowser` input yields
+`conformance.e2e_unverified` kind `ui_browser_unverified`. Without `rollouts.files` default-on cannot be detected and the gate does not fire.
 
 ## Entry 2026-11-10 — production parity beyond ingress (#5284)
 
