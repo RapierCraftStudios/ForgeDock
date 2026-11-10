@@ -737,7 +737,12 @@ release:
   rehearsal_command: ""
   rehearsal_timeout: 1200
   rehearsal_blocking: true
+  mode: freeze
+  branch_pattern: "release/{date}-{n}"
+  fix_mode: cherry-pick
 ```
+
+`forgedock release verify <sha> [--repo owner/repo]` reads the `FORGE:RELEASE` record from the PR that contains `<sha>` and exits 0 only when `<sha>` is the snapshot plus recorded picks, each a clean cherry-pick of a `branches.staging` commit (same tree as `git cherry-pick`), so a repo workflow that trusted `head.ref == staging` can call it instead.
 
 The forge.yaml reader handles two levels, so the rehearsal block is written as the flat keys `rehearsal_command`, `rehearsal_timeout` and `rehearsal_blocking`.
 
@@ -754,6 +759,9 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `rehearsal_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout, on the release-PR head after review and before promotion (#5253). Wire the project's deploy dry-run here: bundle build, env load and the trusted-runtime closure check, e.g. `rehearsal_command: ./scripts/deploy-dry-run.sh` where the script builds the release bundle, loads the production env file in check mode and verifies the trusted-runtime closure, exiting non-zero on the first failure. Unset: no rehearsal, release behavior is unchanged. |
 | `rehearsal_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
 | `rehearsal_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per release head (a re-run at the same head comments on it) with the output tail and the head SHA, and stops the job before promotion; fix it and `--resume <id>`. `false`: the failure is recorded and promotion goes on. |
+| `mode` | `snapshot` \| `freeze` | No | `freeze` (default) is the original behaviour: the release PR head is `branches.staging`, preflight refuses while a lane runs or a PR targets staging, and every batch is held at K=1 until the job ends. `snapshot` (#5276) cuts `release/<id>` from a staging SHA and opens `release/<id>` → `branches.default`; lanes keep merging to staging and no batch K is touched. A `FORGE:RELEASE` record (snapshot SHA, base/head range, bundle PRs, issues, cherry-picks) is kept in the job state and as a hidden marker in the PR body. Only one release branch may exist at a time. Promotion is unchanged (merge commit, `--match-head-commit`) but is stopped unless the head is the snapshot plus exactly the recorded cherry-picks. The branch is deleted after post-merge; fixes are already on staging, so nothing is back-merged. |
+| `branch_pattern` | string | No | Snapshot branch name; `{date}` is `YYYYMMDD`, `{n}` counts the day's release PRs. Default `release/{date}-{n}`. Everything under the pattern's prefix before `{` counts as a release in flight. |
+| `fix_mode` | `cherry-pick` \| `recut` | No | Snapshot mode only. `cherry-pick` (default): after a fix lane merges to staging, the merged commits of PRs labelled `release-blocker`, or closing a `release-blocker` issue or the blocking issue the job filed, are cherry-picked onto `release/<id>` (a clean pick only; a conflict blocks the job) and appended to `FORGE:RELEASE`. `recut`: the branch is moved to the current staging tip and the picks start over. |
 
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
 
