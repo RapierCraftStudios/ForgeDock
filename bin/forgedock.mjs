@@ -3910,10 +3910,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4372,6 +4372,20 @@ switch (command) {
   case "demo":
     await demo();
     break;
+  case "first-run": {
+    // #5290: propose/file small issues on this repo and run one to a PR
+    const { runFirstRun } = await import("./first-run.mjs");
+    const { execFileSync } = await import("node:child_process");
+    const { confirm } = await import("./tui.mjs");
+    const { runFromCli } = await import("./engine-cli.mjs");
+    const r = await runFirstRun({
+      exec: (cmd, args) => execFileSync(cmd, args, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 30000 }).trim(),
+      confirmFn: confirm,
+      runIssueFn: (n) => runFromCli([String(n)]),
+    });
+    if (r.status === "error") exitCode = 1;
+    break;
+  }
   case "auth": {
     const { authFromCli } = await import("./auth/app-token.mjs");
     exitCode = await authFromCli(restArgs);
