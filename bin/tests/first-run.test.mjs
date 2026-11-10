@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { proposeIssues, findDeadLinks, nextStep, parseMarker, markerLine, runFirstRun, MAX_PROPOSALS } from "../first-run.mjs";
+import { proposeIssues, findDeadLinks, nextStep, parseFirstRunMarker, markerLine, runFirstRun, MAX_PROPOSALS } from "../first-run.mjs";
 import { maybeOfferFirstRun } from "../journey.mjs";
 
 const repoDir = (files) => {
@@ -27,8 +27,8 @@ describe("first-run (#5290)", () => {
     assert.equal(proposeIssues(repoDir({ "CONTRIBUTING.md": "x" })).length, 0);
   });
   it("round-trips the start marker", () => {
-    assert.equal(parseMarker(`body\n${markerLine(Date.UTC(2026, 10, 1))}`).started, "2026-11-01T00:00:00.000Z");
-    assert.equal(parseMarker("none"), null);
+    assert.equal(parseFirstRunMarker(`body\n${markerLine(Date.UTC(2026, 10, 1))}`).started, "2026-11-01T00:00:00.000Z");
+    assert.equal(parseFirstRunMarker("none"), null);
   });
   it("maps failures to a plain next step", () => {
     assert.match(nextStep("gh auth: not logged in"), /gh auth login/);

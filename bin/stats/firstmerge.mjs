@@ -5,13 +5,13 @@
  * Start = the FORGE:FIRST_RUN marker in the issues `forgedock first-run` filed (earliest wins); merge = the earliest
  * mergedAt among the PRs that closed those issues. GitHub is the register: no local state is read.
  */
-import { parseMarker } from "../first-run.mjs";
+import { parseFirstRunMarker } from "../first-run.mjs";
 
 const median = (xs) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 
 /** issues: [{number, body, closedByPullRequestsReferences: [{mergedAt}]}] -> {repo, started, merged, minutes, median_minutes, target_minutes, met}. */
 export function firstMergeReport({ issues, repo = null }) {
-  const marked = (issues ?? []).map((i) => ({ i, m: parseMarker(i?.body) })).filter((x) => x.m);
+  const marked = (issues ?? []).map((i) => ({ i, m: parseFirstRunMarker(i?.body) })).filter((x) => x.m);
   if (!marked.length) return { repo, started: null, merged: null, minutes: null, median_minutes: null, target_minutes: 15, met: null, issues: 0 };
   const started = Math.min(...marked.map((x) => Date.parse(x.m.started)));
   const merges = marked.flatMap(({ i }) => (i.closedByPullRequestsReferences ?? []).map((p) => Date.parse(p?.mergedAt)).filter(Number.isFinite));

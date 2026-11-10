@@ -14,7 +14,7 @@ export const FIRST_RUN_MARKER = "FORGE:FIRST_RUN";
 const MARKER_RE = /<!--\s*FORGE:FIRST_RUN\s+(\{.*?\})\s*-->/;
 
 /** The FORGE:FIRST_RUN marker for an issue body: {started: iso} or null. */
-export function parseMarker(body) {
+export function parseFirstRunMarker(body) {
   const m = MARKER_RE.exec(String(body ?? ""));
   if (!m) return null;
   try {
