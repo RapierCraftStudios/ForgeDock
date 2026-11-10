@@ -47,7 +47,7 @@ export async function findInstallation({ appId, pem, fetch: fetchFn = fetch, now
   return Array.isArray(list) && list[0]?.id ? list[0].id : null;
 }
 
-export function buildManifest({ redirectUrl, name = "forgedock-self-hosted" }) {
+export function buildAppManifest({ redirectUrl, name = "forgedock-self-hosted" }) {
   return {
     name, url: "https://github.com/RapierCraftStudios/forgedock", redirect_url: redirectUrl, public: false,
     default_permissions: { ...PIPELINE_PERMISSIONS }, default_events: [],

@@ -6,7 +6,7 @@ import { generateKeyPairSync, createVerify } from "node:crypto";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAppJwt, mintInstallationToken, findInstallation, buildManifest, convertManifestCode, receiveManifestCode, PIPELINE_PERMISSIONS } from "./app-manifest.mjs";
+import { createAppJwt, mintInstallationToken, findInstallation, buildAppManifest, convertManifestCode, receiveManifestCode, PIPELINE_PERMISSIONS } from "./app-manifest.mjs";
 import { authFromCli, resolveAuth, readState, statePath } from "./app-token.mjs";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
@@ -39,12 +39,12 @@ test("findInstallation and manifest conversion", async () => {
   assert.equal(await findInstallation({ appId: 1, pem: privateKey, fetch: async () => json([]) }), null);
   const app = await convertManifestCode({ code: "c/1", fetch: async (u) => { assert.ok(u.endsWith("/app-manifests/c%2F1/conversions")); return json({ id: 5, slug: "mine", pem: "PEM" }); } });
   assert.deepEqual(app, { appId: 5, slug: "mine", pem: "PEM" });
-  assert.equal(buildManifest({ redirectUrl: "http://127.0.0.1:1/callback" }).default_permissions.contents, "write");
+  assert.equal(buildAppManifest({ redirectUrl: "http://127.0.0.1:1/callback" }).default_permissions.contents, "write");
 });
 
 test("loopback receiver returns the code only for the matching state", async () => {
   let base;
-  const p = receiveManifestCode({ state: "S1", manifest: (port) => buildManifest({ redirectUrl: `http://127.0.0.1:${port}/callback` }), onListening: (u) => (base = u) });
+  const p = receiveManifestCode({ state: "S1", manifest: (port) => buildAppManifest({ redirectUrl: `http://127.0.0.1:${port}/callback` }), onListening: (u) => (base = u) });
   while (!base) await new Promise((r) => setTimeout(r, 5));
   const page = await (await fetch(base)).text();
   assert.match(page, /settings\/apps\/new\?state=S1/);

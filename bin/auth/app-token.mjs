@@ -12,7 +12,7 @@ import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "n
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { PIPELINE_PERMISSIONS, API, mintInstallationToken, findInstallation, buildManifest, convertManifestCode, receiveManifestCode } from "./app-manifest.mjs";
+import { PIPELINE_PERMISSIONS, API, mintInstallationToken, findInstallation, buildAppManifest, convertManifestCode, receiveManifestCode } from "./app-manifest.mjs";
 
 export const REFRESH_BEFORE_MS = 10 * 60 * 1000;
 const UA = { "User-Agent": "forgedock", Accept: "application/json", "Content-Type": "application/json" };
@@ -171,7 +171,7 @@ export async function authFromCli(args, { env = process.env, out = (m) => consol
 async function byoLogin({ env, out, fetchFn, org, installationId, openUrl, ...io }) {
   const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
   const code = await receiveManifestCode({
-    state, org, manifest: (port) => buildManifest({ redirectUrl: `http://127.0.0.1:${port}/callback` }),
+    state, org, manifest: (port) => buildAppManifest({ redirectUrl: `http://127.0.0.1:${port}/callback` }),
     onListening: (url) => (openUrl ? openUrl(url) : out(`Open ${url} to create your GitHub App`)),
   });
   const app = await convertManifestCode({ code, fetch: fetchFn });
