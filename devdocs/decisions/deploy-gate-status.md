@@ -13,6 +13,7 @@ created: 2026-10-31
 ## Choice
 
 - The gate is the `forge/deploy-gate` commit status on the PR head: success when the newest trusted marker is `GATE_PASS`, failure when it is `GATE_FAILURE`, pending when there is none, at any age. A status follows the PR head from an `issue_comment` run, which a check run cannot.
+- Scope is PRs into `main` from `staging`, `feature` or `release/*` heads. Snapshot releases (#5276) open `release/<id>`, which the gate first skipped, so `forgedock release --merge` waited on a status that never came (#5408).
 - Marker comments from logins in `FORGE_TRUSTED_MARKER_AUTHORS` now run the job. The job guard's substring `contains` only decides whether the job runs; the scan step still trusts a marker on an exact login match.
 - Markers are sorted by time across PR comments and reviews, and the newest trusted one decides.
 - The job exits 0 whenever no marker counts, inside the window or not: a red job would block the staging review's own Phase 1E CI read before it posts the marker. The review's 1E read and the `/deploy-pr` fix loop ignore `forge/deploy-gate`, as they ignore `forgedock/verify`. Otherwise an earlier `GATE_FAILURE` would block the re-run that clears it, and `/fix-ci` would be sent to fix a review. `wait-ci-green.sh` still waits on it, so an autonomous merge of a deploy PR waits for the gate.

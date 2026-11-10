@@ -65,7 +65,7 @@ A pass counts only when it is the review's final verdict (`FORGE:GATE_PASS:TYPE=
 
 A posted marker re-runs the check, so the status follows the review. The workflow's own job check is not the gate. It stays green while a review runs, so the staging review's CI read is not blocked by the gate it is about to satisfy.
 
-The status blocks nothing until main requires it. In **Settings → Rules → Rulesets** (or branch protection for `main`), add `forge/deploy-gate` as a required status check. GitHub then refuses to merge a staging→main PR that has no passing review on record, including a merge by hand.
+The status blocks nothing until main requires it. In **Settings → Rules → Rulesets** (or branch protection for `main`), add `forge/deploy-gate` as a required status check. GitHub then refuses to merge a staging→main PR that has no passing review on record, including a merge by hand. The gate covers `staging`, `feature` and `release/<id>` (snapshot release) heads into `main`.
 
 ### 2. Copy the workflow template
 
