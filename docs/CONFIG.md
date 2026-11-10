@@ -743,6 +743,15 @@ selftest:
 
 ---
 
+## `gate` (OPTIONAL)
+
+```yaml
+gate:
+  required_checks: ["CI"]   # extra checks the staging review treats as required
+```
+
+`forgedock review-staging --summary` blocks only on the required checks of the target branch (branch protection and rulesets, read from the GitHub API) plus this explicit list; the list is never inferred. Other red checks are reported as non-blocking warnings. When no required checks can be read, every red check blocks.
+
 ## `release` (OPTIONAL)
 
 Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review and fixes are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). Post-merge is automated (#5213): it confirms a publish run for the merge commit (dispatching one when none appears), waits for `artifact_check`, then opens and merges the version-sync PR; a bound that runs out stops the job as blocked and `--resume <id>` retries. `--watch` is accepted and has no effect until the review step lands.
