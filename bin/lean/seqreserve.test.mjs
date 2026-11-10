@@ -11,6 +11,8 @@ import { reserveForBuild, sequenceBuildNote, revalidate } from "./seqreserve.mjs
 import { sequenceCollisions, renumberLane, snapshotLane, verifyRenumber } from "./sequence.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { sequenceBuildRule } from "./prompts.mjs";
+// R4: V1 runs the real-git runCore 0616/v23 replay.
+import "./seqreserve.e2e.test.mjs";
 // The real-git runCore replay (R4) is part of this file's run, so the frozen V1 executes it.
 import "./seqreserve.e2e.test.mjs";
 
