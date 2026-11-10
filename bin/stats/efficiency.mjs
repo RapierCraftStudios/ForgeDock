@@ -77,7 +77,7 @@ export function issueSlices(events) {
     else if (e.event === "LIGHT_UPGRADE") cur.shape = "upgraded";
     if (e.event === "PHASE_ATTEMPT_USAGE") {
       cur.attempts.push({ phase: e.phase ?? "other", trigger: e.trigger ?? null, restart_of: e.restart_of ?? null, model: e.model ?? null,
-        turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e), durationMs: num(e.duration_ms), // #4491
+        turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e), durationMs: num(e.duration_ms), baseline: num(e.baseline_tokens), profile: typeof e.lane_profile === "string" ? e.lane_profile : null, // #4491, #5348
         ...(e.tools && typeof e.tools === "object" ? { calls: num(e.tools.calls), toolTurns: num(e.tools.turns), rereads: num(e.tools.rereads) } : {}) }); // #4410
     } else if (e.event === "RUN_TERMINAL") {
       cur.terminal = { reason: e.reason ?? null, code: e.code ?? null, ts: e.ts ?? null, size: SIZES.includes(e.turns?.size) ? e.turns.size : null, phases: e.phases && typeof e.phases === "object" ? e.phases : null };
@@ -168,6 +168,10 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     for (const s of inScope(row, settleAt)) { const g = shapes[s.shape] ?? shapes.full; g.n++; g.cost_usd += sum(s.attempts.map((a) => a.cost)); }
   }
   for (const g of Object.values(shapes)) g.cost_usd = r(g.cost_usd, 1e6);
+  // #5348: first-turn baseline_tokens per session profile (full, memory-off, lane, narrow) over every attempt of every lane
+  const profiles = {};
+  for (const { row, settleAt } of entries) for (const s of inScope(row, settleAt)) for (const a of s.attempts) if (a.baseline != null) (profiles[a.profile ?? "unknown"] ??= []).push(a.baseline);
+  const baselineByProfile = Object.fromEntries(Object.entries(profiles).map(([k, xs]) => [k, { sessions: xs.length, median: median(xs) }]));
   const lanes = { ...shapes, upgrade_rate: r(per(shapes.upgraded.n, shapes.light.n + shapes.upgraded.n)) };
   for (const { row, settleAt } of entries) {
     if (row?.outcome !== "merged") continue;
@@ -232,7 +236,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     retries: { total, per_merge: r(per(total, merged.length), 100), by_cause: retries, lane_reruns: sum(merged.map((m) => Math.max(0, m.slices - 1))) },
     no_action: { lanes: sum(Object.values(noAction).map((g) => g.n)), cost_usd: r(sum(Object.values(noAction).map((g) => g.cost_usd)), 1e6),
       by_kind: Object.fromEntries(Object.entries(noAction).map(([k, g]) => [k, { ...g, cost_usd: r(g.cost_usd, 1e6) }])) },
-    quality, acceptance, lanes, wait: summarizeWaits(merged.map((m) => m.phases)), // #5349: non-model time by phase and cause
+    quality, acceptance, lanes, baseline_by_profile: baselineByProfile, wait: summarizeWaits(merged.map((m) => m.phases)), // #5349: non-model time by phase and cause
     tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), tool_calls_per_turn_n: withTools.length, rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
     per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
       implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.shape ? { shape: m.shape } : {}), ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
@@ -406,6 +410,8 @@ export function formatEfficiencyLines(m, label = "") {
   lines.push(ln ? `lanes: ${LANE_SHAPES.map((k) => `${k} ${ln[k]?.n ?? 0} (${usd(ln[k]?.cost_usd ?? 0)})`).join(", ")}; upgrade rate ${ln.upgrade_rate == null ? "n/a"
     : `${Math.round(ln.upgrade_rate * 100)}% (${ln.upgraded?.n ?? 0}/${(ln.light?.n ?? 0) + (ln.upgraded?.n ?? 0)})`}` : "lanes: n/a");
   lines.push(rates(m)); // #4491
+  const bp = Object.entries(m.baseline_by_profile ?? {}); // #5348
+  lines.push(`baseline tokens by profile: ${bp.length ? bp.map(([k, g]) => `${k} n=${g.sessions} median ${int(g.median)}`).join("; ") : "n/a"}`);
   lines.push(...waitLines(m.wait)); // #5349
   return lines;
 }

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
-import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
+import { capText, FIX_CAPS, FIX_PROMPT_MAX, NARROW_CAPS, NARROW_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
 import { FINDING_PITFALLS, PLANNER_TIGHTENING } from "./selfreview.mjs";
@@ -397,6 +397,24 @@ export function fixSessionPrompt({ task, diff = "", stat = "", base = "", contra
   const contractText = capText(typeof contract === "string" ? contract : JSON.stringify(contract ?? {}, null, 1), FIX_CAPS.contract);
   const p = `${HOST_RULES}\n\nYou are fixing one failure on an existing branch in this worktree. You have no earlier session: the issue, the frozen contract and the branch's diff against ${base || "the lane base"} are below; read any file you need.\n\n## Issue: ${String(title).slice(0, 300)}\n${capText(summary, FIX_CAPS.summary)}\n\n## Frozen contract (${CONTRACT_FILE})\n\`\`\`json\n${contractText}\n\`\`\`\n\n## Diff (\`git diff ${base || "<base>"}...HEAD\`)\n\`\`\`diff\n${boundDiff(diff, { stat, base, maxBytes: FIX_CAPS.diff })}\n\`\`\`\n\n## The failure to fix\n${capText(task, FIX_CAPS.task)}`;
   return capText(p, FIX_PROMPT_MAX - 100);
+}
+
+/** The frozen contract reduced to what a narrow fix needs: deliverable paths with their change, preserve items, validate commands. */
+function contractExcerpt(contract) {
+  const c = typeof contract === "string" ? (() => { try { return JSON.parse(contract); } catch { return null; } })() : contract;
+  if (!c || typeof c !== "object") return capText(typeof contract === "string" ? contract : "", NARROW_CAPS.contract);
+  const pick = (xs, keys) => (Array.isArray(xs) ? xs.map((x) => Object.fromEntries(keys.filter((k) => x?.[k] != null).map((k) => [k, x[k]]))) : []);
+  return capText(JSON.stringify({ deliverables: pick(c.deliverables, ["path", "change"]), preserve: pick(c.preserve, ["what"]), validate: pick(c.validate, ["command"]) }), NARROW_CAPS.contract);
+}
+
+/**
+ * #5348: the narrow-fix prompt: a contract excerpt, the failing check output and the files it names. No diff, issue summary,
+ * context pack, structure delta or hotspot rules. Under NARROW_PROMPT_MAX characters.
+ */
+export function narrowFixPrompt({ task, contract = null, files = [] }) {
+  const list = capText((files ?? []).map((f) => `- ${f}`).join("\n") || "- (none named: read what the failure cites)", NARROW_CAPS.files);
+  const p = `${HOST_RULES}\n\nYou are fixing one narrow, mechanical failure on an existing branch in this worktree. You have no earlier session. Edit only the files named below (and any file the failure output names), as a minimal diff.\n\n## Contract excerpt (${CONTRACT_FILE})\n${contractExcerpt(contract)}\n\n## Files named by the failure\n${list}\n\n## The failure to fix\n${capText(task, NARROW_CAPS.task)}\n\nRe-run the check that failed (the scoped command), commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return capText(p, NARROW_PROMPT_MAX - 100);
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */

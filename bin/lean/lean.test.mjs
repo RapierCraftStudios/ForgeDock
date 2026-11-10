@@ -6365,6 +6365,32 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  it("#5348 an enumerating-test omission and a duplicate export the detectors name are fixed without a model session", async () => {
+    const w = hworld({ missing: [MISS, []] }); const d = [DUP, []]; w.mech = [];
+    w.io.duplicateExports = async () => (d.length > 1 ? d.shift() : d[0]);
+    w.io.mechFix = {
+      applyEnumerating: async ({ missing }) => { w.mech.push(["enum", missing.length]); return { applied: missing, remaining: [] }; },
+      renameDuplicates: async ({ dups }) => { w.mech.push(["dup", dups.length]); return { applied: dups.map((x) => ({ ...x, renamedTo: "FeedUndo" })), remaining: [] }; },
+    };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(w.mech, [["enum", 1], ["dup", 1]]);
+    assert.equal(builders(w).length, 2, "plan and build only: no fix session");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /enumerating fix applied by the engine/.test(c.join(" "))), "the mechanical edit is committed");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /duplicate fix applied by the engine/.test(c.join(" "))));
+  });
+
+  it("#5348 what the engine cannot place goes to one narrow session that also carries the other pending narrow fix", async () => {
+    const w = hworld({ missing: [MISS, []] }); const d = [DUP, []]; const seen = [];
+    w.io.duplicateExports = async () => (d.length > 1 ? d.shift() : d[0]);
+    w.io.mechFix = { applyEnumerating: async ({ missing }) => ({ applied: [], remaining: missing }), renameDuplicates: async ({ dups }) => ({ applied: [], remaining: dups }) };
+    const inner = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") seen.push({ profile: c.profile ?? null, prompt: c.prompt }); return inner(c); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const fix = seen.filter((x) => x.profile === "narrow");
+    assert.equal(fix.length, 1, "one narrow session for both findings");
+    assert.match(fix[0].prompt, /fooNew[\s\S]*undoActivityAction/);
+    assert.doesNotMatch(fix[0].prompt, /## Diff/);
+  });
+
   it("#4596 English copies in a locale catalog resume the builder once to translate; a leftover is an anomaly", async () => {
     const w = hworld(); const c = [[{ path: "messages/ta.json", key: "calendarView.day", value: "Day view", source: "messages/en.json" }], []]; w.cpCalls = 0;
     w.io.englishCopies = async (x) => { w.cpCalls++; w.cpArgs = x; return c.length > 1 ? c.shift() : c[0]; };
