@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, joinedNumbers, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, verdictOf } from "./query.mjs";
 import { summariseLog } from "./local-source.mjs";
 import { buildReport, parseArgs, runStats } from "./index.mjs";
@@ -179,6 +179,20 @@ describe("conformance outcomes: read only (#5210 R3)", () => {
       { gh: graphqlGh(0), env: {}, now: () => NOW, git: null, releaseTimes: [], onProgress: () => {} });
     assert.equal(r.query.conformance_outcomes.min_n, 3);
   });
+  it("a 502 at first=100 retries the same page smaller and completes (#5363)", async () => {
+    const calls = [];
+    const inner = graphqlGh(150, calls);
+    const gh = async (args) => {
+      if (args.includes("first=100")) throw new Error("gh: HTTP 502: Bad Gateway");
+      return inner(args);
+    };
+    const out = await gatherConformanceOutcomes({ repo: "o/r", gh, since: at(0), now: NOW });
+    assert.ok(out.prs.length > 0);
+    assert.ok(calls.some((a) => a.includes("first=50")));
+  });
+  it("a persistent 502 fails naming a narrower --since (#5363)", async () => {
+    await assert.rejects(gatherConformanceOutcomes({ repo: "o/r", gh: async () => { throw new Error("HTTP 502"); }, since: at(0), now: NOW }), /narrower --since/);
+  });
   it("flag parsing", () => {
     assert.equal(parseArgs(["--conformance-outcomes"]).conformanceOutcomes, true);
     assert.equal(parseArgs(["--conformance-outcomes", "--window-days", "14"]).windowDays, 14);
@@ -224,5 +238,12 @@ describe("conformance outcomes: surfaces and replay (#5283)", () => {
     assert.throws(() => parseArgs(["--replay", "1"]), /need --conformance-outcomes/);
     assert.throws(() => parseArgs(["--conformance-outcomes", "--enforce-domains", "auth"]), /need --replay/);
     assert.throws(() => parseArgs(["--conformance-outcomes", "--replay", "x"]), /comma list/);
+  });
+});
+
+describe("joinedNumbers (#5363)", () => {
+  it("lists each merged PR and its closing issues once, sorted", () => {
+    assert.deepEqual(joinedNumbers([{ number: 9, closingIssues: [{ number: 3 }, { number: 5 }] }, { number: 4, closingIssues: [{ number: 3 }] }]), [3, 4, 5, 9]);
+    assert.deepEqual(joinedNumbers(), []);
   });
 });

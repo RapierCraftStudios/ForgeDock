@@ -17,7 +17,9 @@ import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAUL
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
-import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
+import { stampText, checkStamp } from "./stagestamp.mjs";
+import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
+import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -427,9 +429,12 @@ export async function runCore(o) {
   const protectedBranch = (b) => isProtectedLaneBranch(b, { issue, lane, branches, defaults });
   /** Teardown from the ledger (#4179), on every exit path: builder pids, checkpoint of unpushed work, run tmp, worktree, branch, docker. */
   async function teardown(reason, extra) {
+    const builderPids = (ledger ? ledger.entries("pid") : []).map((p) => Number(p.value));
     for (const p of ledger ? ledger.entries("pid") : []) {
       try { if (await io.killGroup?.(p.value, p.marker)) ledgerDo((l) => l.release("pid", p.value)); } catch { /* keep it listed */ }
     }
+    // #5333: the worktree goes only after the builder processes exited (SIGTERM, then SIGKILL after a grace period).
+    const stillRunning = io.proc?.alive && builderPids.length ? await waitPidsExit(builderPids, { alive: io.proc.alive, kill: io.proc.kill, sleep }).catch(() => []) : [];
     // Never discard work silently: an unmerged lane commits and pushes what is left before its worktree goes.
     const saved = !wtCreated || reason === "merged" || (await checkpoint(`exit (${reason})`));
     await reportLaneHead(reason);
@@ -438,7 +443,7 @@ export async function runCore(o) {
       try { if ((await io.runTmp.remove(runTmp)) !== false) ledgerDo((l) => l.release("tmp", runTmp)); } catch { /* best effort */ }
       runTmp = null;
     } // every terminal, including engine-error and deferred
-    if (wtCreated && saved) {
+    if (wtCreated && saved && !stillRunning.length) {
       let removed = false;
       try { await io.git(["worktree", "remove", "--force", wt], { cwd }); removed = true; } catch { /* best effort */ }
       try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
@@ -449,7 +454,7 @@ export async function runCore(o) {
       }
       if (branchDone) ledgerDo((l) => l.release("branch", branch));
     } else if (wtCreated) {
-      ev({ event: "TEARDOWN_KEPT", reason: "checkpoint failed: worktree and branch kept so no work is lost", worktree: wt });
+      ev({ event: "TEARDOWN_KEPT", reason: stillRunning.length ? `builder process ${stillRunning.join(",")} still running: worktree and branch kept` : "checkpoint failed: worktree and branch kept so no work is lost", worktree: wt });
     }
     for (const kind of ["container", "volume"]) {
       for (const r of ledger ? ledger.entries(kind) : []) {
@@ -617,7 +622,25 @@ export async function runCore(o) {
     { key: "implementation", file: IMPLEMENTATION_FILE, marker: ["FORGE:IMPLEMENTATION"], render: (md, ctx) => renderImplementation(md, ctx.result, { branch, files: ctx.files }) },
   ];
   const posted = {}; // key -> comment url (or "" when posted without a link)
-  const readStage = async (st) => { try { return await io.fs.read(`${wt}/${st.file}`); } catch { return null; } };
+  let stampHash = null; // #5333: the frozen contract hash the stage notes are stamped with (set before the implement call)
+  const stageBad = {}; // key -> true while the stage file on disk carries another issue's or contract's stamp
+  const readStage = async (st) => {
+    let md = null;
+    try { md = await io.fs.read(`${wt}/${st.file}`); } catch { return null; }
+    const c = checkStamp(md, { issue, hash: st.key === "implementation" ? stampHash : null });
+    if (c.ok) { delete stageBad[st.key]; return c.md; }
+    if (!stageBad[st.key]) { ev({ event: "STAGE_STAMP_MISMATCH", file: st.file, reason: c.reason }); T.anomalies.push(`${st.file} not posted: ${c.reason} (another lane's file, e.g. a git stash pop)`); }
+    stageBad[st.key] = true;
+    return null;
+  };
+  /** #5333: after the builder's final turn, a note posted live whose file now carries a foreign stamp is re-rendered from result.json. */
+  async function recheckStages(keys) {
+    for (const key of keys) {
+      if (!(key in posted)) continue;
+      await readStage(STAGES.find((x) => x.key === key));
+      if (stageBad[key]) await upsertStage(key);
+    }
+  }
   const usableMd = (md) => sanitizeMd(md).replace(/\s+/g, " ").length >= 20;
   const stageFiles = async () => {
     const out = String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
@@ -688,7 +711,7 @@ export async function runCore(o) {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), ...(toolchain?.env ?? {}) };
+    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator),
@@ -850,7 +873,7 @@ export async function runCore(o) {
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
   let facts = null; // #4272: path of an optional .forge/repo-facts.json (worktree, then main checkout), cited in builder prompts
-  const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}) });
+  const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}), stamp: stampText({ issue, hash: stampHash }) });
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
   let decisionsNote = ""; // #4901: trusted FORGE:DECISION comments newer than the frozen contract, "" otherwise
@@ -930,6 +953,10 @@ export async function runCore(o) {
   async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null, contextMax = 0, turnMax = 0, profile = null } = {}) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
+    if (wtCreated && io.fs.exists && !(await io.fs.exists(wt))) throw Object.assign(new Error("lane worktree is gone"), { deferCode: OUTCOME_CODES.RUN_INTERRUPTED, deferDetail: `worktree ${wt} no longer exists; no builder session starts in it, a rerun recreates it` }); // #5333
+    const lock = await takeBranchLock();
+    try { return await builderSession(); } finally { try { lock?.release(); } catch { /* best effort */ } }
+    async function builderSession() {
     const control = {};
     const governor = startGovernor(control);
     let spawned = null;
@@ -962,6 +989,17 @@ export async function runCore(o) {
     await attempt("implement", n, profile && r ? { ...r, laneProfile: profile === "narrow" && laneProfile.name === "full" ? "full" : profile } : r, mode, trigger, restartOf, resume);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
+    }
+  }
+  /** #5333: one writer per lane branch. A second session (a fix-up beside a recovery) waits for the holder, then defers `host.busy`. Fail-open when the shared git dir is unknown. */
+  async function takeBranchLock() {
+    let dir = null;
+    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt })).trim(); if (d.startsWith("/") && existsSync(d)) dir = d; } catch { dir = null; }
+    if (!dir) return null;
+    let lock;
+    try { lock = await acquireBranchLock({ gitCommonDir: dir, branch, owner: agentId, waitMs: o.branchLockWaitMs ?? 600000, pollMs: o.branchLockPollMs ?? 15000, sleep: async (ms) => { await renew(); await sleep(ms); } }); } catch { return null; }
+    if (lock.ok) return lock;
+    throw Object.assign(new Error(`lane branch ${branch} is being written by another session`), { deferCode: OUTCOME_CODES.HOST_BUSY, retryInSeconds: 120, deferDetail: `another session (pid ${lock.holder?.pid ?? "?"}, ${lock.holder?.owner ?? "?"}) holds the writer lock of ${branch}; retried later` });
   }
   /** #4390: the restart summary: `git diff --stat` and hunks against the lane base, and the last `forgedock check` record. */
   async function restartFacts() {
@@ -2002,6 +2040,7 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
+      stampHash = hash; // #5333
       await claimSurfaceSlots(frozen); // #5340: the full and recovered paths reach the builder here with the contract settled
       const openPaths = (frozen?.deliverables ?? []).map((d) => d?.path); // #5347: facts for the build's opening batch
       const openMap = io.runCommand ? await readTestMapAtRef(git, base).catch(() => null) : null;
@@ -2048,6 +2087,7 @@ export async function runCore(o) {
       }
       files = await changedFiles();
       if (!files.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
+      await recheckStages(["implementation"]); // #5333
       await flushStages(result, ["implementation"]);
       T.implement = [`${files.length} file(s)`, branch];
       T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
@@ -2517,6 +2557,7 @@ export async function runCore(o) {
         review = repair ? mergeReviewRows(first, parsed) : parsed;
         first = review;
         d = decide(review, ctx);
+        if (d.converted?.length) effective = convertDelivered(effective, d.converted); // #5365: a defer row the review found delivered is judged as deliver
         firstReply ??= d.state;
         if (d.review) review = d.review;
         ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
