@@ -22,5 +22,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "implementation-comment-file-overlap": {
+    "run": "bad=0; for n in $(gh pr list --state merged --limit 30 --json number --jq '.[].number'); do files=$(gh pr view $n --json files --jq '.files[].path'); listed=$(gh pr view $n --json comments --jq '[.comments[]|select(.body|contains(\"FORGE:IMPLEMENTATION\"))]|last|.body // \"\"' | grep -o '^- `[^`]*`' | sed 's/^- `//;s/`$//'); [ -z \"$listed\" ] && continue; echo \"$listed\" | grep -qxFf <(echo \"$files\") || { echo \"disjoint: PR $n\"; bad=1; }; done; test $bad -eq 0",
+    "pass": "exit 0",
+    "timeout": 300,
+    "for": "7d"
   }
 }

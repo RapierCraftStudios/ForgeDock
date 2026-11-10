@@ -39,6 +39,8 @@ const approxTokens = (s) => rawTokens(String(s).replaceAll(INSTALL_ROOT, "<root>
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
 
 const WT = "/wt/lean-7";
+/** #5333: the engine appends the stage-stamp rule to every builder prompt; strip it to compare against the bare template. */
+const unstamp = (s) => String(s).replace(/\n\nStage notes: make the first line[^\n]*/, "");
 const STAGE_MD = {
   investigation: "**Verdict**: CONFIRMED\n**Confidence**: high\n**Severity**: medium\n**Task Type**: bug\n\n### What Was Claimed\nfoo breaks\n\n### What We Found\n- src/foo.js:3 derefs null\n\n### Root Cause\nfoo derefs null at src/foo.js:3\n\n### Affected Files\n- src/foo.js: add guard\n\n### Sibling Sweep\n- src/bar.js:8 same guard\n\n### History\nintroduced in abc123\n\n### Recommendation\nguard null\n\n### Related Issues\nnone",
   plan: "### Approach\nguard null in foo\n\n### Deliverables\n| File | Change | Why |\n| --- | --- | --- |\n| src/foo.js | add guard | avoid crash |\n\n### Acceptance Criteria\n- [ ] foo handles null\n\n### Implementation Order\n1. guard\n\n### Out of Scope\nrefactor: later\n\n### Risk Assessment\n| Risk | Severity | Mitigation |\n| --- | --- | --- |\n| none | low | test |",
@@ -1989,8 +1991,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause).
-    assert.ok(approxTokens(plan) <= 2175, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1675, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
+    assert.ok(approxTokens(plan) <= 2250, `plan prompt with hotspots is ${approxTokens(plan)} tokens`); // 2250: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1750, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2093,7 +2095,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", PATH: "/rt/toolchain/bin:/usr/bin" };
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
     assert.deepEqual(ran.map((a) => [a.command, a.env]), [["npm run lint", lane], ["node --test test/foo.test.js", lane]]);
@@ -2448,8 +2450,8 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2075, `plan prompt is ${approxTokens(plan)} tokens`); // 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} of 1650 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(plan) <= 2150, `plan prompt is ${approxTokens(plan)} tokens`); // 2150: #5333 (git stash rule + stage stamp line); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(impl) <= 1725, `implement prompt is ${approxTokens(impl)} of 1725 tokens`); // 1725: #5333 (git stash rule + stage stamp); 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -5086,7 +5088,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const w = withCi(world());
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
-    assert.equal(builders(w)[1][4], builderImplementPrompt());
+    assert.equal(unstamp(builders(w)[1][4]), builderImplementPrompt());
     assert.doesNotMatch(traj(w)[0], /\| Verify \|/);
   });
 
@@ -5745,14 +5747,14 @@ describe("test map and repo facts caches (#4272)", () => {
   });
 
   it("neither file present: the same commands, events and prompts as without the feature", async () => {
-    const w = world(); const ran = recorder(w); w.io.fs.exists = async () => false;
+    const w = world(); const ran = recorder(w); w.io.fs.exists = async (p) => p === WT;
     const dir = tmpDir("core-");
     assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
     assert.deepEqual(ran, ["true", "make lint"]);
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map(({ round, results, ...rest }) => [round, results, Object.keys(rest).filter((k) => k === "source")]),
       [[0, [{ command: "true", rc: 0, ms: 0 }, { command: "make lint", rc: 0, ms: 0 }], []]]);
     const [plan, impl] = builders(w);
-    assert.equal(plan[4].startsWith(builderPlanPrompt(7)), true); assert.equal(impl[4].startsWith(builderImplementPrompt("local")), true);
+    assert.equal(unstamp(plan[4]).startsWith(builderPlanPrompt(7)), true); assert.equal(unstamp(impl[4]).startsWith(builderImplementPrompt("local")), true);
     for (const b of builders(w)) assert.doesNotMatch(b[4], /Repo facts/);
     assert.doesNotMatch(traj(w)[0], /test-map/);
   });
@@ -5760,11 +5762,11 @@ describe("test map and repo facts caches (#4272)", () => {
   it("repo-facts.json present: the builder prompts cite its path, never its content", async () => {
     const w = world(); recorder(w);
     w.files[FACTSF] = JSON.stringify({ version: 1, toolchain: { pm: { name: "pnpm", version: "9.9.9-SECRET" } } });
-    w.io.fs.exists = async (p) => p in w.files;
+    w.io.fs.exists = async (p) => p === WT || p in w.files;
     assert.equal((await run(w)).terminalReason, "merged");
     const [plan, impl] = builders(w);
     for (const b of [plan, impl]) { assert.ok(b[4].includes(`are cached in ${FACTSF}`)); assert.doesNotMatch(b[4], /9\.9\.9-SECRET/); }
-    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p in w2.files;
+    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p === WT || p in w2.files;
     assert.equal((await run(w2)).terminalReason, "merged");
     assert.ok(builders(w2)[0][4].includes("are cached in /repo/.forge/repo-facts.json"));
   });
@@ -6111,7 +6113,7 @@ describe("context pack modes (forge#4275)", () => {
     const r = await run(w, { dir, contextPack: { mode: "on" } });
     assert.equal(r.terminalReason, "merged");
     const plan = builders(w)[0][4];
-    assert.ok(plan.startsWith(builderPlanPrompt(7)));
+    assert.ok(unstamp(plan).startsWith(builderPlanPrompt(7)));
     assert.match(plan, /Context pack \(hints, not proof[\s\S]*- #3 \[parent\] OPEN "Epic"[\s\S]*zebra protocol/);
     assert.equal(w.packCalls.length, 1);
     assert.equal(w.packCalls[0].base, "origin/staging");
@@ -6921,7 +6923,7 @@ describe("explorer subagent (#4391)", () => {
     assert.ok(b.length >= 2 && b.every((s) => s.agents?.explorer?.model === "claude-haiku-5-5"));
     assert.ok(seen.filter((s) => s.role !== "builder").every((s) => s.agents === null));
     const [plan, impl] = builders(w).map((c) => c[4]);
-    assert.ok(plan.startsWith(builderPlanPrompt(7)));
+    assert.ok(unstamp(plan).startsWith(builderPlanPrompt(7)));
     assert.match(plan, /subagent_type "explorer"[\s\S]*Open a file yourself only to edit it or to verify a digest claim/);
     assert.match(impl, /subagent_type "explorer"/);
     assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").explore, "on");
@@ -7406,8 +7408,8 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1650 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2075, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2075 tokens`);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1725, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1725 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2150, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2150 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -7747,7 +7749,7 @@ describe("prompt budgets (#4969)", () => {
     assert.notEqual(moved, impl);
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
-    assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
+    assert.ok(approxTokens(moved) <= 1725, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1725 tokens`);
   });
 });
 
