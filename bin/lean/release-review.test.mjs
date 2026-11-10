@@ -26,6 +26,7 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [] } = {}) {
     runAgent: async (a) => { agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
     fileCiIssue: async () => { log.push(["ci-issue"]); return n++; },
+    issueMerged: async () => false,
     addNotes: async (pr, notes) => log.push(["notes", notes]),
     runLane: async (a) => { log.push(["lane", a.issue, a.lane]); return lanes[l++] ?? { terminalReason: "merged" }; },
   };
@@ -166,6 +167,23 @@ describe("fixStep", () => {
     const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], ciFailing: 2 } } }));
     assert.deepEqual(s.log.slice(0, 3), [["ci-issue"], ["lane", 100, "staging"], ["pre", H1]]);
     assert.equal(r.blocked, undefined);
+  });
+
+  it("a resume skips fix issues already closed as merged and goes on to the delta review", async () => {
+    const s = fakeSeam({ heads: [H2] });
+    s.issueMerged = async (n) => n === 101;
+    const r = await fixStep(ctx(s, { review: { result: failed } }));
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 0);
+    assert.deepEqual(s.log[0], ["pre", H1]);
+    assert.equal(r.blocked, undefined);
+  });
+
+  it("realSeam.fileCiIssue reuses the issue already filed for the same release head", async () => {
+    const calls = [];
+    const gh = (args) => { calls.push(args); if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 5396, title: "Release PR #7: CI red at b48bae6" }]); throw new Error("unexpected"); };
+    const seam = realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", gh });
+    assert.equal(await seam.fileCiIssue({ pr: 7, head: "b48bae6628432906aa96f509eddfe6d49608e725" }), 5396);
+    assert.equal(calls.length, 1);
   });
 
   it("a blocking finding and red CI together get a lane each", async () => {

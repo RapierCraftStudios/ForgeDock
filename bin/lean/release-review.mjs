@@ -152,6 +152,8 @@ export async function fixStep(ctx) {
     }
     if (!issues.length) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
     for (const issue of issues) {
+      // A resume after the fix already merged (by this job or by an intake lane): its lane would end invalid on a closed issue.
+      if (await seam.issueMerged?.(issue)) continue;
       const lane = await seam.runLane({ issue, lane: ctx.staging });
       if (lane?.terminalReason !== "merged") return blocked(`fix lane for #${issue} ended ${lane?.terminalReason ?? "without a result"}`);
     }
@@ -177,7 +179,7 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
-export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), makeRunner = null }) {
+export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), makeRunner = null, gh: ghIn = null }) {
   const rs = { ...reviewStagingIo(), cwd, env };
   const sd = env.FORGE_SCRATCHPAD || join(cwd, ".forge-scratch");
   let runner = null, shimEnv = null;
@@ -189,7 +191,7 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), ma
     process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
     return (shimEnv = { ...env, PATH: `${dir}${delimiter}${env.PATH ?? ""}` });
   };
-  const gh = (args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env });
+  const gh = ghIn ?? ((args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env }));
   return {
     pre: ({ pr, delta }) => reviewStagingJson([String(pr), ...(delta ? ["--delta", delta] : [])], rs),
     finalize: ({ pr, testGateOutput }) => reviewStagingJson([String(pr), "--finalize", "--test-gate-output", testGateOutput], rs),
@@ -203,7 +205,20 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), ma
       // not readOnly: each reviewer posts its own PR comment
       return runner({ role, issue, cwd, env: pinnedEnv(), prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
     },
+    // closed by a merged fix: state CLOSED with the workflow:merged label (a read failure is "not merged", so the lane runs)
+    issueMerged: async (issue) => {
+      try {
+        const v = JSON.parse(gh(["issue", "view", String(issue), "-R", repo, "--json", "state,labels"]));
+        return v.state === "CLOSED" && (v.labels ?? []).some((l) => l.name === "workflow:merged");
+      } catch { return false; }
+    },
     async fileCiIssue({ pr, head }) {
+      // one issue per release head: a resume reuses the issue filed for the same head instead of filing a duplicate
+      const title = `Release PR #${pr}: CI red at ${head.slice(0, 7)}`;
+      try {
+        const hit = JSON.parse(gh(["issue", "list", "-R", repo, "--state", "all", "--search", `"${title}" in:title`, "--json", "number,title"])).find((i) => i.title === title);
+        if (hit) return hit.number;
+      } catch { /* no lookup: file a new one */ }
       const rows = JSON.parse(gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,bucket"]));
       const names = rows.filter((c) => c.bucket === "fail" && !CI_EXCLUDED_CHECKS.includes(c.name)).map((c) => c.name);
       return this.fileIssue({ item: { title: `Release PR #${pr}: CI red at ${head.slice(0, 7)}`, severity: "HIGH", body: `Failing required checks on the release PR #${pr} at ${head}:\n${names.map((n) => `- ${n}`).join("\n")}\n\nFix them on the staging branch.` }, pr });
