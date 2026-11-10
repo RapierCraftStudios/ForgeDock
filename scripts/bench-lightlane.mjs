@@ -123,13 +123,13 @@ async function grade({ run, src, head, base, corpus, issue, tmp, tag, apiShape }
   await git(run, ["branch", "-f", "bench-head", head], src);
   const dir = join(tmp, `${tag}-grade`);
   await git(run, ["clone", "-q", "-b", "bench-head", src, dir], tmp);
-  await git(run, ["fetch", "-q", corpus.clone_url, issue.fix_sha], dir);
+  if (issue.fix_sha) await git(run, ["fetch", "-q", corpus.clone_url, issue.fix_sha], dir); // adversarial issues that must not be fixed have none (#5292)
   const changed = (await run("git", ["diff", "--quiet", base, "HEAD"], { cwd: dir })).code === 1;
   let shape;
   try { const r = await apiShape({ cwd: dir, base, head: "HEAD" }); shape = { status: r?.status ?? "unknown", changes: Array.isArray(r?.changes) ? r.changes : [] }; }
   catch (e) { shape = { status: "error", changes: [], error: String(e?.message ?? e).slice(0, 200) }; }
   const suite = (await sh(run, corpus.suite_command, dir)).code === 0;
-  const oracle = await runOracle(run, dir, issue);
+  const oracle = issue.oracle ? await runOracle(run, dir, issue) : false;
   return { changed, suite_pass: suite, oracle_pass: oracle, api_shape: shape };
 }
 
