@@ -9,7 +9,7 @@
  * (`(args, {env, input}) => stdout`, throws on failure) and `io.gh`, so the module is testable with a real temp repo.
  */
 const REMOTE = "origin";
-export const BLOCKER_LABEL = "release-blocker";
+import { BLOCKER_LABEL } from "./release-rehearsal.mjs";
 export const DEFAULT_PATTERN = "release/{date}-{n}";
 const MARKER = "FORGE:RELEASE";
 const REF_RE = /^[A-Za-z0-9._/-]+$/;
