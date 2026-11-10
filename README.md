@@ -20,7 +20,7 @@ You describe what you want. ForgeDock plans it, builds it, reviews it, releases 
 
 <div align="center">
 
-<!-- TODO: replace with the 60-90s time-lapse: one sentence typed → epic + sub-issues → lanes running → release merged -->
+<!-- TODO: replace with the time-lapse from #5293: one sentence typed → epic + sub-issues → lanes running → release merged -->
 <img src="docs/demo.gif" alt="ForgeDock turning one feature request into an epic, parallel lanes and a merged release" width="900" />
 
 </div>
@@ -111,7 +111,7 @@ Inside Claude Code: `/work-on 42`, `/orchestrate`, or just describe a feature an
 ## FAQ
 
 **Doesn't it just generate its own work?**
-Part of its work is follow-ups it files on itself: review findings and deferred items. That is deliberate: a finding becomes a tracked issue instead of a silent gap. It is also measured, so you can see the split between work you asked for and work the pipeline found, and cut what isn't worth it. <!-- TODO: link the measured split once the scorecard lands -->
+Part of its work is follow-ups it files on itself: review findings and deferred items. That is deliberate: a finding becomes a tracked issue instead of a silent gap. It is also measured, so you can see the split between work you asked for and work the pipeline found, and cut what isn't worth it. <!-- TODO: link the measured split once #5294 lands -->
 
 **Will it overcomplicate a one-line change?**
 A one-session light lane for small issues is available as opt-in (`light.mode: on`; it ships in `shadow`). The validation step still runs, because "small and obvious" issues are often already done or wrong.
