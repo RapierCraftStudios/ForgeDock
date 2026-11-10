@@ -28,7 +28,7 @@ import { gatherOriginIssues, originReport, renderOrigin } from "./origin.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
 import { gatherScoreboard, renderScoreboard } from "./scoreboard.mjs";
 import { batchRoot } from "../lean/batch.mjs";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, joinedNumbers, renderConformanceOutcomes, replayPrs, renderReplay, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, readBatchRows } from "./query.mjs";
 import { gitProbes } from "./compounding.mjs";
 
@@ -275,12 +275,12 @@ export function comparePivot(v, releaseTimes = []) {
 /** Throttled stderr progress printer (never stdout, so --json stays parseable). */
 export function makeProgressPrinter(write = (t) => process.stderr.write(t), now = Date.now) {
   let last = 0, lastPhase = null;
-  return ({ phase, done, total }) => {
+  return ({ phase, done, total, etaMs }) => {
     const t = now();
     const final = total != null && done >= total;
     if (phase === lastPhase && !final && t - last < 2000) return;
     last = t; lastPhase = phase;
-    write(`forgedock stats: ${phase} ${done}${total != null ? `/${total}` : ""}\n`);
+    write(`forgedock stats: ${phase} ${done}${total != null ? `/${total}` : ""}${etaMs ? ` (eta ${Math.ceil(etaMs / 1000)}s)` : ""}\n`);
   };
 }
 
@@ -408,8 +408,10 @@ export async function buildReport(opts, deps = {}) {
   const bound = sinceToTimestamp(opts.since, releaseTimes);
   if (opts.conformanceOutcomes && !bound.since) bound.since = new Date((deps.now?.() ?? Date.now()) - DEFAULT_LOOKBACK_DAYS * 86400000).toISOString().replace(/\.\d{3}Z$/, "Z"); // #5210: bounded crawl
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
+  // #5363: the merged lane PRs come first (one GraphQL search per 100), so only their PRs and closing issues are crawled.
+  const input = opts.conformanceOutcomes ? await (deps.gatherConformanceOutcomes ?? gatherConformanceOutcomes)({ repo, gh: deps.gh ?? defaultGh, since: bound.since, now: deps.now?.() ?? Date.now() }) : null;
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
-    onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
+    onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now, ...(input ? { numbers: joinedNumbers(input.prs) } : {}) });
   if (opts.edge || opts.milestone) { // forge#4165: audit query instead of the version report
     const e = opts.edge ? parseEdge(opts.edge) : null;
     const query = { ...(e ? { edge: { ...e, prs: edgeQuery(gh.records, e.from, e.to) } } : {}), ...(opts.milestone ? { mix: verdictMix(gh.records, gh.items, opts.milestone) } : {}) };
@@ -425,7 +427,6 @@ export async function buildReport(opts, deps = {}) {
   if (opts.firstReview) return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { first_review: firstReviewReport({ records: gh.records, repo, minN: opts.minNSet ? opts.minN : undefined }) } }; // #5345
   if (opts.conformanceOutcomes) { // forge#5210: read only; GraphQL search per 100 PRs + the telemetry records above + local logs + git
     const now = deps.now?.() ?? Date.now();
-    const input = await (deps.gatherConformanceOutcomes ?? gatherConformanceOutcomes)({ repo, gh: deps.gh ?? defaultGh, since: bound.since, now });
     const verdicts = conformanceVerdicts({ records: gh.records,
       runs: opts.local ? (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo) : [],
       batchRows: opts.local ? (deps.batchRows ?? readBatchRows({ batchRoot: deps.batchRoot ?? batchRoot(env), repo })) : [] });
