@@ -9,7 +9,7 @@ Verified the existing branch work against the frozen contract; it delivers R1-R5
 
 ### Acceptance Criteria Status
 - R1 ✅ bin/stats/card.mjs:15
-- R1b deferred (PNG), docs/STATS.md
+- R1b ⚠ partial: SVG + Markdown delivered; PNG deferred by typed amendment (rasterizer dependency, contract K1), documented in docs/STATS.md
 - R2 ✅ bin/stats/card.mjs:30
 - R3 ✅ bin/stats/card.mjs:38, bin/stats/index.mjs readAttribution
 - R4 ✅ bin/stats/index.mjs runStats card branch; bin/stats/card.test.mjs stubbed gh
