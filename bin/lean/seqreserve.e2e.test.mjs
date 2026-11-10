@@ -114,6 +114,10 @@ function makeWorld(dir) {
 
 describe("#5235 e2e: 0616/v23 replay through runCore (real git)", { skip: !HAVE_GIT && "git not available" }, () => {
   it("renumbers to 0617/v24, revalidates, merges without needs-human", async () => {
+    // the engine's real effects spawn git with process.env, so a CI host without a global git identity needs it there too
+    const saved = {}; for (const k of Object.keys(GIT_ENV)) if (/^GIT_/.test(k)) { saved[k] = process.env[k]; process.env[k] = GIT_ENV[k]; }
+    const restore = () => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+    try {
     const dir = tmpDir("seq-e2e-"), w = makeWorld(dir);
     const ret = await runCore({ issue: 7, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20, sequenceVersioned: VERSIONED });
     assert.equal(ret.terminalReason, "merged", JSON.stringify(ret));
@@ -126,5 +130,6 @@ describe("#5235 e2e: 0616/v23 replay through runCore (real git)", { skip: !HAVE_
     assert.match(at("src/version.ts"), /VERSION = 24/);
     assert.equal(at("db/0617_lane.sql"), "select 2;\n");
     assert.equal(at("db/0616_sibling.sql"), "select 3;\n");
+    } finally { restore(); }
   });
 });
