@@ -1,0 +1,170 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "`forgedock selftest --journey` (or similar) runs both stages and fails on the regressions above.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "Its result is posted on the release PR next to GATE_PASS.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "A fresh container with only Node and git: `npx forgedock` from the packed tarball. Assert the not-ready output, the files written, and the doctor output.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "With gh authenticated to the sandbox account and Claude Code available (`sandbox_repo` from the selftest config): setup on a fresh sandbox repo, `doctor` green, `demo --run` or first issue to merged PR.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "Record time to first merged PR (#5290) and every prompt shown.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Snapshot the user-visible output (banner, help, doctor, errors) so wording regressions show up in review.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "A scripted new-user journey test, run before each release on the host (not Actions minutes, see #5277/#5278):",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/selftest-journey.mjs",
+   "change": "New module: runJourney({io,...}) with stage 1 (pack, clean env npx, assert not-ready output, files written, doctor output), stage 2 (sandbox setup, doctor green, demo --run to merged PR, time-to-first-merge and prompts recorded, cleanup always), scrubbed snapshot compare with --update-snapshots; all process access via injected io; stage 2 skipped with a note when gh/claude unavailable",
+   "requirements": [
+    "R1",
+    "R3",
+    "R4",
+    "R5",
+    "R6",
+    "R7"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/selftest-journey.test.mjs",
+   "change": "Unit tests with fake io: stage-1 regressions (false success banner, missing file, doctor wording drift) fail; stage 2 records ttfm and prompts; cleanup runs on failure; snapshot diff and update",
+   "requirements": [
+    "R1",
+    "R3",
+    "R4",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/selftest-live.mjs",
+   "change": "selftestFromCli: accept --journey (+ --update-snapshots), reuse sandbox repo resolution and project/release-repo refusal, print result, exit non-zero naming the step, post journey marker when --pr given; update usage strings",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/selftest-gate.mjs",
+   "change": "Add buildJourneyMarker/parseJourneyMarker/postJourneyMarker for `\u003c!-- FORGE:JOURNEY result= sha= step= ttfm= -->`, separate from FORGE:SELFTEST so neither overwrites the other",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/lean/selftest-gate.test.mjs",
+   "change": "Tests for the journey marker build/parse and that it does not affect selftestGate",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/forgedock.mjs",
+   "change": "Help line for selftest mentions --journey",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/tests/fixtures/journey-snapshots/banner.txt",
+   "change": "Committed scrubbed snapshots of user-visible output (add sibling help.txt, doctor.txt, not-ready.txt, errors.txt in the same dir)",
+   "requirements": [
+    "R6"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "docs/SELFTEST.md",
+   "change": "Document --journey stages, snapshots, marker next to GATE_PASS, host-only (never Actions)",
+   "requirements": [
+    "R1",
+    "R2",
+    "R7"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "devdocs/modules/lean.md",
+   "change": "Entry for the journey selftest",
+   "requirements": [
+    "R1"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "`selftest --static` and `--live` behaviour, steps and exit codes in bin/lean/selftest-live.mjs and its tests"
+  },
+  {
+   "id": "P2",
+   "what": "FORGE:SELFTEST marker format and selftestGate fail-closed semantics in bin/lean/selftest-gate.mjs, as consumed by bin/review-staging.mjs:242-249"
+  },
+  {
+   "id": "P3",
+   "what": "selftest-nightly.mjs keeps running --live only"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/selftest-journey.test.mjs bin/lean/selftest-gate.test.mjs bin/lean/selftest-live.test.mjs bin/lean/selftest-nightly.test.mjs bin/lean/selftest-static.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/tests/review-staging.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Separate FORGE:JOURNEY marker instead of reusing FORGE:SELFTEST",
+   "justification": "selftestGate takes the newest FORGE:SELFTEST marker (bin/lean/selftest-gate.mjs:28), so a journey result would overwrite the live result; the issue asks only for posting next to GATE_PASS, not gating",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "All process access (docker/npm pack/npx/gh) injected via io, real binding only in realIo; no mocked-vs-real swap for the stage logic beyond unit fakes, live run is a host command",
+   "justification": "same pattern as bin/lean/selftest-live.mjs:5-6",
+   "source": "precedent"
+  }
+ ]
+}
