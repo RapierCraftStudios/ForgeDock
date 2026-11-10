@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
+import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, prsOfPage, wilson, cites, reverts, sameHunks, OUTCOME_INSUFFICIENT, HIGHER, NOT_HIGHER, DEFAULT_OUTCOME_MIN_N } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, verdictOf } from "./query.mjs";
 import { summariseLog } from "./local-source.mjs";
 import { buildReport, parseArgs, runStats } from "./index.mjs";
@@ -184,5 +184,38 @@ describe("conformance outcomes: read only (#5210 R3)", () => {
     assert.equal(parseArgs(["--conformance-outcomes", "--window-days", "14"]).windowDays, 14);
     assert.throws(() => parseArgs(["--window-days", "7"]), /needs --conformance-outcomes/);
     assert.throws(() => parseArgs(["--conformance-outcomes", "--window-days", "0"]), /positive integer/);
+  });
+});
+
+describe("conformance outcomes: surfaces and replay (#5283)", () => {
+  const stub = (files) => files.map((f) => (f.includes("migrations/") ? "domain:database" : f.includes("auth") ? "domain:auth" : f.endsWith(".tsx") ? "domain:frontend" : null)).filter(Boolean).sort();
+  const lane = (n, d, files) => pr(n, d, { files });
+  it("by_surface compares nonconforming vs conforming among PRs touching that surface; n/a under min n", () => {
+    const prs = [lane(1, 0, ["db/migrations/0543.sql"]), lane(2, 0, ["db/migrations/0544.sql"]), lane(3, 0, ["web/a.tsx"]), pr(4, 0)];
+    const v = verdicts([[1, "nonconforming", ["conformance.unimplemented"]], [2, "conforms"], [3, "conforms"], [4, "conforms"]]);
+    const r = conformanceOutcomes({ prs, verdicts: v, minN: 1, now: NOW, surfacesOf: stub });
+    const s = r.repos["o/r"].by_surface;
+    assert.deepEqual(Object.keys(s).sort(), ["domain:database", "domain:frontend"]);
+    assert.equal(s["domain:database"].nonconforming.n, 1);
+    assert.equal(s["domain:database"].conforming.n, 1);
+    assert.match(renderConformanceOutcomes(r), /surface domain:database/);
+    assert.equal(conformanceOutcomes({ prs, verdicts: v, minN: 5, now: NOW, surfacesOf: stub }).repos["o/r"].by_surface["domain:database"].nonconforming.rate, null);
+  });
+  it("replay: enforced when a configured surface is hit and the verdict is nonconforming, flagged when it would pass, none otherwise", () => {
+    const prs = [lane(1, 0, ["db/migrations/0543.sql"]), lane(2, 0, ["web/(site)/layout.tsx"]), lane(3, 0, ["docs/x.md"])];
+    const v = verdicts([[1, "nonconforming", ["conformance.unimplemented"]], [2, "conforms"], [3, "conforms"]]);
+    const r = replayPrs({ prs, verdicts: v, numbers: [1, 2, 3, 9], enforceDomains: "database,frontend", surfacesOf: stub });
+    assert.deepEqual(r.prs.map((x) => x.outcome), ["enforced", "flagged", "none"]);
+    assert.deepEqual(r.missing, [9]);
+    assert.equal(replayPrs({ prs, verdicts: v, numbers: [3], riskPaths: "docs/**", surfacesOf: stub }).prs[0].outcome, "flagged");
+    assert.match(renderReplay(r), /\| #2 \| shadow \| conforms \| domain:frontend \| flagged \|/);
+  });
+  it("prsOfPage keeps changed file paths; parseArgs validates --replay and its companions", () => {
+    const data = { data: { search: { nodes: [{ number: 5, mergedAt: at(0), files: { nodes: [{ path: "a.ts" }] } }] } } };
+    assert.deepEqual(prsOfPage(data, "o/r")[0].files, ["a.ts"]);
+    assert.deepEqual(parseArgs(["--conformance-outcomes", "--replay", "1,2", "--enforce-domains", "auth"]).replay, [1, 2]);
+    assert.throws(() => parseArgs(["--replay", "1"]), /need --conformance-outcomes/);
+    assert.throws(() => parseArgs(["--conformance-outcomes", "--enforce-domains", "auth"]), /need --replay/);
+    assert.throws(() => parseArgs(["--conformance-outcomes", "--replay", "x"]), /comma list/);
   });
 });
