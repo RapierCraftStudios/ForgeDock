@@ -133,6 +133,8 @@ import { mapLimit } from "./pmap.mjs";
 import { quotaRequeue } from "./rotator.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 import { formatOverload } from "./hostload.mjs";
+import { lackedTools } from "./toolplace.mjs";
+import { openPrerequisites } from "./prereq.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -385,6 +387,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
     if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
+      const lk = lackedTools(remote.contractOf?.(n), remote.lacks);
+      if (lk.tools.length) return { where: "local", reason: `host tool: sandbox lacks ${lk.tools.join(", ")}` };
+    }
     if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
     try {
       if (typeof remote.place === "function") {
@@ -498,6 +504,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // #4409: `head` (decomposed sub-issues) puts them at the front of the queue in their given order; a sub-issue's
   // estimate is the parent's ÷ N, floored at the M default.
+  // #5340: an open declared prerequisite outside the batch joins it, so edges() orders it first (no run that can only end dependency-open).
+  const pullPrerequisites = async (ns) => {
+    for (const n of ns) {
+      if (results.has(n)) continue;
+      const { pull } = await openPrerequisites({ deps: deps.get(n) ?? [], inBatch: (d) => set.has(d), results, issueState, issueLabels });
+      if (pull.length) { await addIssues(pull); decided({ issue: n, what: `prerequisite ${pull.map((d) => `#${d}`).join(", ")} is open: pulled into the batch ahead of it`, why: "declared Depends on, outside the batch", alternative: "start the run and end dependency-open" }); }
+    }
+  };
   const addIssues = async (ns, { head = false, parent = null } = {}) => {
     const fresh = ns.filter((d) => !set.has(d));
     for (const d of fresh) {
@@ -510,6 +524,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (head) { pending.splice(at++, 0, d); heads.add(d); } else pending.push(d);
       enqueued.set(d, now());
     }
+    await pullPrerequisites(fresh);
     noteCrossLane();
   };
   // New issues (a fresh batch, or extra issues passed to a resume) join the queue.
@@ -523,6 +538,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     await mapLimit(unread, setupConcurrency, async (n) => { await readDeps(n); setup.read++; save(); });
     setup = null;
   }
+  await pullPrerequisites([...pending]);
   if (estimate) for (const n of order) { // a resume that enabled the estimator
     if (estimates.has(n) || results.has(n)) continue;
     let b = ""; try { b = await readBody(n); } catch { b = ""; }

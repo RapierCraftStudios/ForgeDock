@@ -1,5 +1,5 @@
 ---
-description: Guided idea-to-backlog setup for a brand-new project — interview, defaults, doubts, spike doc, validated orchestrate-ready backlog
+description: Guided idea-to-backlog setup for a new project: interview, defaults, doubts, spike doc, validated orchestrate-ready backlog
 argument-hint: "<free text | path to docs> [--dry-run] [--spike <path>]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -9,7 +9,7 @@ argument-hint: "<free text | path to docs> [--dry-run] [--spike <path>]"
 
 **Input**: $ARGUMENTS
 
-This spec holds only judgment. All GitHub writes run in `scripts/bootstrap-create.mjs`. Templates live in `$(forge_root)/templates/bootstrap/`.
+Judgment only; writes run in `scripts/bootstrap-create.mjs`.
 
 ```bash
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
@@ -19,19 +19,20 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 
 1. **Read the input.** Use the free text, or read each doc at the given path(s).
 2. **Interview** from `interview.md`. Cover each aspect briefly; skip what the input answers.
-3. **Fill the blanks.** Default every unanswered aspect with a one-line rationale, using the closest `stack-profiles.md` preset. Show them in ONE editable "Here's what I assumed" list and apply the user's edits.
-4. **Ask only genuine doubts** (architecture or cost: native vs PWA, data residency, self-host vs managed DB, product name, repo owner). Ask with AskUserQuestion, at most 4 multiple-choice questions per batch, each with a recommended option. Everything else stays a default. Headless (no AskUserQuestion, e.g. `npx forgedock bootstrap`): take each recommended option and list it under "Here's what I assumed".
-5. **Spike doc.** Write `technical-spike.md` to `--spike` (default `docs/engineering/technical-spike.md`); set the plan's `spikeDoc` to that path. Fill every section and give each decision an ADR-style `**Rationale**:` line.
+3. **Fill the blanks.** Default every unanswered aspect with a one-line rationale from the closest `stack-profiles.md` preset. Show them in ONE editable "Here's what I assumed" list; apply edits.
+4. **Ask only genuine doubts** (architecture or cost: native vs PWA, data residency, self-host vs managed DB, repo owner). Use AskUserQuestion: at most 4 multiple-choice questions per batch, each with a recommended option. Everything else stays a default. Headless (no AskUserQuestion, e.g. `npx forgedock bootstrap`): take each recommended option, list it under "Here's what I assumed".
+5. **Spike doc.** Write `technical-spike.md` to `--spike` (default `docs/engineering/technical-spike.md`); set the plan's `spikeDoc` to that path. Fill every section; each decision gets a `**Rationale**:` line.
 6. **Plan JSON** in `$TMPDIR` (shape: header of `bootstrap-validate.mjs` and `bootstrap-create.mjs`):
    - Milestones as dependency layers, foundation first: each depends only on earlier ones (#4659).
-   - A thin deployable slice (CI deploy workflow, staging env, seed) in milestone 1 or 2, never last.
-   - A `SPIKE` parent issue.
-   - Sub-issues from `issue-body.md` with planned paths, `[type:*]` tags, `priority` and `component`.
+   - Milestone 1 has one `"skeleton": true` issue owning scaffold (CI, test harness, dependency bootstrap, first runnable build) and one #5336 journey; others depend on it.
+   - A thin deployable slice (CI deploy, staging, seed) in milestone 1 or 2, never last.
+   - A `SPIKE` parent (epic) with a `forge-acceptance` journey (`acceptance check`).
+   - Sub-issues from `issue-body.md`: planned paths, `[type:*]` tags, `priority`, `component`.
    - `"ui": true` issues carry the full design spec. `"hero": true` issues route to `/design`.
-   - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues reference it as `#{{KEY}}`, never depend on it, and name the mock that keeps dev and CI green.
+   - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues cite it as `#{{KEY}}`, never depend on it, and name the mock keeping dev and CI green.
    - Sub-issues point at the spike via `**Parent**` only, never `Depends on`.
-   - `guardrails` and `domainRules` from the interview.
-7. **Validate.** Run `node "$VALIDATE" <plan>`. Fix the plan until it exits 0. Heed `deploy-last` warnings. Never create from an invalid plan.
-8. **Create.** Run `node "$CREATE" <plan>`, adding `--dry-run` when the input has it (preview only, GitHub untouched). It reuses existing issues, so on an error re-run it to resume.
-9. **Hand off.** Print the script's hand-off verbatim: created (links), needs a human (links), and the `/orchestrate` command per milestone, in order.
-10. Later: `npx forgedock plan validate --live` (#4659).
+   - `guardrails`, `domainRules` from the interview.
+7. **Validate.** Run `node "$VALIDATE" <plan>`; fix until it exits 0; heed `deploy-last`. Never create from an invalid plan.
+8. **Create.** Run `node "$CREATE" <plan>`, adding `--dry-run` when the input has it (preview only, GitHub untouched). It reuses existing issues: re-run to resume.
+9. **Hand off.** Print the script's hand-off verbatim: created, needs a human, and the `/orchestrate` command per milestone, in order.
+10. Later: `npx forgedock plan validate --live`.

@@ -100,3 +100,11 @@ describe("liveDeferralBlocks (#5285)", () => {
     assert.deepEqual(liveDeferralBlocks({ requirements: [{ id: "R2", disposition: "defer", bucket: "owner:rotate key", why: "needs a credential" }] }, [{ flag: "f", mode: "on", live: true }]), []);
   });
 });
+
+describe("liveDeferralBlocks transferred requirements (#5339)", () => {
+  it("a live rollout with a post-deploy e2e/manual requirement transferred to the epic blocks, even without a live bucket", () => {
+    const c = { requirements: [{ id: "R2", quote: "Search works against the live web [type:e2e]", disposition: "post-deploy", bucket: "date:2027-01-01" }] };
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "pool", mode: "on", live: true }]), [{ id: "R2", flag: "pool" }]);
+    assert.deepEqual(liveDeferralBlocks(c, [{ flag: "pool", mode: "off", live: false }]), []);
+  });
+});

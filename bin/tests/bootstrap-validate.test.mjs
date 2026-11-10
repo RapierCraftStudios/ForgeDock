@@ -30,6 +30,9 @@ const CLASSES = [
   { code: "missing-parent", key: "ROUTES", base: "python" },
   { code: "missing-labels", key: "SYNC", base: "go" },
   { code: "code-depends-on-needs-human", key: "AUTH", base: "nextjs" },
+  { code: "missing-skeleton", key: "SPIKE", base: "go" },
+  { code: "multiple-skeletons", key: "STORE", base: "go" },
+  { code: "not-behind-skeleton", key: "MODELS", base: "python" },
 ];
 
 for (const eco of ECOSYSTEMS) {
@@ -228,9 +231,15 @@ test("isNeedsHuman is null-safe and validatePlan reports missing-labels without 
 const deployPlan = (deployMilestone) => {
   const plan = structuredClone(load("valid-nextjs"));
   plan.milestones = [{ key: "A", title: "A" }, { key: "B", title: "B" }, { key: "C", title: "C" }];
-  plan.issues.forEach((it, i) => { it.milestone = i === 0 ? "A" : "B"; it.deps = []; it.body = it.body.replace(/^.*Depends on.*$/gim, ""); });
+  plan.issues.forEach((it, i) => {
+    it.milestone = i === 0 ? "A" : "B";
+    delete it.skeleton;
+    it.deps = i === 0 ? [] : [plan.issues[0].key];
+    it.body = it.body.replace(/^.*Depends on.*$/gim, "") + (i === 0 ? "\nOne acceptance journey passes." : `\nDepends on #{{${plan.issues[0].key}}}`);
+  });
+  plan.issues[0].skeleton = true;
   const d = structuredClone(plan.issues[0]);
-  Object.assign(d, { key: "DEPLOY", title: "CI deploy workflow", milestone: deployMilestone, deps: [], body: plan.issues[0].body.replace(/^.*Depends on.*$/gim, "") + "\nAdds `.github/workflows/deploy.yml`." });
+  Object.assign(d, { key: "DEPLOY", title: "CI deploy workflow", milestone: deployMilestone, deps: [plan.issues[0].key], skeleton: false, body: plan.issues[0].body.replace(/^.*Depends on.*$/gim, "") + `\nDepends on #{{${plan.issues[0].key}}}` + "\nAdds `.github/workflows/deploy.yml`." });
   plan.issues.push(d);
   return plan;
 };
@@ -253,4 +262,29 @@ test("deploy-last: warns for deploy only in a middle milestone of 4", () => {
   const plan = deployPlan("C");
   plan.milestones.push({ key: "D", title: "D" });
   assert.deepEqual(validatePlan(plan).warnings.map((w) => w.code), ["deploy-last"]);
+});
+
+test("skeleton rules: no-journey, misplaced, label form, exemptions (#5337)", () => {
+  const go = load("valid-go");
+  issue(go, "MOD").body = issue(go, "MOD").body.replace(/\n- \[ \][^\n]*journey[^\n]*/, "");
+  assert.deepEqual(codes(validatePlan(go)), ["skeleton-no-journey"]);
+
+  const moved = load("valid-go");
+  delete issue(moved, "MOD").skeleton;
+  issue(moved, "SYNC").skeleton = true;
+  assert.deepEqual(codes(validatePlan(moved)), ["missing-skeleton", "skeleton-misplaced"]);
+
+  const byLabel = load("valid-go");
+  delete issue(byLabel, "MOD").skeleton;
+  issue(byLabel, "MOD").labels.push("skeleton");
+  assert.equal(validatePlan(byLabel).ok, true);
+
+  // needs-human issues and the skeleton's own ancestors (the spike) never need to depend on the skeleton.
+  const next = load("valid-nextjs");
+  assert.deepEqual(issue(next, "GOOGLE_OAUTH").deps, ["SCAFFOLD"]);
+  issue(next, "GOOGLE_OAUTH").deps = ["DB"];
+  issue(next, "GOOGLE_OAUTH").body = issue(next, "GOOGLE_OAUTH").body.replace(/#\{\{SCAFFOLD\}\}/g, "#{{DB}}");
+  assert.equal(validatePlan(next).ok, true);
+
+  assert.deepEqual(codes(validatePlan({ ...load("valid-go"), issues: load("valid-go").issues.map((i) => ({ ...i, skeleton: "yes" })) })), ["invalid-plan"]);
 });

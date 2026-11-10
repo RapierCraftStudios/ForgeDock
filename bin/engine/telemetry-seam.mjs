@@ -68,7 +68,7 @@ export function mapRecord(rec, wallMs) {
   }
   if (rec.event === "RUN_TERMINAL") {
     return { event: "run_terminal", phase: null, ...prOf(rec), payload: compact({ reason: rec.reason, code: rec.code, wall_ms: wallMs, guard_added_ms: rec.guard_added_ms, // #4705
-      milestone: rec.milestone, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would,
+      milestone: rec.milestone, verified: typeof rec.verified === "boolean" ? Number(rec.verified) : undefined, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would,
       builder_tier: rec.builder_tier, builder_class: rec.builder_class, builder_model: rec.builder_model, // #4394: the model per merge
       builder_escalated: typeof rec.builder_escalated === "boolean" ? Number(rec.builder_escalated) : undefined,
       experiment: rec.experiment, arm: rec.arm, arm_overrides: armOv(rec.arm_overrides) }) }; // #4629, #5206

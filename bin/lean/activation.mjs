@@ -106,6 +106,7 @@ export function liveDeferralBlocks(contract, modes) {
   const out = [];
   for (const r of contract?.requirements ?? []) {
     if (r?.disposition !== "defer" && r?.disposition !== "post-deploy") continue;
+    if (r.transferred || /\[type:(?:e2e|manual)\]/i.test(String(r.quote ?? ""))) { out.push({ id: r.id, flag: live.join(", ") }); continue; } // #5339: transferred to the epic, still unrun
     const b = String(r.bucket ?? "");
     if (r.disposition === "post-deploy" || b === "post-deploy" || b === "verify-now" || b === "host" || LIVE_ACCEPTANCE_RE.test(`${r.quote ?? ""} ${r.why ?? ""}`)) out.push({ id: r.id, flag: live.join(", ") });
   }

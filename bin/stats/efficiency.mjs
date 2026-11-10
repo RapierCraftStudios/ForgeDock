@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { citesFileLine } from "../lean/fixround.mjs";
 import { laneSize, SIZES } from "../lean/budget.mjs";
 import { probeResultOf } from "../lean/probe.mjs";
+import { summarizeWaits } from "../lean/phaseledger.mjs";
 import { listBatches } from "../lean/batch.mjs";
 import { isTrustedComment } from "../engine/phases.mjs";
 import { noComments } from "../lean/render.mjs";
@@ -79,7 +80,7 @@ export function issueSlices(events) {
         turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e), durationMs: num(e.duration_ms), // #4491
         ...(e.tools && typeof e.tools === "object" ? { calls: num(e.tools.calls), toolTurns: num(e.tools.turns), rereads: num(e.tools.rereads) } : {}) }); // #4410
     } else if (e.event === "RUN_TERMINAL") {
-      cur.terminal = { reason: e.reason ?? null, code: e.code ?? null, ts: e.ts ?? null, size: SIZES.includes(e.turns?.size) ? e.turns.size : null };
+      cur.terminal = { reason: e.reason ?? null, code: e.code ?? null, ts: e.ts ?? null, size: SIZES.includes(e.turns?.size) ? e.turns.size : null, phases: e.phases && typeof e.phases === "object" ? e.phases : null };
     }
   }
   return out;
@@ -179,7 +180,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     const term = [...slices].reverse().find((s) => s.terminal?.reason === "merged")?.terminal;
     merged.push({ issue: row.issue, slices: slices.length, cost: sum(atts.map((a) => a.cost)), implCost: sum(impl.map((a) => a.cost)),
       reviewCost: sum(atts.filter((a) => a.phase === "review").map((a) => a.cost)), implTurns: sum(impl.map((a) => a.turns)), implCache: sum(impl.map((a) => a.cacheRead)),
-      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl), shape: slices.at(-1)?.shape ?? null, implWall: laneWall(impl) });
+      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl), shape: slices.at(-1)?.shape ?? null, implWall: laneWall(impl), phases: term?.phases ?? null });
   }
   const all = group(merged);
   const bySize = {};
@@ -231,8 +232,8 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     retries: { total, per_merge: r(per(total, merged.length), 100), by_cause: retries, lane_reruns: sum(merged.map((m) => Math.max(0, m.slices - 1))) },
     no_action: { lanes: sum(Object.values(noAction).map((g) => g.n)), cost_usd: r(sum(Object.values(noAction).map((g) => g.cost_usd)), 1e6),
       by_kind: Object.fromEntries(Object.entries(noAction).map(([k, g]) => [k, { ...g, cost_usd: r(g.cost_usd, 1e6) }])) },
-    quality, acceptance, lanes,
-    tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
+    quality, acceptance, lanes, wait: summarizeWaits(merged.map((m) => m.phases)), // #5349: non-model time by phase and cause
+    tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), tool_calls_per_turn_n: withTools.length, rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
     per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
       implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.shape ? { shape: m.shape } : {}), ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
       ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}),
@@ -380,6 +381,9 @@ const int = (x) => (num(x) == null ? "n/a" : String(Math.round(x)));
 const g1 = (g) => `n=${g.n} ${usd(g.usd_per_merge)}/merge turns/merge ${f(g.turns_per_merge, 1)} context/turn ${int(g.context_per_turn)}`;
 
 /** The report lines of one scope (the batch report prints them unlabelled). */
+/** #5347: a median of tool calls per turn under this means builders are back to one call per turn. */
+export const CALLS_PER_TURN_ALERT = 1.5;
+
 export function formatEfficiencyLines(m, label = "") {
   const lines = [`efficiency${label ? ` (${label})` : ""}: merged ${m.merged}, ${usd(m.usd_per_merge)}/merge (implement ${usd(m.implement_usd)}, review ${usd(m.review_usd)}), turns/merge ${f(m.turns_per_merge, 1)}, context/turn ${int(m.context_per_turn)}`];
   const sizes = Object.entries(m.by_size ?? {});
@@ -397,11 +401,22 @@ export function formatEfficiencyLines(m, label = "") {
     : "acceptance (7d after promotion): n/a");
   if (a) lines.push(`unprobed merged issues (no acceptance probe declared): ${a.unprobed_issues?.length ? a.unprobed_issues.map((n) => `#${n}`).join(", ") : "none"}`); // #4908
   lines.push(`tools: calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads (>=3x same path)/merge ${f(m.rereads_per_merge)}`); // #4410
+  if (num(m.tool_calls_per_turn_p50) != null && m.tool_calls_per_turn_p50 < CALLS_PER_TURN_ALERT && (m.tool_calls_per_turn_n ?? 0) >= 3) lines.push(`ALERT: calls/turn p50 ${f(m.tool_calls_per_turn_p50)} is below ${CALLS_PER_TURN_ALERT}: builders are not batching independent reads (#5347)`);
   const ln = m.lanes; // #4452
   lines.push(ln ? `lanes: ${LANE_SHAPES.map((k) => `${k} ${ln[k]?.n ?? 0} (${usd(ln[k]?.cost_usd ?? 0)})`).join(", ")}; upgrade rate ${ln.upgrade_rate == null ? "n/a"
     : `${Math.round(ln.upgrade_rate * 100)}% (${ln.upgraded?.n ?? 0}/${(ln.light?.n ?? 0) + (ln.upgraded?.n ?? 0)})`}` : "lanes: n/a");
   lines.push(rates(m)); // #4491
+  lines.push(...waitLines(m.wait)); // #5349
   return lines;
+}
+
+/** #5349: where the non-model time of merged lanes went, by phase and cause; n/a when no merged lane carries a wait breakdown. */
+function waitLines(w) {
+  if (!w?.n) return ["wait (non-model time): n/a"];
+  const mins = (ms) => `${(ms / 60000).toFixed(1)}m`, causes = (c) => Object.entries(c).map(([k, v]) => `${k} ${mins(v)}`).join(", ") || "none";
+  const waiting = Math.max(0, w.total.ms - w.total.model_ms);
+  return [`wait (non-model time, ${w.n} merged lane${w.n === 1 ? "" : "s"}): ${mins(waiting)} of ${mins(w.total.ms)} wall (${w.total.ms > 0 ? Math.round((waiting / w.total.ms) * 100) : 0}%); ${causes(w.total.wait)}`,
+    ...Object.entries(w.phases).map(([id, g]) => `  wait ${id}: ${mins(Math.max(0, g.ms - g.model_ms))} of ${mins(g.ms)} (${causes(g.wait)}${Object.keys(g.pct ?? {}).length ? `; p50/p90 ${Object.entries(g.pct).map(([k, q]) => `${k} ${mins(q.p50)}/${mins(q.p90)}`).join(", ")}` : ""})`)];
 }
 
 const pct = (x) => (num(x) == null ? "n/a" : `${Math.round(x * 100)}%`);

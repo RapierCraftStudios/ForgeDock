@@ -67,6 +67,11 @@ describe("engine telemetry seam", () => {
     assert.deepEqual(calls[0][1], { reason: "needs-human", code: "review.escalated", wall_ms: 60000 });
     assert.equal(calls[0][2].phase, undefined);
   });
+  it("#5339: RUN_TERMINAL carries verified as 0/1, omitted when absent", () => {
+    assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", verified: false, issue: 7 }, 10).payload.verified, 0);
+    assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", verified: true, issue: 7 }, 10).payload.verified, 1);
+    assert.equal("verified" in mapRecord({ event: "RUN_TERMINAL", reason: "merged", issue: 7 }, 10).payload, false);
+  });
   it("maps STRUCTURE_DELTA (forge#4159) to structure_delta with scalar counts and 0/1 flags", () => {
     const m = mapRecord({ event: "STRUCTURE_DELTA", issue: 7, edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: true, boundary_loosened: false }, 10);
     assert.deepEqual(m, { event: "structure_delta", phase: "implement", payload: { edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: 1, boundary_loosened: 0 } });

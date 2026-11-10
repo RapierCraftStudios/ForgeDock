@@ -39,6 +39,35 @@ export function classifyEdges({ order, issues }) {
   return { ok: !edges.some((e) => e.state === "invalid"), edges };
 }
 
+/**
+ * #5337: walking-skeleton rule on live milestones. Every open milestone with issues needs exactly one `skeleton`-labelled
+ * issue, and every other issue (not an epic or needs-human, nor one the skeleton itself depends on) reaches it through `Depends on`.
+ * @param {{ open?: string[], issues: Array<{ number: number, milestone: string|null, body?: string, labels?: Array<string|{name: string}> }> }} live
+ * @returns {Array<{ milestone: string, issue: number|null, code: string, message: string }>}
+ */
+export function skeletonProblems({ open = [], issues }) {
+  const names = (it) => (Array.isArray(it.labels) ? it.labels : []).map((l) => (typeof l === "string" ? l : l?.name));
+  const has = (it, re) => names(it).some((n) => re.test(String(n)));
+  const byNumber = new Map(issues.map((it) => [it.number, it]));
+  const reach = (n) => { const seen = new Set(); const todo = [n]; while (todo.length) for (const d of parseDependsOn(byNumber.get(todo.pop())?.body, n)) if (byNumber.has(d) && !seen.has(d)) { seen.add(d); todo.push(d); } return seen; };
+  const out = [];
+  for (const title of open) {
+    const mine = issues.filter((it) => it.milestone === title);
+    if (!mine.length) continue;
+    const sk = mine.filter((it) => has(it, /^skeleton$/));
+    if (sk.length !== 1) {
+      out.push({ milestone: title, issue: sk[1]?.number ?? null, code: sk.length ? "multiple-skeletons" : "missing-skeleton", message: `${sk.length} skeleton issues; exactly one \`skeleton\` issue is required` });
+      continue;
+    }
+    const ancestors = reach(sk[0].number);
+    for (const it of mine) {
+      if (it === sk[0] || ancestors.has(it.number) || has(it, /^(epic|needs-human(:.*)?)$/)) continue;
+      if (!reach(it.number).has(sk[0].number)) out.push({ milestone: title, issue: it.number, code: "not-behind-skeleton", message: `#${it.number} does not depend on skeleton issue #${sk[0].number}, directly or transitively` });
+    }
+  }
+  return out;
+}
+
 export function formatLiveReport({ edges }) {
   if (!edges.length) return "plan validate --live: no cross-milestone edges";
   const lines = edges.map((e) => `${e.state}: #${e.from} (${e.fromMilestone}) depends on #${e.to} (${e.toMilestone})`);
@@ -52,9 +81,10 @@ const parse = (s) => { try { return JSON.parse(String(s)); } catch { return null
 export async function readLive({ gh, repo }) {
   const r = repo ? ["-R", repo] : [];
   const ms = parse(await gh(["api", `repos/${repo || "{owner}/{repo}"}/milestones?state=all&per_page=100`, "--paginate", "--slurp"]));
-  const issues = parse(await gh(["issue", "list", ...r, "--state", "all", "--limit", "1000", "--json", "number,body,state,milestone"]));
+  const issues = parse(await gh(["issue", "list", ...r, "--state", "all", "--limit", "1000", "--json", "number,body,state,milestone,labels"]));
   if (!Array.isArray(ms) || !Array.isArray(issues)) throw new Error("could not read milestones/issues from GitHub");
-  return { order: orderMilestones(ms.flat()), issues: issues.map((i) => ({ ...i, milestone: i.milestone?.title ?? null })) };
+  return { order: orderMilestones(ms.flat()), open: ms.flat().filter((m) => String(m.state).toLowerCase() === "open").map((m) => m.title),
+    issues: issues.map((i) => ({ ...i, milestone: i.milestone?.title ?? null })) };
 }
 
 /**
@@ -136,10 +166,14 @@ export async function runLive(argv, { gh = ghExec, out = (t) => process.stdout.w
   if (argv[0] !== "validate" || !argv.includes("--live")) { err("usage: forgedock plan validate --live [--repo owner/repo] [--json]"); return 2; }
   const i = argv.indexOf("--repo");
   const repo = i >= 0 ? argv[i + 1] : "";
-  let report;
-  try { report = classifyEdges(await readLive({ gh, repo })); } catch (e) { err(`plan validate --live: ${e.message}`); return 2; }
-  out(argv.includes("--json") ? JSON.stringify(report) : formatLiveReport(report));
-  return report.ok ? 0 : 1;
+  let report, skeleton;
+  try { const live = await readLive({ gh, repo }); report = classifyEdges(live); skeleton = skeletonProblems(live); } catch (e) { err(`plan validate --live: ${e.message}`); return 2; }
+  if (argv.includes("--json")) out(JSON.stringify({ ...report, skeleton }));
+  else {
+    out(formatLiveReport(report));
+    for (const p of skeleton) out(`invalid: [${p.code}] ${p.milestone}: ${p.message}`);
+  }
+  return report.ok && !skeleton.length ? 0 : 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

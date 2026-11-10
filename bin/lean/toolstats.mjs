@@ -6,6 +6,7 @@
  * one tool use; a read is the Read tool's path or a file operand of `cat`, `sed -n`, `head` or `tail` in a Bash command
  * (grep is a search, not a re-read); a re-read path is one read 3 or more times. Pure module: no I/O.
  */
+import { firstEditTurn } from "./ceiling.mjs";
 
 export const REREAD_MIN = 3;
 const MAX_SEGMENTS = 50;
@@ -67,6 +68,7 @@ export function toolStats(toolUses) {
   }
   if (!calls) return null;
   const hot = [...reads].filter(([, k]) => k >= REREAD_MIN).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const firstEdit = firstEditTurn(toolUses); // #5346: turns-to-first-edit, the cost of a restart's re-orientation
   return { calls, turns: msgs.size, per_turn: Math.round((calls / msgs.size) * 100) / 100, rereads: hot.length,
-    top: hot.slice(0, 5).map(([path, n]) => ({ path, reads: n })) };
+    top: hot.slice(0, 5).map(([path, n]) => ({ path, reads: n })), ...(firstEdit != null ? { first_edit_turn: firstEdit } : {}) };
 }
