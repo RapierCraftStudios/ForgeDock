@@ -2907,3 +2907,14 @@ middle tier) and flagged `cost_estimated: true`. A kill that streamed nothing ca
 Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issue>.jsonl` (`runLogPath`); the bare
 `<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
 does, and take the repo from the RUN_START slice, never from the number alone.
+
+## Clean first review (#5345)
+
+`forgedock check` also runs `selfreview.mjs` `selfReviewFindings` (the deterministic subset of `precheck()`, plus a
+preserve-touch check): findings land in the `review` section of `.forge-lean/self-check.json`, make `ok` false, and a
+fixed result with a red record gets one builder resume (`SELF_CHECK_RED`) before any reviewer runs. An incomplete reviewer
+reply whose gaps are row ids (`reaskable()`) is repaired in place by `mergeReviewRows`, never a new review round.
+`RUN_TERMINAL` carries `first_review` (first gate state, finding kinds, rounds, `incomplete`, change type, risk surfaces);
+`forgedock stats --first-review` reports the clean rate by repo, change type and risk surface, maps finding kinds to
+contract sections, and flags long-clean cells as light-lane candidates (never a risk surface, #5283). Recurring finding
+classes reach the builder as `FINDING_PITFALLS` in the implement prompt.
