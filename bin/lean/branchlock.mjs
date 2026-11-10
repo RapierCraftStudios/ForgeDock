@@ -7,15 +7,9 @@
  */
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { pidAlive } from "./sched.mjs";
 
 export const LOCK_DIR = "forge-branch-locks";
-
-/** True when `pid` is a live process (EPERM: alive, owned by someone else). */
-export function pidAlive(pid) {
-  const n = Number(pid);
-  if (!Number.isSafeInteger(n) || n <= 0) return false;
-  try { process.kill(n, 0); return true; } catch (e) { return e?.code === "EPERM"; }
-}
 
 const lockPath = (gitCommonDir, branch) => join(gitCommonDir, LOCK_DIR, encodeURIComponent(String(branch)));
 const readHolder = (p) => { try { const j = JSON.parse(readFileSync(p, "utf8")); return j && typeof j === "object" ? j : null; } catch { return null; } };
