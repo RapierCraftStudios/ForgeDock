@@ -20,8 +20,9 @@ import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
+import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
-export const RELEASE_STEPS = ["preflight", "release-pr", "review", "fixes", "rehearsal", "promotion", "post-merge"];
+export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -44,16 +45,16 @@ export function openRelease(root, id, mounts) {
   };
 }
 
-/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow, rehearsal}` (#5253). */
+/** forge.yaml `release.*` of `raw`: `{autoMerge, artifactCheck, versionSync, publishWorkflow, rehearsal, preflight}` (#5253, #5277). */
 export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...rehearsalKey(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...optKeys(r) };
 }
 
-/** `{rehearsal}` only when configured, so the config of a repo without it keeps its shape. */
-const rehearsalKey = (r) => { const rehearsal = parseRehearsalConfig(r); return rehearsal ? { rehearsal } : {}; };
+/** `{rehearsal}` / `{preflight}` only when configured, so the config of a repo without them keeps its shape. */
+const optKeys = (r) => { const rehearsal = parseRehearsalConfig(r), preflight = parsePreflightConfig(r); return { ...(rehearsal ? { rehearsal } : {}), ...(preflight ? { preflight } : {}) }; };
 
 const json = (s) => JSON.parse(String(s || "null"));
 
@@ -98,7 +99,7 @@ async function releasePrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", staging, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true };
   const list = await bundleList({ io, repo, head: staging, base: def });
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list)])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
@@ -133,11 +134,15 @@ async function promotionStep(ctx) {
   return { merged: true, head, gate };
 }
 
+const OPTIONAL_STEPS = ["host-preflight", "mark-ready"];
+
 const STEP_FNS = {
   preflight: preflightStep,
+  "host-preflight": hostPreflightStep,
   "release-pr": releasePrStep,
   review: (ctx) => reviewStep(ctx),
   fixes: (ctx) => fixStep(ctx),
+  "mark-ready": markReadyStep,
   rehearsal: (ctx) => rehearsalStep(ctx),
   promotion: promotionStep,
   "post-merge": (ctx) => postMergeStep(ctx),
@@ -164,6 +169,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
+      if (result?.skipped && OPTIONAL_STEPS.includes(step)) continue; // unconfigured: leaves no trace in the state
       if (result?.stopped) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; out = { id, status: "stopped", step, reason: result.why }; break; }
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
       ctx.save();

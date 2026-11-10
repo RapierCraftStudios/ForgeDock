@@ -371,11 +371,22 @@ else
   # old query errored and defaulted to 0 = "no failures"). An unreadable result counts as failing.
   # forgedock/verify (the lean engine's report-only gate summary) is not a code failure: ignored, as wait-ci-green.sh does.
   # forge/deploy-gate and "Check for FORGE gate markers" (the staging review's marker status and its workflow job) are not fixable by /fix-ci: ignored here, still waited on in Phase 5.
+  # A still-running check is not passed (#5277): the reads below count fail, cancel and pending. When nothing has failed yet and
+  # checks are only unfinished, this phase reports PENDING and leaves the wait to Phase 5 (wait-ci-green.sh); never PASSED.
+  CI_PENDING=false
+  ci_only_pending() {
+    gh pr checks "$PR_NUMBER" $GH_FLAG --json name,bucket \
+      --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null | grep -qx 0
+  }
   CURRENT_CI_STATUS=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,bucket \
-    --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
+    --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel" or .bucket == "pending")] | length' 2>/dev/null || echo "1")
 
   if [ "$CURRENT_CI_STATUS" -eq 0 ]; then
     echo "CI gate: PASSED (no failing checks)"
+    CI_GATE_PASSED=true
+  elif ci_only_pending; then
+    echo "CI gate: PENDING ($CURRENT_CI_STATUS check(s) unfinished, none failed) — deferred to Phase 5 (wait-ci-green.sh)"
+    CI_PENDING=true
     CI_GATE_PASSED=true
   else
     echo "CI has $CURRENT_CI_STATUS failing checks — invoking /fix-ci (max $MAX_CI_ITER iterations)"
@@ -394,10 +405,14 @@ else
 
       # Re-check CI status after fix attempt (same fail-closed query as above)
       FAILING_AFTER=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,bucket \
-        --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
+        --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate" and .name != "Check for FORGE gate markers") | select(.bucket == "fail" or .bucket == "cancel" or .bucket == "pending")] | length' 2>/dev/null || echo "1")
 
       if [ "$FAILING_AFTER" -eq 0 ]; then
         echo "CI gate: PASSED after $CI_ITER iteration(s)"
+        CI_GATE_PASSED=true
+      elif ci_only_pending; then
+        echo "CI gate: PENDING after $CI_ITER iteration(s) ($FAILING_AFTER check(s) unfinished, none failed) — deferred to Phase 5 (wait-ci-green.sh)"
+        CI_PENDING=true
         CI_GATE_PASSED=true
       else
         echo "CI still has $FAILING_AFTER failing checks after iteration $CI_ITER"
@@ -414,7 +429,7 @@ fi
 
 # Emit gate state marker for auditability <!-- Ref: issue #1582 — gate passes must be auditable -->
 if [ "$DRY_RUN" = "false" ] && [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "DRY_RUN" ]; then
-  gh pr comment "$PR_NUMBER" $GH_FLAG --body "<!-- FORGE:GATE_PASS phase=ci iterations=${CI_ITER} fixes=${CI_FIXES} -->" 2>/dev/null || true
+  gh pr comment "$PR_NUMBER" $GH_FLAG --body "<!-- FORGE:GATE_PASS phase=ci iterations=${CI_ITER} fixes=${CI_FIXES} pending=${CI_PENDING:-false} -->" 2>/dev/null || true
 fi
 ```
 
