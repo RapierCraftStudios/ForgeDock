@@ -23,6 +23,8 @@ import { duplicateExports } from "./postmerge.mjs";
 import { englishCopies } from "./i18n.mjs";
 import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
+import { reserveForBuild } from "./seqreserve.mjs";
+import { parseVersioned } from "./seqversioned.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
@@ -309,6 +311,14 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
+  /** #5235: paths the other open PRs on `lane` carry (gh only, no fetch); [] on any failure. */
+  const openPrFiles = async (cwd, lane) => {
+    try {
+      const me = String(await run("git")(["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).trim();
+      const prs = JSON.parse(await run("gh")(["pr", "list", "--state", "open", "--base", lane, "--limit", "100", "--json", "headRefName,files"], { cwd }));
+      return prs.filter((p) => p?.headRefName !== me).flatMap((p) => (p?.files ?? []).map((f) => String(f?.path ?? "")));
+    } catch { return []; }
+  };
   return {
     ghCache: (root) => makeGhCache({ root }),
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
@@ -421,16 +431,23 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     enumeratingMissing: ({ cwd, base }) => missingEntries({ git: (a) => run("git")(a, { cwd }), cwd, base }),
     /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
     // #5340: also against the default branch(es) in `extraBases`, which a milestone lane would otherwise not see
-    sequenceCheck: async ({ cwd, base, extraBases = [] }) => {
+    sequenceCheck: async ({ cwd, base, extraBases = [], versioned }) => {
       const git = (a) => run("git")(a, { cwd });
-      const out = [...(await sequenceCollisions({ git, base }))];
-      for (const b of extraBases) { try { out.push(...(await sequenceCollisions({ git, base: b }))); } catch { /* fail-open */ } }
+      const out = [...(await sequenceCollisions({ git, base, versioned }))];
+      for (const b of extraBases) { try { out.push(...(await sequenceCollisions({ git, base: b, versioned }))); } catch { /* fail-open */ } }
       return out;
     },
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
-    sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
+    sequenceVerify: ({ cwd, base, before, moves, versioned }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves: moves?.filter((m) => !m.versioned), versioned }),
     /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
-    sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve, openNumbers }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve, openNumbers }),
+    sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve, openNumbers, versioned }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve, openNumbers, versioned }),
+    /** #5235: reserve the numbers / versions the frozen contract's deliverables need before the build (bin/lean/seqreserve.mjs); [] on failure. */
+    sequenceReserveBuild: ({ cwd, base, lane, repo, issue, deliverables, versioned }) => reserveForBuild({
+      git: (a) => run("git")(a, { cwd }), base, deliverables, versioned,
+      reserve: (x) => seqLeaseIo.reserve({ repo, lane, issue, ...x }),
+      openNumbers: async ({ dir }) => (await openPrFiles(cwd, lane)).filter((f) => dirname(f) === dir).map((f) => Number(seqNumber(f))).filter(Number.isFinite),
+      openVersions: async ({ cls }) => { const [c] = parseVersioned([cls]); return (await openPrFiles(cwd, lane)).map((f) => c.re.exec(dirname(f).slice(c.dir ? c.dir.length + 1 : 0).split("/")[0])?.[1]).filter(Boolean).map(Number); },
+    }),
     sequenceResolve: ({ cwd, files, partial }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files, partial }),
     /** #4732: numbers the other open PRs on `lane` already carry in `dir` (gh only, no fetch); [] on any failure. */
     async sequenceOpenNumbers({ cwd, lane, dir }) {

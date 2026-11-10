@@ -6647,6 +6647,31 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /deterministic: 2 union \/ JSON-map \/ generated file/);
     });
 
+    it("#5235 a hand-off renumber reruns the frozen validates without a spurious failure (no fix round, no anomaly)", async () => {
+      const w = dworld({ seq: [COLL, []] }), ran = [];
+      w.io.runCommand = async (a) => { ran.push(a.command); return { rc: 0, output: "" }; };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(w.renumbers.length, 1);
+      assert.ok(ran.includes("node --test test/foo.test.js"), `validate rerun after hand-off renumber: ${JSON.stringify(ran)}`);
+      assert.equal(builders(w).length, 2, "no fix round");
+      assert.ok(!(r.anomalies ?? []).some((x) => /after the hand-off renumber/.test(x)), JSON.stringify(r.anomalies));
+    });
+
+    it("#5235 a renumber after a base-sync reruns the frozen validates before the merge; no renumber, no extra run", async () => {
+      const w = dworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"], mine: [] }), ran = [];
+      w.io.runCommand = async (a) => { ran.push(a.command); return { rc: 0, output: "" }; };
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.ok(w.renumbers.length >= 1, "renumbered at the base-sync");
+      assert.ok(ran.includes("node --test test/foo.test.js"), `frozen validate rerun: ${JSON.stringify(ran)}`);
+      assert.ok(w.merges.length === 1);
+      const n = dworld({ seq: [[], [], []], prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"], mine: [] }), nran = [];
+      n.io.runCommand = async (a) => { nran.push(a.command); return { rc: 0, output: "" }; };
+      await run(n);
+      assert.equal(n.renumbers.length, 0);
+      assert.ok(!nran.includes("node --test test/foo.test.js"), "P2: nothing extra without a renumber");
+    });
+
     it("#4588: files the engine cannot resolve go to the sequence resolver, and the builder when that fails; without config nothing changes", async () => {
       const w = dworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["src/index.ts", "db/meta/_journal.json"], resolve: { unsupported: "x" } });
       w.io.conflictResolve = async () => ({ resolved: ["src/index.ts"], remaining: ["db/meta/_journal.json"] });

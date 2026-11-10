@@ -44,7 +44,8 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, buildOpeningNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { reserveForBuild, revalidate } from "./seqreserve.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -407,6 +408,7 @@ export async function runCore(o) {
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
   const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
   let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
+  let seqBuildNote = ""; // #5235: numbers reserved for this lane at build start (prompt paragraph)
   let seqLease = null; // #4386: the host sequence lease, held from the merge-gate renumber through the merge
   const waits = {};
   const followupsFiled = []; // #5078: {issue, class, count} per tracking issue this lane filed into, for the batch report
@@ -880,7 +882,7 @@ export async function runCore(o) {
   let decisionsNote = ""; // #4901: trusted FORGE:DECISION comments newer than the frozen contract, "" otherwise
   let carriedPasses = []; // #5331: validate ids that passed on the resume head (resume digest); carried into the builder result while HEAD is unchanged
   let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
-  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
+  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
   /** #5334: records a builder session that ended without its result line (kill, signal) as one attempt; `at` = its start. */
   const killedAttempt = (n, e, opts, at) => attempt("implement", n, { killed: true, usage: e.usage ?? null, turns: e.turns ?? null, tools: toolStats(e.toolUses), costUsd: null, durationMs: now() - at, model: opts.model ?? laneModel() ?? null }, opts.mode, opts.trigger, opts.restartOf);
   async function flushInflight() {
@@ -2041,11 +2043,16 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
+      if (!isSplit && io.sequenceReserveBuild) { // #5235: reserve numbers / versions before the builder picks them from its stale snapshot
+        const rs = await io.sequenceReserveBuild({ cwd: wt, base, lane, repo, issue, deliverables: frozen?.deliverables ?? [], versioned: o.sequenceVersioned ?? [] }).catch(() => []);
+        seqBuildNote = sequenceBuildRule(rs);
+        if (rs.length) { ev({ event: "SEQUENCE_RESERVED", reservations: rs }); T.decisions.push(`Sequence numbers reserved at build start: ${rs.map((r) => `${r.cls ?? r.dir}=${r.numbers.join(",")}`).join("; ")}`); }
+      }
       stampHash = hash; // #5333
       await claimSurfaceSlots(frozen); // #5340: the full and recovered paths reach the builder here with the contract settled
       const openPaths = (frozen?.deliverables ?? []).map((d) => d?.path); // #5347: facts for the build's opening batch
       const openMap = io.runCommand ? await readTestMapAtRef(git, base).catch(() => null) : null;
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
       stage = "implement"; phaseLedger.enter("implement");
       let buildPrompt = implementPrompt, noCeiling = false;
@@ -2239,16 +2246,32 @@ export async function runCore(o) {
      * sees its tip. #4386: the engine renumbers first (no builder, no session); the builder only when that is unsupported.
      * `laneRef`: the pre-merge lane head after a base-sync took the base side of sequence-only conflicts.
      */
+    /** #5235: a renumber (hand-off or base-sync) reruns the frozen validates (one fix round on failure, then an anomaly) before the merge. */
+    async function revalidateRenumbered(trigger) {
+      if (!io.runCommand || !frozen?.validate?.length) return;
+      const env = laneEnv();
+      const runAll = () => revalidate({ validates: frozen.validate, runOne: async (v) => { const x = (await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: resolveForgedockPaths(String(v.command), { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI }), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r)) ?? {}; return { rc: x.rc, output: x.output }; } });
+      let bad = await runAll();
+      ev({ event: "SEQUENCE_REVALIDATED", trigger, failed: bad.map((x) => x.id) });
+      if (bad.length && sessionId) {
+        const log = bad.map((x) => `${x.id} (exit ${x.rc}): ${x.output.slice(-1500)}`).join("\n");
+        const renumberTask = () => `The sequence renumber after ${trigger} changed the tree and these frozen validate commands now fail:\n${log}\n\nFix the cause (the renumber itself is correct), ${syncChecks(vcfg.mode)}, commit. Do not push.`; // called below so the #4362 trigger-literal check parses the call
+        await fixRound("sequence", renumberTask(), [], "sequence", log);
+        files = await changedFiles();
+        bad = await runAll();
+      }
+      if (bad.length) T.anomalies.push(`Frozen validate(s) fail after the ${trigger} renumber: ${bad.map((x) => x.id).join(", ")}`);
+    }
     async function sequenceHandoff(trigger, { laneRef = null } = {}) {
       if (!io.sequenceCheck || isSplit) return null;
       try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
-      const collisions = (await io.sequenceCheck({ cwd: wt, base }).catch(() => null)) ?? [];
+      const collisions = (await io.sequenceCheck({ cwd: wt, base, versioned: o.sequenceVersioned }).catch(() => null)) ?? [];
       if (!collisions.length) return null;
       const before = (await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? [];
       ev({ event: "SEQUENCE_COLLISION", trigger, files: collisions.map((c) => c.lane) });
       const taken = collisions.filter((c) => c.base.length).map((c) => `${c.lane} vs ${c.base.join(", ")}`).join("; ");
       if (io.sequenceRenumber) {
-        const renumber = async (ref) => (await io.sequenceRenumber({ cwd: wt, base, ...(ref ? { laneRef: ref } : {}), regenerate: o.sequenceRegenerate ?? null, reserve: io.sequenceLease?.reserve ? (x) => io.sequenceLease.reserve({ repo, lane, issue, ...x }) : null, openNumbers: io.sequenceOpenNumbers ? (x) => io.sequenceOpenNumbers({ cwd: wt, lane, ...x }) : null }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? { unsupported: "no result" };
+        const renumber = async (ref) => (await io.sequenceRenumber({ cwd: wt, base, ...(ref ? { laneRef: ref } : {}), regenerate: o.sequenceRegenerate ?? null, versioned: o.sequenceVersioned ?? [], reserve: io.sequenceLease?.reserve ? (x) => io.sequenceLease.reserve({ repo, lane, issue, ...x }) : null, openNumbers: io.sequenceOpenNumbers ? (x) => io.sequenceOpenNumbers({ cwd: wt, lane, ...x }) : null }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? { unsupported: "no result" };
         let det = await renumber(laneRef);
         if (det.nonSequence?.length && !laneRef) { // #4732: base-sync first (sequence files take the base side, the builder resolves the rest), then renumber deterministically
           const pre = String(await git(["rev-parse", "HEAD"])).trim(), left = async () => String(await git(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
@@ -2266,10 +2289,11 @@ export async function runCore(o) {
         if (det.ok && det.moves?.length) {
           ev({ event: "SEQUENCE_RENUMBERED", trigger, mode: "deterministic", moves: det.moves });
           T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${taken}; renumbered deterministically (no builder): ${det.moves.map((m) => `${m.from} → ${m.to}`).join(", ")}`);
-          const v = (await io.sequenceVerify?.({ cwd: wt, base, before, moves: det.moves }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
+          const v = (await io.sequenceVerify?.({ cwd: wt, base, before, moves: det.moves, versioned: o.sequenceVersioned }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
           if (!v.ok) return { done: await needsHuman(`Sequence-numbered files still collide with ${lane} after the deterministic renumber (${trigger}); nothing merged:\n${v.problems.slice(0, 10).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.BASE_CONFLICT) };
           await gatePassed("sequence");
           files = await changedFiles();
+          await revalidateRenumbered(trigger);
           return { renumbered: true, deterministic: true };
         }
         const why = det.unsupported ?? "no movable sequence file";
@@ -2279,10 +2303,11 @@ export async function runCore(o) {
       T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${taken}; builder renumbers`);
       await fixRound("sequence", sequencePrompt(collisions, lane, vcfg.mode), [], "sequence", collisions.map((c) => `sequence number collision: ${c.lane} already taken by ${(c.base ?? []).join(", ")}`).join("\n"));
       result = (await readResult()) ?? result;
-      const v = (await io.sequenceVerify?.({ cwd: wt, base, before }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
+      const v = (await io.sequenceVerify?.({ cwd: wt, base, before, versioned: o.sequenceVersioned }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
       if (!v.ok) return { done: await needsHuman(`Sequence-numbered files still collide with ${lane} after the builder renumbered (${trigger}); nothing merged:\n${v.problems.slice(0, 10).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.BASE_CONFLICT) };
       await gatePassed("sequence");
       files = await changedFiles();
+      await revalidateRenumbered(trigger);
       return { renumbered: true };
     }
     { const sq = await sequenceHandoff("hand-off"); if (sq?.done) return sq.done; }
@@ -3338,7 +3363,7 @@ export async function runCore(o) {
         }
         if (seqLease) {
           try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
-          const late = (await io.sequenceCheck({ cwd: wt, base, extraBases: defaults.filter((d) => d && `origin/${d}` !== base).map((d) => `origin/${d}`) }).catch(() => null)) ?? [];
+          const late = (await io.sequenceCheck({ cwd: wt, base, versioned: o.sequenceVersioned, extraBases: defaults.filter((d) => d && `origin/${d}` !== base).map((d) => `origin/${d}`) }).catch(() => null)) ?? [];
           if (late.length) {
             ev({ event: "SEQUENCE_LATE_BIND", pr, files: late.map((c) => c.lane) });
             const r = await baseSync("merge gate: sequence number taken"); if (r) return r;

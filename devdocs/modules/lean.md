@@ -566,6 +566,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`seqlease.mjs` `reserve`, its own registry `schedDir()/seq-pick/<key>/`, never the merge-gate
    lease) above every other live lane's reservation in `reserved.json`; a reservation lasts until
    `unreserve` at finish, its holder's death (pid) or 24h, and a lock or file error keeps the
+   #5235: build-start reservation (`seqreserve.mjs` `reserveForBuild`): before the implement call one number per numbered series dir (and one version per `lean.sequence.versioned` class, `seqversioned.mjs`) the frozen deliverables touch is reserved through the same `reserve`, above the base and open PRs, and named to the builder (`sequenceBuildRule`, kept on restarts). A renumber after a base-sync reruns the frozen validates (`revalidate`; one fix round, then an anomaly). Versioned-dir collisions are renumbered by `renumberVersioned` (`git mv` plus companion rewrite).
    base-derived numbers (fail-open). `verifyRenumber` also accepts a file whose first line only
    swaps its own stem/number (`headerOnlyChange`, e.g. `-- Migration 0067_x`). A data-only move
    after a schema-changing one in the same dir goes through the generator (its predecessor is not

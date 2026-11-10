@@ -21,6 +21,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { promisify } from "node:util";
+import { parseVersioned, renumberVersioned, versionedCollisions } from "./seqversioned.mjs";
 
 const NUM_RE = /^(\d{3,})[_-]/;
 const DATE_RE = /^(?:19|20)\d\d(-?)(?:0[1-9]|1[0-2])\1(?:0[1-9]|[12]\d|3[01])[_-]/;
@@ -56,12 +57,21 @@ async function seriesDir(g, ref, dir) {
   };
 }
 
+/** #5235: whether `dir` holds a numbered series at `ref`, its highest number and width. @returns {Promise<{series:boolean, max:number, width:number}>} */
+export async function baseSeries({ git, ref, dir }) {
+  const g = out(git), series = await seriesDir(g, ref, dir);
+  const nums = lines(await g(["-c", "core.quotepath=off", "ls-tree", "--name-only", ref, ...inDir(dir)])).filter((p) => dirname(p) === dir).map(numOf).filter(Boolean);
+  const width = Math.max(0, ...nums.map((n) => n.length));
+  return { series: width > 0 && series(width), max: Math.max(0, ...nums.map(Number)), width };
+}
+
 /**
  * Collisions: in each directory where a lane-added numbered file shares its number with a different base file (another
  * name, or the same path with other content), every lane-added numbered file there must move, in order, above the base's
  * highest number. @returns {Promise<Array<{dir, number, lane, base:string[], next}>>} (base [] = moves only to keep order)
  */
-export async function sequenceCollisions({ git, base, ref = "HEAD" }) {
+export async function sequenceCollisions({ git, base, ref = "HEAD", versioned = [] }) {
+  const more = versioned?.length ? await versionedCollisions({ git, base, ref, versioned }) : []; // #5235: versioned dirs (`<dir>/v{N}`)
   try {
     const g = out(git);
     const lane = await laneNumbered(git, base, ref);
@@ -81,8 +91,8 @@ export async function sequenceCollisions({ git, base, ref = "HEAD" }) {
       let next = Math.max(0, ...theirs.map((t) => Number(numOf(t.path))));
       for (const f of mine) res.push({ dir, number: numOf(f.path), lane: f.path, base: clash(f), next: String(++next).padStart(width, "0") });
     }
-    return res;
-  } catch { return []; }
+    return [...res, ...more];
+  } catch { return more; }
 }
 
 /**
@@ -181,10 +191,10 @@ function retitle(text, oldNum, newNum) {
  * `moves` ([{from,to}]) defaults to the pairing of recorded and current lane files by the name after the number.
  * @returns {Promise<{ok, problems}>}
  */
-export async function verifyRenumber({ git, base, before = [], moves = null }) {
+export async function verifyRenumber({ git, base, before = [], moves = null, versioned = [] }) {
   try {
     const g = out(git), problems = [];
-    const left = await sequenceCollisions({ git, base });
+    const left = await sequenceCollisions({ git, base, versioned });
     for (const c of left.filter((x) => x.base.length)) problems.push(`${c.lane} still shares number ${c.number} with ${c.base.join(", ")}`);
     const now = await laneNumbered(git, base);
     const rest = (p) => basename(p).slice(numOf(p).length);
@@ -301,7 +311,26 @@ const writeJson = (p, o) => writeFileSync(p, `${JSON.stringify(o, null, 2)}\n`);
  * where it started. Never throws.
  * @returns {Promise<{ok:true, moves:Array<{from,to}>, commit:string|null}|{unsupported:string, nonSequence?:string[]}>}
  */
-export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerate = null, regenerateCustom = null, run = null, uuid = randomUUID, reserve = null, openNumbers = null }) {
+export async function renumberLane({ versioned = [], ...o }) {
+  let r = await renumberNumbered(o);
+  if (r.unsupported && versioned?.length && r.nonSequence?.length) {
+    // #5235: base-merge conflicts only inside versioned dirs: the versioned pass takes the base side, then the numbered pass reruns
+    const cls = parseVersioned(versioned), inCls = (f) => cls.some((c) => (!c.dir || f.startsWith(`${c.dir}/`)) && c.re.test(posix.relative(c.dir || ".", f).split("/")[0]));
+    if (r.nonSequence.every(inCls)) {
+      const pre = await renumberVersioned({ git: o.git, base: o.base, cwd: o.cwd, laneRef: o.laneRef ?? "HEAD", versioned, reserve: o.reserve ? (x) => o.reserve({ ...x }) : null });
+      if (pre.unsupported) return pre;
+      const r2 = await renumberNumbered({ ...o, laneRef: "HEAD" });
+      return r2.unsupported ? r2 : { ...r2, ok: true, moves: [...(r2.moves ?? []), ...pre.moves], commit: r2.commit ?? pre.commit ?? null };
+    }
+  }
+  if (r.unsupported || !versioned?.length) return r;
+  // #5235: versioned dirs after the numbered files (the base is merged by then); a failure leaves the numbered commit in place
+  const v = await renumberVersioned({ git: o.git, base: o.base, cwd: o.cwd, laneRef: o.laneRef ?? "HEAD", versioned, reserve: o.reserve ? (x) => o.reserve({ ...x }) : null });
+  if (v.unsupported) return v;
+  return { ...r, ok: true, moves: [...(r.moves ?? []), ...v.moves], commit: v.commit ?? r.commit ?? null };
+}
+
+async function renumberNumbered({ git, base, cwd, laneRef = "HEAD", regenerate = null, regenerateCustom = null, run = null, uuid = randomUUID, reserve = null, openNumbers = null }) {
   const custom = regenerateCustom ?? (regenerate ? `${regenerate} --custom` : null);
   const g = out(git);
   const start = (await g(["rev-parse", "HEAD"])).trim();
