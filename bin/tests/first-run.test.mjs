@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 import { proposeIssues, findDeadLinks, nextStep, parseFirstRunMarker, markerLine, runFirstRun, MAX_PROPOSALS } from "../first-run.mjs";
 import { maybeOfferFirstRun } from "../journey.mjs";
 
 const repoDir = (files) => {
-  const d = mkdtempSync(join(tmpdir(), "fr-"));
+  const d = tmpDir("fr-");
   for (const [f, c] of Object.entries(files)) { mkdirSync(join(d, f, ".."), { recursive: true }); writeFileSync(join(d, f), c); }
   return d;
 };
