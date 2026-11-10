@@ -246,7 +246,8 @@ export async function acceptanceFromCli(argv, deps = {}) {
 
 /**
  * The orchestrate seam's `journeys({title, branch, number})`: fetch the milestone branch, check it out detached in a
- * throwaway worktree, run the epics' milestone journeys there and post the results. Milestones with no epic or journey are a no-op.
+ * throwaway worktree, run the epics' milestone journeys there and post the results. Milestones with no epic or journey are a no-op (a string);
+ * a run resolves {summary, red, ran, head} (#5337).
  */
 export function makeJourneyRunner({ repo, io, cwd = process.cwd(), tmpRoot }) {
   return async ({ title, branch, number }) => {
@@ -263,7 +264,8 @@ export function makeJourneyRunner({ repo, io, cwd = process.cwd(), tmpRoot }) {
       await git(["worktree", "add", "--detach", dir, `origin/${branch}`]);
       const head = String(await git(["rev-parse", "HEAD"], { cwd: dir })).trim();
       const res = await runMilestoneJourneys({ io, repo, milestone: { number, title, branch }, cwd: dir, head });
-      return res.map((r) => `#${r.epic} ${r.result}`).join(", ") || "no journey declared";
+      // #5337: structured so the integration seam can file the red issue and hold admission; it still reads as its `summary`.
+      return { summary: res.map((r) => `#${r.epic} ${r.result}`).join(", ") || "no journey declared", red: res.some((r) => r.result === "fail"), ran: res.some((r) => r.result === "pass" || r.result === "fail"), head };
     } finally {
       try { await git(["worktree", "remove", "--force", dir]); } catch { /* pruned below */ }
       try { rmSync(join(dir, ".."), { recursive: true, force: true }); await git(["worktree", "prune"]); } catch { /* best effort */ }

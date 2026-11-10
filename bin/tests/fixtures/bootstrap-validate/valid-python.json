@@ -18,7 +18,7 @@
         "docs"
       ],
       "deps": [],
-      "body": "## Problem\n\nSpike for the FastAPI service.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/spike.md` — new\n\n## Acceptance Criteria\n\n- [ ] Spike reviewed [type:manual]\n\n## Context\n\n**Parent**: none (spike)\n\n## Dependencies\n\nNone.\n"
+      "body": "## Problem\n\nSpike for the FastAPI service.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/spike.md` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Spike reviewed [type:manual]\n\n## Context\n\n**Parent**: none (spike)\n\n## Dependencies\n\nNone.\n"
     },
     {
       "key": "PKG",
@@ -30,7 +30,8 @@
       "deps": [
         "SPIKE"
       ],
-      "body": "## Problem\n\nCreate the uv-managed package and pytest setup.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `pyproject.toml` — new\n2. `src/service/__init__.py` — new\n3. `tests/conftest.py` — new\n\n## Acceptance Criteria\n\n- [ ] `pytest` runs green on an empty suite [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} — needs SPIKE\n"
+      "body": "## Problem\n\nCreate the uv-managed package and pytest setup.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `pyproject.toml` \u2014 new\n2. `src/service/__init__.py` \u2014 new\n3. `tests/conftest.py` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] `pytest` runs green on an empty suite [type:unit]\n- [ ] The project builds, boots, and one acceptance journey passes on the thinnest real path, with no fakes at the joins [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} \u2014 needs SPIKE\n",
+      "skeleton": true
     },
     {
       "key": "MODELS",
@@ -42,7 +43,7 @@
       "deps": [
         "PKG"
       ],
-      "body": "## Problem\n\nSQLAlchemy models and Alembic migrations.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `src/service/models.py` — new\n2. `migrations/env.py` — new\n\n## Acceptance Criteria\n\n- [ ] Migration upgrades and downgrades cleanly [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{PKG}} — needs PKG\n"
+      "body": "## Problem\n\nSQLAlchemy models and Alembic migrations.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `src/service/models.py` \u2014 new\n2. `migrations/env.py` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Migration upgrades and downgrades cleanly [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{PKG}} \u2014 needs PKG\n"
     },
     {
       "key": "ROUTES",
@@ -56,7 +57,7 @@
         "MODELS",
         "PKG"
       ],
-      "body": "## Problem\n\nCRUD routes for projects.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `src/service/routes/projects.py` — new\n\n## Acceptance Criteria\n\n- [ ] POST /projects returns 201 [type:api]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{MODELS}} — needs MODELS\nDepends on #{{PKG}} — needs PKG\n"
+      "body": "## Problem\n\nCRUD routes for projects.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `src/service/routes/projects.py` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] POST /projects returns 201 [type:api]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{MODELS}} \u2014 needs MODELS\nDepends on #{{PKG}} \u2014 needs PKG\n"
     },
     {
       "key": "STRIPE_KEYS",
@@ -69,7 +70,7 @@
         "ROUTES"
       ],
       "needsHuman": true,
-      "body": "gates: preview\nowner: maintainer\n\n## Problem\n\nCreate Stripe test and live keys (STRIPE_SECRET_KEY) once billing routes exist.\n\n### Setup steps\n\n1. Create the account or credential in the provider console.\n2. Store the values as deploy secrets.\n\n### Environment variables\n\n- `STRIPE_SECRET_KEY`\n\n### Secret handling\n\nNever commit the values; dev and CI use the mock provider.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/stripe.md` — new\n\n## Acceptance Criteria\n\n- [ ] Keys stored as deploy secrets [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{ROUTES}} — needs ROUTES\n"
+      "body": "gates: preview\nowner: maintainer\n\n## Problem\n\nCreate Stripe test and live keys (STRIPE_SECRET_KEY) once billing routes exist.\n\n### Setup steps\n\n1. Create the account or credential in the provider console.\n2. Store the values as deploy secrets.\n\n### Environment variables\n\n- `STRIPE_SECRET_KEY`\n\n### Secret handling\n\nNever commit the values; dev and CI use the mock provider.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/stripe.md` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Keys stored as deploy secrets [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{ROUTES}} \u2014 needs ROUTES\n"
     }
   ]
 }

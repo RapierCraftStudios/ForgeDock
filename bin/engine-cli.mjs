@@ -1952,7 +1952,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { makeIntegration } = await import("./lean/integration.mjs");
     // forge#5336: the epic journeys run after each child merge (real runs only: injected test seams keep their own io).
     const journeys = deps.leanIo || deps.leanModule || deps.laneScript ? null : (await import("./lean/acceptance.mjs")).makeJourneyRunner({ repo, io: leanIo, cwd });
-    integration = makeIntegration({ repo, io: leanIo, cfg: await readIntegration(cwd), pattern: branches.featurePattern ?? undefined, journeys,
+    integration = makeIntegration({ repo, io: leanIo, cfg: await readIntegration(cwd), pattern: branches.featurePattern ?? undefined, journeys, skeleton: !!journeys, // #5337: the skeleton hold rides the same real-run guard
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)), onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
     try { await integration?.prime(); } catch { /* streaks unknown: nothing is held */ }
   }
