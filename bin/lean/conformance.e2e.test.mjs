@@ -267,6 +267,13 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
     assert.match(o.ret.detail, /topology\.route_reachability[\s\S]*\/api\/v1\/agent\/signup\/pending[\s\S]*unreachable: \/api\/v1\/agent\/signup\/pending -> api/);
   });
+  it("#5284 a declared topology.prod_parity surface touched without a check result or justification blocks before merge", async () => {
+    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { prodParity: { "web/src/app/**": "note: exercise the page under the production runtime" }, verify: { maxRounds: 0 } } });
+    assert.equal(o.staging.search, false, "staging untouched");
+    assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
+    assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
+    assert.match(o.ret.detail, /topology\.prod_parity/);
+  });
   it("6 a generic PASS over an incomplete implementation never merges (review.incomplete)", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "export"]), generic: true });
     blocked(o, "review.incomplete"); assert.deepEqual([o.counts.builder, o.counts.reviewer], [2, 2]);

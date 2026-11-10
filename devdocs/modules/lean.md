@@ -2862,3 +2862,7 @@ requirement is deferred for live/post-deploy verification (bucket post-deploy/ve
 (dialog/CTA/layout component files) makes `e2eWanted` run the repo's e2e (CI label or workflow, never a local browser install). With no
 trigger configured the skip is a trajectory decision; on a `review.risk_paths` hit `precheck`'s `uiBrowser` input yields
 `conformance.e2e_unverified` kind `ui_browser_unverified`. Without `rollouts.files` default-on cannot be detected and the gate does not fire.
+
+## Entry 2026-11-10 — production parity beyond ingress (#5284)
+
+forge.yaml `topology.prod_parity` (block map `{path glob: command | "note: how to verify"}`, read by `readEnvConfig` → `prodParity`) generalises `route_reachability` (#5087) to runtime build mode, DB role/ownership and env scope. `bin/lean/prodparity.mjs` matches the lane's changed files to the globs; a command rule runs once with the matching paths (non-zero or rc 127 → `conformance.unimplemented` kind `prod_parity_failed`), a note rule needs `parity: [{surface, justification}]` in the result file (else kind `prod_parity_unjustified`). Failures enter `precheck` as `prodParityFailures`, beside `routeFailures`. The plan prompt lists touched surfaces and the review rubric treats a surface with no evidence as not delivered. No key, no check. Record: `devdocs/decisions/5284-prod-parity.md`.
