@@ -13,7 +13,7 @@ export const SURFACE_LANE = "*"; // the lease key spans every lane branch: the m
 
 const escapeRe = (s) => s.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 /** A repo-relative glob as a RegExp: `**` any depth, `*` within a segment, `?` one char; a trailing `/` means the whole dir. */
-export function globToRegExp(glob) {
+export function surfaceGlobRegExp(glob) {
   let g = String(glob).trim().replace(/^\.?\/+/, "");
   if (g.endsWith("/")) g += "**";
   let re = "";
@@ -37,7 +37,7 @@ export function parseSharedSurfaces(raw) {
     if (!name || seen.has(name)) continue;
     seen.add(name);
     const generate = rest.join("=>").trim() || null;
-    const re = globToRegExp(name);
+    const re = surfaceGlobRegExp(name);
     out.push({ name, generate, test: (p) => re.test(String(p).replace(/^\.?\/+/, "")) });
   }
   return out;

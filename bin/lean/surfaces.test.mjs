@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
-import { parseSharedSurfaces, matchSurfaces, generatorNote, claimSurfaces, globToRegExp } from "./surfaces.mjs";
+import { parseSharedSurfaces, matchSurfaces, generatorNote, claimSurfaces, surfaceGlobRegExp } from "./surfaces.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const mk = () => makeSequenceLeaseIo({ dir: tmpDir("surf-"), pickDir: tmpDir("surfpick-"), declDir: tmpDir("surfdecl-"), pollMs: 20 });
@@ -18,10 +18,10 @@ describe("parse and match (#5340)", () => {
     assert.deepEqual(parseSharedSurfaces(undefined), []);
   });
   it("globs: ** any depth, * one segment, trailing slash is the dir", () => {
-    assert.ok(globToRegExp("db/**").test("db/a/b.sql"));
-    assert.ok(globToRegExp("db/*.sql").test("db/a.sql"));
-    assert.ok(!globToRegExp("db/*.sql").test("db/x/a.sql"));
-    assert.ok(globToRegExp("i18n/").test("i18n/en/x.json"));
+    assert.ok(surfaceGlobRegExp("db/**").test("db/a/b.sql"));
+    assert.ok(surfaceGlobRegExp("db/*.sql").test("db/a.sql"));
+    assert.ok(!surfaceGlobRegExp("db/*.sql").test("db/x/a.sql"));
+    assert.ok(surfaceGlobRegExp("i18n/").test("i18n/en/x.json"));
   });
   it("a generated registry is exempt from reservation and gets a builder note", () => {
     const m = matchSurfaces(SURF, ["db/migrations/0001.sql", "src/registry.ts", "README.md"]);
