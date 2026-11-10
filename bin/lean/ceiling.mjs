@@ -5,7 +5,8 @@
  * Pure: no I/O. The ceiling itself (#4390) is applied in lean.mjs `builder()`; the mid-edit deferral lives in runner.mjs.
  */
 
-export const SIZES = ["S", "M", "L"];
+import { SIZES } from "./budget.mjs";
+
 /** A session that starts above this share of the ceiling restarts whatever the builder does. */
 export const PREDICT_SHARE = 0.6;
 /** Rough bytes per token for source and prose. */
