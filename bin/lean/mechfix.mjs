@@ -98,6 +98,12 @@ export function renamedExport(symbol, path) {
 
 const word = (s) => new RegExp(`(?<![\\w$])${s.replace(/[\\$]/g, "\\$&")}(?![\\w$])`, "g");
 
+/** True when `text` binds `name` from another module (ES import / `export {..} from`, python from-import): such a file references the lane's export, it does not merely declare its own. */
+function importsName(text, name) {
+  const clauses = [...text.matchAll(/^\s*(?:import|export)\s+(?:type\s+)?([^;"'`]*?)\s*from\s*["'][^"']*["']/gm), ...text.matchAll(/^\s*from\s+\S+\s+import\s+(.*)$/gm)];
+  return clauses.some((m) => word(name).test(m[1]));
+}
+
 /**
  * Duplicate exports: rename the lane's new export to `<AppPrefix><Symbol>` when the name occurs only in its declaring file and the
  * other files that declare it themselves (`others`; so no importer, registry or test keyed by the name can be left behind) and never as a property, string or label.
@@ -112,7 +118,11 @@ export async function renameDuplicates({ dups = [], cwd, git, fsx = fs } = {}) {
       const next = renamedExport(d.symbol, d.path);
       if (!next || next === d.symbol || (await grep(next)).length) { remaining.push(d); continue; }
       const files = await grep(d.symbol);
-      const ours = new Set([d.path, ...(d.others ?? [])]); // the detector's others declare the name themselves, so they cannot import ours
+      const others = d.others ?? [];
+      const reads = (f) => { try { return fsx.readFileSync(join(cwd, f), "utf8"); } catch { return null; } };
+      // the detector's others declare the name themselves, so they cannot import ours; a barrel (import then export) is listed as a declarer but does import it
+      if (others.some((f) => { const t = reads(f); return t === null || importsName(t, d.symbol); })) { remaining.push(d); continue; }
+      const ours = new Set([d.path, ...others]);
       if (!files.includes(d.path) || files.some((f) => !ours.has(f))) { remaining.push(d); continue; }
       const text = fsx.readFileSync(join(cwd, d.path), "utf8");
       const re = word(d.symbol);

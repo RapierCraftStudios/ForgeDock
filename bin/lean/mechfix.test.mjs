@@ -77,6 +77,12 @@ describe("#5348 duplicate export rename", () => {
     assert.equal(fs.readFileSync(join(cwd, "app/ui.ts"), "utf8"), `export const UiButton = 1;\nexport const y = UiButton + 1;\n`);
     assert.equal(fs.readFileSync(join(cwd, "app/other.ts"), "utf8"), `export const Button = 2;\n`);
   });
+  it("leaves it for a session when a detector other is a barrel that imports the name", async () => {
+    const w = world({ "app/ui.ts": `export const Button = 1;\n`, "app/index.ts": `import { Button } from "./ui";\nexport { Button };\n` });
+    const r = await renameDuplicates({ dups: [{ symbol: "Button", path: "app/ui.ts", others: ["app/index.ts"] }], cwd: w.cwd, git: w.git });
+    assert.equal(r.applied.length, 0); assert.equal(r.remaining.length, 1);
+    assert.equal(fs.readFileSync(join(w.cwd, "app/ui.ts"), "utf8"), `export const Button = 1;\n`);
+  });
   it("leaves it for a session when another file references the name, or it is used as a property", async () => {
     let w = world({ "app/ui.ts": `export const Button = 1;\n`, "app/use.ts": `import { Button } from "./ui";\n` });
     let r = await renameDuplicates({ dups: [{ symbol: "Button", path: "app/ui.ts", others: ["app/other.ts"] }], cwd: w.cwd, git: w.git });
