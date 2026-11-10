@@ -193,10 +193,11 @@ export async function runIntegration({ io, repo, cfg, pattern, only = null, ...r
  * onMerged counts the merge into the milestone state and, at `every_merges`, starts a run in the background (never in the
  * lane's slot); `settle()` waits for those. `prime()` loads the red streaks `holds` reads (synchronously) from the milestones.
  */
-export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTERN, nowFn = () => Date.now(), sleep, random, onEvent = () => {} }) {
-  if (!cfg) return null;
+export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTERN, nowFn = () => Date.now(), sleep, random, onEvent = () => {}, journeys = null }) {
+  if (!cfg && !journeys) return null;
   const streaks = new Map(); // lane -> consecutive red runs
   const running = new Set();
+  const journeyRunning = new Set();
   const pending = new Set();
   let chain = Promise.resolve();
   const lane = (title) => { const b = branchOf(pattern, title); return b ? b.branch : null; };
@@ -208,6 +209,16 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
     const ms = await readMilestone({ gh: io.gh, repo, title });
     if (!ms) return;
     const full = { ...ms, title };
+    // #5336: after each child merge, run the epic's journeys on the milestone branch (the runner skips milestones with no journey yet).
+    if (journeys && !journeyRunning.has(title)) {
+      journeyRunning.add(title);
+      const jp = Promise.resolve().then(() => journeys({ title, branch: lane(title), number: ms.number }))
+        .then((r) => onEvent({ issue, detail: `journeys: ${title} ${r ?? "done"}` }))
+        .catch((e) => onEvent({ issue, detail: `journey run failed: ${String(e?.message ?? e).slice(0, 200)}` }))
+        .finally(() => { journeyRunning.delete(title); pending.delete(jp); });
+      pending.add(jp);
+    }
+    if (!cfg) return;
     const s = parseIntegrationState(ms.description) ?? emptyState();
     const pr = result.pr ?? null;
     const next = { ...s, mergesSince: (s.mergesSince ?? 0) + 1, mergedPrs: pr != null && !s.mergedPrs.includes(pr) ? [...s.mergedPrs, pr].slice(-MAX_PRS) : s.mergedPrs };
@@ -230,7 +241,7 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
       return p;
     },
     holds(issue, { lane: l } = {}) {
-      if (!cfg.blockAdmissionAfter) return null;
+      if (!cfg?.blockAdmissionAfter) return null;
       const n = streaks.get(String(l ?? ""));
       return n >= cfg.blockAdmissionAfter ? `${n} consecutive red integration runs on ${l}` : null;
     },
