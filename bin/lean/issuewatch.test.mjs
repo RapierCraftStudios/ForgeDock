@@ -32,6 +32,7 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, 
       if (a[0] === "api" && /\/commits\/([0-9a-f]+)\/check-runs/.test(a.join(" "))) { const sha = /commits\/([0-9a-f]+)/.exec(a.join(" "))[1]; return (checks[sha] ?? []).map(([n, st, c], i) => `${i + 1}\t${n}\t${st}\t${c ?? ""}`).join("\n"); }
       if (a[0] === "api" && /\/commits\/[0-9a-f]+\/status/.test(a[1])) return "";
       if (a[0] === "api") return issues.filter((i) => !closed.has(i.number)).map((i) => `${i.number}\t${i.authorAssociation}`).join("\n"); // #4859: REST association list
+      if (a[0] === "pr" && a[1] === "list" && a.join(" ").includes("closingIssuesReferences")) return JSON.stringify(io.openPrs ?? []); // #5313: open PRs with their closing issues
       if (a[0] === "pr" && a[1] === "list") { const n = +/feat\/issue-(\d+)-lean/.exec(a.join(" "))[1]; return JSON.stringify(n in prs ? prs[n] : [{ number: 1000 + n, baseRefName: "staging", headRefOid: `aa${n}`, mergeCommit: { oid: `bb${n}` }, labels: [] }]); }
       if (a[1] === "list") return JSON.stringify(issues.filter((i) => !closed.has(i.number)).map(({ authorAssociation: _a, ...i }) => i));
       if (a[1] === "view" && a.includes("state")) return JSON.stringify({ state: closed.has(+a[2]) ? "CLOSED" : "OPEN" });
@@ -99,7 +100,7 @@ test("version: from the milestone title, from a version:x.y label, title wins", 
 test("search is passed to gh", async () => {
   const dir = tmp(), io = fakeIo(dir, [iss(1)]);
   await tick({ watch: W({ search: "label:bug sort:created-asc" }), repo: "o/r", io, state: { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" } });
-  const list = io.calls.find((a) => a[1] === "list");
+  const list = io.calls.find((a) => a[0] === "issue" && a[1] === "list");
   assert.equal(list[list.indexOf("--search") + 1], "label:bug sort:created-asc");
 });
 
@@ -494,7 +495,7 @@ for (const mode of ["per-issue", "batch"]) {
     const r = await issueWatchFromCli(["run", "--name", "intake", "--dry-run"], { cwd, env: io.env, io, print: (l) => out.push(l) });
     const t = out.join("\n");
     assert.match(t, /would claim #1 -> staging: ForgeDock App author \(trust_app\)/);
-    assert.match(t, /skip #2: excluded label epic/);
+    assert.match(t, /skip #2: (excluded|skip) label epic/);
     assert.match(t, /skip #3: untrusted author mallory \(NONE\)/);
     assert.match(t, /skip #4: already claimed by watch other/);
     assert.match(t, /skip #5: bot author dependabot\[bot\]/);

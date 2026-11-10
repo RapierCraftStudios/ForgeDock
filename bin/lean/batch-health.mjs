@@ -9,7 +9,7 @@
  * dir records the checkpoints done and the alert, so a restarted daemon re-arms only the remaining checks and never alerts
  * twice. A refused launch has no batch dir: it is recorded in `<batch root>/refusals.json`. `forgedock status` reads both.
  */
-import { readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { spawn as spawnProc } from "node:child_process";
 import { join } from "node:path";
 import { listBatches, openBatch, REQUEUABLE, writeAtomic } from "./batch.mjs";
@@ -248,6 +248,79 @@ export async function resolvedOnGithub(cands, gh, repo) {
       }
       if (ok) out.push(issue);
     } catch { /* unresolved */ }
+  }
+  return out;
+}
+
+export const DEFAULT_STALL_MIN = 10;
+/**
+ * #5314: dispatch stall. A batch with ready pending issues, free capacity and no progress for `windowMin` minutes. Ready: pending,
+ * not held, no retry-at in the future, every in-batch dependency ended well. Independent of the runner (it may be dead), so the
+ * schedd polls it. `hosted`: a runner is alive. @returns null (healthy) or `{code, ready, idleMin, hosted, detail}`. Pure.
+ */
+export function evaluateDispatchStall(state, { held = [], parallel = null, hosted = false, lastProgressMs = null, now = Date.now(), windowMin = DEFAULT_STALL_MIN, cancelled = false, reported = false } = {}) {
+  if (!state || cancelled || reported || lastProgressMs === null) return null;
+  if (state.breaker && !state.breaker.transport) return null; // an operator --resume clears it; a re-host would stop again at once
+  const order = new Set((state.order ?? []).map(Number)), results = state.results ?? {}, heldSet = new Set(held.map(Number));
+  const running = Object.keys(state.running ?? {}).length;
+  const k = Number.isInteger(parallel) && parallel > 0 ? parallel : Number.isInteger(state.parallel) && state.parallel > 0 ? state.parallel : 1;
+  const ready = (state.pending ?? []).map(Number).filter((n) => !heldSet.has(n) && results[n] === undefined && !(Number(state.notBefore?.[n]) > now)
+    && (state.deps?.[n] ?? []).every((d) => !order.has(Number(d)) || Number(d) === n || GOOD_END.has(results[d]?.outcome)));
+  const idleMin = Math.floor((now - lastProgressMs) / 60000);
+  if (!ready.length || running >= k || idleMin < windowMin) return null;
+  return { code: "dispatch-stalled", ready, idleMin, hosted, detail: `${ready.length} ready issue${ready.length === 1 ? "" : "s"} (${list(ready.slice(0, 8))}${ready.length > 8 ? ", …" : ""}) pending with ${k - running} free lane${k - running === 1 ? "" : "s"} and no dispatch for ${idleMin} min; ${hosted ? "the runner is alive but not dispatching" : "no runner hosts the batch"}` };
+}
+
+export const FIRST_HOUR_FILE = "first-hour.json";
+export const BATCH_LOG_FILE = "batch.log";
+export const FIRST_HOUR_MIN = 60;
+export const readFirstHour = (dir) => readJson(join(dir, FIRST_HOUR_FILE));
+/** Append one line to the batch's operator-readable log. Best effort. */
+export const appendBatchLog = (dir, text) => { try { appendFileSync(join(dir, BATCH_LOG_FILE), `${text}\n`, { mode: 0o600 }); } catch { /* advisory */ } };
+
+/** The first-hour report of one batch: dispatched / running / merged / stuck, and why. Pure. */
+export function firstHourReport(state, { batchId, now = Date.now(), held = [], stall = null } = {}) {
+  const order = (state?.order ?? []).map(Number), results = state?.results ?? {}, running = Object.keys(state?.running ?? {}).map(Number);
+  const merged = order.filter((n) => GOOD_END.has(results[n]?.outcome)), heldSet = new Set(held.map(Number));
+  const stuck = order.filter((n) => !running.includes(n) && !GOOD_END.has(results[n]?.outcome) && (results[n] !== undefined || (state?.pending ?? []).map(Number).includes(n)));
+  const why = (n) => results[n]?.outcome ? `#${n} ${results[n].outcome}` : heldSet.has(n) ? `#${n} held` : Number(state?.notBefore?.[n]) > now ? `#${n} waiting on a retry` : `#${n} pending`;
+  const dispatched = order.filter((n) => results[n] !== undefined || running.includes(n)).length;
+  const counts = { total: order.length, dispatched, running: running.length, merged: merged.length, stuck: stuck.length };
+  const reasons = [...stuck.map(why), ...(stall ? [stall.detail] : [])];
+  const summary = `first hour: ${dispatched}/${order.length} dispatched, ${running.length} running, ${merged.length} merged, ${stuck.length} stuck${reasons.length ? ` (${reasons.slice(0, 6).join("; ")})` : ""}`;
+  return { batch: batchId, at: new Date(now).toISOString(), counts, summary, lines: [`batch ${batchId}: ${summary}`, ...reasons.slice(0, 12).map((r) => `  ${r}`)] };
+}
+
+/** Persist the first-hour report once (batch dir + `batch.log`); false when it already exists. */
+export function writeFirstHour(batch, report) {
+  if (existsSync(join(batch.dir, FIRST_HOUR_FILE))) return false;
+  try { writeAtomic(join(batch.dir, FIRST_HOUR_FILE), JSON.stringify(report) + "\n", { private: true }); } catch { return false; }
+  for (const l of report.lines) appendBatchLog(batch.dir, `${report.at} ${l}`);
+  return true;
+}
+
+/** The one needs-you item of a stall: recorded in `health.json` (shown by status) per distinct ready set. @returns true when newly raised */
+export function recordStallAlert(batch, stall, { now = Date.now() } = {}) {
+  const sig = stall.ready.join(","), prev = readHealth(batch.dir) ?? {};
+  if (prev.stall?.sig === sig) return false;
+  const at = new Date(now).toISOString();
+  const text = `BATCH UNHEALTHY ${batch.id} (dispatch-stalled)\n  cause: dispatch-stalled: ${stall.detail}\n  recovery:\n    forgedock orchestrate --resume ${batch.id}\n    forgedock orchestrate --cancel ${batch.id}`;
+  try { writeHealth(batch.dir, { ...prev, stall: { at, sig, detail: stall.detail }, ...(prev.alertedAt ? {} : { alertedAt: at, alert: text }) }); } catch { return false; }
+  appendBatchLog(batch.dir, `${at} ${text.split("\n").slice(0, 2).join(" | ")}`);
+  return true;
+}
+
+/** `sched show` lines: per unfinished batch, its first-hour summary and any dispatch stall. */
+export function summaryLines(root, { now = Date.now() } = {}) {
+  const out = [];
+  for (const id of listBatches(root)) {
+    try {
+      const b = openBatch(root, id);
+      if (b.readReport() || b.readCancel()) continue;
+      const fh = readFirstHour(b.dir), h = readHealth(b.dir);
+      if (fh?.summary) out.push(`  batch ${id}: ${fh.summary}`);
+      if (h?.stall && now - Date.parse(h.stall.at) < 24 * 3600 * 1000) out.push(`  batch ${id}: DISPATCH STALLED since ${h.stall.at}: ${h.stall.detail}`);
+    } catch { /* an unreadable batch has no line */ }
   }
   return out;
 }

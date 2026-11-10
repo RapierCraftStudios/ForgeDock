@@ -575,7 +575,7 @@ jobs:
     runs-on: ubuntu-latest
     # Every commands/**/*.md: growth <= 2% and <= 4 KB, new specs <= 4 KB, per-file ceilings in the script (#4164).
     # Release PRs (staging -> main) carry cumulative growth already checked per PR.
-    if: github.event_name == 'pull_request' && !(github.head_ref == 'staging' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.event_name == 'pull_request' && !((github.head_ref == 'staging' || startsWith(github.head_ref, 'release/')) && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

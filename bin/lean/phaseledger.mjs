@@ -5,11 +5,15 @@
  * The lane marks the phase it enters; entering one closes the previous, so the lane phases sum to the lane's wall time.
  * `queue_wait` (and, for a remote lane, the sandbox start the dispatcher saw) happens before the lane clock starts, so the
  * batch runner adds them to the row; they are not part of the lane-wall sum.
- * Row shape: `phases: { <id>: { ms, model_ms?, usd? } }`. FORGE:TELEMETRY values are scalars, so `flattenPhases` gives
- * `phase_<id>_ms|_model_ms|_usd` keys for it and `unflattenPhases` reads them back.
+ * Row shape: `phases: { <id>: { ms, model_ms?, usd?, wait? } }`. FORGE:TELEMETRY values are scalars, so `flattenPhases` gives
+ * `phase_<id>_ms|_model_ms|_usd|_wait_<cause>_ms` keys for it and `unflattenPhases` reads them back.
+ * #5349: `wait` is the phase's non-model time by cause (WAIT_CAUSES); what no typed wait explains is `command` (`sandbox` in
+ * sandbox_start), so model_ms + the wait causes close to ms.
  */
 
 export const LANE_PHASES = Object.freeze(["queue_wait", "sandbox_start", "deps_install", "validate", "plan", "implement", "precheck", "review", "ci_wait", "base_sync", "merge"]);
+/** Why a lane was not in a model call: queued for a heavy slot, paused for host load, rate-limited, sandbox start, or running a command. */
+export const WAIT_CAUSES = Object.freeze(["heavy_queue", "host_load", "rate_limit", "sandbox", "command"]);
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
 
 function pct(values, p) {
@@ -19,10 +23,19 @@ function pct(values, p) {
   return v[Math.max(0, Math.ceil((v.length * p) / 100) - 1)];
 }
 
+/** Typed waits rounded, plus the residual (ms - model - typed waits, never negative) as `sandbox` in sandbox_start, else `command`. */
+function waitOf(ms, modelMs, typed = {}, id) {
+  const w = {};
+  for (const c of WAIT_CAUSES) if (typed[c] > 0) w[c] = Math.round(typed[c]);
+  const rest = Math.round(ms - modelMs - Object.values(w).reduce((a, b) => a + b, 0));
+  if (rest > 0) { const c = id === "sandbox_start" ? "sandbox" : "command"; w[c] = (w[c] ?? 0) + rest; }
+  return w;
+}
+
 /** Sequential ledger starting in `first` at `start`. `now` is the lane clock. */
 export function createLedger(now, first = "sandbox_start", start = now()) {
   let cur = LANE_PHASES.includes(first) ? first : null, since = start;
-  const ms = {}, model = {}, usd = {};
+  const ms = {}, model = {}, usd = {}, wait = {};
   const close = (t) => { if (cur) ms[cur] = (ms[cur] ?? 0) + Math.max(0, t - since); };
   const enter = (phase) => {
     if (!LANE_PHASES.includes(phase) || phase === cur) return;
@@ -42,6 +55,12 @@ export function createLedger(now, first = "sandbox_start", start = now()) {
       if (isNum(modelMs) && modelMs > 0) model[id] = (model[id] ?? 0) + modelMs;
       if (isNum(cost) && cost > 0) usd[id] = (usd[id] ?? 0) + cost;
     },
+    /** `waitMs` of `cause` (a typed wait) spent in `phase` (the current one when it is not a ledger phase). */
+    addWait(phase, cause, waitMs) {
+      const id = LANE_PHASES.includes(phase) ? phase : cur;
+      if (!id || !WAIT_CAUSES.includes(cause) || !isNum(waitMs) || waitMs <= 0) return;
+      (wait[id] ??= {})[cause] = (wait[id][cause] ?? 0) + waitMs;
+    },
     /** The ledger as of now (the open phase counted up to now); does not end the current phase. */
     snapshot() {
       const t = now(), total = { ...ms };
@@ -49,7 +68,8 @@ export function createLedger(now, first = "sandbox_start", start = now()) {
       const out = {};
       for (const id of LANE_PHASES) {
         if (!(id in total) && !(id in model) && !(id in usd)) continue;
-        out[id] = { ms: Math.round(total[id] ?? 0), ...(model[id] ? { model_ms: Math.round(model[id]) } : {}), ...(usd[id] ? { usd: Math.round(usd[id] * 1e6) / 1e6 } : {}) };
+        const w = waitOf(total[id] ?? 0, model[id] ?? 0, wait[id], id);
+        out[id] = { ms: Math.round(total[id] ?? 0), ...(model[id] ? { model_ms: Math.round(model[id]) } : {}), ...(usd[id] ? { usd: Math.round(usd[id] * 1e6) / 1e6 } : {}), ...(Object.keys(w).length ? { wait: w } : {}) };
       }
       return out;
     },
@@ -69,6 +89,7 @@ export function flattenPhases(phases) {
     if (isNum(v.ms)) out[`phase_${id}_ms`] = v.ms;
     if (isNum(v.model_ms)) out[`phase_${id}_model_ms`] = v.model_ms;
     if (isNum(v.usd)) out[`phase_${id}_usd`] = v.usd;
+    for (const c of WAIT_CAUSES) if (isNum(v.wait?.[c])) out[`phase_${id}_wait_${c}_ms`] = v.wait[c];
   }
   return out;
 }
@@ -78,7 +99,9 @@ export function unflattenPhases(rec) {
   for (const id of LANE_PHASES) {
     const ms = rec?.[`phase_${id}_ms`], mm = rec?.[`phase_${id}_model_ms`], usd = rec?.[`phase_${id}_usd`];
     if (!isNum(ms)) continue;
-    out[id] = { ms, ...(isNum(mm) ? { model_ms: mm } : {}), ...(isNum(usd) ? { usd } : {}) };
+    const wait = {};
+    for (const c of WAIT_CAUSES) if (isNum(rec?.[`phase_${id}_wait_${c}_ms`])) wait[c] = rec[`phase_${id}_wait_${c}_ms`];
+    out[id] = { ms, ...(isNum(mm) ? { model_ms: mm } : {}), ...(isNum(usd) ? { usd } : {}), ...(Object.keys(wait).length ? { wait } : {}) };
   }
   return out;
 }
@@ -101,6 +124,25 @@ export function summarizePhases(list) {
   let largest = null;
   for (const [id, v] of Object.entries(phases)) if (!largest || v.sum > phases[largest].sum) largest = id;
   return { n: lanes.length, phases, largest: largest ? { phase: largest, share: total > 0 ? phases[largest].sum / total : 0 } : null };
+}
+
+/**
+ * #5349: non-model time over the given `phases` objects: per phase the summed wall, model and wait-by-cause, and the totals.
+ * Only lanes that carry a `wait` breakdown count (older runs have none); `{ n: 0, ... }` when there is none.
+ */
+export function summarizeWaits(list) {
+  const lanes = (list ?? []).filter((p) => p && typeof p === "object" && Object.values(p).some((v) => v?.wait && typeof v.wait === "object"));
+  const phases = {}, total = { ms: 0, model_ms: 0, wait: {} }, per = {}; // per[id][cause]: one value per lane, for p50/p90
+  for (const p of lanes) for (const [id, v] of Object.entries(p)) {
+    if (!LANE_PHASES.includes(id) || !isNum(v?.ms) || id === "queue_wait") continue;
+    const g = (phases[id] ??= { ms: 0, model_ms: 0, wait: {} });
+    for (const c of WAIT_CAUSES) if (isNum(v.wait?.[c])) ((per[id] ??= {})[c] ??= []).push(v.wait[c]);
+    g.ms += v.ms; total.ms += v.ms;
+    if (isNum(v.model_ms)) { g.model_ms += v.model_ms; total.model_ms += v.model_ms; }
+    for (const c of WAIT_CAUSES) if (isNum(v.wait?.[c])) { g.wait[c] = (g.wait[c] ?? 0) + v.wait[c]; total.wait[c] = (total.wait[c] ?? 0) + v.wait[c]; }
+  }
+  for (const [id, byCause] of Object.entries(per)) phases[id].pct = Object.fromEntries(Object.entries(byCause).map(([c, vs]) => [c, { p50: pct(vs, 50), p90: pct(vs, 90) }]));
+  return { n: lanes.length, phases, total };
 }
 
 const min = (ms) => `${(ms / 60000).toFixed(1)}m`;

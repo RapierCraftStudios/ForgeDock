@@ -84,6 +84,23 @@ delivery_count() {
   case "$n" in ''|*[!0-9]*) n=0 ;; esac   # fail closed: counts as missing
   printf '%s\n' "$n"
 }
+# Why each given domain has no usable current-head comment, one REDISPATCH line per domain (only that reviewer is re-run, at head ${REVIEW_SHA_FULL}).
+delivery_report() {
+  local d b shas last brief
+  [ -s "$DELIVERY_CACHE" ] || return 0
+  for d in "$@"; do
+    b=$(bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:${d} -->" < "$DELIVERY_CACHE" 2>/dev/null)
+    shas=$(printf '%s\n' "$b" | jq -r 'capture("(^|\\n)Reviewed-SHA:[ ]*(?<s>[^\\s]*)") | .s' 2>/dev/null | grep . | tr '\n' ' ')
+    if [ -z "$b" ]; then echo "DELIVERY: ${d}: no trusted comment with marker FORGE:REVIEW-AGENT:${d} (not posted, or posted under another name)"
+    elif [ -z "$shas" ]; then echo "DELIVERY: ${d}: comment has no Reviewed-SHA line; expected ${REVIEW_SHA_FULL}"
+    else
+      last=${shas%% }; last=${last##* }
+      case "$shas" in *"${REVIEW_SHA_FULL} "*) echo "DELIVERY: ${d}: posted at the right SHA but without a REVIEW-FINDINGS-START/END block" ;; *) echo "DELIVERY: ${d}: stale or wrong Reviewed-SHA ${last} (expected ${REVIEW_SHA_FULL})" ;; esac
+    fi
+    brief="$_SD/review-staging-${PR_NUMBER}/brief-${d}.md"
+    if [ -r "$brief" ]; then echo "REDISPATCH ${d} ${brief}"; else echo "REDISPATCH ${d}"; fi
+  done
+}
 # END delivery-fetch
 # BEGIN panel-guard
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
@@ -134,6 +151,10 @@ if [ "${DISPATCH_FAILED:-}" != "true" ] && [ "$SELECTED_COUNT_INVALID" != "true"
   exit 2
 fi
 if [ "${DISPATCH_FAILED:-}" = "true" ] || [ "$SELECTED_COUNT_INVALID" = "true" ] || [ "$ACTUAL_AGENT_COUNT" -lt "$SELECTED_AGENT_COUNT" ]; then
+  _SHORT=""
+  for _D in ${LAUNCHED_REVIEW_AGENTS:-}; do case "$DELIVERY_FOUND" in *" $_D "*) ;; *) _SHORT="${_SHORT} ${_D}" ;; esac; done
+  # shellcheck disable=SC2086  # word-split on purpose: one domain per argument
+  [ -n "$_SHORT" ] && [ -n "$REVIEW_SHA_FULL" ] && [ "$DELIVERY_LAST" = ok ] && delivery_report $_SHORT
   gh label create "review-degraded" --color "E4E669" --description "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null || true
   gh pr edit "$PR_NUMBER" -R "$GH_REPO" --add-label "review-degraded" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->
@@ -163,6 +184,8 @@ done
 
 if [ -n "$MISSING_AGENT_COMMENTS" ]; then
   echo "REVIEW DELIVERY FAILURE: missing findings comment(s) for:${MISSING_AGENT_COMMENTS}"
+  # shellcheck disable=SC2086  # word-split on purpose: one domain per argument
+  delivery_report $MISSING_AGENT_COMMENTS
   echo "A comment without a REVIEW-FINDINGS-START block counts as missing. Re-dispatch the missing agent once with the note: structured findings block required. A second miss is a degraded panel. Recover each agent's returned verdict, findings, and durable body path before rerunning review."
   exit 1
 fi

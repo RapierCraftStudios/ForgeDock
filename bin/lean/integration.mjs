@@ -111,6 +111,21 @@ export function redIssue({ slug, milestone, head, state, failures, specs, runUrl
   return { title: `integration-red(milestone/${slug}): full suite failing at ${short(head)}`, body, marker: redMarker(slug), milestone };
 }
 
+export const journeyMarker = (slug) => `${STATE_MARKER}:journey:${slug}`;
+
+/** #5337: title and body of the integration-red issue for a red epic journey; names the PR that merged last and every PR since the last green run. */
+export function journeyRedIssue({ slug, milestone, head, pr, prs, repo, at }) {
+  const named = arr(prs).map((p) => `#${p}`).join(", ") || "none recorded";
+  const body = [
+    `The epic journey of milestone \`${milestone}\` is red on \`milestone/${slug}\` after the merge of ${pr != null ? `#${pr}` : "a lane PR"}. Admission of new lanes is held until a journey run is green.`, "",
+    `- Head: \`${short(head)}\` (${at})`,
+    `- Lane PRs merged since the last green journey run: ${named}`,
+    `- Result: see the latest FORGE:ACCEPTANCE comment on the epic (${repo})`, "",
+    `<!-- ${journeyMarker(slug)} -->`,
+  ].join("\n");
+  return { title: `integration-red(milestone/${slug}): journey red after ${pr != null ? `#${pr}` : "a merge"}`, body, marker: journeyMarker(slug), milestone };
+}
+
 /** Open issue of the milestone carrying `marker`: its number, or null. */
 async function findRed({ gh, repo, milestone, marker }) {
   const open = JSON.parse(String(await gh(["issue", "list", "-R", repo, "--milestone", milestone, "--state", "open", "--limit", "500", "--json", "number,body"])) || "[]");
@@ -193,25 +208,87 @@ export async function runIntegration({ io, repo, cfg, pattern, only = null, ...r
  * onMerged counts the merge into the milestone state and, at `every_merges`, starts a run in the background (never in the
  * lane's slot); `settle()` waits for those. `prime()` loads the red streaks `holds` reads (synchronously) from the milestones.
  */
-export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTERN, nowFn = () => Date.now(), sleep, random, onEvent = () => {} }) {
-  if (!cfg) return null;
+export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTERN, nowFn = () => Date.now(), sleep, random, onEvent = () => {}, journeys = null, skeleton = false }) {
+  if (!cfg && !journeys && !skeleton) return null;
   const streaks = new Map(); // lane -> consecutive red runs
   const running = new Set();
+  const journeyRunning = new Set();
+  const journeyAgain = new Map(); // milestone title -> the last merge that landed during a running journey run (#5382)
+  const skeletons = new Map(); // lane -> number of its open skeleton issue (#5337: no sibling is admitted until it merges)
+  const journeyHeld = new Map(); // lane -> number of the open journey integration-red issue (#5337)
+  const journeyPrs = new Map(); // milestone title -> lane PRs merged since the last green journey run
   const pending = new Set();
   let chain = Promise.resolve();
   const lane = (title) => { const b = branchOf(pattern, title); return b ? b.branch : null; };
   const note = (ms, state) => { const l = lane(ms.title); if (l) streaks.set(l, state?.redStreak ?? 0); };
+
+  /** #5337: record the first lane merge / first green journey run in the milestone's FORGE:INTEGRATION block (read-modify-write). Resolves {before, description} or null when already set. */
+  async function stamp(ms, key) {
+    const fresh = (await readMilestone({ gh: io.gh, repo, title: ms.title })) ?? ms;
+    const before = parseIntegrationState(fresh.description) ?? emptyState();
+    if (before[key]) return null;
+    const description = renderState(fresh.description, { ...before, [key]: new Date(nowFn()).toISOString() });
+    await io.gh(["api", "-X", "PATCH", `repos/${repo}/milestones/${fresh.number}`, "-f", `description=${description}`]);
+    return { before, description };
+  }
+
+  /** #5337: a journey run result: red files/updates ONE integration-red issue naming the PRs and holds admission; green closes it. */
+  async function judge(issue, ms, title, res) {
+    const l = lane(title), b = branchOf(pattern, title);
+    if (!res || typeof res !== "object" || !b) return;
+    const at = new Date(nowFn()).toISOString();
+    if (res.red) {
+      if (skeletons.has(l)) return; // the skeleton has not merged: a red journey is expected and holds nothing yet
+      const prs = journeyPrs.get(title) ?? [];
+      const filed = await fileOrUpdateRed({ gh: io.gh, repo, issue: journeyRedIssue({ slug: b.slug, milestone: title, head: res.head, pr: prs[prs.length - 1] ?? null, prs, repo, at }) });
+      if (filed.number) journeyHeld.set(l, filed.number);
+      onEvent({ issue, detail: `journey red on ${l}: filed #${filed.number}, admission held` });
+    } else if (res.ran) {
+      await closeRed({ gh: io.gh, repo, milestone: title, slug: `journey:${b.slug}`, head: res.head });
+      journeyHeld.delete(l);
+      journeyPrs.delete(title);
+      const done = await stamp(ms, "firstJourneyGreenAt");
+      if (done) {
+        const first = done.before.firstMergeAt ? Date.parse(done.before.firstMergeAt) : NaN;
+        onEvent({ issue, detail: `first green journey on ${l}${Number.isFinite(first) ? ` ${Math.round((nowFn() - first) / 60000)} min after the first lane merge` : ""}` });
+      }
+    }
+  }
+
+  /** #5336: run the epic's journeys once; when a merge arrived meanwhile (#5382), run once more so a red hold can clear. */
+  function startJourneys(issue, full, title, number) {
+    journeyRunning.add(title);
+    const jp = Promise.resolve().then(() => journeys({ title, branch: lane(title), number }))
+      .then(async (r) => { onEvent({ issue, detail: `journeys: ${title} ${r?.summary ?? r ?? "done"}` }); await judge(issue, full, title, r); })
+      .catch((e) => onEvent({ issue, detail: `journey run failed: ${String(e?.message ?? e).slice(0, 200)}` }))
+      .finally(() => {
+        journeyRunning.delete(title); pending.delete(jp);
+        const again = journeyAgain.get(title);
+        if (again) { journeyAgain.delete(title); startJourneys(again.issue, again.full, title, number); }
+      });
+    pending.add(jp);
+  }
 
   async function count(issue, result) {
     const title = result?.milestone;
     if (!title) return;
     const ms = await readMilestone({ gh: io.gh, repo, title });
     if (!ms) return;
-    const full = { ...ms, title };
-    const s = parseIntegrationState(ms.description) ?? emptyState();
+    let full = { ...ms, title };
+    if (skeletons.get(lane(title)) === Number(issue)) skeletons.delete(lane(title)); // the skeleton merged: siblings are admitted
+    if (result.pr != null) journeyPrs.set(title, [...(journeyPrs.get(title) ?? []), result.pr].slice(-MAX_PRS));
+    if (journeys || skeleton) { const st = await stamp(full, "firstMergeAt"); if (st) full = { ...full, description: st.description }; }
+    // #5336: after each child merge, run the epic's journeys on the milestone branch (the runner skips milestones with no journey yet).
+    // #5382: a merge that lands while a run is in flight queues one rerun (the run may have started before that merge).
+    if (journeys) {
+      if (journeyRunning.has(title)) journeyAgain.set(title, { issue, full });
+      else startJourneys(issue, full, title, ms.number);
+    }
+    if (!cfg) return;
+    const s = parseIntegrationState(full.description) ?? emptyState();
     const pr = result.pr ?? null;
     const next = { ...s, mergesSince: (s.mergesSince ?? 0) + 1, mergedPrs: pr != null && !s.mergedPrs.includes(pr) ? [...s.mergedPrs, pr].slice(-MAX_PRS) : s.mergedPrs };
-    const desc = renderState(ms.description, next);
+    const desc = renderState(full.description, next);
     await io.gh(["api", "-X", "PATCH", `repos/${repo}/milestones/${ms.number}`, "-f", `description=${desc}`]);
     note(full, next);
     if (!cfg.everyMerges || next.mergesSince < cfg.everyMerges || running.has(title)) return;
@@ -230,12 +307,24 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
       return p;
     },
     holds(issue, { lane: l } = {}) {
-      if (!cfg.blockAdmissionAfter) return null;
-      const n = streaks.get(String(l ?? ""));
+      const key = String(l ?? "");
+      const sk = skeletons.get(key);
+      if (sk && Number(issue) !== sk) return `skeleton issue #${sk} of ${key} has not merged`;
+      const red = journeyHeld.get(key);
+      // #5382: the integration-red issue is the fix for the hold: admitting it is the only exit, its merge reruns the journeys.
+      if (red && Number(issue) !== red) return `epic journey red on ${key} (integration-red #${red})`;
+      if (!cfg?.blockAdmissionAfter) return null;
+      const n = streaks.get(key);
       return n >= cfg.blockAdmissionAfter ? `${n} consecutive red integration runs on ${l}` : null;
     },
     async prime() {
-      for (const ms of await listOpenMilestones({ gh: io.gh, repo })) note(ms, parseIntegrationState(ms.description));
+      const open = await listOpenMilestones({ gh: io.gh, repo });
+      for (const ms of open) note(ms, parseIntegrationState(ms.description));
+      // #5337: reload the holds from GitHub (the register): open skeleton issues and open journey integration-red issues.
+      const list = async (label) => { try { return arr(JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "500", "--json", "number,body,milestone"])) || "[]")); } catch { return []; } };
+      const laneOf = (x) => { const t = x?.milestone?.title; return t && open.some((m) => m.title === t) ? lane(t) : null; };
+      if (skeleton) for (const x of await list("skeleton")) { const l = laneOf(x); if (l && !skeletons.has(l)) skeletons.set(l, Number(x.number)); }
+      if (journeys) for (const x of await list(RED_LABEL)) { const l = laneOf(x); if (l && String(x.body ?? "").includes(`<!-- ${STATE_MARKER}:journey:`)) journeyHeld.set(l, Number(x.number)); }
     },
     async settle() { await chain; while (pending.size) await Promise.allSettled([...pending]); },
   };
@@ -256,7 +345,9 @@ export async function runIntegrationCli(argv, deps = {}) {
     const on = deps.cfg !== undefined ? !!deps.cfg : !!readIntegrationConfig(deps.cwd ?? process.cwd());
     for (const ms of await listOpenMilestones({ gh: io.gh, repo })) {
       const s = parseIntegrationState(ms.description);
-      if (s || on) (deps.print ?? ((t) => console.log(t)))(`  integration: ${ms.title}: last green full-suite run ${s?.lastGreen?.at ?? "never"} (red streak ${s?.redStreak ?? 0})`);
+      // #5337: the metric: first lane merge to first green journey run, per milestone.
+      const first = s?.firstMergeAt ? `; first merge ${s.firstMergeAt}, first green journey ${s.firstJourneyGreenAt ?? "never"}` : "";
+      if (s || on) (deps.print ?? ((t) => console.log(t)))(`  integration: ${ms.title}: last green full-suite run ${s?.lastGreen?.at ?? "never"} (red streak ${s?.redStreak ?? 0})${first}`);
     }
     return 0;
   }

@@ -30,6 +30,12 @@ Per-release pipeline evaluation results for ForgeDock. Every scorecard here was 
 
 ---
 
+## Adversarial benchmark
+
+Full lane vs a bare `claude -p` session on 20 issues, 12 of which must be closed instead of implemented (#5292). Corpus: `corpus/adversarial-v1.json`. Reproduce it with [adversarial-bench.md](adversarial-bench.md). Its scorecards are published as `published/adversarial-<date>.md`; none has been run yet.
+
+---
+
 ## Scorecard schema
 
 Every file in `published/` is a JSON object with the following fields:

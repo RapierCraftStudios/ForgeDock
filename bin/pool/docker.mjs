@@ -24,6 +24,11 @@ export const dockerCli = {
     }
   },
   async remove(name) { try { await docker(["rm", "-f", "-v", name], { timeoutMs: 60000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
+  /** Signal the container's main process (the lane). False when the container is gone or already stopped. */
+  async kill(name, signal = "TERM") {
+    try { await docker(["kill", `--signal=${signal}`, name], { timeoutMs: 20000 }); return true; }
+    catch (e) { if (/No such container|is not running/i.test(e.stderr ?? "")) return false; throw e; }
+  },
   async listLabelled(label) {
     const out = await docker(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"], { timeoutMs: 20000 });
     return out ? out.split("\n").filter(Boolean) : [];

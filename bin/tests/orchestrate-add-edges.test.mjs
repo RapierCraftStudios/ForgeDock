@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { tmpDir } from "./_tmp.mjs";
 import { openBatch, newBatchId } from "../lean/batch.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
+import { orchestrate } from "../lean/orchestrate.mjs";
 
 // No live schedd: on a host whose daemon runs, `--add` would reach it, and it reads its own batch root, not the test's.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("add-edges-sched-");
@@ -28,9 +29,21 @@ describe("#4773: --add reports the edges it created", () => {
       const lines = [], log = console.log;
       console.log = (l) => lines.push(String(l));
       let out;
-      try { out = await orchestrateFromCli(["--add", id, "5", "6", "9"], { io }); } finally { console.log = log; }
+      try { out = await orchestrateFromCli(["--add", id, "5", "6", "9"], { io }).catch((e) => { if (e.code === "batch.not-hosted") return e.result; throw e; }); } finally { console.log = log; }
       assert.deepEqual(out.edges, [{ from: 5, to: 6 }]);
       assert.ok(lines.some((l) => l === `batch ${id}: edges #5 blocked by #6`), lines.join("\n"));
     } finally { if (prev === undefined) delete process.env.FORGEDOCK_BATCH_DIR; else process.env.FORGEDOCK_BATCH_DIR = prev; }
+  });
+});
+
+describe("#5340: an open out-of-batch prerequisite is pulled in ahead of its dependent", () => {
+  it("runs the prerequisite first; no run starts for the dependent before it merges", async () => {
+    const started = [], decisions = [];
+    const bodies = { 1: "Depends on #2", 2: "" };
+    await orchestrate({ issues: [1], parallel: 3, pollMs: 5, trusted: () => true, readBody: async (n) => bodies[n] ?? "", decide: (d) => decisions.push(d),
+      issueState: async (n) => (n === 2 ? "OPEN" : "CLOSED"), issueLabels: async () => [],
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(started, [2, 1]);
+    assert.ok(decisions.some((d) => /prerequisite #2 is open/.test(d.what)));
   });
 });

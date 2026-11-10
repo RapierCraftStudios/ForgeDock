@@ -4,7 +4,9 @@
 
 <h1>ForgeDock</h1>
 
-<p><strong>From GitHub issues to reviewed, tested, merged changes, autonomously.</strong></p>
+<p><strong>An AI engineering team that ships to production</strong></p>
+
+<p>From GitHub issues to reviewed, tested, merged changes, autonomously.</p>
 
 <p>ForgeDock runs AI coding agents through validation, implementation, review, CI and merge, one issue per lane, many lanes in parallel. Every step is recorded on GitHub, so runs survive crashes, later agents build on earlier ones, and you can audit everything.</p>
 
@@ -128,7 +130,11 @@ Deeper: [How it works](docs/site/how-it-works.md) · [GitHub is your agents' mem
 
 - [Getting started](docs/site/getting-started.md) · [Install](docs/site/install.md) · [Configuration](docs/CONFIG.md) · [Command reference](docs/site/command-reference.md)
 - [Troubleshooting & recovery](docs/site/troubleshooting.md) · [Outcome codes](docs/OUTCOME-CODES.md) · [Stats](docs/STATS.md)
-- [Start a new project](docs/site/start-a-new-project.md) · [Comparison with other approaches](docs/comparison.md) · [Release eval scorecards](docs/eval/README.md)
+- [Start a new project](docs/site/start-a-new-project.md) · [Comparison with other approaches](docs/comparison.md) · [Release eval scorecards](docs/eval/README.md) · [Adversarial benchmark](docs/eval/adversarial-bench.md)
+
+## FAQ
+
+**Does it create its own work?** Some issues are pipeline-found (review findings, follow-ups, production signals). `npx forgedock stats --origin` prints the split of requested vs pipeline-generated issues, how the pipeline-found ones closed, and their share of cost; see [Issue origin](docs/STATS.md#issue-origin---origin-forge5294).
 
 ## For companies
 

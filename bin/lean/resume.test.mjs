@@ -81,4 +81,20 @@ describe("#4467: App comments in gh issue view shape", () => {
     assert.ok(buildResumeDigest({ state, comments: [ghShape("rapiercraft-forgedock")] }).text.includes("- FORGE:NEEDS_HUMAN: CI red on lint"));
     assert.ok(!buildResumeDigest({ state, comments: [ghShape("someone")] }).text.includes("FORGE:NEEDS_HUMAN"));
   });
+  it("keeps the best result per validate id: a later tool-missing row never replaces a pass (#5331)", () => {
+    const hf = (validation) => `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ validation }, { files: ["src/a.ts"], head: "abc1234" }))}`;
+    const comments = [
+      { body: hf([{ command: "npm run lint", exit: 0 }]), ...BOT },
+      { body: hf([{ command: "npm run lint", exit: 127 }, { command: "npm test -- a.test.ts", exit: 1 }]), ...BOT },
+    ];
+    const d = buildResumeDigest({ comments, contract: CONTRACT, head: "abc1234" });
+    assert.match(d.text, /V2 `npm run lint`: exit 0 \(already passed/);
+    assert.doesNotMatch(d.text, /exit 127/);
+    assert.match(d.text, /V1 `npm test -- a.test.ts`: exit 1 \(failing\)/);
+    assert.deepEqual(d.passes, [{ id: "V2", command: "npm run lint", head: "abc1234" }]);
+    // a different head, or a record with no head, is not "the same head": nothing is claimed or carried
+    assert.deepEqual(buildResumeDigest({ comments, contract: CONTRACT, head: "fff0000" }).passes, []);
+    assert.deepEqual(buildResumeDigest({ comments: COMMENTS, contract: CONTRACT, head: "abc1234" }).passes, []);
+    assert.doesNotMatch(buildResumeDigest({ comments: COMMENTS, contract: CONTRACT, head: "abc1234" }).text, /already passed/);
+  });
 });

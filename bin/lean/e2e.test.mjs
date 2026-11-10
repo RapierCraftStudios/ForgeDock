@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseE2e, e2eSpecs, contractWantsE2e, e2eWanted, ownFailures, runE2eGate, E2E_DEFAULT_PATHS, NO_TRIGGER } from "./e2e.mjs";
+import { parseE2e, e2eSpecs, contractWantsE2e, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, E2E_DEFAULT_PATHS, NO_TRIGGER } from "./e2e.mjs";
 import { VERIFY_CHECK_NAME } from "./verify.mjs";
 
 const HEAD = "abc123abc123abc123";
@@ -82,5 +82,30 @@ describe("runE2eGate (#4403)", () => {
     const r = await runE2eGate(f.args({ cfg: parseE2e({ e2e_label: "full-ci", e2e_workflow: "e2e.yml", e2e_paths_input: "specs" }) }));
     assert.equal(r.result, "fail"); assert.equal(r.runId, 9); assert.deepEqual(f.labels, []);
     assert.deepEqual(f.dispatched, [{ workflow: "e2e.yml", ref: "feat/issue-7-lean", inputs: { specs: "e2e/a.spec.ts" } }]);
+  });
+});
+
+describe("interactive UI real-browser check (#5285)", () => {
+  const cfg = { ...parseE2e({ e2e_label: "e2e" }) };
+  it("flags dialog/CTA/layout components, not tests or plain logic", () => {
+    assert.deepEqual(uiInteractiveChanged(["web/components/SignupDialog.tsx", "web/components/SignupDialog.test.tsx", "web/lib/price.ts"]), ["web/components/SignupDialog.tsx"]);
+  });
+  it("e2eWanted runs the gate for an interactive UI change when a trigger is configured; skips with a reason otherwise", () => {
+    const w = e2eWanted({ cfg, files: ["web/components/HeroCta.tsx"] });
+    assert.equal(w.run, true);
+    assert.match(w.reason, /real-browser/);
+    assert.equal(e2eWanted({ cfg: parseE2e({}), files: ["web/components/HeroCta.tsx"] }).run, false);
+  });
+});
+
+describe("fakedPaths and [type:manual] (#5339)", () => {
+  it("flags test files that fake or mock the real path, not clean ones or unreadable ones", () => {
+    const files = { "a.test.mjs": "const depts = fake_departments();", "b.test.mjs": "vi.mock('./render')", "c.e2e.mjs": "await page.goto(url); expect(film).toExist()", "d.py": "def test(monkeypatch): ..." };
+    const read = (p) => { if (!(p in files)) throw new Error("ENOENT"); return files[p]; };
+    assert.deepEqual(fakedPaths(["a.test.mjs", "b.test.mjs", "c.e2e.mjs", "d.py", "gone.mjs"], read), ["a.test.mjs", "b.test.mjs", "d.py"]);
+  });
+  it("contractWantsE2e covers manual", () => {
+    assert.equal(contractWantsE2e({ requirements: [{ quote: "Restore works [type:manual]" }] }), true);
+    assert.equal(contractWantsE2e({ requirements: [{ quote: "Restore works [type:unit]" }] }), false);
   });
 });

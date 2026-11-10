@@ -1160,7 +1160,7 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(dir, ".git", "info", "exclude"), ".forge-lean/\nforge.yaml\n");
     writeFileSync(join(dir, "a.js"), "2\n"); g(["commit", "-qam", "work"]);
     mkdirSync(join(dir, ".forge-lean"));
-    writeFileSync(join(dir, ".forge-lean", "contract.json"), JSON.stringify({ validate: [{ id: "V1", command: "node --test a.test.mjs" }] }));
+    writeFileSync(join(dir, ".forge-lean", "contract.json"), JSON.stringify({ deliverables: [{ id: "D1", path: "a.js", change: "edit" }], validate: [{ id: "V1", command: "node --test a.test.mjs" }] }));
     if (plan) writeFileSync(join(dir, ".forge-lean", "check-plan.json"), JSON.stringify(plan));
     if (forgeYaml) writeFileSync(join(dir, "forge.yaml"), forgeYaml);
     return { dir, git: async (a, cwd) => execFileSync("git", a, { cwd, encoding: "utf8", env: GIT_ENV }) };
@@ -1225,6 +1225,14 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 90000\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 90000);
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 0\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 0);
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
+  });
+
+  it("#5346: readCoreLimits reads engine.context_ceiling_by_size (junk ignored, absent: no key)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-ctxsz-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_by_size: \"S=80000,L=160000\"\n"); assert.deepEqual(readCoreLimits(d).contextCeilingBySize, { S: 80000, L: 160000 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_by_size: lots\n"); assert.equal(readCoreLimits(d).contextCeilingBySize, undefined);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 5\n"); assert.equal(readCoreLimits(d).contextCeilingBySize, undefined);
   });
 
   it("#4392: readCoreLimits reads engine.turn_budget_s|m|l over the defaults (0 allowed, junk ignored, none set: the defaults)", async () => {

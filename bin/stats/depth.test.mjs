@@ -79,55 +79,80 @@ test("promotion: met, not met and insufficient data below min-n, with n per cell
 });
 
 const fakeGh = (o = {}) => async (args) => {
-  const path = args[2] ?? "";
+  const path = args.find((x) => /^(search|repos)\//.test(x)) ?? "";
   if (o.fail) throw new Error("gh down");
-  if (path.includes("issues/events")) return JSON.stringify({ issue: 2, ts: iso(T0 + 2 * DAY) });
+  const ev = /issues\/(\d+)\/events/.exec(path);
+  if (ev) return ev[1] === "2" ? JSON.stringify({ issue: 2, ts: iso(T0 + 2 * DAY) }) : "";
   if (path.startsWith("search/issues")) return [
     { number: 300, title: "Revert \"feat: x (#101)\"", body: "", labels: [], merged_at: iso(T0 + DAY) },
     { number: 301, title: "fix: y", body: "", labels: [], merged_at: iso(T0 + 2 * DAY) },
     { number: 302, title: "fix: late", body: "", labels: [], merged_at: iso(T0 + 30 * DAY) },
+    { number: 303, title: "fix: rewrite z", body: "", labels: [], merged_at: iso(T0 + 2 * DAY) },
+    { number: 304, title: "fix: regression from #105", body: "", labels: [], merged_at: iso(T0 + 3 * DAY) },
   ].map((x) => JSON.stringify(x)).join("\n");
-  const files = { 101: "src/a.js", 102: "src/b.js\ntest/b.test.js", 103: "src/c.js\ntest/shared.test.js", 301: "src/b.js\ntest/shared.test.js", 302: "src/c.js" };
-  const m = /pulls\/(\d+)\/files/.exec(path);
-  return m ? files[m[1]] ?? "" : "";
+  const m = /pulls\/(\d+)$/.exec(path);
+  return m ? `sha${m[1]}` : "";
 };
+// Local git: fix PR 303 rewrites lines of PR 104; every other fix PR (301 touches a shared file) rewrites someone else's lines.
+const fakeGit = { oldRanges: (sha) => [{ file: "src/shared.js", start: 1, end: 5 }], blame: (rev) => (rev === "sha303^" ? ["sha104"] : ["sha999"]) };
 
-test("gatherDefects: reopen, revert and a same-file fix PR within 7 days; gh failure is null, never false", async () => {
-  const rows = rowsOf({ issue: 1 }, { issue: 2 }, { issue: 3 });
-  const d = await gatherDefects({ repo: "o/r", gh: fakeGh(), rows });
-  assert.deepEqual(d.get(1), { reopen: false, revert: true, fixPr: false, defect: true });
-  assert.deepEqual(d.get(2), { reopen: true, revert: false, fixPr: true, defect: true });
-  assert.deepEqual(d.get(3), { reopen: false, revert: false, fixPr: false, defect: false }, "test-only overlap and an out-of-window fix do not count");
-  const bad = await gatherDefects({ repo: "o/r", gh: fakeGh({ fail: true }), rows });
-  assert.deepEqual(bad.get(1), { reopen: null, revert: null, fixPr: null, defect: null });
+test("depth defect: unrelated fix on a shared file is not a defect, one rewriting the lane's lines is", async () => {
+  const rows = rowsOf({ issue: 3 }, { issue: 4 });
+  const d = await gatherDefects({ repo: "o/r", gh: fakeGh(), rows, git: fakeGit });
+  assert.deepEqual(d.get(3), { reopen: false, revert: false, cited: false, same_hunks: false, defect: false }, "fix 301/303 touch the shared file but not this PR's lines; 302 is out of window");
+  assert.deepEqual(d.get(4), { reopen: false, revert: false, cited: false, same_hunks: true, defect: true });
+});
+
+test("gatherDefects: reverted, reopened, cited and same_hunks; no git is n/a unless another signal; gh failure is null, never false", async () => {
+  const rows = rowsOf({ issue: 1 }, { issue: 2 }, { issue: 3 }, { issue: 5 });
+  const d = await gatherDefects({ repo: "o/r", gh: fakeGh(), rows, git: fakeGit });
+  assert.deepEqual(d.get(1), { reopen: false, revert: true, cited: false, same_hunks: false, defect: true });
+  assert.deepEqual(d.get(2), { reopen: true, revert: false, cited: false, same_hunks: false, defect: true });
+  assert.deepEqual(d.get(5), { reopen: false, revert: false, cited: true, same_hunks: false, defect: true });
+  const nogit = await gatherDefects({ repo: "o/r", gh: fakeGh(), rows });
+  assert.deepEqual(nogit.get(3), { reopen: false, revert: false, cited: false, same_hunks: null, defect: null }, "unresolved same_hunks is n/a, not a defect");
+  assert.equal(nogit.get(1).defect, true, "another signal still decides");
+  const rep = depthReport({ rows, defects: nogit, minN: 1 });
+  assert.equal(rep.defects_unresolved, 1);
+  assert.match(renderDepth(rep), /1 unresolved/);
+  const bad = await gatherDefects({ repo: "o/r", gh: fakeGh({ fail: true }), rows, git: fakeGit });
+  assert.deepEqual(bad.get(1), { reopen: null, revert: null, cited: null, same_hunks: null, defect: null });
   assert.equal(depthReport({ rows, defects: bad, minN: 1 }).by_verdict.eligible.defect_rate, null);
 });
 
-test("renderDepth and buildDepth: verdict and promotion lines with n per cell from run logs", async () => {
-  const dir = tmpDir("depth-");
-  mkdirSync(join(dir, "runs"), { recursive: true });
-  writeFileSync(join(dir, "runs", "5.jsonl"), slice({ issue: 5, shape: "light" }).map((e) => JSON.stringify(e)).join("\n") + "\n{torn");
-  writeFileSync(join(dir, "runs", "6.jsonl"), slice({ issue: 6, verdict: "ambiguous", reasons: ["no_repro"], signals: ["no_repro"] }).map((e) => JSON.stringify(e)).join("\n"));
-  const rep = await buildDepth({ runsDir: join(dir, "runs"), repo: "o/r", gh: null });
-  assert.equal(rep.lanes, 2);
-  assert.equal(rep.defects_source, "offline");
-  const text = renderDepth(rep, { repo: "o/r" });
-  assert.match(text, /lane depth o\/r/);
-  assert.match(text, /^  eligible: n=1, merge 100%/m);
-  assert.match(text, /^  ambiguous: n=1/m);
-  assert.match(text, /^  ineligible: n=0/m);
-  assert.match(text, /^  no_repro: n=1/m);
-  assert.match(text, /light-lane promotion \(#5052, min n 10 per cell\): insufficient data \(treatment light\|upgraded n=0, control eligible full n=0/);
-  assert.match(text, /cost ratio: insufficient data/);
-  assert.match(text, /config decision/);
+test("gatherDefects (#5318): per-issue events, windowed search, a warm cache makes zero gh calls, progress is reported", async () => {
+  const dir = tmpDir("depth-cache-");
+  const env = { FORGE_STATS_CACHE_DIR: join(dir, "cache") };
+  const rows = rowsOf({ issue: 1 }, { issue: 2 }, { issue: 3 });
+  const now = T0 + 60 * DAY, git = fakeGit;
+  const calls = [];
+  const gh = async (args) => { calls.push(args[2]); return fakeGh()(args); };
+  const prog = [];
+  const cold = await gatherDefects({ repo: "o/r", gh, rows, now, env, useCache: true, git, onProgress: (p) => prog.push(p) });
+  assert.equal(cold.get(2).reopen, true);
+  assert.ok(!calls.some((c) => c.includes("/issues/events")), "no repo-wide events crawl");
+  assert.ok(calls.some((c) => /merged%3A\d{4}-\d{2}-\d{2}\.\./.test(c)), "search bounded to the merge window");
+  assert.equal(prog.at(-1).done, 3);
+  const n = calls.length;
+  const warm = await gatherDefects({ repo: "o/r", gh, rows, now, env, useCache: true, git });
+  assert.equal(calls.length, n, "warm run makes no gh calls");
+  assert.deepEqual([...warm], [...cold]);
+  await gatherDefects({ repo: "o/r", gh, rows, now, env, useCache: true, refresh: true, git });
+  assert.ok(calls.length > n, "--refresh re-reads");
+  const fresh = calls.length;
+  await gatherDefects({ repo: "o/r", gh, rows, now: T0 + DAY, env, useCache: true, git });
+  assert.ok(calls.length > fresh, "a row inside its window is never served from the cache");
 });
 
-test("parseArgs accepts --depth and --depth --offline; --offline alone still needs --efficiency; HELP lists --depth", () => {
-  assert.equal(parseArgs(["--depth"]).depth, true);
-  const o = parseArgs(["--depth", "--offline", "--min-n", "3"]);
-  assert.deepEqual([o.depth, o.offline, o.minN], [true, true, 3]);
-  assert.equal(parseArgs(["--efficiency", "--offline"]).offline, true);
-  assert.throws(() => parseArgs(["--offline"]), /--offline need --efficiency/);
-  assert.throws(() => parseArgs(["--compare", "2026-01-01"]), /--compare and --offline need --efficiency/);
-  assert.match(HELP, /stats --depth/);
+test("depthReport recommendation: decision, eligible share, would-be saving and defect rate; rendered", () => {
+  const rows = rowsOf({ issue: 1, shape: "light", cost: 0.5 }, { issue: 2, cost: 2 }, { issue: 3, cost: 2 }, { issue: 4, verdict: "ineligible" });
+  const rep = depthReport({ rows, defects: new Map([[2, { defect: true }], [3, { defect: false }]]), minN: 1 });
+  const rc = rep.recommendation;
+  assert.equal(rc.eligible_n, 3);
+  assert.equal(rc.eligible_share, 0.75);
+  assert.equal(rc.would_be_saving_usd, 3, "2 eligible full lanes x (2 - 0.5)");
+  assert.equal(rc.eligible_defect_rate, 0.5);
+  assert.ok(["promote", "do not promote", INSUFFICIENT].includes(rc.decision));
+  assert.match(renderDepth(rep), /^recommendation: .*eligible share 75% \(n=3\), would-be saving \$3\.00/m);
+  assert.equal(depthReport({ rows: [], minN: 10 }).recommendation.decision, INSUFFICIENT);
 });

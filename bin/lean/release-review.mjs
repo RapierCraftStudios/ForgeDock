@@ -11,9 +11,11 @@
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runHostPreflight } from "./release-preflight.mjs";
 import { reviewStagingJson, reviewStagingIo, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { pickFixes, recut } from "./release-snapshot.mjs";
 
 /** Delta passes after a head move, and fix-lane rounds: past either the job blocks for the manual path. */
 export const MAX_DELTA_PASSES = 2;
@@ -23,6 +25,19 @@ const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const SEVERE = new Set(["CRITICAL", "HIGH"]);
 const MANUAL = "use the manual path: forgedock review-staging <PR> (commands/review-pr-staging.md)";
 const blocked = (why) => ({ blocked: true, reason: `${why}; ${MANUAL}` });
+
+/**
+ * scripts/issue-create.sh (programmatic mode) refuses a body file without exactly one `FORGE:BODY-INTEGRITY` marker, so a
+ * finding body gets one appended unless it already carries exactly one. The id is reduced to the marker's allowed chars.
+ */
+export function withIntegrityMarker(body, id) {
+  const text = String(body ?? "");
+  const n = (text.match(/<!-- FORGE:BODY-INTEGRITY:[^>]+ -->/g) ?? []).length;
+  if (n === 1) return text;
+  const clean = text.replace(/<!-- FORGE:BODY-INTEGRITY:[^>]+ -->\n?/g, "").trimEnd();
+  const tag = String(id ?? "finding").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "finding";
+  return `${clean}\n\n<!-- FORGE:BODY-INTEGRITY:${tag} -->\n`;
+}
 
 /** Reviewers whose prompts are prose in the spec (not briefed by the pre-dispatch): marker domain -> spec phase. */
 export const SPEC_PANEL = [
@@ -45,6 +60,12 @@ export function missingReviewers(lines) {
   const m = /missing findings comment\(s\) for:\s*([^\n]+)/.exec(t) ?? /no structured findings block from:\s*([^\n]+?)\.?(?:\s+Re-dispatch|\n|$)/.exec(t);
   return m ? m[1].split(/[\s,]+/).filter((d) => /^[a-z0-9-]+$/.test(d)) : [];
 }
+/** A reviewer session's failure as one line: exit status and the last lines of what it said. */
+const sessionFailure = (e) => {
+  const out = String(e?.stderr || e?.message || e || "").trim().split("\n").slice(-3).join(" | ").slice(0, 300);
+  return `exit ${e?.code ?? e?.status ?? e?.exitCode ?? "?"}: ${out}`;
+};
+const failureNote = (failures) => (failures.size ? `; session failures: ${[...failures].map(([d, f]) => `${d} (${f})`).join("; ")}` : "");
 const headMoved = (lines) => /head moved since/.test((lines ?? []).join("\n"));
 
 /** One review round at the current head: dispatch, test gate, head check, finalize. @returns {{moved: string}|{fail}|{ok}} */
@@ -61,7 +82,9 @@ async function reviewRound({ seam, pr, def, delta }) {
   const prompts = new Map(agents.map((a) => [a.domain, a.prompt()]));
   seam.markLaunched(m.launchedFile, agents.map((a) => a.domain), m.headSha);
   const send = (domain, note = "") => seam.runAgent({ role: `release-review-${domain}`, issue: pr, prompt: note ? `${prompts.get(domain)}\n\n${note}` : prompts.get(domain) });
-  await Promise.all(agents.map((a) => send(a.domain).catch((e) => ({ error: e.message }))));
+  const failures = new Map();
+  const attempt = (domain, note) => send(domain, note).catch((e) => { failures.set(domain, sessionFailure(e)); return null; });
+  await Promise.all(agents.map((a) => attempt(a.domain)));
   const gate = await seam.runAgent({ role: "release-test-gate", issue: pr, prompt: `/test-gate --prs "${(m.bundle ?? []).join(" ")}" --base ${def}\n\nPrint the complete gate output, ending with its FORGE:TEST_GATE:RESULT= marker.` });
   const gateFile = seam.saveTestGate(pr, gate?.text ?? "");
 
@@ -71,13 +94,13 @@ async function reviewRound({ seam, pr, def, delta }) {
   if (fin.code !== 0 || !fin.data) {
     if (headMoved(fin.lines)) return { moved: m.headSha };
     const missing = missingReviewers(fin.lines).filter((d) => prompts.has(d));
-    if (!missing.length) return { fail: `finalize stopped (exit ${fin.code}): ${(fin.lines ?? []).slice(-2).join(" | ").slice(0, 300)}` };
+    if (!missing.length) return { fail: `finalize stopped (exit ${fin.code}): ${(fin.lines ?? []).slice(-2).join(" | ").slice(0, 300)}${failureNote(failures)}` };
     // once: the same brief with the note the spec prescribes; a second miss is a degraded panel
-    await Promise.all(missing.map((d) => send(d, "structured findings block required: post your findings comment again, ending with the REVIEW-FINDINGS-START/END block.").catch(() => null)));
+    await Promise.all(missing.map((d) => attempt(d, "structured findings block required: post your findings comment again, ending with the REVIEW-FINDINGS-START/END block.")));
     fin = await seam.finalize({ pr, testGateOutput: gateFile });
     if (fin.code !== 0 || !fin.data) {
       if (headMoved(fin.lines)) return { moved: m.headSha };
-      return { fail: `reviewer findings block still missing after one re-ask (${missing.join(", ")}): degraded panel` };
+      return { fail: `reviewer findings block still missing after one re-ask (${missing.join(", ")}): degraded panel${failureNote(failures)}` };
     }
   }
   return { ok: fin.data };
@@ -129,8 +152,20 @@ export async function fixStep(ctx) {
     }
     if (!issues.length) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
     for (const issue of issues) {
+      // A resume after the fix already merged (by this job or by an intake lane): its lane would end invalid on a closed issue.
+      if (await seam.issueMerged?.(issue)) continue;
       const lane = await seam.runLane({ issue, lane: ctx.staging });
       if (lane?.terminalReason !== "merged") return blocked(`fix lane for #${issue} ended ${lane?.terminalReason ?? "without a result"}`);
+    }
+    // Snapshot mode (#5276): the fixes are merged on staging; bring exactly those onto release/<id> (or recut it) before the delta review.
+    if (ctx.config?.mode === "snapshot") {
+      const moved = ctx.config.fixMode === "recut" ? await recut(ctx) : await pickFixes(ctx, { issues });
+      if (moved.err) return blocked(moved.err);
+    }
+    // The host preflight re-runs on the head the fixes produced, before the delta review (the draft PR has no Actions CI yet, #5277).
+    if (ctx.config?.preflight) {
+      const pf = await runHostPreflight(ctx, { head: await seam.headOf(r.pr), pr: r.pr });
+      if (!pf.ok && pf.blocking) return blocked(`host preflight failed at ${pf.head} after the fix round (release-blocker #${pf.issue})`);
     }
     const next = await runReview({ seam, pr: r.pr, def: ctx.def, delta: r.head });
     if (next.blocked) return next;
@@ -144,11 +179,19 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
-export function realSeam({ repo, def, env = process.env, cwd = process.cwd() }) {
+export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), makeRunner = null, gh: ghIn = null }) {
   const rs = { ...reviewStagingIo(), cwd, env };
   const sd = env.FORGE_SCRATCHPAD || join(cwd, ".forge-scratch");
-  let runner = null;
-  const gh = (args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env });
+  let runner = null, shimEnv = null;
+  // Reviewer briefs say `forgedock ...`: pin that name to this release job's own build, whatever is installed globally.
+  const pinnedEnv = () => {
+    if (shimEnv) return shimEnv;
+    const dir = mkdtempSync(join(tmpdir(), "release-forgedock-"));
+    writeFileSync(join(dir, "forgedock"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "bin", "forgedock.mjs")}" "$@"\n`, { mode: 0o755 });
+    process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+    return (shimEnv = { ...env, PATH: `${dir}${delimiter}${env.PATH ?? ""}` });
+  };
+  const gh = ghIn ?? ((args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env }));
   return {
     pre: ({ pr, delta }) => reviewStagingJson([String(pr), ...(delta ? ["--delta", delta] : [])], rs),
     finalize: ({ pr, testGateOutput }) => reviewStagingJson([String(pr), "--finalize", "--test-gate-output", testGateOutput], rs),
@@ -158,11 +201,24 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd() }) 
     markLaunched: (file, domains, head) => { appendFileSync(file, domains.map((d) => `${d}\n`).join("")); writeFileSync(`${file}.head`, `${head}\n`); },
     saveTestGate: (pr, text) => { mkdirSync(sd, { recursive: true }); const f = join(sd, `${pr}_test_gate_output.txt`); writeFileSync(f, text); return f; },
     runAgent: async ({ role, issue, prompt }) => {
-      runner ??= (await import("./effects.mjs")).makeLeanRunner();
+      runner ??= makeRunner ? makeRunner() : (await import("./effects.mjs")).makeLeanRunner();
       // not readOnly: each reviewer posts its own PR comment
-      return runner({ role, issue, cwd, prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+      return runner({ role, issue, cwd, env: pinnedEnv(), prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+    },
+    // closed by a merged fix: state CLOSED with the workflow:merged label (a read failure is "not merged", so the lane runs)
+    issueMerged: async (issue) => {
+      try {
+        const v = JSON.parse(gh(["issue", "view", String(issue), "-R", repo, "--json", "state,labels"]));
+        return v.state === "CLOSED" && (v.labels ?? []).some((l) => l.name === "workflow:merged");
+      } catch { return false; }
     },
     async fileCiIssue({ pr, head }) {
+      // one issue per release head: a resume reuses the issue filed for the same head instead of filing a duplicate
+      const title = `Release PR #${pr}: CI red at ${head.slice(0, 7)}`;
+      try {
+        const hit = JSON.parse(gh(["issue", "list", "-R", repo, "--state", "all", "--search", `"${title}" in:title`, "--json", "number,title"])).find((i) => i.title === title);
+        if (hit) return hit.number;
+      } catch { /* no lookup: file a new one */ }
       const rows = JSON.parse(gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,bucket"]));
       const names = rows.filter((c) => c.bucket === "fail" && !CI_EXCLUDED_CHECKS.includes(c.name)).map((c) => c.name);
       return this.fileIssue({ item: { title: `Release PR #${pr}: CI red at ${head.slice(0, 7)}`, severity: "HIGH", body: `Failing required checks on the release PR #${pr} at ${head}:\n${names.map((n) => `- ${n}`).join("\n")}\n\nFix them on the staging branch.` }, pr });
@@ -172,7 +228,7 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd() }) 
       try {
         const body = item.body ?? [`Found by the staging review of PR #${pr}.`, ...Object.entries(item).filter(([k, v]) => k !== "title" && ["string", "number"].includes(typeof v)).map(([k, v]) => `- **${k}**: ${v}`)].join("\n");
         const bodyFile = join(dir, "body.md");
-        writeFileSync(bodyFile, body);
+        writeFileSync(bodyFile, withIntegrityMarker(body, `release-${pr}-${item.id ?? item.title ?? "finding"}`));
         let out = "";
         try { out = execFileSync("bash", [join(ROOT, "scripts", "issue-create.sh"), "--title", item.title, "--body-file", bodyFile, "--label", "review-finding", "--label", "staging-review", "--repo", repo], { encoding: "utf8", cwd, env }); } catch (e) { out = String(e.stdout ?? ""); }
         try {

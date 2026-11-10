@@ -25,8 +25,9 @@ import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
+import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness } from "./issuewatch-parity.mjs";
 
-const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels"];
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause"];
 export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
@@ -81,8 +82,12 @@ export function validateWatch(name, cfg = {}) {
     since: cfg.since || null, version: cfg.version ? String(cfg.version) : null, lane: cfg.lane || null, max_issues: int("max_issues", null), max_inflight: int("max_inflight", 4),
     until: cfg.until || null, mode: cfg.mode || "per-issue", parallel: int("parallel", 4), include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null,
     max_launches: int("max_launches", null), sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true",
-    trust_app: cfg.trust_app === true || String(cfg.trust_app).toLowerCase() === "true", trust_app_labels: list(cfg.trust_app_labels) };
+    trust_app: cfg.trust_app === true || String(cfg.trust_app).toLowerCase() === "true", trust_app_labels: list(cfg.trust_app_labels),
+    skip_labels: cfg.skip_labels === undefined ? (cfg.mode === "batch" ? DEFAULT_SKIP_LABELS : []) : list(cfg.skip_labels), // #5313: the bash watcher's skip list; batch watches take it by default
+    release_pause: cfg.release_pause === undefined ? cfg.mode === "batch" : /^true$/i.test(String(cfg.release_pause)) };
   if (cfg.sweep_needs_human !== undefined && !/^(true|false)$/i.test(String(cfg.sweep_needs_human))) throw new Error(`watch ${name}: sweep_needs_human must be true or false`);
+  if (cfg.release_pause !== undefined && !/^(true|false)$/i.test(String(cfg.release_pause))) throw new Error(`watch ${name}: release_pause must be true or false`);
+  if (searchesPullRequests(w.search)) throw new Error(`watch ${name}: search must not select pull requests (a watch claims issues only)`);
   if (cfg.trust_app !== undefined && !/^(true|false)$/i.test(String(cfg.trust_app))) throw new Error(`watch ${name}: trust_app must be true or false`);
   if (w.trust_app_labels.length && !w.trust_app) throw new Error(`watch ${name}: trust_app_labels needs trust_app: true`);
   if (!["per-issue", "batch", "release"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue, batch or release`);
@@ -139,6 +144,14 @@ export function selectorMiss(issue, sel) {
   if (sel.since && !(Date.parse(issue.createdAt) >= Date.parse(sel.since))) return "since";
   if (sel.version && issueVersion(issue) !== sel.version) return "version";
   return null;
+}
+
+/** #5313: why the bash watcher's rules skip `issue` (a PR, a skip label, an open closing PR), or null. */
+export function parityMiss(issue, watch, closing = new Map()) {
+  if (isPullRequest(issue)) return "pull request (a watch claims issues only)";
+  const l = skipLabelHit(issue, watch.skip_labels);
+  if (l) return `skip label ${l}`;
+  return closing.has(issue.number) ? `open closing PR #${closing.get(issue.number)}` : null;
 }
 
 /** AND of every set selector. `search` is applied by gh, not here. */
@@ -324,6 +337,7 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   }
   if (taken.length && watch.mode === "batch") {
     const nums = taken.map((t) => t.n);
+    if (state.batch && io.batch.reported(state.batch)) { state.inflight.filter((n) => !nums.includes(n)).forEach(fail); state.batch = null; } // #5313: it reported since the check above; never add to a finished batch
     if (state.batch) io.batch.add(state.batch, nums); else state.batch = await io.batch.start(nums, watch.parallel, taken[0].lane);
   } else for (const t of taken) handles.set(t.n, io.launch(t.n, t.lane));
   return state;
@@ -341,8 +355,11 @@ export async function planClaims({ watch, repo, io, state, branches = {}, defaul
   if (watch.search) args.push("--search", watch.search);
   const found = [], folds = [], skip = [], why = new Map();
   const assoc = await listAssociations(io.gh, repo); // #4859: not a `gh issue list` field
+  const closing = await closingPrIssues(io.gh, repo); // #5313
   for (const raw of JSON.parse(String(await io.gh(args)))) {
     const i = { ...raw, authorAssociation: assoc.get(raw.number) };
+    const parity = parityMiss(i, watch, closing);
+    if (parity) { skip.push({ number: i.number, reason: parity }); continue; }
     const miss = selectorMiss(i, watch);
     if (miss) { skip.push({ number: i.number, reason: miss }); continue; }
     const c = classifyWhy(i, watch);
@@ -381,13 +398,15 @@ async function releaseStep({ watch, repo, io, state, dir, branches = {}, default
   const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
   if (watch.search) args.push("--search", watch.search);
   const registry = () => readJson(join(repoDir(repo, io.env), "claims.json")) ?? {};
+  let closing = new Map();
   const listOpen = async () => {
     const assoc = await listAssociations(io.gh, repo); // #4859
-    const all = JSON.parse(String(await io.gh(args))).map((i) => ({ ...i, authorAssociation: assoc.get(i.number) }));
+    closing = await closingPrIssues(io.gh, repo); // #5313
+    const all = JSON.parse(String(await io.gh(args))).filter((i) => !isPullRequest(i)).map((i) => ({ ...i, authorAssociation: assoc.get(i.number) }));
     if (!dryRun) for (const i of all) if (matchesSelectors(i, watch) && classifyIssue(i, watch) === "fold") await fold({ issue: i, watch, repo, io, state });
     return all;
   };
-  const eligible = (i) => matchesSelectors(i, watch) && classifyIssue(i, watch) === "claim" && !state.claimed.includes(i.number) && unclaimedOrOwn(registry(), i.number, watch.name); // release #4820 CONC-1: own claims stay eligible
+  const eligible = (i) => !parityMiss(i, watch, closing) && matchesSelectors(i, watch) && classifyIssue(i, watch) === "claim" && !state.claimed.includes(i.number) && unclaimedOrOwn(registry(), i.number, watch.name); // release #4820 CONC-1: own claims stay eligible
   const p = loadPolicy({ io: { readFile }, cwd });
   return releaseTick({ watch, repo, io, state, defaults, listOpen, eligible, claim: (n) => claimIssue(repoDir(repo, io.env), n, watch.name), laneFor: (i) => laneFor(i, watch, { branches, defaults }), dagOrder,
     policy: { path: p.policyPath, text: p.policyText }, dryRun });
@@ -406,7 +425,8 @@ async function fold({ issue, watch, repo, io, state }) {
 export function formatStatus(s, watch, now = Date.now()) {
   const sel = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane"].filter((k) => (Array.isArray(watch[k]) ? watch[k].length : watch[k])).map((k) => `${k}=${[].concat(watch[k]).join(",")}`).join(" ") || "(all trusted issues)";
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
-  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
+  const live = s.heartbeat || s.paused ? watchLiveness(s, now) : null;
+  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, ...(live ? [`  state: ${live.state}${live.state === "paused" || live.state === "stale" ? ` (${live.reason})` : ""}  last heartbeat: ${s.heartbeat ?? "never"}${live.ageMs != null ? ` (${Math.round(live.ageMs / 1000)}s ago)` : ""}`] : []), `  selector: ${sel}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
     ...(s.decisionError ? [`  needs-human decisions: last round failed: ${s.decisionError}`] : []), // release #5068 CQ-1
@@ -451,6 +471,15 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
   const launch = (i) => decisionLaunch({ i, watch, repo, io, state, handles, branches, defaults });
   try {
     do {
+      state.heartbeat = new Date(io.now()).toISOString(); state.heartbeatEveryMs = intervalMs; // #5313: liveness lives in the state, not a process grep
+      const rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null;
+      if (rel) { // a release job holds staging: no claims, retries or decisions until it ends; the next pass resumes by itself
+        state.paused = { reason: `release ${rel.id} in flight${rel.step ? ` (${rel.step})` : ""}`, release: rel.id, since: state.paused?.since ?? state.heartbeat };
+        writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
+        if (once) break;
+        await io.sleep(intervalMs); continue;
+      }
+      state.paused = null;
       if (state.phase === "running" && decisionsActive(watch, ctx.policy)) { // #4793: a failed round must not stop the watch
         try { await decisionStep({ watch, repo, io, state, ctx, shared, launch }); state.decisionError = null; } catch (e) { state.decisionError = String(e?.message ?? e).slice(0, 200); }
       }

@@ -32,7 +32,7 @@ function clean(raw) {
     .filter((f) => f && AT_RE.test(f) && !f.startsWith(".forge-lean/") && !f.split("/").includes("..")), (x) => x).slice(0, FACTS_FILES_MAX);
   const rejected = uniqBy(list(r.rejected).map((x) => ({ approach: one(x?.approach), why: one(x?.why) })).filter((x) => x.approach && x.why), (x) => x.approach).slice(0, FACTS_LIST_MAX);
   const hotspots = uniqBy(list(r.hotspots).map((x) => ({ at: one(x?.at, 200), why: one(x?.why) })).filter((x) => x.at && x.why && AT_RE.test(x.at) && !x.at.split("/").includes("..")), (x) => x.at).slice(0, FACTS_LIST_MAX);
-  const baselines = uniqBy(list(r.baselines).map((x) => ({ command: one(x?.command, 200), exit: x?.exit })).filter((x) => x.command && Number.isInteger(x.exit)), (x) => x.command).slice(0, FACTS_LIST_MAX);
+  const baselines = uniqBy(list(r.baselines).map((x) => ({ command: one(x?.command, 200), exit: x?.exit, ...(typeof x?.head === "string" && /^[0-9a-f]{7,40}$/.test(x.head) ? { head: x.head } : {}) })).filter((x) => x.command && Number.isInteger(x.exit)), (x) => x.command).slice(0, FACTS_LIST_MAX);
   return { v: 1, files, decisions: strs(r.decisions), rejected, hotspots, conventions: strs(r.conventions), baselines };
 }
 const hasContent = (f) => KINDS.some((k) => f[k].length > 0);
@@ -41,10 +41,10 @@ const hasContent = (f) => KINDS.some((k) => f[k].length > 0);
  * The lane's FORGE:FACTS record, or null when it would carry nothing. `result` is result.json (its `facts` and
  * `validation`), `files` the lane's changed files, `contract` the frozen contract (decision fallback).
  */
-export function normaliseFacts(result, { files = [], contract = null } = {}) {
+export function normaliseFacts(result, { files = [], contract = null, head = "" } = {}) {
   const raw = result?.facts && typeof result.facts === "object" ? result.facts : {};
   const decisions = list(raw.decisions).some((d) => one(d)) ? raw.decisions : list(contract?.decisions).map((d) => d?.choice);
-  const baselines = list(result?.validation).map((v) => ({ command: v?.command, exit: v?.exit }));
+  const baselines = list(result?.validation).map((v) => ({ command: v?.command, exit: v?.exit, head })); // #5331: the head the result was recorded on
   const f = clean({ ...raw, decisions, baselines, files });
   return hasContent(f) ? f : null;
 }

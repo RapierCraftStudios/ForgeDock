@@ -188,12 +188,16 @@ export function pathCovers(d, f) {
   if (/[*?]/.test(p)) return globRe(p).test(file);
   return p === file;
 }
+/** #5365: explicit coupling map: editing `when` (a deliverable) also puts `also` in scope (a test asserts parity between them). */
+const COUPLED_PATHS = [{ when: "bin/engine/outcome-codes.mjs", also: ["docs/OUTCOME-CODES.md"] }];
 /** The deliverable id that authorizes `f`, "test", "incidental", or null. */
 export function authorizationOf(contract, f) {
   const d = (contract.deliverables ?? []).find((x) => pathCovers(x.path, f));
   if (d) return d.id;
   if (isTestPath(f)) return "test";
   if (isIncidentalPath(f)) return "incidental";
+  // #5365: a file a parity test reads alongside a changed deliverable is in scope with it
+  if (COUPLED_PATHS.some((c) => c.also.some((g) => pathCovers(g, f)) && (contract.deliverables ?? []).some((x) => pathCovers(x.path, c.when) || pathCovers(c.when, x.path)))) return "coupled";
   return null;
 }
 // A doc a freshness rule can demand: a prose file under a docs directory. Build and dependency files (`requirements.txt`,
@@ -651,7 +655,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       applied.push({ kind: a.kind, target: r.id, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
-      if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
+      if (c.requirements.some((r) => r.id === a.requirement.id)) {
+        // #5365: a taken id is renumbered to the next free R<n>, never a failure; the remap is recorded in `applied`
+        const was = a.requirement.id, free = `R${Math.max(0, ...c.requirements.map((r) => Number(/^R(\d+)$/.exec(String(r.id))?.[1] ?? 0))) + 1}`;
+        a = { ...a, requirement: { ...a.requirement, id: free } };
+        applied.push({ kind: "add-requirement", target: `${was} -> ${free}`, why: `id ${was} already in the contract; renumbered to ${free}` });
+      }
       let snapTo = null;
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) {
         snapTo = snapQuote(a.requirement.quote, issueText);
@@ -721,6 +730,24 @@ const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportErro
 const NODE_MISSING_RE = /Cannot find (?:module|package) '([^']+)'/;
 const POETRY_NOT_FOUND_RE = /^\s*Command not found: (\S+)/m;
 const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /([^\s:'"`]+): not found\b/;
+// #5371: exit-1 failures that are the executor's environment (no Docker daemon, a bind-mount source that is absent where the step runs,
+// no Playwright browser, no network for npm), never a failing assertion of the change
+const ENV_SIGNATURES = [
+  [/Cannot connect to the Docker daemon|docker\.sock|error during connect|Is the docker daemon running/i, "Docker daemon"],
+  [/invalid mount config for type "bind"|bind source path does not exist|error while creating mount source path|mounts denied/i, "Docker bind-mount source"],
+  [/Executable doesn't exist at|npx playwright install|browserType\.launch: Executable/i, "Playwright browser"],
+  [/\bENOTFOUND\b|\bEAI_AGAIN\b|npm (?:ERR!|error) network|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)/i, "network access for npm"],
+];
+const envSignature = (out) => { const hit = ENV_SIGNATURES.find(([re]) => re.test(out)); return hit ? { tool: hit[1], kind: "environment" } : null; };
+const SECRET_PAIR_RE = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)\S+/gi;
+const SECRET_SHAPE_RE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b|Bearer\s+[A-Za-z0-9._~+/=-]{12,}/g;
+/** #5371: the last `lines` lines of a command's output with secret-looking values redacted, as an indented block for a failure detail ("" when empty). */
+export function outputTail(output, lines = 40) {
+  const t = String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());
+  while (t.length && !t[t.length - 1]) t.pop();
+  const tail = t.slice(-lines).join("\n").replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]").slice(-4000);
+  return tail ? `\n  output tail (last ${Math.min(lines, t.length)} lines):\n${tail.split("\n").map((l) => `    ${l}`).join("\n")}` : "";
+}
 /** #4857: why a command is not valid bash (`bash -n`), or null when it parses (or bash is unavailable). Catches prose left on a command. */
 export function shellSyntaxError(command) {
   const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
@@ -882,7 +909,7 @@ export function resolveForgedockPaths(command, { exists = () => true, checksCli,
     return here && !exists(tok) ? here : tok;
   });
 }
-const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
+const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
  * (or rc 127), python "No module named x" (top-level package), node "Cannot find module|package 'x'" (bare specifiers only).
@@ -905,7 +932,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const po = POETRY_NOT_FOUND_RE.exec(out)?.[1]; // #5020: `poetry run pytest` in an env that was never installed
   if (po) return local(po) ? null : { tool: po, kind: "command" };
   const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? String(command).trim().split(/\s+/)[0] : null);
-  if (!cmd || cmd.includes("/") || local(cmd)) return null;
+  if (!cmd || cmd.includes("/") || local(cmd)) return envSignature(out); // #5371
   return { tool: cmd, kind: "command" };
 }
 
@@ -931,7 +958,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -939,6 +966,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
+  // #5285: interactive UI changed on a high-risk surface with no real-browser check configured: a recorded skip that blocks
+  if (uiBrowser?.files?.length && uiBrowser.highRisk && !uiBrowser.ran) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "ui_browser_unverified", detail: `interactive UI changed (${uiBrowser.files.slice(0, 5).join(", ")}) on a high-risk surface but no real-browser check runs (${uiBrowser.reason}); configure verify.e2e_label/e2e_workflow or add a Playwright spec` });
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -955,7 +984,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
       const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
-      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check` }); continue; }
+      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -976,9 +1005,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) { ciCovered.push(v.id); continue; }
-      if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
+      if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
@@ -1003,6 +1032,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
+  failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
@@ -1163,10 +1193,13 @@ export function evidencePathOnly(problems = []) {
 }
 /**
  * #5164: true when every problem of an incomplete review is a reviewer slip a targeted re-ask can fix: an evidence path that
- * did not resolve (#4327) or an issue_coverage misquote. A real coverage gap is never one, so it keeps the two-run limit.
+ * did not resolve (#4327) or an issue_coverage misquote. #5345: so is any single missing or invalid row (requirement, preserve,
+ * scope, issue_coverage, verdict): the reply is repaired in place for those ids, never a new review round. A whole absent
+ * `requirements` section is not a slip: it keeps the two-run limit. A real coverage gap is a failure, not an incompleteness.
  */
+const ROW_GAP_RE = /needs exactly one row|status invalid|needs deferral_ok|needs instrumented|needs path:line evidence|needs validated_by|has no scope row|needs a row with status|issue_coverage is missing or empty|verdict must be|regressions must be/;
 export function reaskable(problems = []) {
-  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX));
+  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)) || String(p).startsWith(MISQUOTE_PREFIX) || ROW_GAP_RE.test(String(p)));
 }
 const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)));
 
@@ -1249,8 +1282,10 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 }
 
 
-/** #4726: a requirement quote that carries a `[type:e2e]` criterion. */
-const wantsE2e = (r) => /\[type:e2e\]/i.test(String(r?.quote ?? ""));
+/** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? ""));
+/** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
+const DEFAULT_ENFORCED_KINDS = ["e2e_row"];
 const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 /**
  * #4726: whether a validate command runs a real end-to-end check: an entry of `verify.e2e_checks`, a file of the e2e spec set
@@ -1259,6 +1294,7 @@ const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 export function isE2eCommand(command, e2e = null) {
   const cmd = String(command ?? "");
   if ((e2e?.checks ?? []).some((c) => c && cmd.includes(c))) return true;
+  if ((e2e?.faked ?? []).some((f) => f && cmd.includes(f))) return false; // #5339: names a test that fakes the real path
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
@@ -1278,7 +1314,7 @@ export function decide(raw, ctx) {
   const rv = fillEngineRows(raw, ctx);
   const comp = checkCompleteness(rv, ctx);
   if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
-  const f = [];
+  const f = [], converted = [];
   const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
   const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
   for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
@@ -1290,24 +1326,29 @@ export function decide(raw, ctx) {
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
-      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, detail: `${r.id} is a [type:e2e] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack); run one, or mark ${r.id} post-deploy with a tracked follow-up` });
+      const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
+    } else if (r.disposition === "defer" && wantsE2e(r)) {
+      // #5339: a deferred e2e/manual requirement is not met; only a post-deploy one is transferred to the epic (the lane closes partial)
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
     }
     // #5207: in-lane engineering work is never deferrable, whatever the reviewer says; one failure per row.
-    if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
+    if (TRACKED.includes(r.disposition) && row.status === "implemented" && (inLaneDeferral(r) || row.deferral_ok === false)) converted.push({ id: r.id, evidence: String(row.evidence ?? "") }); // #5365: delivered in the diff
+    else if (inLaneDeferral(r)) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} is in-lane engineering work (bucket ${r.bucket ?? "none"}): deliver it (amend-requirement to deliver); only post-deploy, owner and external items may be deferred (#5207)` });
     else if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
   for (const s of rv.scope) {
     if (!blank(s.authorized_by)) continue;
     const engine = authorizationOf(ctx.contract, s.file);
-    if (engine === "test" || engine === "incidental") continue; // always allowed; a reviewer "none" here is a misreading, not creep
+    if (engine === "test" || engine === "incidental" || engine === "coupled") continue; // always allowed; a reviewer "none" here is a misreading, not creep
     f.push({ code: C.CONFORMANCE_SCOPE_CREEP, detail: `${s.file}: ${s.note || "not authorized by the contract"}` });
   }
   for (const p of rv.preserve ?? []) if (p.status !== "intact") f.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, detail: `${p.id} ${p.status}${p.evidence ? ` (${p.evidence})` : ""}${p.note ? `: ${p.note}` : ""}` });
   for (const r of rv.regressions ?? []) f.push({ code: C.CONFORMANCE_REGRESSION, detail: `${r?.at ?? "?"}: ${r?.failure ?? ""}` });
-  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv };
+  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted };
   // A NONCONFORMING verdict with every row passing gives the builder nothing to fix: re-ask the reviewer.
   if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }], missing: ["verdict"], review: rv };
-  return { state: "conforms", failures: [], review: rv };
+  return { state: "conforms", failures: [], review: rv, converted };
 }
 
 /** The ids (or sections) a targeted re-ask must fill: requirement ids without a valid row, issue_coverage problems, ...; [] when complete. */
@@ -1355,6 +1396,15 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
 }
 
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */
+/** #5365: flips the requirements `converted` names (decide) to deliver, keeping the original row in amended_from; returns a new contract. */
+export function convertDelivered(contract, converted) {
+  const by = new Map((converted ?? []).map((x) => [x.id, x.evidence]));
+  return { ...contract, requirements: (contract.requirements ?? []).map((r) => {
+    if (!by.has(r.id) || !TRACKED.includes(r.disposition)) return r;
+    const { bucket, why, check, tracked, class: cls, ...rest } = r;
+    return { ...rest, disposition: "deliver", amended: true, amended_from: r.amended_from ?? Object.fromEntries(["quote", "disposition", "why", "bucket", "check", "tracked", "class"].filter((k) => r[k] != null).map((k) => [k, r[k]])), amendment: { text: `delivered in the diff (${by.get(r.id) || "reviewer evidence"})`, why: "reviewer found the deferred requirement delivered" } };
+  }) };
+}
 /** #5207: in-lane engineering deferrals are never filed (decide() sends them back to the builder). */
 export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked && !inLaneDeferral(r));
 
@@ -1366,9 +1416,17 @@ export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(tit
  * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
  * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
  */
-export function closePlan(contract, { title = null, review = null, issueText = null } = {}) {
+export function closePlan(contract, { title = null, review = null, issueText = null, liveBlocks = [] } = {}) {
   const reqs = contract.requirements ?? [];
   const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
+  // #5339: an e2e/manual requirement that was not run in the lane is transferred to the epic, not met: the issue stays partial
+  const transferred = reqs.filter((r) => r.disposition === "post-deploy" && wantsE2e(r));
+  // #5285: a default-on change whose live acceptance is deferred is not closed as completed; #5382: it still transfers its e2e/manual rows
+  if (liveBlocks.length) {
+    const live = reqs.filter((r) => liveBlocks.some((b) => b.id === r.id));
+    return { reason: "partial", tracked, liveBlocked: true, blocks: liveBlocks, open: live, ...(transferred.length ? { transferred: true, transfer: transferred } : {}) };
+  }
+  if (transferred.length) return { reason: "partial", tracked, transferred: true, open: transferred };
   const rows = Array.isArray(review?.requirements) ? review.requirements : null;
   if (!isInvestigation(title)) {
     const unticked = unmetChecklist(reqs, rows, issueText);
@@ -1595,7 +1653,7 @@ export function normalizeKindModes(raw) {
 export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
   const block = [], record = [];
   for (const f of failures ?? []) {
-    const own = kinds?.[f?.code];
+    const own = kinds?.[f?.code] ?? (DEFAULT_ENFORCED_KINDS.includes(f?.kind) ? "enforce" : undefined);
     (own ? own === "enforce" : !shadow || allow.includes(f?.code)) ? block.push(f) : record.push(f);
   }
   return { block, record };

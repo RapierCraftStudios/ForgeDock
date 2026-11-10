@@ -22,5 +22,35 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "adversarial-bench-run": {
+    "run": "ls docs/eval/published/adversarial-*.md >/dev/null 2>&1 && grep -qi \"corpus revision\" docs/eval/published/adversarial-*.md",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "30d"
+  },
+  "implementation-comment-file-overlap": {
+    "run": "bad=0; for n in $(gh pr list --state merged --limit 30 --json number --jq '.[].number'); do files=$(gh pr view $n --json files --jq '.files[].path'); listed=$(gh pr view $n --json comments --jq '[.comments[]|select(.body|contains(\"FORGE:IMPLEMENTATION\"))]|last|.body // \"\"' | grep -o '^- `[^`]*`' | sed 's/^- `//;s/`$//'); [ -z \"$listed\" ] && continue; echo \"$listed\" | grep -qxFf <(echo \"$files\") || { echo \"disjoint: PR $n\"; bad=1; }; done; test $bad -eq 0",
+    "pass": "exit 0",
+    "timeout": 300,
+    "for": "7d"
+  },
+  "R4-metric": {
+    "run": "npx --no-install forgedock stats --first-review --json --since \"$(date -u -d '14 days ago' +%Y-%m-%d)\" | node -e 'const r=JSON.parse(require(\"fs\").readFileSync(0,\"utf8\")).query.first_review.overall;process.exit(r.n>0&&r.clean_rate>=0.85&&r.incomplete_rate<=0.02?0:1)'",
+    "pass": "exit 0",
+    "timeout": 300,
+    "for": "14d"
+  },
+  "ceiling-ab-posted": {
+    "run": "test \"$(gh issue view 5346 --json comments --jq '[.comments[]|select(.body|contains(\"FORGE:CEILING_AB\"))]|length')\" -ge 1",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
+  },
+  "ceiling-default-set": {
+    "run": "git fetch -q origin staging && test \"$(git log origin/staging --grep='ceiling default (#5346)' --format=%H | wc -l)\" -ge 1",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
   }
 }
