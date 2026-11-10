@@ -44,6 +44,7 @@ import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVE
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
+import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
@@ -248,7 +249,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -2541,6 +2542,9 @@ export async function runCore(o) {
       const [{ runs: validateRuns, subs: substitutedRuns }, guardFailures] = await Promise.all([validatePhase, guardGate(files)]);
       // #5087: forge.yaml topology.route_reachability gates the route handlers this diff adds; unset = no check
       const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
+      // #5284: forge.yaml topology.prod_parity: declared production-only surfaces this diff touches need a check result or a justification
+      const parityRules = parseProdParity(prodParity);
+      const prodParityFailures = parityRules.length && io.runCommand ? await prodParityOf({ rules: parityRules, changedFiles: files, result, run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
       // #4705: only the part not hidden behind the validate rerun; 0 when the gate errored or skipped
       const guardRunMs = guardEv && !guardEv.error ? Math.max(0, now() - gateT0 - validateMs) : 0;
       guardAddedMs += guardRunMs;
@@ -2557,7 +2561,7 @@ export async function runCore(o) {
         const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
         if (!T.decisions.includes(note)) T.decisions.push(note);
       }
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });

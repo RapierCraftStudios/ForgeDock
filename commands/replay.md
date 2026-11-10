@@ -10,6 +10,8 @@ install: extras
 
 Replay a completed pipeline run. Fetches all FORGE annotations posted during the pipeline and displays them chronologically — phase headings, timestamps, and key structured fields. Read-only: nothing is written, no labels changed.
 
+For a time-lapse of a whole batch or epic, run `forgedock replay --timelapse <batch|epic>` (see docs/REPLAY.md).
+
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 
 ---
