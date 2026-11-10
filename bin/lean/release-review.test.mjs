@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam } from "./release-review.mjs";
+import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam, withIntegrityMarker } from "./release-review.mjs";
 import { readFileSync } from "node:fs";
 import { reviewStagingJson } from "../review-staging.mjs";
 
@@ -267,5 +267,23 @@ describe("fixStep in snapshot mode (#5276)", () => {
     c.config = {};
     await fixStep(c);
     assert.deepEqual(w.git, []);
+  });
+});
+
+describe("withIntegrityMarker (filing release findings through issue-create.sh)", () => {
+  const count = (s) => (s.match(/<!-- FORGE:BODY-INTEGRITY:[^>]+ -->/g) ?? []).length;
+  it("appends exactly one marker to a body that has none", () => {
+    const out = withIntegrityMarker("Found by the staging review of PR #5389.\n- **severity**: HIGH", "release-5389-REG-1");
+    assert.equal(count(out), 1);
+    assert.match(out, /<!-- FORGE:BODY-INTEGRITY:release-5389-REG-1 -->\n$/);
+  });
+  it("keeps a body that already has exactly one marker unchanged", () => {
+    const body = "x\n<!-- FORGE:BODY-INTEGRITY:abc -->\n";
+    assert.equal(withIntegrityMarker(body, "y"), body);
+  });
+  it("collapses several markers to one and sanitises the id", () => {
+    const out = withIntegrityMarker("a <!-- FORGE:BODY-INTEGRITY:1 -->\nb <!-- FORGE:BODY-INTEGRITY:2 -->", "fix: auto-spawned schedd (review finding)");
+    assert.equal(count(out), 1);
+    assert.match(out, /FORGE:BODY-INTEGRITY:fix-auto-spawned-schedd-review-finding -->/);
   });
 });
