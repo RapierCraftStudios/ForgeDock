@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAcceptance, validateEpic, declaredAcceptance, renderAcceptanceComment, acceptanceResultOf, gateMilestone, gateByRef, runMilestoneJourneys, acceptanceFromCli } from "./acceptance.mjs";
+import { parseAcceptance, validateEpic, declaredAcceptance, renderAcceptanceComment, acceptanceResultOf, gateMilestone, gateByRef, runMilestoneJourneys, makeJourneyRunner, acceptanceFromCli } from "./acceptance.mjs";
 import { makeIntegration } from "./integration.mjs";
 
 const F = "```";
@@ -129,6 +129,21 @@ describe("gateByRef, run and CLI", () => {
     assert.equal(await acceptanceFromCli(["check", "--body-file", "f"], { print, readFile: () => J1 }), 0);
     assert.equal(await acceptanceFromCli(["gate", "--milestone", "M One", "--repo", "o/r"], { print, io: world().io, cwd: "/nonexistent" }), 1);
     assert.match(out.at(-1), /BLOCKED/);
+  });
+});
+
+describe("makeJourneyRunner structured result (#5337)", () => {
+  it("stays a string when nothing ran, and resolves {summary, red, ran, head} after a run", async () => {
+    const none = world({ labels: false });
+    assert.equal(await makeJourneyRunner({ repo: "o/r", io: none.io })({ title: "M One", branch: "milestone/m-one", number: 3 }), "no journey declared");
+    const w = world();
+    const git = w.io.git;
+    w.io.git = async (a, o) => (a[0] === "rev-parse" ? `${HEAD}\n` : git(a, o));
+    const r = await makeJourneyRunner({ repo: "o/r", io: w.io, cwd: process.cwd() })({ title: "M One", branch: "milestone/m-one", number: 3 });
+    assert.equal(typeof r.summary, "string");
+    assert.equal(r.head, HEAD);
+    assert.equal(typeof r.red, "boolean");
+    assert.equal(typeof r.ran, "boolean");
   });
 });
 
