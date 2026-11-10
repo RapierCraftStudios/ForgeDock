@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 import { buildTimeline, buildFrames, readOnlyGh, resolveTarget, replayFromCli, writeOutput, MIN_SECONDS, MAX_SECONDS, FPS } from "../replay-timelapse.mjs";
 
 const ev = (type, issue, ts, extra = {}) => JSON.stringify({ schema: "forgedock.event", v: 1, type, ts, issue, pr: extra.pr ?? null, ...(extra.cost_usd != null ? { cost_usd: extra.cost_usd } : {}), data: {} });
@@ -13,7 +13,7 @@ const LINES = [
   ev("pr.merged", 1, "2026-01-01T00:30:00Z", { pr: 11, cost_usd: 1.5 }), ev("pr.merged", 2, "2026-01-01T01:00:00Z", { pr: 12, cost_usd: 2 }),
   ev("release.promoted", 2, "2026-01-01T01:10:00Z"), ev("pr.merged", 99, "2026-01-01T02:00:00Z", { cost_usd: 50 }), "not json",
 ];
-const tmp = () => mkdtempSync(join(process.env.TMPDIR || tmpdir(), "replay-"));
+const tmp = () => tmpDir("replay-");
 
 test("timeline is ordered, scoped to the issues, one 'issue' item each", () => {
   const items = buildTimeline(LINES, [1, 2]);
