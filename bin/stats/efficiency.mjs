@@ -232,7 +232,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     no_action: { lanes: sum(Object.values(noAction).map((g) => g.n)), cost_usd: r(sum(Object.values(noAction).map((g) => g.cost_usd)), 1e6),
       by_kind: Object.fromEntries(Object.entries(noAction).map(([k, g]) => [k, { ...g, cost_usd: r(g.cost_usd, 1e6) }])) },
     quality, acceptance, lanes,
-    tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
+    tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), tool_calls_per_turn_n: withTools.length, rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
     per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
       implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.shape ? { shape: m.shape } : {}), ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
       ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}),
@@ -380,6 +380,9 @@ const int = (x) => (num(x) == null ? "n/a" : String(Math.round(x)));
 const g1 = (g) => `n=${g.n} ${usd(g.usd_per_merge)}/merge turns/merge ${f(g.turns_per_merge, 1)} context/turn ${int(g.context_per_turn)}`;
 
 /** The report lines of one scope (the batch report prints them unlabelled). */
+/** #5347: a median of tool calls per turn under this means builders are back to one call per turn. */
+export const CALLS_PER_TURN_ALERT = 1.5;
+
 export function formatEfficiencyLines(m, label = "") {
   const lines = [`efficiency${label ? ` (${label})` : ""}: merged ${m.merged}, ${usd(m.usd_per_merge)}/merge (implement ${usd(m.implement_usd)}, review ${usd(m.review_usd)}), turns/merge ${f(m.turns_per_merge, 1)}, context/turn ${int(m.context_per_turn)}`];
   const sizes = Object.entries(m.by_size ?? {});
@@ -397,6 +400,7 @@ export function formatEfficiencyLines(m, label = "") {
     : "acceptance (7d after promotion): n/a");
   if (a) lines.push(`unprobed merged issues (no acceptance probe declared): ${a.unprobed_issues?.length ? a.unprobed_issues.map((n) => `#${n}`).join(", ") : "none"}`); // #4908
   lines.push(`tools: calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads (>=3x same path)/merge ${f(m.rereads_per_merge)}`); // #4410
+  if (num(m.tool_calls_per_turn_p50) != null && m.tool_calls_per_turn_p50 < CALLS_PER_TURN_ALERT && (m.tool_calls_per_turn_n ?? 0) >= 3) lines.push(`ALERT: calls/turn p50 ${f(m.tool_calls_per_turn_p50)} is below ${CALLS_PER_TURN_ALERT}: builders are not batching independent reads (#5347)`);
   const ln = m.lanes; // #4452
   lines.push(ln ? `lanes: ${LANE_SHAPES.map((k) => `${k} ${ln[k]?.n ?? 0} (${usd(ln[k]?.cost_usd ?? 0)})`).join(", ")}; upgrade rate ${ln.upgrade_rate == null ? "n/a"
     : `${Math.round(ln.upgrade_rate * 100)}% (${ln.upgraded?.n ?? 0}/${(ln.light?.n ?? 0) + (ln.upgraded?.n ?? 0)})`}` : "lanes: n/a");

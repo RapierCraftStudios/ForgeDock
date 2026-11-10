@@ -1989,8 +1989,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause).
-    assert.ok(approxTokens(plan) <= 2175, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1675, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
+    assert.ok(approxTokens(plan) <= 2275, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1725, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2448,8 +2448,8 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2075, `plan prompt is ${approxTokens(plan)} tokens`); // 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} of 1650 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(plan) <= 2150, `plan prompt is ${approxTokens(plan)} tokens`); // 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(impl) <= 1700, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -5086,7 +5086,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const w = withCi(world());
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
-    assert.equal(builders(w)[1][4], builderImplementPrompt());
+    assert.ok(builders(w)[1][4].startsWith(builderImplementPrompt()), "#5347: only the opening-batch note follows the base prompt");
     assert.doesNotMatch(traj(w)[0], /\| Verify \|/);
   });
 
@@ -7458,11 +7458,11 @@ describe("#4395 lane profile", () => {
 
   it("#4410 both builder prompts ask for same-turn read-only calls and read-once notes (within budget)", () => {
     for (const p of [builderPlanPrompt(7), builderImplementPrompt(), builderImplementPrompt("ci")]) {
-      assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
+      assert.match(p, /One turn, many calls: when several reads, greps, git show\/log\/blame or gh calls do not depend on each other, issue them all in the same turn/);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1650 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2075, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2075 tokens`);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1700, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2150, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -7802,7 +7802,7 @@ describe("prompt budgets (#4969)", () => {
     assert.notEqual(moved, impl);
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
-    assert.ok(approxTokens(moved) <= 1650, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1650 tokens`);
+    assert.ok(approxTokens(moved) <= 1700, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1700 tokens`);
   });
 });
 
@@ -7852,5 +7852,23 @@ describe("#5237 relaxation gate", () => {
     const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf()] })); w.diffText = rescue;
     assert.equal((await run(w, { dir: tmpDir("relax-") })).terminalReason, "merged");
     assert.equal(w.vcalls.length, 0);
+  });
+});
+
+describe("#5347 builders open with one batch of independent reads", () => {
+  it("the batching rule is its own rule in plan, implement and fix prompts, and the plan asks for the build's reads", async () => {
+    const { fixSessionPrompt, buildOpeningNote } = await import("./prompts.mjs");
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt(), fixSessionPrompt({ task: "t" })]) assert.match(p, /One turn, many calls/);
+    assert.match(builderPlanPrompt(7), /Build reads/);
+    assert.match(buildOpeningNote({ paths: ["a.mjs", "a.mjs", "b.mjs"], tests: ["node --test a.test.mjs"] }), /Deliverables: a\.mjs, b\.mjs\nMapped tests \(test map\): node --test a\.test\.mjs/);
+    assert.equal(buildOpeningNote({}), "");
+  });
+  it("the implement session prompt carries the contract's deliverable paths and the test map's commands", async () => {
+    const { buildOpeningNote } = await import("./prompts.mjs");
+    const { selectCommands, parseTestMap } = await import("./testmap.mjs");
+    const map = parseTestMap(JSON.stringify({ version: 1, entries: [{ globs: ["src/**"], command: "node --test src/x.test.mjs" }] }));
+    const note = buildOpeningNote({ paths: ["src/x.mjs", "docs/y.md"], tests: selectCommands(map, ["src/x.mjs", "docs/y.md"]) });
+    assert.match(note, /src\/x\.mjs, docs\/y\.md/);
+    assert.match(note, /node --test src\/x\.test\.mjs/);
   });
 });
