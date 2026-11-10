@@ -81,7 +81,8 @@ test("promotion: met, not met and insufficient data below min-n, with n per cell
 const fakeGh = (o = {}) => async (args) => {
   const path = args[2] ?? "";
   if (o.fail) throw new Error("gh down");
-  if (path.includes("issues/events")) return JSON.stringify({ issue: 2, ts: iso(T0 + 2 * DAY) });
+  const ev = /issues\/(\d+)\/events/.exec(path);
+  if (ev) return ev[1] === "2" ? JSON.stringify({ issue: 2, ts: iso(T0 + 2 * DAY) }) : "";
   if (path.startsWith("search/issues")) return [
     { number: 300, title: "Revert \"feat: x (#101)\"", body: "", labels: [], merged_at: iso(T0 + DAY) },
     { number: 301, title: "fix: y", body: "", labels: [], merged_at: iso(T0 + 2 * DAY) },
@@ -130,4 +131,41 @@ test("parseArgs accepts --depth and --depth --offline; --offline alone still nee
   assert.throws(() => parseArgs(["--offline"]), /--offline need --efficiency/);
   assert.throws(() => parseArgs(["--compare", "2026-01-01"]), /--compare and --offline need --efficiency/);
   assert.match(HELP, /stats --depth/);
+});
+
+test("gatherDefects (#5318): per-issue events, windowed search, a warm cache makes zero gh calls, progress is reported", async () => {
+  const dir = tmpDir("depth-cache-");
+  const env = { FORGE_STATS_CACHE_DIR: join(dir, "cache") };
+  const rows = rowsOf({ issue: 1 }, { issue: 2 }, { issue: 3 });
+  const now = T0 + 60 * DAY;
+  const calls = [];
+  const gh = async (args) => { calls.push(args[2]); return fakeGh()(args); };
+  const prog = [];
+  const cold = await gatherDefects({ repo: "o/r", gh, rows, now, env, useCache: true, onProgress: (p) => prog.push(p) });
+  assert.equal(cold.get(2).reopen, true);
+  assert.ok(!calls.some((c) => c.includes("/issues/events")), "no repo-wide events crawl");
+  assert.ok(calls.some((c) => /merged%3A\d{4}-\d{2}-\d{2}\.\./.test(c)), "search bounded to the merge window");
+  assert.equal(prog.at(-1).done, 3);
+  const n = calls.length;
+  const warm = await gatherDefects({ repo: "o/r", gh, rows, now, env, useCache: true });
+  assert.equal(calls.length, n, "warm run makes no gh calls");
+  assert.deepEqual([...warm], [...cold]);
+  await gatherDefects({ repo: "o/r", gh, rows, now, env, useCache: true, refresh: true });
+  assert.ok(calls.length > n, "--refresh re-reads");
+  const fresh = calls.length;
+  await gatherDefects({ repo: "o/r", gh, rows, now: T0 + DAY, env, useCache: true });
+  assert.ok(calls.length > fresh, "a row inside its window is never served from the cache");
+});
+
+test("depthReport recommendation: decision, eligible share, would-be saving and defect rate; rendered", () => {
+  const rows = rowsOf({ issue: 1, shape: "light", cost: 0.5 }, { issue: 2, cost: 2 }, { issue: 3, cost: 2 }, { issue: 4, verdict: "ineligible" });
+  const rep = depthReport({ rows, defects: new Map([[2, { defect: true }], [3, { defect: false }]]), minN: 1 });
+  const rc = rep.recommendation;
+  assert.equal(rc.eligible_n, 3);
+  assert.equal(rc.eligible_share, 0.75);
+  assert.equal(rc.would_be_saving_usd, 3, "2 eligible full lanes x (2 - 0.5)");
+  assert.equal(rc.eligible_defect_rate, 0.5);
+  assert.ok(["promote", "do not promote", INSUFFICIENT].includes(rc.decision));
+  assert.match(renderDepth(rep), /^recommendation: .*eligible share 75% \(n=3\), would-be saving \$3\.00/m);
+  assert.equal(depthReport({ rows: [], minN: 10 }).recommendation.decision, INSUFFICIENT);
 });

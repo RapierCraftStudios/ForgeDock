@@ -229,7 +229,8 @@ const repoOrNull = (v) => (REPO_RE.test(String(v ?? "").trim()) ? String(v).trim
 /** `forgedock selftest [--static] | --live --repo <o/sandbox> [--lang node|python] [--pr N]`; non-zero exit names the failed step. */
 export async function selftestFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env, print = deps.print ?? ((l) => console.log(l));
-  const usage = "usage: forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--lang node|python] [--pr <staging->main PR>]  (sandbox repo from --repo or forge.yaml selftest.sandbox_repo)";
+  const usage = "usage: forgedock selftest [--static] | --live [--repo <owner/sandbox>] [--lang node|python] [--pr <staging->main PR>] | --journey [--repo <owner/sandbox>] [--pr <N>] [--update-snapshots]  (sandbox repo from --repo or forge.yaml selftest.sandbox_repo)";
+  if (argv.includes("--journey")) return (await import("./selftest-journey.mjs")).journeyFromCli(argv, deps); // #5305
   if (!argv.includes("--live") && !argv.includes("--static")) throw new Error(usage);
   const nightlyRepo = argv.includes("--nightly-report") ? flag(argv, "--nightly-report") : null;
   if (nightlyRepo) {

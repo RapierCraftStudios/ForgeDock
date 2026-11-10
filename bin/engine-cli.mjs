@@ -4,6 +4,7 @@
  * `forgedock resume-stalled [--dry-run] [--lane <lane>]` enumerates all in-flight
  * issues, calls scanStalls, and re-dispatches each stalled issue via run-issue.
  */
+import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -1887,6 +1888,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
+  // #5315: a forge.yaml key that is unknown, ignored by this engine path, mistyped or a deprecated alias is named at batch start, never silent.
+  try { for (const f of validateForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"), { path: deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd) })) sink.line(`config: ${formatFinding(f)}`); } catch { /* no forge.yaml: nothing to validate */ }
   // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
