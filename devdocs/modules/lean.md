@@ -2778,6 +2778,8 @@ Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs`
 
 `release.mjs` (#5208): `forgedock release`, the resumable staging→default release job (state `~/.forge/releases/<id>/`, steps preflight → release-pr → review → fixes → promotion → post-merge, promotion opt-in via `--merge` / `release.auto_merge`); `release-review.mjs` is a blocked stub until #5212. `release-postmerge.mjs` (#5213) confirms or dispatches the publish run, polls `release.artifact_check` with backoff and opens/merges the `chore/sync-version-<V>` PR (blocked, resumable, when a bound runs out). ADRs `devdocs/decisions/5208-release-job.md`, `devdocs/decisions/5208-release-postmerge.md`.
 
+`realReleaseIo.runningLanes` reads each unfinished batch's state through `openBatch(...).store.load()` (the handle `openBatch` exposes); `release-io.test.mjs` drives it against real batch dirs, since the step tests stub `io`.
+
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
 
 - `light.mjs` `lightEligibility` takes `hotspots` (scripts/hotspots.sh `files` rows `{path, lines, commits_90d, over}`). A predicted non-test file with `over` (beyond `maintenance.hotspot.file_lines`) is a new hard reason `hotspot` (`<path> (<lines> lines)`).
