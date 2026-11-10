@@ -19,6 +19,7 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
+import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
 
 export const RELEASE_STEPS = ["preflight", "release-pr", "review", "fixes", "rehearsal", "promotion", "post-merge"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
@@ -221,8 +222,13 @@ export async function releaseFromCli(argv, deps = {}) {
   }
   repo ??= JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
+  const budget = async (since) => { // #5278: the Actions-minutes line (and any auto switch to local-first); never fails the job
+    try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
+  };
+  await budget(null);
   const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config: readReleaseConfig(raw), branches: readBranches(cwd), root, id, mounts: deps.mounts });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
+  try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
   return r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;
 }

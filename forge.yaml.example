@@ -1445,3 +1445,7 @@ branches:
 #     interval_hours: 24
 #     every_merges: 10           # optional
 #     block_admission_after: 2   # optional: hold new lanes after N red runs
+#   # Actions-minutes budget and placement (forge#5278), flat keys:
+#   mode: auto                 # remote | local-first | local-attested | auto
+#   monthly_minutes: 40000     # default: the plan's included minutes
+#   reserve_pct: 10
