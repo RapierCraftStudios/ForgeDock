@@ -19,6 +19,9 @@
  * missing-section, missing-type-tag, missing-parent, missing-labels, unknown-label, code-depends-on-needs-human,
  * missing-design-spec (a `ui` issue lacks a design-spec item), hero-not-routed (a `hero` issue never names `/design`),
  * missing-needs-human-section (a needs-human issue lacks setup steps, env var names or secret handling) (#4176).
+ * Skeleton (#5337): the first milestone holds exactly one `"skeleton": true` issue (also the `skeleton` label) whose body names the
+ * #5336 journey; every other issue depends on it transitively (exempt: the spike, needs-human issues, the skeleton's own
+ * ancestors): missing-skeleton, multiple-skeletons, skeleton-misplaced, skeleton-no-journey, not-behind-skeleton.
  * Warns (never fails; exit stays 0): deploy-last (#4665: every milestone holding deploy workflows comes after the feature
  * milestones, so nothing can be previewed or deployed until they all ship).
  * `Depends on` lines are read with the engine's own parser (bin/engine/phases.mjs parseDependsOn) after placeholder
@@ -73,6 +76,10 @@ const NEEDS_HUMAN_PARTS = [
 // #4665: an issue holds deploy work when its title or body names a deploy workflow or a staging environment definition.
 const DEPLOY_RE = /\.github\/workflows\/[^\s`'")]*deploy|\bdeploy(?:ment)? workflow\b|\bstaging environment\b/i;
 const isDeployIssue = (it) => DEPLOY_RE.test(`${it?.title ?? ""}\n${it?.body ?? ""}`);
+
+export const SKELETON_LABEL = "skeleton";
+/** #5337: the plan's walking-skeleton issue flag (`skeleton: true` or the `skeleton` label). */
+export const isSkeleton = (it) => it?.skeleton === true || (Array.isArray(it?.labels) && it.labels.includes(SKELETON_LABEL));
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === "string" && v.trim() !== "";
@@ -154,7 +161,7 @@ function checkStructure(plan) {
       at("`labels` must be an array of strings");
     }
     if (typeof it.body !== "string") at("needs a string `body`");
-    for (const f of ["ui", "hero"]) if (it[f] !== undefined && typeof it[f] !== "boolean") at(`\`${f}\` must be a boolean`);
+    for (const f of ["ui", "hero", "skeleton"]) if (it[f] !== undefined && typeof it[f] !== "boolean") at(`\`${f}\` must be a boolean`);
   });
   return errors;
 }
@@ -232,7 +239,7 @@ export function validatePlan(plan) {
     if (labels.filter(isNonEmptyString).length === 0) err(it.key, "missing-labels", "issue has no labels");
     if (declaredLabels) {
       for (const l of labels) {
-        if (isNonEmptyString(l) && !declaredLabels.has(l)) err(it.key, "unknown-label", `label ${l} is not in the plan's labels`);
+        if (isNonEmptyString(l) && l !== SKELETON_LABEL && !declaredLabels.has(l)) err(it.key, "unknown-label", `label ${l} is not in the plan's labels`);
       }
     }
 
@@ -288,7 +295,33 @@ export function validatePlan(plan) {
       }
     }
   }
+  for (const e of skeletonErrors(plan, byKey)) err(e.issue, e.code, e.message);
   return { ok: errors.length === 0, errors, warnings: deployWarnings(issues, milestones) };
+}
+
+/** #5337: walking-skeleton rules (see the header). Needs a valid structure; cycles are reported separately and tolerated here. */
+function skeletonErrors(plan, byKey) {
+  const out = [];
+  const add = (issue, code, message) => out.push({ issue, code, message });
+  const { issues, milestones } = plan;
+  const first = milestones[0].key;
+  const marked = issues.filter(isSkeleton);
+  const inFirst = marked.filter((it) => it.milestone === first);
+  for (const it of marked.filter((x) => x.milestone !== first)) add(it.key, "skeleton-misplaced", `skeleton issue is in milestone ${it.milestone}; it belongs in the first milestone ${first}`);
+  if (!inFirst.length) { add(issues.find((x) => x.milestone === first)?.key ?? null, "missing-skeleton", `first milestone ${first} has no skeleton issue (\`"skeleton": true\`): the thinnest real path that builds, boots and passes one journey`); return out; }
+  if (inFirst.length > 1) add(inFirst[1].key, "multiple-skeletons", `first milestone ${first} has ${inFirst.length} skeleton issues (${inFirst.map((x) => x.key).join(", ")}); exactly one is allowed`);
+  const sk = inFirst[0];
+  if (!/\bjourney\b/i.test(sk.body)) add(sk.key, "skeleton-no-journey", "skeleton issue acceptance names no journey (one #5336 journey must pass on the thinnest real path)");
+  const closure = (start, next) => { const seen = new Set(); const todo = [start]; while (todo.length) { for (const n of next(todo.pop())) if (!seen.has(n)) { seen.add(n); todo.push(n); } } return seen; };
+  const ancestors = closure(sk.key, (k) => (byKey.get(k)?.deps ?? []).filter((d) => byKey.has(d)));
+  const spike = plan.spike ?? "SPIKE";
+  for (const it of issues) {
+    if (it.key === sk.key || it.key === spike || isNeedsHuman(it) || ancestors.has(it.key) || isSkeleton(it)) continue;
+    if (!closure(it.key, (k) => (byKey.get(k)?.deps ?? []).filter((d) => byKey.has(d))).has(sk.key)) {
+      add(it.key, "not-behind-skeleton", `does not depend on skeleton issue ${sk.key}, directly or transitively`);
+    }
+  }
+  return out;
 }
 
 /** #4665: `deploy-last` when deploy work exists but none of it sits in milestones 1-2 (needs >= 3 milestones). */

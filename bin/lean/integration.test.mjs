@@ -120,6 +120,69 @@ describe("runIntegration", () => {
   });
 });
 
+describe("walking skeleton and journey gate (#5337)", () => {
+  const LANE = "milestone/m-one";
+  const withSkeleton = (io, open = [{ number: 7, body: "", milestone: { title: "M One" } }]) => ({ ...io, gh: async (a) => (a[0] === "issue" && a[1] === "list" && a.includes("skeleton") ? JSON.stringify(open) : io.gh(a)) });
+
+  it("admits no sibling until the skeleton issue merges", async () => {
+    const { st, io } = fake({});
+    const seam = makeIntegration({ repo: "o/r", io: withSkeleton(io), cfg: null, skeleton: true, nowFn: () => NOW });
+    await seam.prime();
+    assert.match(seam.holds(8, { lane: LANE }), /skeleton issue #7 of milestone\/m-one has not merged/);
+    assert.equal(seam.holds(7, { lane: LANE }), null, "the skeleton itself is admitted");
+    assert.equal(seam.holds(8, { lane: "staging" }), null, "other lanes are untouched");
+    await seam.onMerged(7, {}, { milestone: "M One", pr: 20 });
+    assert.equal(seam.holds(8, { lane: LANE }), null);
+    assert.equal(parseIntegrationState(st.description).firstMergeAt, new Date(NOW).toISOString());
+  });
+  it("is off without the skeleton option", () => assert.equal(makeIntegration({ repo: "o/r", io: fake({}).io, cfg: null }), null));
+
+  it("a red journey files ONE integration-red issue naming the PR, holds admission, and a green run closes it", async () => {
+    const { st, io } = fake({});
+    let result = { summary: "#5 fail", red: true, ran: true, head: SHA };
+    const events = [];
+    const seam = makeIntegration({ repo: "o/r", io: withSkeleton(io, []), cfg: null, skeleton: true, journeys: async () => result, nowFn: () => NOW, onEvent: (e) => events.push(e.detail) });
+    await seam.prime();
+    await seam.onMerged(1, {}, { milestone: "M One", pr: 11 });
+    await seam.settle();
+    assert.equal(st.created.length, 1);
+    assert.match(st.created[0].title, /journey red after #11/);
+    assert.match(st.created[0].body, /<!-- FORGE:INTEGRATION:journey:m-one -->/);
+    assert.match(seam.holds(2, { lane: LANE }), /epic journey red on milestone\/m-one \(integration-red #900\)/);
+    await seam.onMerged(2, {}, { milestone: "M One", pr: 12 });
+    await seam.settle();
+    assert.equal(st.created.length, 1, "still one issue");
+    assert.match(st.edited.at(-1).body, /#11, #12/);
+    result = { summary: "#5 pass", red: false, ran: true, head: SHA2 };
+    await seam.onMerged(3, {}, { milestone: "M One", pr: 13 });
+    await seam.settle();
+    assert.deepEqual(st.closed, ["900"]);
+    assert.equal(seam.holds(4, { lane: LANE }), null);
+    const state = parseIntegrationState(st.description);
+    assert.ok(state.firstMergeAt && state.firstJourneyGreenAt);
+    assert.ok(events.some((d) => /first green journey on milestone\/m-one/.test(d)));
+  });
+  it("a red journey before the skeleton merged files nothing and holds nothing extra", async () => {
+    const { st, io } = fake({});
+    const seam = makeIntegration({ repo: "o/r", io: withSkeleton(io), cfg: null, skeleton: true, journeys: async () => ({ summary: "fail", red: true, ran: true, head: SHA }), nowFn: () => NOW });
+    await seam.prime();
+    await seam.onMerged(8, {}, { milestone: "M One", pr: 11 });
+    await seam.settle();
+    assert.equal(st.created.length, 0);
+  });
+  it("reloads an open journey red issue on prime and `integration status` shows the metric", async () => {
+    const body = "x\n<!-- FORGE:INTEGRATION:journey:m-one -->";
+    const { io } = fake({ description: renderState("", { ...emptyState(), firstMergeAt: "2026-10-27T09:00:00.000Z" }) });
+    const gh = async (a) => (a[0] === "issue" && a[1] === "list" && a.includes("integration-red") ? JSON.stringify([{ number: 31, body, milestone: { title: "M One" } }]) : io.gh(a));
+    const seam = makeIntegration({ repo: "o/r", io: { ...io, gh }, cfg: null, journeys: async () => "no journey declared" });
+    await seam.prime();
+    assert.match(seam.holds(2, { lane: LANE }), /integration-red #31/);
+    const lines = [];
+    await runIntegrationCli(["status", "--repo", "o/r"], { io, cfg: null, print: (t) => lines.push(t) });
+    assert.match(lines.join("\n"), /first merge 2026-10-27T09:00:00.000Z, first green journey never/);
+  });
+});
+
 describe("makeIntegration seam", () => {
   it("is null when off", () => assert.equal(makeIntegration({ repo: "o/r", io: {}, cfg: null }), null));
   it("holds a lane after N consecutive red runs and releases it on green", async () => {

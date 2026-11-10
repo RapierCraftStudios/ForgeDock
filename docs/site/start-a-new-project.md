@@ -206,7 +206,8 @@ Two milestones, a spike, four build issues and one needs-human issue. `INVITES` 
         "SPIKE"
       ],
       "priority": "p0",
-      "body": "## Problem\n\nScaffold the Next.js app with pnpm and a CI workflow.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `package.json` — new\n2. `app/layout.tsx` — new\n3. `.github/workflows/ci.yml` — new\n\n## Acceptance Criteria\n\n- [ ] `pnpm build` succeeds [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} — needs the stack decision\n"
+      "body": "## Problem\n\nScaffold the Next.js app with pnpm and a CI workflow.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `package.json` — new\n2. `app/layout.tsx` — new\n3. `.github/workflows/ci.yml` — new\n\n## Acceptance Criteria\n\n- [ ] `pnpm build` succeeds [type:unit]\n- [ ] The project builds, boots, and one acceptance journey passes on the thinnest real path [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} — needs the stack decision\n",
+      "skeleton": true
     },
     {
       "key": "DB",

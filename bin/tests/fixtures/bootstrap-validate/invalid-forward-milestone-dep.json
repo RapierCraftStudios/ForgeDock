@@ -24,7 +24,7 @@
         "infra"
       ],
       "deps": [],
-      "body": "## Problem\n\nSpike for the Go sync service and Flutter client.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/spike.md` — new\n\n## Acceptance Criteria\n\n- [ ] Spike reviewed [type:manual]\n\n## Context\n\n**Parent**: none (spike)\n\n## Dependencies\n\nNone.\n"
+      "body": "## Problem\n\nSpike for the Go sync service and Flutter client.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/spike.md` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Spike reviewed [type:manual]\n\n## Context\n\n**Parent**: none (spike)\n\n## Dependencies\n\nNone.\n"
     },
     {
       "key": "MOD",
@@ -36,7 +36,7 @@
       "deps": [
         "SPIKE"
       ],
-      "body": "## Problem\n\nGo module with chi router and health endpoint.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `go.mod` — new\n2. `cmd/server/main.go` — new\n3. `internal/http/health.go` — new\n\n## Acceptance Criteria\n\n- [ ] GET /healthz returns 200 [type:api]\n- [ ] `go test ./...` passes [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} — needs SPIKE\n"
+      "body": "## Problem\n\nGo module with chi router and health endpoint.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `go.mod` \u2014 new\n2. `cmd/server/main.go` \u2014 new\n3. `internal/http/health.go` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] GET /healthz returns 200 [type:api]\n- [ ] `go test ./...` passes [type:unit]\n- [ ] The project builds, boots, and one acceptance journey passes on the thinnest real path, with no fakes at the joins [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} \u2014 needs SPIKE\n"
     },
     {
       "key": "STORE",
@@ -48,7 +48,8 @@
       "deps": [
         "MOD"
       ],
-      "body": "## Problem\n\nSQLite store behind an interface.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `internal/store/store.go` — new\n2. `internal/store/sqlite.go` — new\n\n## Acceptance Criteria\n\n- [ ] Store round-trips a record [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{MOD}} — needs MOD\n"
+      "body": "## Problem\n\nSQLite store behind an interface.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `internal/store/store.go` \u2014 new\n2. `internal/store/sqlite.go` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Store round-trips a record [type:unit]\n- [ ] The project builds, boots, and one acceptance journey passes on the thinnest real path, with no fakes at the joins [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{MOD}} \u2014 needs MOD\n",
+      "skeleton": true
     },
     {
       "key": "SYNC",
@@ -60,7 +61,7 @@
       "deps": [
         "STORE"
       ],
-      "body": "## Problem\n\nDelta-sync endpoint.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `internal/sync/handler.go` — new\n\n## Acceptance Criteria\n\n- [ ] Sync returns only changed records [type:api]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{STORE}} — needs STORE\n"
+      "body": "## Problem\n\nDelta-sync endpoint.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `internal/sync/handler.go` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Sync returns only changed records [type:api]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{STORE}} \u2014 needs STORE\n"
     },
     {
       "key": "CLIENT",
@@ -72,7 +73,7 @@
       "deps": [
         "SYNC"
       ],
-      "body": "## Problem\n\nFlutter client consuming delta sync.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `mobile/lib/sync.dart` — new\n2. `mobile/pubspec.yaml` — new\n\n## Acceptance Criteria\n\n- [ ] Offline edits sync on reconnect [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SYNC}} — needs SYNC\n"
+      "body": "## Problem\n\nFlutter client consuming delta sync.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `mobile/lib/sync.dart` \u2014 new\n2. `mobile/pubspec.yaml` \u2014 new\n\n## Acceptance Criteria\n\n- [ ] Offline edits sync on reconnect [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SYNC}} \u2014 needs SYNC\n"
     }
   ]
 }
