@@ -21,3 +21,6 @@ Verified the existing branch work against the frozen contract; it delivers R1-R5
 
 ### Notes
 No new env vars. No repo formatter is configured (base files also fail prettier), so none was applied. Footer follows forge.yaml branding.show_attribution (default on).
+
+### Sibling-list follow-up
+`card` (bin/stats) is not a member of the lists at bin/lean/batch.test.mjs:28 or bin/lean/execution.test.mjs:51: neither references stats modules (grep "stats" is empty); they test batch resume and execution config. Recorded in result.json not_members.
