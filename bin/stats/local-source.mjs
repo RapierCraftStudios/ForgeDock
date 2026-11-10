@@ -66,6 +66,7 @@ export function summariseLog(events, fallbackIssue = null) {
     source: "local", repo: start.repo ?? null, version: start.version ?? null, issue: start.issue ?? fallbackIssue, run: start.run ?? null,
     finished, hydrated: start.hydrated === true, usageEvents,
     reason: finished ? ev[t].reason ?? null : null, code: finished ? ev[t].code ?? null : null,
+    milestone: typeof term?.milestone === "string" && term.milestone ? term.milestone : null, verified: typeof term?.verified === "boolean" ? term.verified : null, // #5339
     remediated: ev.some((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate"),
     startTs, endTs, wallMs: finished && !Number.isNaN(a) && !Number.isNaN(b) ? Math.max(0, b - a) : null,
     phases,

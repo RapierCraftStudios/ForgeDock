@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand } from "./conformance.mjs";
+import { removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, blockingFailures, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -1647,5 +1647,41 @@ describe("contract quote snapping (#5244)", () => {
     assert.equal(snapQuote("Remove the legacy alert path entirely from the service", ISS), null);
     assert.equal(snapQuote("Publish a completely different dashboard widget for billing", ISS), null);
     assert.equal(snapQuotes({ requirements: [{ id: "R1", quote: "totally unrelated words about something else here" }] }, ISS).snapped.length, 0);
+  });
+});
+
+describe("#5339 a faked or deferred e2e/manual requirement is not met", () => {
+  const Q = "Users can render the launch film end to end [type:e2e]";
+  const mk = (cmd, quote, extra = {}, disposition = "deliver") => {
+    const contract = { ...C, requirements: [{ id: "R1", quote, disposition, ...extra }, C.requirements[1]], validate: [{ id: "V1", command: cmd }] };
+    return { contract, ctx: { ...ctx, contract } };
+  };
+  const rv = (contract) => ({ ...good, issue_coverage: [{ quote: contract.requirements[0].quote, status: "covered" }, ...good.issue_coverage.slice(1)] });
+  const run = (cmd, quote, e2e, disposition, row = {}) => { const m = mk(cmd, quote, {}, disposition); const r = rv(m.contract); r.requirements = [{ ...r.requirements[0], ...row }, ...r.requirements.slice(1)]; return decide(r, { ...m.ctx, issueText: `${ISSUE}\n${quote}`, e2e }); };
+  it("a validate that names a faked test is not an e2e run, even with e2e in its name (spectracut #63 replay)", () => {
+    const d = run("node --test tests/e2e/film.e2e.test.mjs", Q, { faked: ["tests/e2e/film.e2e.test.mjs"] });
+    assert.equal(d.state, "nonconforming");
+    assert.deepEqual(codes(d), ["conformance.e2e_unverified"]);
+    assert.equal(d.failures[0].kind, "e2e_row");
+    assert.equal(run("node --test tests/e2e/film.e2e.test.mjs", Q, { faked: [] }).state, "conforms");
+    assert.equal(run("make film", Q, { checks: ["make film"], faked: ["make film"] }).state, "conforms", "a configured e2e check is always real");
+  });
+  it("[type:manual] is judged like [type:e2e]; a deferred e2e row fails, a post-deploy one is transferred", () => {
+    assert.deepEqual(codes(run("pytest tests/test_x.py", "Operators can restore a backup [type:manual]")), ["conformance.e2e_unverified"]);
+    assert.deepEqual(codes(run("pytest tests/test_x.py", Q, undefined, "defer", { status: "deferred" })), ["conformance.e2e_unverified"]);
+    assert.equal(codes(run("pytest tests/test_x.py", Q, undefined, "post-deploy", { status: "post-deploy" })).includes("conformance.e2e_unverified"), false);
+  });
+  it("e2e_unverified of the e2e row blocks by default; forge.yaml conformance_kinds overrides; other kinds follow the lane", () => {
+    const fs = [{ code: "conformance.e2e_unverified", kind: "e2e_row" }, { code: "conformance.e2e_unverified", kind: "ui_browser_unverified" }];
+    assert.deepEqual(blockingFailures(fs, { shadow: true }).block.map((f) => f.kind), ["e2e_row"]);
+    assert.deepEqual(blockingFailures(fs, { shadow: true, kinds: { "conformance.e2e_unverified": "shadow" } }).block, []);
+  });
+  it("closePlan: a transferred e2e/manual requirement closes partial, never completed", () => {
+    const k = { requirements: [{ id: "R1", quote: Q, disposition: "post-deploy", tracked: "#9" }] };
+    const p = closePlan(k);
+    assert.equal(p.reason, "partial");
+    assert.equal(p.transferred, true);
+    assert.deepEqual(p.open.map((r) => r.id), ["R1"]);
+    assert.equal(closePlan({ requirements: [{ id: "R1", quote: "A plain thing [type:unit]", disposition: "post-deploy" }] }).reason, "completed");
   });
 });

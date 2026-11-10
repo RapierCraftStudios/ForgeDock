@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAcceptance, validateEpic, declaredAcceptance, renderAcceptanceComment, acceptanceResultOf, gateMilestone, gateByRef, runMilestoneJourneys, acceptanceFromCli } from "./acceptance.mjs";
+import { parseAcceptance, validateEpic, declaredAcceptance, renderAcceptanceComment, acceptanceResultOf, gateMilestone, gateByRef, transferToEpic, transferOf, transferName, runMilestoneJourneys, acceptanceFromCli } from "./acceptance.mjs";
 import { makeIntegration } from "./integration.mjs";
 
 const F = "```";
@@ -144,5 +144,43 @@ describe("integration seam runs journeys after a child merge", () => {
     const bad = makeIntegration({ repo: "o/r", io, cfg: null, journeys: async () => { throw new Error("x"); }, onEvent: (e) => events.push(e.detail) });
     await bad.onMerged(1, {}, { milestone: "M One" }); await bad.settle();
     assert.ok(events.some((e) => /journey run failed/.test(e)));
+  });
+});
+
+describe("transferred requirements (#5339)", () => {
+  const rows = (name, result) => [{ name, result, exit: result === "pass" ? 0 : 1, ms: 1 }];
+  const declPd = declaredAcceptance({ body: block("journey: smoke\nrun: ./j.sh\nwhen: post-deploy"), ...owner });
+  const tcomment = { ...bot, body: ["<!-- FORGE:TRANSFERRED -->", "## t", JSON.stringify({ issue: 5339, req: "R1", quote: "q", at: "t" })].join("\n") };
+  const pd = (results) => ({ ...bot, body: renderAcceptanceComment({ head: HEAD, at: "t", site: "post-deploy", rows: Object.entries(results).map(([name, result]) => ({ name, result, exit: result === "pass" ? 0 : 1, ms: 1 })) }) });
+  it("blocks the epic's close until a post-deploy journey named for the requirement passes; ship is not blocked", () => {
+    const passSmoke = pd({ smoke: "pass" });
+    const open = gateMilestone({ epics: [epic(declPd, [tcomment, passSmoke])], head: HEAD, stage: "close" });
+    assert.equal(open.ok, false);
+    assert.match(open.reasons.join(), /R1 transferred from #5339 has not been run/);
+    assert.equal(gateMilestone({ epics: [epic(declPd, [tcomment])], head: HEAD, stage: "ship" }).ok, true);
+    assert.equal(gateMilestone({ epics: [epic(declPd, [tcomment, passSmoke, pd({ [transferName(5339, "R1")]: "fail" })])], head: HEAD, stage: "close" }).ok, false);
+    assert.equal(gateMilestone({ epics: [epic(declPd, [tcomment, passSmoke, pd({ [transferName(5339, "R1")]: "pass" })])], head: HEAD, stage: "close" }).ok, true);
+  });
+  it("transferToEpic posts one FORGE:TRANSFERRED comment per requirement, idempotently, and returns null without an epic", async () => {
+    const posted = [];
+    let existing = [];
+    const gh = async (a) => {
+      const u = a.join(" ");
+      if (u.includes("/milestones")) return JSON.stringify([{ number: 3, title: "Feature X", state: "open" }]);
+      if (u.includes("issues?milestone=")) return JSON.stringify([{ number: 7, state: "open", body: "", user: owner.user, author_association: "OWNER" }]);
+      if (u.includes("/comments")) return existing.map((b) => JSON.stringify({ body: b, ...bot })).join("\n");
+      if (a[0] === "issue" && a[1] === "comment") { posted.push(a[a.indexOf("--body") + 1]); return ""; }
+      return "[]";
+    };
+    const reqs = [{ id: "R1", quote: "Live search works [type:e2e]" }];
+    const n = await transferToEpic({ io: { gh }, repo: "o/r", milestoneTitle: "Feature X", issue: 5339, reqs });
+    assert.equal(n, 7);
+    assert.equal(posted.length, 1);
+    assert.deepEqual([transferOf(posted[0]).issue, transferOf(posted[0]).req], [5339, "R1"]);
+    existing = [posted[0]];
+    await transferToEpic({ io: { gh }, repo: "o/r", milestoneTitle: "Feature X", issue: 5339, reqs });
+    assert.equal(posted.length, 1, "idempotent");
+    assert.equal(await transferToEpic({ io: { gh }, repo: "o/r", milestoneTitle: null, issue: 5339, reqs }), null);
+    assert.equal(await transferToEpic({ io: { gh: async () => "[]" }, repo: "o/r", milestoneTitle: "Feature X", issue: 5339, reqs }), null);
   });
 });
