@@ -2999,3 +2999,8 @@ path is authorized (#5380).
 
 - **PATH shim.** `release-review.mjs` `realSeam.runAgent` passes the runner an env whose PATH starts with a lazily made tmp dir holding a `forgedock` shim that execs `process.execPath ROOT/bin/forgedock.mjs`, so briefs, spec-panel prompts and the test gate run this build (`--post-reviewer`), not the globally installed CLI. The dir is removed on process exit; `makeRunner` is an injection point for tests.
 - **Session failures.** `reviewRound` records each failed reviewer session (domain, exit, last lines) instead of swallowing it, and appends `session failures: ...` to the `finalize stopped` and degraded-panel `fail` reasons.
+
+## Entry 2026-11-10 — release/* PRs skip the spec-size budget; regex escapes (#5396)
+
+- **Release skip.** `check-spec-size.sh` (and the `spec-size-budget` job `if:` in `check-commands.yml`) now skip same-repo PRs to `main` whose head is `staging` or `release/*`; forks, non-main bases and missing `PR_SAME_REPO` are still budgeted. CI runs the script from the base ref, so the job `if:` is what takes effect first.
+- **Backslash escape.** `mechfix.mjs` `word()` escapes `\` as well as `$` when building the symbol regex (CodeQL incomplete-escaping).
