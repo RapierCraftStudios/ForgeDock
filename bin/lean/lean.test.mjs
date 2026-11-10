@@ -6486,6 +6486,24 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.equal(w.resolveArgs.partial, true);
     });
 
+    it("#5340: a full-path lane whose contract touches a declared shared surface takes a reserved slot, released at finish", async () => {
+      const w = dworld({ seq: [[]] }), declared = [];
+      w.io.sequenceLease.declare = async (x) => { declared.push(x); };
+      w.io.sequenceLease.undeclare = async () => {};
+      const r = await run(w, { sharedSurfaces: ["src/foo.js", "src/gen.js => npm run gen"] });
+      assert.equal(r.terminalReason, "merged");
+      const slot = w.leases.acquired.find((a) => a.lane === "*");
+      assert.deepEqual(slot.dirs, ["surface:src/foo.js"]);
+      assert.deepEqual(declared[0].surfaces, ["src/foo.js"]);
+      assert.ok(w.leases.released >= 1, "slot released at teardown");
+    });
+
+    it("#5340: no declared shared surface takes no surface lease", async () => {
+      const w = dworld({ seq: [[]] });
+      await run(w);
+      assert.ok(!w.leases.acquired.some((a) => a.lane === "*"));
+    });
+
     it("#4526: the renumber gets a reserve hook bound to (repo, lane, issue), and the run's reservations are dropped at finish", async () => {
       const w = dworld({ seq: [COLL, []] }), reserved = [], unreserved = [];
       w.io.sequenceLease.reserve = async (x) => { reserved.push(x); return { numbers: [9] }; };

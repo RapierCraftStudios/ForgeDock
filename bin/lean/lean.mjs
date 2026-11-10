@@ -361,6 +361,12 @@ export async function runCore(o) {
   const ctxArm = contextArm({ mode: ctxBase.mode, repo, issue }); // #4444: ab picks a stable on|shadow arm per issue
   let ctxCfg = { ...ctxBase, mode: ctxArm.mode }; // #5340: re-resolved once the issue is read (milestone/parent default)
   let surfaceClaim = null; // #5340: the shared-surface slots held from contract freeze to teardown
+  const claimSurfaceSlots = async (frozen) => { // every path that settles `frozen` (light, fresh, recovered) calls this once; idempotent
+    const surfaces = parseSharedSurfaces(o.sharedSurfaces);
+    if (!surfaces.length || !io.sequenceLease || surfaceClaim || !frozen) return;
+    surfaceClaim = await claimSurfaces({ lease: io.sequenceLease, repo, issue, surfaces, paths: (frozen.deliverables ?? []).map((d) => d.path), maxWaitS: ciMaxMinutes * 60 }).catch(() => null);
+    if (surfaceClaim?.names.length) T.decisions.push(surfaceClaim.timedOut ? `Shared surface slot ${surfaceClaim.names.join(", ")} timed out (fail-open)` : `Shared surface slot held: ${surfaceClaim.names.join(", ")} (waited ${Math.round(surfaceClaim.waitMs / 1000)}s)`);
+  };
   const ctxAb = ctxArm.ab ? { context_ab: true } : {};
   if (ctxArm.ab) T.decisions.push(`Context pack A/B (#4444): arm ${ctxArm.mode}`);
   const exploreCfg = parseExploreConfig(o.explore ?? {}); // #4391
@@ -1813,13 +1819,7 @@ export async function runCore(o) {
           let body = renderContract(frozen, hash, { scope: scopeHash });
           if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
-        { // #5340: a declared shared surface the contract touches takes a reserved slot until teardown
-          const surfaces = parseSharedSurfaces(o.sharedSurfaces);
-          if (surfaces.length && io.sequenceLease && !surfaceClaim) {
-            surfaceClaim = await claimSurfaces({ lease: io.sequenceLease, repo, issue, surfaces, paths: (frozen.deliverables ?? []).map((d) => d.path), maxWaitS: ciMaxMinutes * 60 }).catch(() => null);
-            if (surfaceClaim?.names.length) T.decisions.push(surfaceClaim.timedOut ? `Shared surface slot ${surfaceClaim.names.join(", ")} timed out (fail-open)` : `Shared surface slot held: ${surfaceClaim.names.join(", ")} (waited ${Math.round(surfaceClaim.waitMs / 1000)}s)`);
-          }
-        }
+          await claimSurfaceSlots(frozen);
           ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
           await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
           ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro, cost_usd: usage.cost_usd });
@@ -1940,6 +1940,7 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
+      await claimSurfaceSlots(frozen); // #5340: the full and recovered paths reach the builder here with the contract settled
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
       stage = "implement"; phaseLedger.enter("implement");
