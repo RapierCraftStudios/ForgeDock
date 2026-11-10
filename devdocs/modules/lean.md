@@ -2862,3 +2862,8 @@ requirement is deferred for live/post-deploy verification (bucket post-deploy/ve
 (dialog/CTA/layout component files) makes `e2eWanted` run the repo's e2e (CI label or workflow, never a local browser install). With no
 trigger configured the skip is a trajectory decision; on a `review.risk_paths` hit `precheck`'s `uiBrowser` input yields
 `conformance.e2e_unverified` kind `ui_browser_unverified`. Without `rollouts.files` default-on cannot be detected and the gate does not fire.
+
+## Entry 2026-11-10 — New-user journey selftest (#5305)
+
+`selftest-journey.mjs` (`forgedock selftest --journey`, routed from `selftestFromCli`) runs stage 1 (packed tarball via `npx --package`, in Docker or a node+git-only PATH; cases banner, help, doctor, unknown command; assertions for false success wording, doctor exit and wording, jargon errors, placeholder `forge.yaml` values; scrubbed output compared with `bin/tests/fixtures/journey-snapshots`) and stage 2 (sandbox repo: `demo`, `doctor`, `demo --run` to a merged PR; records time to first merge and prompts; always cleans up; skipped when gh or claude is unavailable). All process access goes through `io`. `selftest-gate.mjs` adds the separate `FORGE:JOURNEY` marker, posted with `--pr`; `review-staging` does not read it, so it never replaces the `FORGE:SELFTEST` gate result. Snapshots are regenerated with `--update-snapshots`. Docs: `docs/SELFTEST.md`.
+Cite: #5305.
