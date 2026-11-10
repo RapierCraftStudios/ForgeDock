@@ -7,7 +7,7 @@
  * SELF_REVIEW_DISAGREED). Never a failure, never a runner call. Pure: no I/O.
  */
 
-import { precheck, authorizationOf } from "./conformance.mjs";
+import { precheck, authorizationOf, applyAmendments } from "./conformance.mjs";
 import { pathDomains, riskClassOf } from "./review-trigger.mjs";
 
 const text = (v) => (v === null || v === undefined ? "" : String(v)).trim();
@@ -75,8 +75,10 @@ const NEEDS_RESULT = new Set(["requirement_unimplemented", "untracked_deferral"]
  * The deterministic conformance findings of the current tree: [{code, kind, detail, section}]. Validate commands are not
  * judged here (`forgedock check` runs them); requirement statuses are judged only when the builder reported any.
  */
-export function selfReviewFindings({ contract, result = null, changedFiles = [], ignore = [".forge-lean/"], hotspots = null }) {
-  if (!contract || typeof contract !== "object") return [];
+export function selfReviewFindings({ contract: frozen, result = null, changedFiles = [], ignore = [".forge-lean/"], hotspots = null }) {
+  if (!frozen || typeof frozen !== "object") return [];
+  // the builder's typed amendments (add-deliverable, ...) are part of the contract the gate judges; problems are the engine's to report
+  const contract = Array.isArray(result?.amendments) && result.amendments.length ? applyAmendments(frozen, result.amendments).contract : frozen;
   const reported = Array.isArray(result?.requirements);
   const pc = precheck({ contract: { ...contract, validate: [] }, result: reported ? result : null, changedFiles, ignore, hotspots, ciVerified: true });
   const out = pc.failures.filter((f) => reported || !NEEDS_RESULT.has(f.kind)).map((f) => ({ code: f.code, kind: f.kind ?? null, detail: f.detail, section: sectionOfKind(f.code) }));

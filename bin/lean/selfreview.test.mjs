@@ -58,6 +58,15 @@ describe("selfReviewFindings (#5345)", () => {
     assert.ok(f.some((x) => x.code === "conformance.scope_creep" && x.section === "deliverables"));
     assert.ok(f.some((x) => x.code === "conformance.preserve_violated" && /P1: src\/keep\.js/.test(x.detail)));
   });
+  it("selfReviewFindings applies add-deliverable amendments", () => {
+    const files = ["src/a.js", "src/b.js"];
+    const amendments = [{ kind: "add-deliverable", path: "src/b.js", why: "needed helper" }];
+    assert.ok(selfReviewFindings({ contract, result: { amendments }, changedFiles: files }).length === 0);
+    assert.ok(selfReviewFindings({ contract, result: { amendments: [] }, changedFiles: files }).some((x) => x.code === "conformance.scope_creep"));
+    assert.ok(selfReviewFindings({ contract, changedFiles: files }).some((x) => x.code === "conformance.scope_creep"));
+    const keep = selfReviewFindings({ contract, result: { amendments: [{ kind: "add-deliverable", path: "src/keep.js", why: "w" }] }, changedFiles: ["src/a.js", "src/keep.js"] });
+    assert.deepEqual(keep, []);
+  });
   it("catches an unimplemented requirement only once the builder reported statuses", () => {
     assert.deepEqual(selfReviewFindings({ contract, changedFiles: ["src/a.js"] }), []);
     const f = selfReviewFindings({ contract, result: { requirements: [{ id: "R1", status: "missing" }] }, changedFiles: ["src/a.js"] });
