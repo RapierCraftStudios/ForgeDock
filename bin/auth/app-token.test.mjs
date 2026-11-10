@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { statSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { resolveAuth, applyAuthEnv, startAuthRefresh, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, assertSecureBroker, authFromCli, doctorAppAuth, clearState } from "./app-token.mjs";
+import { resolveAuth, applyAuthEnv, startAuthRefresh, writeState, readState, statePath, deviceFlowLogin, mintViaBroker, assertSecureBroker, authFromCli, doctorAppAuth, clearState, AUTH_REFRESH_COMMANDS } from "./app-token.mjs";
 
 const mkEnv = (extra = {}) => ({ FORGE_HOME_DIR: tmpDir("app-auth-"), ...extra });
 const NOW = Date.parse("2026-01-01T00:00:00Z");
@@ -229,4 +229,12 @@ test("an inherited App token whose login was removed is dropped with its marker 
   assert.equal(out.afterApply, null);
   assert.equal(out.fp, null);
   assert.equal(out.timers, 0);
+});
+
+// Long-running lane commands must refresh the App token they adopt, or lanes past expiry 401.
+test("AUTH_REFRESH_COMMANDS covers lane commands and the CLI uses it instead of an inline list", () => {
+  for (const c of ["orchestrate", "schedd", "watch", "issue-watch", "prod-watch", "run-issue", "resume-stalled", "run", "bootstrap", "release"]) assert.ok(AUTH_REFRESH_COMMANDS.has(c), c);
+  for (const c of ["auth", "gc", "doctor"]) assert.ok(!AUTH_REFRESH_COMMANDS.has(c), c);
+  const src = readFileSync(new URL("../forgedock.mjs", import.meta.url), "utf8");
+  assert.match(src, /AUTH_REFRESH_COMMANDS\.has\(command\)\) startAuthRefresh\(\)/);
 });
