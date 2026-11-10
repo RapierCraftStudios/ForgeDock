@@ -119,8 +119,9 @@ describe("#4402 efficiencyMetrics", () => {
   });
   it("renders n/a, never NaN, for an empty cohort", () => {
     const lines = formatEfficiencyLines(efficiencyMetrics({}));
-    assert.equal(lines.length, 10);
+    assert.equal(lines.length, 11);
     assert.equal(lines[9], "implement wall p50 n/a, merge rate n/a, conformance pass n/a"); // #4491, appended
+    assert.equal(lines[10], "baseline tokens by profile: n/a"); // #5348
     assert.ok(!lines.some((l) => /NaN|undefined/.test(l)), lines.join("\n"));
     assert.match(lines[0], /^efficiency: merged 0, n\/a\/merge/);
     assert.equal(lines[6], "acceptance (7d after promotion): n/a");
@@ -374,5 +375,18 @@ describe("#5347 calls/turn alert", () => {
     assert.ok(!lines(2.1, 5).some((l) => l.startsWith("ALERT")));
     assert.ok(!lines(1.03, 1).some((l) => l.startsWith("ALERT")));
     assert.ok(!lines(null, 0).some((l) => l.startsWith("ALERT")));
+  });
+});
+
+describe("#5348 baseline tokens per session profile", () => {
+  const ev = (o) => ({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", ...o });
+  const logs = new Map([[1, [{ event: "RUN_START", ts: "2026-10-01T00:00:00Z" },
+    ev({ trigger: "build", baseline_tokens: 30000, lane_profile: "lane" }), ev({ trigger: "enumerating", baseline_tokens: 9000, lane_profile: "narrow" }),
+    ev({ trigger: "duplicate", baseline_tokens: 11000, lane_profile: "narrow" }), ev({ trigger: "ci_red" }),
+    { event: "RUN_TERMINAL", reason: "merged", code: "completed" }]]]);
+  const m = efficiencyMetrics({ entries: [{ row: { issue: 1, outcome: "merged" }, settleAt: null }], logs, repo: "o/r", now: Date.parse("2026-10-02T00:00:00Z") });
+  it("reports sessions and median baseline per lane_profile; attempts without a baseline are skipped", () => {
+    assert.deepEqual(m.baseline_by_profile, { lane: { sessions: 1, median: 30000 }, narrow: { sessions: 2, median: 10000 } });
+    assert.equal(formatEfficiencyLines(m).at(-1), "baseline tokens by profile: lane n=1 median 30000; narrow n=2 median 10000");
   });
 });
