@@ -24,3 +24,4 @@ No new env vars or dependencies. Time saved uses documented constant 1.5h per me
 ### Sibling lists
 - card (bin/stats) is not a member of bin/lean/batch.test.mjs:28 or bin/lean/execution.test.mjs:51 lists; recorded in result.json not_members.
 - Sibling-list check: `card` (bin/stats) is not a member of the lists in bin/lean/batch.test.mjs or bin/lean/execution.test.mjs; recorded under `not_members` in result.json.
+- Amendments: the only amendment is the typed defer of R1b (PNG). No add-requirement is recorded; the reported R2b id is not in the contract or in result.json.
