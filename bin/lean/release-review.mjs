@@ -11,7 +11,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runHostPreflight } from "./release-preflight.mjs";
 import { reviewStagingJson, reviewStagingIo, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
@@ -47,6 +47,12 @@ export function missingReviewers(lines) {
   const m = /missing findings comment\(s\) for:\s*([^\n]+)/.exec(t) ?? /no structured findings block from:\s*([^\n]+?)\.?(?:\s+Re-dispatch|\n|$)/.exec(t);
   return m ? m[1].split(/[\s,]+/).filter((d) => /^[a-z0-9-]+$/.test(d)) : [];
 }
+/** A reviewer session's failure as one line: exit status and the last lines of what it said. */
+const sessionFailure = (e) => {
+  const out = String(e?.stderr || e?.message || e || "").trim().split("\n").slice(-3).join(" | ").slice(0, 300);
+  return `exit ${e?.code ?? e?.status ?? e?.exitCode ?? "?"}: ${out}`;
+};
+const failureNote = (failures) => (failures.size ? `; session failures: ${[...failures].map(([d, f]) => `${d} (${f})`).join("; ")}` : "");
 const headMoved = (lines) => /head moved since/.test((lines ?? []).join("\n"));
 
 /** One review round at the current head: dispatch, test gate, head check, finalize. @returns {{moved: string}|{fail}|{ok}} */
@@ -63,7 +69,9 @@ async function reviewRound({ seam, pr, def, delta }) {
   const prompts = new Map(agents.map((a) => [a.domain, a.prompt()]));
   seam.markLaunched(m.launchedFile, agents.map((a) => a.domain), m.headSha);
   const send = (domain, note = "") => seam.runAgent({ role: `release-review-${domain}`, issue: pr, prompt: note ? `${prompts.get(domain)}\n\n${note}` : prompts.get(domain) });
-  await Promise.all(agents.map((a) => send(a.domain).catch((e) => ({ error: e.message }))));
+  const failures = new Map();
+  const attempt = (domain, note) => send(domain, note).catch((e) => { failures.set(domain, sessionFailure(e)); return null; });
+  await Promise.all(agents.map((a) => attempt(a.domain)));
   const gate = await seam.runAgent({ role: "release-test-gate", issue: pr, prompt: `/test-gate --prs "${(m.bundle ?? []).join(" ")}" --base ${def}\n\nPrint the complete gate output, ending with its FORGE:TEST_GATE:RESULT= marker.` });
   const gateFile = seam.saveTestGate(pr, gate?.text ?? "");
 
@@ -73,13 +81,13 @@ async function reviewRound({ seam, pr, def, delta }) {
   if (fin.code !== 0 || !fin.data) {
     if (headMoved(fin.lines)) return { moved: m.headSha };
     const missing = missingReviewers(fin.lines).filter((d) => prompts.has(d));
-    if (!missing.length) return { fail: `finalize stopped (exit ${fin.code}): ${(fin.lines ?? []).slice(-2).join(" | ").slice(0, 300)}` };
+    if (!missing.length) return { fail: `finalize stopped (exit ${fin.code}): ${(fin.lines ?? []).slice(-2).join(" | ").slice(0, 300)}${failureNote(failures)}` };
     // once: the same brief with the note the spec prescribes; a second miss is a degraded panel
-    await Promise.all(missing.map((d) => send(d, "structured findings block required: post your findings comment again, ending with the REVIEW-FINDINGS-START/END block.").catch(() => null)));
+    await Promise.all(missing.map((d) => attempt(d, "structured findings block required: post your findings comment again, ending with the REVIEW-FINDINGS-START/END block.")));
     fin = await seam.finalize({ pr, testGateOutput: gateFile });
     if (fin.code !== 0 || !fin.data) {
       if (headMoved(fin.lines)) return { moved: m.headSha };
-      return { fail: `reviewer findings block still missing after one re-ask (${missing.join(", ")}): degraded panel` };
+      return { fail: `reviewer findings block still missing after one re-ask (${missing.join(", ")}): degraded panel${failureNote(failures)}` };
     }
   }
   return { ok: fin.data };
@@ -156,10 +164,18 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
-export function realSeam({ repo, def, env = process.env, cwd = process.cwd() }) {
+export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), makeRunner = null }) {
   const rs = { ...reviewStagingIo(), cwd, env };
   const sd = env.FORGE_SCRATCHPAD || join(cwd, ".forge-scratch");
-  let runner = null;
+  let runner = null, shimEnv = null;
+  // Reviewer briefs say `forgedock ...`: pin that name to this release job's own build, whatever is installed globally.
+  const pinnedEnv = () => {
+    if (shimEnv) return shimEnv;
+    const dir = mkdtempSync(join(tmpdir(), "release-forgedock-"));
+    writeFileSync(join(dir, "forgedock"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "bin", "forgedock.mjs")}" "$@"\n`, { mode: 0o755 });
+    process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+    return (shimEnv = { ...env, PATH: `${dir}${delimiter}${env.PATH ?? ""}` });
+  };
   const gh = (args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env });
   return {
     pre: ({ pr, delta }) => reviewStagingJson([String(pr), ...(delta ? ["--delta", delta] : [])], rs),
@@ -170,9 +186,9 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd() }) 
     markLaunched: (file, domains, head) => { appendFileSync(file, domains.map((d) => `${d}\n`).join("")); writeFileSync(`${file}.head`, `${head}\n`); },
     saveTestGate: (pr, text) => { mkdirSync(sd, { recursive: true }); const f = join(sd, `${pr}_test_gate_output.txt`); writeFileSync(f, text); return f; },
     runAgent: async ({ role, issue, prompt }) => {
-      runner ??= (await import("./effects.mjs")).makeLeanRunner();
+      runner ??= makeRunner ? makeRunner() : (await import("./effects.mjs")).makeLeanRunner();
       // not readOnly: each reviewer posts its own PR comment
-      return runner({ role, issue, cwd, prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+      return runner({ role, issue, cwd, env: pinnedEnv(), prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
     },
     async fileCiIssue({ pr, head }) {
       const rows = JSON.parse(gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,bucket"]));
