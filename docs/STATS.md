@@ -18,6 +18,16 @@ version (the table embedded in the staging review summary). `--json` is machine-
 is resolved to its tag time minus one day; an unknown tag falls back to a full crawl and says so on stderr). Progress is
 printed to stderr while crawling, so `--json` stdout stays parseable.
 
+## Feature scoreboard (`--milestone <id|title>`, forge#5341)
+
+`forgedock stats --milestone <number|title> [--repo <owner/repo>] [--json]` grades a whole milestone from GitHub (its issues, PRs and
+epic FORGE:ACCEPTANCE comments) and the local run logs, with no manual input. Columns: journey status at ship (pass, fail or
+never-ran, per epic with head and time); minutes from the first lane merge to the first green journey; defects created after the last
+planned child closed, by class (`release-review`, `post-deploy`, `hotfix`, `other`, from labels or title); rework share (issues whose body
+says fix/redo/rework/follow-up of a sibling `#N`, or labelled `rework`); operator interventions (hand PRs whose head branch is not a
+`<type>/issue-N` lane branch, PRs labelled `manual-merge`, plus `needs-human` issues); cost from the run logs. A signal that cannot be read prints n/a. `--json`
+keeps the earlier verdict mix under `query.mix` and adds `query.scoreboard`. The feature benchmark is in `docs/eval/feature-bench.md`.
+
 ## Sources
 
 1. **GitHub (primary).** Issues, PRs and labels of the target repo, plus trusted `<!-- FORGE:TELEMETRY v1 -->` comments

@@ -25,6 +25,7 @@ import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs"
 import { firstMergeReport, gatherFirstRunIssues, medianMinutes, renderFirstMerge } from "./firstmerge.mjs";
 import { gatherOriginIssues, originReport, renderOrigin } from "./origin.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
+import { gatherScoreboard, renderScoreboard } from "./scoreboard.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, readBatchRows } from "./query.mjs";
@@ -75,7 +76,9 @@ thresholds under forge.yaml stats.alerts.*. Nothing is printed when none fired o
 
 Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, no comment bodies read):
   --edge FROM:TO        merged PRs that added the dependency or import edge FROM -> TO (e.g. @s/web:@s/db)
-  --milestone M         conformance verdict mix and per-day structure series for milestone M
+  --milestone M         feature scoreboard of milestone M (number or title: journey status at ship, first merge to first green journey, defects
+                        after the last child by class, rework share, interventions; forge#5341) plus the conformance verdict mix and
+                        per-day structure series (--json: query.scoreboard, query.mix)
 
 Context-pack A/B (forge#4275; local run logs only, no GitHub crawl):
   --context-ab          first-pass yield, builder turns, cache tokens and cost per lane type (rerun, child,
@@ -405,6 +408,13 @@ export async function buildReport(opts, deps = {}) {
   if (opts.edge || opts.milestone) { // forge#4165: audit query instead of the version report
     const e = opts.edge ? parseEdge(opts.edge) : null;
     const query = { ...(e ? { edge: { ...e, prs: edgeQuery(gh.records, e.from, e.to) } } : {}), ...(opts.milestone ? { mix: verdictMix(gh.records, gh.items, opts.milestone) } : {}) };
+    if (opts.milestone) { // forge#5341: the feature scoreboard from GitHub plus the local run logs; best-effort, absent when the milestone is unknown
+      try {
+        const runs = opts.local ? (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo) : [];
+        const board = await gatherScoreboard({ io: { gh: deps.gh ?? defaultGh }, repo, ref: opts.milestone, runs });
+        if (board) query.scoreboard = board;
+      } catch (e) { (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(`--milestone: scoreboard unavailable: ${e.message}`); }
+    }
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
   }
   if (opts.conformanceOutcomes) { // forge#5210: read only; GraphQL search per 100 PRs + the telemetry records above + local logs + git
@@ -472,6 +482,7 @@ export async function runStats(argv, deps = {}) {
     }
     if (report.query?.experiment && opts.emitEvent) await (deps.emitExperiment ?? (async (r, x) => (await import("../engine-cli.mjs")).experimentEventSink(r, x)))(opts.repo, report.query.experiment);
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
+    if (report.query?.scoreboard && !opts.json) { process.stdout.write(`${renderScoreboard(report.query.scoreboard)}\n`); return 0; }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.conformance_outcomes && !opts.json) { const co = report.query.conformance_outcomes; process.stdout.write(`${renderConformanceOutcomes(co)}${co.replay ? `\n\n${renderReplay(co.replay)}` : ""}\n`); return 0; }
