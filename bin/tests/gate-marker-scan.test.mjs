@@ -76,3 +76,24 @@ describe("deploy gate marker scan", () => {
     assert.equal(scan([finalMarker(20, "PASS", HEAD), finalMarker(50, "FAILURE", HEAD)]), "failure");
   });
 });
+
+describe("deploy gate scope", () => {
+  const SCOPE = stepScript("Skip non-deploy PRs");
+  /** skip output of the scope step for a PR from `head` into `base`. */
+  function skip(head, base = "main") {
+    const dir = tmpDir("gate-scope-");
+    const out = join(dir, "out");
+    writeFileSync(out, "");
+    const r = spawnSync("bash", ["-e", "-c", SCOPE], { encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: out, BASE: base, HEAD: head } });
+    assert.equal(r.status, 0, r.stderr);
+    return /skip=(\w+)/.exec(readFileSync(out, "utf8"))?.[1];
+  }
+  it("gates staging, feature and snapshot release heads into main", () => {
+    for (const head of ["staging", "feature", "release/20261110-2"]) assert.equal(skip(head), "false", head);
+  });
+  it("skips other heads and non-main bases", () => {
+    assert.equal(skip("fix/x"), "true");
+    assert.equal(skip("releases/x"), "true");
+    assert.equal(skip("release/20261110-2", "staging"), "true");
+  });
+});
