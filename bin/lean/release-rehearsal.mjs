@@ -25,8 +25,9 @@ export function parseRehearsalConfig(r) {
   return { command, timeoutMs: Number.isFinite(secs) && secs > 0 ? secs * 1000 : REHEARSAL_TIMEOUT_MS, blocking: !off(r.rehearsal_blocking) };
 }
 
-const tail = (s) => { const t = String(s ?? ""); return t.length > OUTPUT_TAIL_CHARS ? `…${t.slice(-OUTPUT_TAIL_CHARS)}` : t; };
-const marker = (head) => `<!-- FORGE:RELEASE_BLOCKER head=${head} -->`;
+export const tail = (s) => { const t = String(s ?? ""); return t.length > OUTPUT_TAIL_CHARS ? `…${t.slice(-OUTPUT_TAIL_CHARS)}` : t; };
+// The rehearsal marker keeps its original form; other kinds (preflight, #5277) get their own so one head can hold both blockers.
+const marker = (head, kind = "rehearsal") => `<!-- FORGE:RELEASE_BLOCKER head=${head}${kind === "rehearsal" ? "" : ` kind=${kind}`} -->`;
 
 const prSection = (res) => `${PR_START}\n**Rehearsal**: ${res.ok ? "PASS" : res.blocking ? "FAIL (promotion held)" : "FAIL (non-blocking)"} at \`${res.head}\` — \`${res.command}\`${res.issue ? ` (#${res.issue})` : ""}\n${PR_END}`;
 
@@ -37,13 +38,13 @@ async function recordInPr({ io, repo, pr }, res) {
   await io.gh(["pr", "edit", String(pr), "--repo", repo, "--body", `${base}\n\n${prSection(res)}\n`]);
 }
 
-/** One open release-blocker issue per head: comment on it when it exists, else create it. @returns the issue number. */
-async function fileBlocker({ io, repo, pr }, res) {
-  const text = `Release rehearsal failed on PR #${pr} at head \`${res.head}\`.\n\nCommand: \`${res.command}\` (exit ${res.code ?? "?"}${res.timedOut ? ", timed out" : ""})\n\n\`\`\`\n${tail(res.output)}\n\`\`\`\n`;
+/** One open release-blocker issue per head and kind: comment on it when it exists, else create it. @returns the issue number. */
+export async function fileBlocker({ io, repo, pr, kind = "rehearsal" }, res) {
+  const text = `Release ${kind} failed${pr ? ` on PR #${pr}` : ""} at head \`${res.head}\`.\n\nCommand: \`${res.command}\` (exit ${res.code ?? "?"}${res.timedOut ? ", timed out" : ""})\n\n\`\`\`\n${tail(res.output)}\n\`\`\`\n`;
   const open = json(await io.gh(["issue", "list", "--repo", repo, "--label", BLOCKER_LABEL, "--state", "open", "--limit", "100", "--json", "number,body"])) ?? [];
-  const found = open.find((i) => String(i.body ?? "").includes(marker(res.head)));
+  const found = open.find((i) => String(i.body ?? "").includes(marker(res.head, kind)));
   if (found) { await io.gh(["issue", "comment", String(found.number), "--repo", repo, "--body", text]); return found.number; }
-  const url = String(await io.gh(["issue", "create", "--repo", repo, "--label", BLOCKER_LABEL, "--title", `release-blocker: rehearsal failed at ${res.head.slice(0, 12)}`, "--body", `${marker(res.head)}\n${text}`])).trim();
+  const url = String(await io.gh(["issue", "create", "--repo", repo, "--label", BLOCKER_LABEL, "--title", `release-blocker: ${kind} failed at ${res.head.slice(0, 12)}`, "--body", `${marker(res.head, kind)}\n${text}`])).trim();
   return Number(/\/issues\/(\d+)/.exec(url)?.[1]) || null;
 }
 

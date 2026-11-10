@@ -731,6 +731,9 @@ release:
   artifact_check: ""
   version_sync: false
   publish_workflow: publish.yml
+  preflight_command: ""
+  preflight_timeout: 1200
+  preflight_blocking: true
   rehearsal_command: ""
   rehearsal_timeout: 1200
   rehearsal_blocking: true
@@ -750,6 +753,9 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `version_sync` | boolean | No | The repo pushes a `chore/sync-version-<VERSION>` branch after a release. Post-merge opens its PR to `branches.staging` if missing and merges it with `--match-head-commit` once its checks are green (no checks, or a red one, blocks the job). Default: `false`. |
 | `publish_workflow` | string | No | Workflow file post-merge looks for (and dispatches when no run appears) for the merge commit. Default: `publish.yml`. |
 
+| `preflight_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout on the staging head **before** the release PR is opened (#5277), again after each fix round, and once more on the final head before the PR is marked ready. Put the repo's own suites here, e.g. `preflight_command: npm test`. Setting it also opens the release PR as a **draft** and marks it ready only after review and a passing preflight, so Actions CI runs once on the final head. Unset: no preflight, the PR is opened ready as before. |
+| `preflight_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
+| `preflight_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per head (a re-run comments on it) and stops the job before the PR is opened or marked ready; fix it and `--resume <id>`. `false`: the failure is recorded and the release goes on. |
 | `rehearsal_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout, on the release-PR head after review and before promotion (#5253). Wire the project's deploy dry-run here: bundle build, env load and the trusted-runtime closure check, e.g. `rehearsal_command: ./scripts/deploy-dry-run.sh` where the script builds the release bundle, loads the production env file in check mode and verifies the trusted-runtime closure, exiting non-zero on the first failure. Unset: no rehearsal, release behavior is unchanged. |
 | `rehearsal_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
 | `rehearsal_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per release head (a re-run at the same head comments on it) with the output tail and the head SHA, and stops the job before promotion; fix it and `--resume <id>`. `false`: the failure is recorded and promotion goes on. |
@@ -758,6 +764,17 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `fix_mode` | `cherry-pick` \| `recut` | No | Snapshot mode only. `cherry-pick` (default): after a fix lane merges to staging, the merged commits of PRs labelled `release-blocker`, or closing a `release-blocker` issue or the blocking issue the job filed, are cherry-picked onto `release/<id>` (a clean pick only; a conflict blocks the job) and appended to `FORGE:RELEASE`. `recut`: the branch is moved to the current staging tip and the picks start over. |
 
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
+
+Repos that set `preflight_command` should skip their Actions CI while the release PR is a draft, so the paid run happens once, on the final head:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  test:
+    if: ${{ !github.event.pull_request.draft }}
+```
 
 **Commands that use this section**: `forgedock release`
 
