@@ -181,6 +181,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    < 60K chars). The fresh session never adopts its session id; when it makes no commit, one resume of the build
    session follows in the same round. `PHASE_ATTEMPT_USAGE` gains `mode: fresh|resume` on fix rounds (run log only).
    Block/contract corrections, CI-unavailable and base-sync conflict resolution still resume; round gates unchanged.
+   #5348 narrow fixes: the enumerating and duplicate-export gates first apply the change the detector names with no model
+   (`mechfix.mjs` `applyEnumerating` writes the missing entry into the test's string list, `renameDuplicates` renames an
+   export only its declaring file mentions to `<App><Name>`), commit it (`MECHANICAL_FIX` event) and re-run the detector.
+   What is left goes to one narrow session per stage: the enumerating round also carries the pending duplicate-export and
+   English-copy findings (`mergeNarrowTasks`; their gates re-check). The session runs profile `narrow` (no lane text,
+   CLAUDE.md off, `prompts.mjs` `narrowFixPrompt`: contract excerpt, failure output and named files, `NARROW_PROMPT_MAX`
+   chars, under `NARROW_BASELINE_TOKENS`); `PHASE_ATTEMPT_USAGE.lane_profile` is `narrow` and `stats --efficiency`
+   prints baseline tokens per profile.
    #4362: every `PHASE_ATTEMPT_USAGE` carries `trigger` (`fixround.mjs` `TRIGGERS`): plan call `plan`, implement
    `build`, untyped-block resume `block_correction`, contract correction `contract_correction`, `fixRound(kind, task,
    failures, trigger)` with `precheck`/`structure`/`docs`/`enumerating`/`sequence`/`conformance`/`review`, CI verify
@@ -2904,6 +2912,10 @@ and the runner's auto-add stay soft.
 
 `issuewatch-parity.mjs` holds the pure helpers: `isPullRequest`, `closingPrIssues` (open PRs' `closingIssuesReferences`), `skipLabelHit` with `DEFAULT_SKIP_LABELS`, `releaseInFlight` (a `~/.forge/releases/<id>/state.json` with no end `status` and a fresh mtime, since `runRelease` writes `status` only when the job ends) and `watchLiveness`. `planClaims` and the release pass skip PRs, issues with an open closing PR and `skip_labels` (default for `mode: batch`); a `search` selecting PRs fails at load. `runWatch` stamps `state.heartbeat` every pass and, with `release_pause` (default in batch), writes `state.paused` and skips the pass while a release job runs; the next pass resumes. `tick` re-checks `batch.reported` right before `batch.add` so a finished batch is never added to. `status` prints running/paused/stale/done with the heartbeat. Cost: 0 LLM calls.
 
+## Entry 2026-11-10 — env.tool_missing: remote tool check, best validate result, per-service lockfiles (#5331)
+
+`toolplace.mjs` (pure): `toolMisses` keeps the validate preflight's executable/module misses (never an unset env var) with their validate ids; `lackedTools` names the frozen contract's tools a target is known to lack. At the remote pre-build check `lean.mjs` ends a lane with `env.tool_missing` (`REMOTE_TOOL_MISSING`) before the builder starts, and `orchestrate.mjs` `placeOf` places a lane local when `remote.contractOf(n)` names a tool in `remote.lacks` (both optional; recovery placement and `ENV_CAPABILITY_REMOTE` are unchanged). `validatebest.mjs` (pure) keeps the best result per validate id: a 126/127 row never replaces a pass. `buildResumeDigest` uses it over every trusted FACTS record (takes `head`), marking passes "already passed"; it stays pure and byte-capped. `conformance.mjs` still re-runs all ids. `depcache.mjs` `detect` also finds `services|packages|apps/<name>/uv.lock|poetry.lock` when the root has none (cap 8); each is prepared in its own dir, so those repos are no longer "skipped: no lockfile". Root-lockfile detection and keys are unchanged.
+
 ## Entry 2026-11-10 — feature-level acceptance: every epic carries a runnable journey (#5336)
 
 `acceptance.mjs` is deterministic (no model call). An epic declares a top-level ```` ```forge-acceptance ```` block: `journey:` sections with probe keys `run`, `pass`, `timeout` and `when: milestone|post-deploy` (`parseAcceptance`, `validateEpic` = the creation gate behind `forgedock acceptance check`; `probe.mjs` exports `fencedBlocks` for the shared fence scan, and the declarer is `isProbeDeclarer`, fail closed). `runMilestoneJourneys` runs the milestone journeys on the branch head and posts `FORGE:ACCEPTANCE` on each epic (head, time, site, per-journey result). `gateMilestone`/`gateByRef` (`forgedock acceptance gate --stage ship|close`) block on a red journey, a journey never run on the current head, an epic with no journey, or (close) a post-deploy journey not yet passed; a milestone without an epic is not gated. `review-staging --summary` calls it for a `milestone/<slug>` release PR (`acceptanceBlock`): blocked journeys, or a test-gate SKIP on a milestone with an epic, is BLOCK DEPLOY. `makeIntegration({journeys})` runs `makeJourneyRunner` (detached worktree of the milestone branch) after each child merge; `engine-cli` wires it for real runs only. The close.md C3 parent close and the `milestone` ship/close specs call the gate.
@@ -2925,8 +2937,26 @@ Run-file naming is a contract for readers: `~/.forge/runs/<owner>__<repo>__<issu
 `<issue>.jsonl` is legacy and collides across repos. Parse with `/(?:^|__)(\d+)\.jsonl$/` as `stats/local-source.mjs`
 does, and take the repo from the RUN_START slice, never from the number alone.
 
+## Clean first review (#5345)
+
+`forgedock check` also runs `selfreview.mjs` `selfReviewFindings` (the deterministic subset of `precheck()`, plus a
+preserve-touch check): findings land in the `review` section of `.forge-lean/self-check.json`, make `ok` false, and a
+fixed result with a red record gets one builder resume (`SELF_CHECK_RED`) before any reviewer runs. An incomplete reviewer
+reply whose gaps are row ids (`reaskable()`) is repaired in place by `mergeReviewRows`, never a new review round.
+`RUN_TERMINAL` carries `first_review` (first gate state, finding kinds, rounds, `incomplete`, change type, risk surfaces);
+`forgedock stats --first-review` reports the clean rate by repo, change type and risk surface, maps finding kinds to
+contract sections, and flags long-clean cells as light-lane candidates (never a risk surface, #5283). Recurring finding
+classes reach the builder as `FINDING_PITFALLS` in the implement prompt.
+
 ## Sibling awareness (#5340)
 
 - **Context pack default.** `resolveContextMode` (`context.mjs`): an explicit `engine.context_pack` (shadow|off|on|ab) always wins; unset, a lane with a milestone or a parent epic runs `on`, every other lane stays `shadow`. `parseContextPackConfig({})` is unchanged. Sibling facts (same parent or milestone, at most `MAX_SIBLING_READS`) rank before other lanes' facts, after the declarations of in-flight siblings.
 - **Shared surfaces.** `engine.shared_surfaces` in `forge.yaml` lists globs (comma scalar or block list). After the contract freezes, a lane whose deliverables touch one takes a one-slot host reservation per surface (`surfaces.mjs` `claimSurfaces`, over `seqlease.mjs`; key spans every lane branch, so the milestone lane and the default branch share it) until teardown, and declares what it adds (`declare`/`declared`/`undeclare`, `surface-declared` under the sched dir). `glob => command` marks an append-only registry: never reserved, and the builder is told to run the command instead of hand-editing. The merge-gate sequence check also runs against the default branch(es). No declaration, no behaviour change; a failed lease is fail-open.
 - **Prerequisite pull-in.** `orchestrate` calls `prereq.mjs` `openPrerequisites` after reading dependencies and adds an open, non-`needs-human` prerequisite outside the batch, so `edges()` orders it first. The `dependency-open` admission refusal and requeue remain the fallback.
+
+## Walking skeleton first (#5337)
+
+- **Validation.** `bootstrap-validate.mjs` takes a plan flag `skeleton: true` (becomes the `skeleton` label, applied by `bootstrap-create.mjs`). Milestone 1 needs exactly one skeleton issue whose text names a #5336 journey (`missing-skeleton`, `multiple-skeletons`, `skeleton-misplaced`, `skeleton-no-journey`); every other issue depends on it transitively (`not-behind-skeleton`; the spike key and needs-human issues are exempt). `plan-validate-live.mjs` checks the same per open milestone from the `skeleton` label and `Depends on`, exit 1 on violation. The greenfield scaffold (CI, harness, dependency bootstrap, first build) is spec text in `commands/bootstrap.md`, not mechanically checked.
+- **Admission.** `makeIntegration({skeleton})` (on for real runs in `engine-cli`) loads open `skeleton` issues in `prime()`; `holds(n,{lane})` refuses every sibling of the lane until the skeleton merges. The `holds` signature is unchanged.
+- **Journey gate.** `makeJourneyRunner` resolves `{summary, red, ran, head}` (a string when nothing ran). A red result files or updates ONE `integration-red` issue (marker `FORGE:INTEGRATION:journey:<slug>`) naming the last merged PR and the PRs since the last green run, and holds admission; a green run closes it. `prime()` reloads that hold. A red journey before the skeleton merges files nothing.
+- **Metric.** `firstMergeAt` and `firstJourneyGreenAt` are stored in the milestone's `FORGE:INTEGRATION` block and shown by `integration status`.

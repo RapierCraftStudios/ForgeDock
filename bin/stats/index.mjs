@@ -22,9 +22,11 @@ import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
+import { firstReviewReport, renderFirstReview } from "./first-review.mjs";
 import { firstMergeReport, gatherFirstRunIssues, medianMinutes, renderFirstMerge } from "./firstmerge.mjs";
 import { gatherOriginIssues, originReport, renderOrigin } from "./origin.mjs";
 import { buildDepth, renderDepth } from "./depth.mjs";
+import { gatherScoreboard, renderScoreboard } from "./scoreboard.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 import { conformanceOutcomes, gatherConformanceOutcomes, renderConformanceOutcomes, replayPrs, renderReplay, DEFAULT_OUTCOME_MIN_N, DEFAULT_WINDOW_DAYS, DEFAULT_LOOKBACK_DAYS } from "./conformance-outcomes.mjs";
 import { conformanceVerdicts, readBatchRows } from "./query.mjs";
@@ -37,6 +39,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --first-review [--repo <owner/repo>] [--since <date>] [--min-n 20] [--json]
        forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --origin [--repo <owner/repo>] [--since <date>] [--json]
@@ -75,7 +78,9 @@ thresholds under forge.yaml stats.alerts.*. Nothing is printed when none fired o
 
 Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, no comment bodies read):
   --edge FROM:TO        merged PRs that added the dependency or import edge FROM -> TO (e.g. @s/web:@s/db)
-  --milestone M         conformance verdict mix and per-day structure series for milestone M
+  --milestone M         feature scoreboard of milestone M (number or title: journey status at ship, first merge to first green journey, defects
+                        after the last child by class, rework share, interventions; forge#5341) plus the conformance verdict mix and
+                        per-day structure series (--json: query.scoreboard, query.mix)
 
 Context-pack A/B (forge#4275; local run logs only, no GitHub crawl):
   --context-ab          first-pass yield, builder turns, cache tokens and cost per lane type (rerun, child,
@@ -90,7 +95,8 @@ Pool (forge#4549; local batch reports, no gh):
 
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
   --efficiency          $/merge, turns/merge, context/turn per size and model, retries/merge by cause, no-action
-                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
+                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion,
+                        non-model (wait) time by phase and cause
   --batch <id>          also report one batch (~/.forge/batches/<id>, FORGEDOCK_BATCH_DIR)
   --window <list>       trailing windows over the repo's batches (default 7d,30d)
   --compare <date|v>    before/after A/B around a deploy (date or release tag): equal-span cohorts of batches either side,
@@ -103,6 +109,7 @@ Issue origin (#5294; GitHub issues and telemetry):
                         how the pipeline-originated ones closed and their share of cost; --since <date> (default: last 30 days)
 
 Self-filed issues (#5207; GitHub issues only):
+  --first-review        clean-first-review rate by repo, change type and risk surface, with first-round finding kinds (#5345)
   --first-merge         setup start to first merged PR on a first-run repo, against the 15 min target (#5290)
   --self-filed          share of new issues the pipeline filed itself, by kind (follow-up, review-finding, staging-review,
                         rollup), against the 15% target; --since <date> bounds the window (default: the last 30 days)
@@ -172,6 +179,7 @@ export function parseArgs(argv) {
     else if (name === "--compounding") o.compounding = true;
     else if (name === "--self-filed") o.selfFiled = true;
     else if (name === "--first-merge") o.firstMerge = true;
+    else if (name === "--first-review") o.firstReview = true;
     else if (name === "--origin") o.origin = true;
     else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
@@ -404,8 +412,16 @@ export async function buildReport(opts, deps = {}) {
   if (opts.edge || opts.milestone) { // forge#4165: audit query instead of the version report
     const e = opts.edge ? parseEdge(opts.edge) : null;
     const query = { ...(e ? { edge: { ...e, prs: edgeQuery(gh.records, e.from, e.to) } } : {}), ...(opts.milestone ? { mix: verdictMix(gh.records, gh.items, opts.milestone) } : {}) };
+    if (opts.milestone) { // forge#5341: the feature scoreboard from GitHub plus the local run logs; best-effort, absent when the milestone is unknown
+      try {
+        const runs = opts.local ? (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo) : [];
+        const board = await gatherScoreboard({ io: { gh: deps.gh ?? defaultGh }, repo, ref: opts.milestone, runs });
+        if (board) query.scoreboard = board;
+      } catch (e) { (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(`--milestone: scoreboard unavailable: ${e.message}`); }
+    }
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
   }
+  if (opts.firstReview) return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query: { first_review: firstReviewReport({ records: gh.records, repo, minN: opts.minNSet ? opts.minN : undefined }) } }; // #5345
   if (opts.conformanceOutcomes) { // forge#5210: read only; GraphQL search per 100 PRs + the telemetry records above + local logs + git
     const now = deps.now?.() ?? Date.now();
     const input = await (deps.gatherConformanceOutcomes ?? gatherConformanceOutcomes)({ repo, gh: deps.gh ?? defaultGh, since: bound.since, now });
@@ -471,7 +487,9 @@ export async function runStats(argv, deps = {}) {
     }
     if (report.query?.experiment && opts.emitEvent) await (deps.emitExperiment ?? (async (r, x) => (await import("../engine-cli.mjs")).experimentEventSink(r, x)))(opts.repo, report.query.experiment);
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
+    if (report.query?.scoreboard && !opts.json) { process.stdout.write(`${renderScoreboard(report.query.scoreboard)}\n`); return 0; }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
+    if (report.query?.first_review && !opts.json) { process.stdout.write(`${renderFirstReview(report.query.first_review)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.conformance_outcomes && !opts.json) { const co = report.query.conformance_outcomes; process.stdout.write(`${renderConformanceOutcomes(co)}${co.replay ? `\n\n${renderReplay(co.replay)}` : ""}\n`); return 0; }
     if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }

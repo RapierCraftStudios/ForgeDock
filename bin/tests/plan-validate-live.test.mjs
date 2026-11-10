@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyEdges, orderMilestones, runLive, unmetDependencies } from "../../scripts/plan-validate-live.mjs";
+import { classifyEdges, orderMilestones, runLive, skeletonProblems, unmetDependencies } from "../../scripts/plan-validate-live.mjs";
 
 const ms = (title, number, due_on = null) => ({ title, number, due_on });
 const is = (number, milestone, body = "", state = "OPEN") => ({ number, milestone, body, state });
@@ -272,5 +272,32 @@ describe("orchestrate admit-and-hold (#5031)", async () => {
     await quiet(() => orchestrateFromCli(["--resume", id], deps));
     assert.deepEqual(seen, [[7, true]], "the resumed batch ran #7 only after the commit landed");
     assert.ok(landed.calls > 1, "the commit was re-checked after the resume");
+  });
+});
+
+describe("walking skeleton on live milestones (#5337)", () => {
+  const lab = (number, milestone, body, ...labels) => ({ ...is(number, milestone, body), labels: labels.map((name) => ({ name })) });
+  const codes = (issues) => skeletonProblems({ open: ["M1"], issues }).map((p) => `${p.code}${p.issue ? `:${p.issue}` : ""}`);
+
+  it("passes when one skeleton exists and every sibling depends on it transitively", () => {
+    assert.deepEqual(codes([lab(1, "M1", "", "skeleton"), lab(2, "M1", "Depends on #1"), lab(3, "M1", "Depends on #2"), lab(4, "M1", "", "epic")]), []);
+  });
+  it("rejects a milestone with no skeleton issue", () => {
+    assert.deepEqual(codes([lab(1, "M1", ""), lab(2, "M1", "Depends on #1")]), ["missing-skeleton"]);
+  });
+  it("rejects two skeletons", () => {
+    assert.deepEqual(codes([lab(1, "M1", "", "skeleton"), lab(2, "M1", "", "skeleton")]), ["multiple-skeletons:2"]);
+  });
+  it("rejects a sibling that does not reach the skeleton", () => {
+    assert.deepEqual(codes([lab(1, "M1", "", "skeleton"), lab(2, "M1", "")]), ["not-behind-skeleton:2"]);
+  });
+  it("ignores closed milestones and runLive exits 1 on a missing skeleton", async () => {
+    assert.deepEqual(skeletonProblems({ open: [], issues: [lab(1, "M1", "")] }), []);
+    const gh = async (a) => (a[0] === "api"
+      ? JSON.stringify([[{ ...ms("M1", 1), state: "open" }]])
+      : JSON.stringify([{ number: 1, body: "", state: "OPEN", labels: [], milestone: { title: "M1" } }]));
+    const lines = [];
+    assert.equal(await runLive(["validate", "--live"], { gh, out: (t) => lines.push(t) }), 1);
+    assert.match(lines.join("\n"), /\[missing-skeleton\] M1/);
   });
 });

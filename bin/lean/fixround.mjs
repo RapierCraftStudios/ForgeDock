@@ -15,6 +15,20 @@ export const MECHANICAL_KINDS = Object.freeze(["precheck", "ci", "docs", "struct
 export const FIX_PROMPT_MAX = 60000;
 export const FIX_CAPS = Object.freeze({ task: 20000, diff: 24000, contract: 8000, summary: 1500 });
 
+/**
+ * #5348: the narrow profile (enumerating and duplicate-export fixes): contract excerpt, failing check output and the named
+ * files only. A session starts under NARROW_BASELINE_TOKENS; the prompt gets a quarter of that (NARROW_PROMPT_MAX chars at
+ * ~4 chars/token), the rest is the fixed system prompt and tool schemas. The budget test pins the cap.
+ */
+export const NARROW_BASELINE_TOKENS = 12000;
+export const NARROW_PROMPT_MAX = 12000;
+export const NARROW_CAPS = Object.freeze({ task: 6000, contract: 2500, files: 1200 });
+
+/** One task for every pending narrow fix of a stage: [{title, text}] -> sections, empty ones dropped. */
+export function mergeNarrowTasks(pending) {
+  return (pending ?? []).filter((x) => x && String(x.text ?? "").trim()).map((x) => `### ${x.title}\n${String(x.text).trim()}`).join("\n\n");
+}
+
 const FILE_LINE_RE = /[\w.@/-]+\.[A-Za-z0-9]+:\d+/;
 
 /** True only for a non-empty list whose every failure (a string, or `f.detail`) cites a `path.ext:N`. */

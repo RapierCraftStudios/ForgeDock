@@ -852,6 +852,16 @@ describe("core work-on", () => {
     assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
   });
 
+  it("#5331 a remote lane whose sandbox lacks a validate tool ends env.tool_missing before building; local placement is unchanged", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: tmpDir("lean-5331-"), ...remote });
+    assert.equal(r.code, "env.tool_missing");
+    const l = world({ contract }); l.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    assert.notEqual((await run(l, { placement: { where: "local", reason: "x" } })).code, "env.tool_missing");
+  });
+
   it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
     const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
@@ -2018,9 +2028,9 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause).
-    assert.ok(approxTokens(plan) <= 2300, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1725, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
+    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
+    assert.ok(approxTokens(plan) <= 2375, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1825, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2425,7 +2435,8 @@ describe("comment templates", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     const f = parseFactsComment(w.comments.find((c) => markerOf(c) === "FORGE:FACTS"));
     assert.deepEqual(f.rejected, [{ approach: "detection-only guard", why: "hides the cause" }]);
-    assert.deepEqual(f.baselines, [{ command: "node --test test/foo.test.js", exit: 0 }]);
+    assert.equal(f.baselines.length, 1); assert.deepEqual({ ...f.baselines[0], head: undefined }, { command: "node --test test/foo.test.js", exit: 0, head: undefined }); // #5331: the baseline also records the head it ran on
+    assert.match(f.baselines[0].head, /^[0-9a-f]{7,40}$/);
     assert.ok(f.files.length > 0 && !f.files.some((x) => x.startsWith(".forge-lean/")), JSON.stringify(f.files));
     assert.ok(!scopeText({ title: "t", body: "b" }, [{ body: w.comments.find((c) => markerOf(c) === "FORGE:FACTS") }]).includes("detection-only"));
   });
@@ -2478,8 +2489,8 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2200, `plan prompt is ${approxTokens(plan)} tokens`); // 2150: #5342 (design-invalidated block kind); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1700, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(plan) <= 2300, `plan prompt is ${approxTokens(plan)} tokens`); // 2300: #5342 (design-invalidated block kind) on top of the staging prompts; 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(impl) <= 1800, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -6384,6 +6395,32 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  it("#5348 an enumerating-test omission and a duplicate export the detectors name are fixed without a model session", async () => {
+    const w = hworld({ missing: [MISS, []] }); const d = [DUP, []]; w.mech = [];
+    w.io.duplicateExports = async () => (d.length > 1 ? d.shift() : d[0]);
+    w.io.mechFix = {
+      applyEnumerating: async ({ missing }) => { w.mech.push(["enum", missing.length]); return { applied: missing, remaining: [] }; },
+      renameDuplicates: async ({ dups }) => { w.mech.push(["dup", dups.length]); return { applied: dups.map((x) => ({ ...x, renamedTo: "FeedUndo" })), remaining: [] }; },
+    };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(w.mech, [["enum", 1], ["dup", 1]]);
+    assert.equal(builders(w).length, 2, "plan and build only: no fix session");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /enumerating fix applied by the engine/.test(c.join(" "))), "the mechanical edit is committed");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /duplicate fix applied by the engine/.test(c.join(" "))));
+  });
+
+  it("#5348 what the engine cannot place goes to one narrow session that also carries the other pending narrow fix", async () => {
+    const w = hworld({ missing: [MISS, []] }); const d = [DUP, []]; const seen = [];
+    w.io.duplicateExports = async () => (d.length > 1 ? d.shift() : d[0]);
+    w.io.mechFix = { applyEnumerating: async ({ missing }) => ({ applied: [], remaining: missing }), renameDuplicates: async ({ dups }) => ({ applied: [], remaining: dups }) };
+    const inner = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") seen.push({ profile: c.profile ?? null, prompt: c.prompt }); return inner(c); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const fix = seen.filter((x) => x.profile === "narrow");
+    assert.equal(fix.length, 1, "one narrow session for both findings");
+    assert.match(fix[0].prompt, /fooNew[\s\S]*undoActivityAction/);
+    assert.doesNotMatch(fix[0].prompt, /## Diff/);
+  });
+
   it("#4596 English copies in a locale catalog resume the builder once to translate; a leftover is an anomaly", async () => {
     const w = hworld(); const c = [[{ path: "messages/ta.json", key: "calendarView.day", value: "Day view", source: "messages/en.json" }], []]; w.cpCalls = 0;
     w.io.englishCopies = async (x) => { w.cpCalls++; w.cpArgs = x; return c.length > 1 ? c.shift() : c[0]; };
@@ -7540,8 +7577,8 @@ describe("#4395 lane profile", () => {
       assert.match(p, /One turn, many calls: when several reads, greps, git show\/log\/blame or gh calls do not depend on each other, issue them all in the same turn/);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1700, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2200, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2200 tokens`);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1800, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2300, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -7881,7 +7918,7 @@ describe("prompt budgets (#4969)", () => {
     assert.notEqual(moved, impl);
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
-    assert.ok(approxTokens(moved) <= 1700, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1700 tokens`);
+    assert.ok(approxTokens(moved) <= 1800, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1700 tokens`);
   });
 });
 

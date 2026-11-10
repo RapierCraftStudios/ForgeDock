@@ -580,8 +580,10 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.match(problems[0], /nearest criterion line: "The scrape route must release/);
     assert.ok(reaskable(problems));
     assert.ok(reaskable(["R1: evidence path /layout.tsx does not exist"]), "#4327 evidence paths stay re-askable");
-    assert.ok(!reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]));
-    assert.ok(!reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(reaskable([...problems, "requirement R1 needs exactly one row (has 0)"]), "#5345 a missing row is repaired in place");
+    assert.ok(reaskable(["issue_coverage is missing or empty"]));
+    assert.ok(!reaskable(["requirements rows are missing"]), "a whole absent section keeps the two-run limit");
+    assert.ok(!reaskable([...problems, "something else is wrong"]));
     assert.ok(!reaskable([]));
     assert.deepEqual(fillEngineRows(good, ctx).issue_coverage, good.issue_coverage, "verbatim rows are untouched");
   });
@@ -1647,6 +1649,14 @@ describe("contract quote snapping (#5244)", () => {
     assert.equal(snapQuote("Remove the legacy alert path entirely from the service", ISS), null);
     assert.equal(snapQuote("Publish a completely different dashboard widget for billing", ISS), null);
     assert.equal(snapQuotes({ requirements: [{ id: "R1", quote: "totally unrelated words about something else here" }] }, ISS).snapped.length, 0);
+  });
+});
+
+describe("#5345 an incomplete reviewer reply is repaired in place", () => {
+  it("every row-level gap is re-askable and the repaired rows merge into the first reply (no new review round)", () => {
+    for (const p of ["R2: status invalid: maybe", "R1: a defer requirement needs deferral_ok true|false (is deferring it justified?)", "changed file a.js has no scope row", "preserve P1 needs a row with status intact|violated|unverified", "verdict must be CONFORMS or NONCONFORMING"]) assert.ok(reaskable([p]), p);
+    const merged = mergeReviewRows({ verdict: "CONFORMS", requirements: [{ id: "R1", status: "implemented" }] }, { requirements: [{ id: "R2", status: "implemented" }] });
+    assert.deepEqual(merged.requirements.map((r) => r.id), ["R1", "R2"]);
   });
 });
 
