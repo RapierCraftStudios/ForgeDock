@@ -24,7 +24,7 @@ export function parsePreflightConfig(r) {
  * Run the preflight at `head`; on failure file/comment the release-blocker issue.
  * @returns {{ok, head, command, blocking, code, timedOut, issue?}}
  */
-export async function runPreflight(ctx, { head, pr }) {
+export async function runHostPreflight(ctx, { head, pr }) {
   const { io, repo, config } = ctx;
   const cfg = config.preflight;
   const run = await io.rehearse(cfg.command, { timeout: cfg.timeoutMs });
@@ -41,7 +41,7 @@ export async function hostPreflightStep(ctx) {
   const cfg = ctx.config.preflight;
   if (!cfg) return { skipped: true };
   const head = String(await ctx.io.gh(["api", `repos/${ctx.repo}/commits/${ctx.staging}`, "--jq", ".sha"])).trim();
-  const r = await runPreflight(ctx, { head });
+  const r = await runHostPreflight(ctx, { head });
   return !r.ok && r.blocking ? stopOf(r) : r;
 }
 
@@ -51,7 +51,7 @@ export async function markReadyStep(ctx) {
   const { io, repo } = ctx;
   const { pr } = ctx.state.steps["release-pr"].result;
   const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid,isDraft"]));
-  const r = await runPreflight(ctx, { head: view?.headRefOid, pr });
+  const r = await runHostPreflight(ctx, { head: view?.headRefOid, pr });
   if (!r.ok && r.blocking) return stopOf(r);
   if (view?.isDraft) await io.gh(["pr", "ready", String(pr), "--repo", repo]);
   return { ...r, ready: true, wasDraft: !!view?.isDraft };
