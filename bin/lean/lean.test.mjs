@@ -647,6 +647,36 @@ describe("core work-on", () => {
     assert.equal(classifyBlock({ summary: "V1 needs the prod key", block: { kind: "human", why: "credentials" } }, 1).kind, "human");
   });
 
+  it("#5342 classifyBlock: design-invalidated needs a decision and a why; the other kinds are unchanged", () => {
+    const ok = classifyBlock({ block: { kind: "design-invalidated", decision: "replay_store is optional", why: "the core loop needs it", epic: "#5", paths: ["src/a.ts"] } }, 7);
+    assert.deepEqual([ok.kind, ok.epic, ok.paths], ["design-invalidated", 5, ["src/a.ts"]]);
+    assert.equal(classifyBlock({ block: { kind: "design-invalidated", decision: "x" } }, 7).kind, "untyped");
+    assert.equal(classifyBlock({ block: { kind: "dependency", issues: [3] } }, 7).kind, "dependency");
+  });
+
+  it("#5342 a design-invalidated block files one amendment, holds the affected open siblings and the lane behind it, and requeues as dependency-open", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "the store design is wrong", block: { kind: "design-invalidated", decision: "replay_store is optional", why: "core loop needs it", epic: 5 } } }, {});
+    const gh = w.io.gh;
+    const kid = (n) => ({ number: n, body: `**Parent**: #5\n`, labels: [], author: { login: "o" } });
+    w.io.gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "list" && a.includes("--help")) return "JSON FIELDS\n  author, body, labels, number\n";
+      if (a[0] === "issue" && a[1] === "list") return JSON.stringify([kid(8), kid(9), kid(7)]);
+      if (a[0] === "api" && /issues\?state=open/.test(a[1])) return "7\tOWNER\n8\tOWNER\n9\tOWNER\n";
+      if (a[0] === "issue" && a[1] === "view" && /^[789]$/.test(a[2]) && a.includes("body")) return JSON.stringify({ body: `**Parent**: #5\n` });
+      return gh(a);
+    };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.equal(r.code, "design.invalidated");
+    assert.equal(w.created.length, 1);
+    assert.match(w.created[0][w.created[0].indexOf("--title") + 1], /^spike amendment: replay_store is optional/);
+    const held = w.edits.filter((e) => e[1] === "edit" && e.includes("--body")).map((e) => [e[2], e[e.indexOf("--body") + 1]]);
+    assert.deepEqual(held.map(([n]) => n).sort(), ["7", "8", "9"]);
+    for (const [, body] of held) assert.match(body, /^\*\*Depends on\*\*: #201$/m);
+    assert.ok(w.comments.some((c) => /FORGE:REPLAN/.test(c) && /#201/.test(c)));
+    noNeedsHuman(w);
+  });
+
   it("#4385 split siblings that declare a shared hub file are serialised (chained, no duplicate transitive edge); disjoint or undeclared files stay parallel", () => {
     const hub = ["src/domain/index.ts", "./src/domain/events.ts"];
     const BIG = { files: 40, lines: 2000 }; // #4396: shared or undeclared files are admitted only over the size budget

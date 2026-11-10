@@ -108,7 +108,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Conformance needs-human lines and the "Not conforming" decision append the
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
-   `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human` | `design-invalidated` (#5342: `replan.mjs` `fileAmendment` files or joins one spike-amendment issue per epic, adds a `**Depends on**` edge to each affected open sibling and the lane, posts `FORGE:REPLAN`, finishes `dependency-open`; `forgedock replan apply --amendment N --repo o/r` then applies the per-child `forge-replan-dispositions` block (unchanged / re-scoped / dropped), releases the hold and rewrites the epic checklist, failing closed on a missing disposition).
    A `split` is admitted only by `decompose.mjs` `splitGate` (#4396): every
    sub-issue's `paths`/`files` disjoint from the others', or the block's `size` over
    `SPLIT_MIN_FILES` (25) / `SPLIT_MIN_LINES` (1500); otherwise it is `untyped`

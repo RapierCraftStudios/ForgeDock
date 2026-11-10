@@ -74,6 +74,7 @@ import { applyArmOverrides } from "../experiment.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { readDecisionIndex, withDecisionRows, recordDecisions } from "./decisions.mjs";
+import { normaliseInvalidation, epicOf, fileAmendment, REPLAN_MARKER } from "./replan.mjs";
 import { claimSurfaces, parseSharedSurfaces, generatorNote } from "./surfaces.mjs";
 import { parseContextPackConfig, resolveContextMode, parentOf, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { isExternalKill } from "./hostkill.mjs";
@@ -178,6 +179,10 @@ export function classifyBlock(result, issue) {
       dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
       ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
     return { kind: "split", rationale: gate.rationale, subissues, serialized: serializeShared(subissues) };
+  }
+  if (b.kind === "design-invalidated") { // #5342
+    const inv = normaliseInvalidation(b, issue);
+    return inv ? { kind: "design-invalidated", ...inv } : { kind: "untyped", problem: "the design-invalidated block names no decision or no why" };
   }
   if (b.kind === "human") {
     const remainder = (Array.isArray(b.remainder) ? b.remainder : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string").slice(0, MAX_SUBISSUES).map((x) => ({ title: x.title.trim(), body: x.body })); // #4730
@@ -1134,6 +1139,16 @@ export async function runCore(o) {
       return blocked
         ? await finish("dependency-blocked", detail, { code: OUTCOME_CODES.DEPENDENCY_BLOCKED, dependencies: b.issues, blockers: b.blockers }, OUTCOME_CODES.DEPENDENCY_BLOCKED)
         : await finish("dependency-open", detail, { code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: b.issues }, OUTCOME_CODES.DEPENDENCY_OPEN);
+    }
+    if (b.kind === "design-invalidated") { // #5342: one amendment issue, siblings held behind it, decision superseded
+      const epic = epicOf(b, iss?.body);
+      if (!epic) return await needsHuman(`Builder reported a design-invalidated block but no epic: set "epic" or a **Parent** line (${b.decision}): ${s}`, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED);
+      let f;
+      try { f = await fileAmendment({ gh: ghc, create: ghw, repo, issue, inv: b, epic, milestone }); } catch (e) { return await finish("engine-error", `filing the spike amendment failed: ${e?.message ?? e}`); }
+      T.decisions.push(`Builder block: design invalidated (${b.decision}); amendment #${f.amendment} ${f.created ? "filed" : "joined"}, held ${refs(f.held)}`);
+      try { await post(REPLAN_MARKER, `## Design invalidated\n${b.decision}\n\nWhy: ${b.why}\n\nAmendment: #${f.amendment}; held until it merges: ${refs(f.held)}.\n\n${s}`); } catch { /* best effort */ }
+      if (b.paths.length) try { await recordDecisions([{ choice: `${b.decision} no longer holds; replaced by the amendment`, why: b.why, anchors: b.paths, ...(b.supersedes ? { supersedes: b.supersedes } : {}) }], { issue: f.amendment, repo, post }); } catch { /* the register is best effort */ }
+      return await finish("dependency-open", `design invalidated; waiting on amendment #${f.amendment}`, { code: OUTCOME_CODES.DESIGN_INVALIDATED, dependencies: [f.amendment], amendment: f.amendment, epic }, OUTCOME_CODES.DESIGN_INVALIDATED);
     }
     if (b.kind === "split") {
       const filed = [];

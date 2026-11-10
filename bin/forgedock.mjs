@@ -4356,6 +4356,17 @@ switch (command) {
     }
     break;
   }
+  case "replan": {
+    // Re-plan loop (#5342): `forgedock replan apply --amendment N --repo owner/repo`.
+    const { replanFromCli } = await import("./lean/replan.mjs");
+    try {
+      exitCode = await replanFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "probe": {
     const { probeFromCli } = await import("./engine-cli.mjs");
     try {
