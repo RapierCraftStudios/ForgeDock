@@ -8,6 +8,7 @@ import { seqNumber } from "./sequence.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
+import { stampRule } from "./stagestamp.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
@@ -24,10 +25,11 @@ export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url)
 export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
 const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
-Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Issue independent read-only calls (reads, greps, git log/blame, gh) in the same turn or one shell call. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.`;
+Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Issue independent read-only calls (reads, greps, git log/blame, gh) in the same turn or one shell call. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.
+Never use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane's files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.`;
 
 /** #4450: the host-rules block of the builder prompts (toolchain, sparse and repo-facts lines included), reused by the light-lane prompt. */
-export const hostRules = ({ toolchain = null, sparse = null, facts = null } = {}) => `${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}`;
+export const hostRules = ({ toolchain = null, sparse = null, facts = null, stamp = null } = {}) => `${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
@@ -137,10 +139,10 @@ const factsRule = (f) => (f ? `\nRepo facts (toolchain pins, slow suites, layer 
 const sparseRule = (s) => (s?.excluded ? `\nThis worktree is a sparse checkout: ${s.excluded} tracked file(s) of ${s.maxKb} KB or more are not on disk (\`git ls-files -t | grep '^S'\` lists them). They are not deleted: never commit their removal. If you need one, run \`git sparse-checkout add /<path>\`.` : "");
 
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n, { toolchain = null, sparse = null, facts = null } = {}) {
+export function builderPlanPrompt(n, { toolchain = null, sparse = null, facts = null, stamp = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -195,11 +197,11 @@ export function investigationVerdict(md) {
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
+export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null, stamp = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, run the repo's formatter on the files you changed, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.

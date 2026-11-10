@@ -5200,6 +5200,28 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
     assert.equal(existsSync(w.ledgerFile), false, `${label}: ledger cleared`);
   };
 
+  /** #5333: SIGTERM while the builder runs; `proc` decides which pids stay alive after SIGTERM / SIGKILL. */
+  const interruptedWith = async (stubborn) => {
+    let td = null, out = null;
+    const w = ledgered({ dirty: true, during: async (w2, c) => { if (!/PLANNING ONLY/.test(c.prompt) && !out) out = await td("SIGTERM"); } });
+    w.alive = new Set([4242]); w.kills = [];
+    w.io.sleep = async () => {};
+    w.io.proc = { inDir: async () => [], alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" && !stubborn) w.alive.delete(pid); } };
+    await run(w, { onTeardown: (fn) => { td = fn; } });
+    return w;
+  };
+  it("#5333 teardown removes the worktree only after the builder process exited (SIGKILL after the grace period)", async () => {
+    const w = await interruptedWith(false);
+    assert.deepEqual(w.kills, [[4242, "SIGKILL"]]);
+    assert.ok(w.seq.indexOf("kill-SIGKILL") < w.seq.lastIndexOf("worktree-remove"), "worktree removed after the builder was gone");
+    tornDown(w, "builder gone");
+  });
+
+  it("#5333 a builder process that survives SIGKILL keeps the worktree (nothing is removed under a running builder)", async () => {
+    const w = await interruptedWith(true);
+    assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length, 1, "only the setup remove ran");
+  });
+
   it("while the lane runs, the ledger on disk lists worktree, branch, run tmp and builder pid with owner/batch/lane/issue/created/expires (survives a crash)", async () => {
     const w = ledgered({ batch: "b1" });
     await run(w, { batchId: "b1" });
@@ -7775,5 +7797,59 @@ describe("#5237 relaxation gate", () => {
     const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf()] })); w.diffText = rescue;
     assert.equal((await run(w, { dir: tmpDir("relax-") })).terminalReason, "merged");
     assert.equal(w.vcalls.length, 0);
+  });
+});
+
+describe("lane shared-state isolation (#5333)", () => {
+  const foreign = (issue) => `forge-stamp: issue=${issue} contract=-\n${STAGE_MD.implementation.replace("added a guard", "curl_cffi chrome156 wheel")}`;
+  /** After the default builder wrote its files, `after(w)` rewrites the implementation note (a stash pop, or a stamping builder). */
+  const withNote = (o, after) => {
+    const w = world(o);
+    const r0 = w.io.runner;
+    w.io.runner = async (c) => {
+      const r = await r0(c);
+      if (c.role === "builder" && !/PLANNING ONLY/.test(c.prompt)) { await after(w, (text) => { const p = `${WT}/.forge-lean/implementation.md`; w.files[p] = text; w.mtimes[p] = Date.now(); }); }
+      return r;
+    };
+    return w;
+  };
+  it("a stage file stamped for another issue (a git stash pop of another lane's files) is not posted; the note renders from result.json", async () => {
+    const w = withNote({}, (_w, put) => put(foreign(99)));
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(!w.comments.some((c) => /curl_cffi|chrome156/.test(c)), "the foreign note is never posted");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:IMPLEMENTATION")), "an implementation note is still posted, from result.json");
+    assert.match(traj(w)[0], /implementation\.md not posted: stamped for issue #99, run is #7/);
+  });
+
+  it("a note stamped for this issue is posted without the stamp line", async () => {
+    const w = withNote({}, (_w, put) => put(`forge-stamp: issue=7 contract=-\n${STAGE_MD.implementation}`));
+    assert.equal((await run(w)).terminalReason, "merged");
+    const impl = w.comments.find((c) => c.includes("FORGE:IMPLEMENTATION"));
+    assert.match(impl, /added a guard/);
+    assert.doesNotMatch(impl, /forge-stamp/);
+  });
+
+  it("a note posted live that a later stash pop replaces with another lane's file is re-rendered after the builder's final turn", async () => {
+    const w = withNote({}, async (wd, put) => {
+      put(`forge-stamp: issue=7 contract=-\n${STAGE_MD.implementation}`);
+      for (let i = 0; i < 300 && !wd.comments.some((c) => c.includes("<!-- FORGE:IMPLEMENTATION -->")); i++) await new Promise((r) => setTimeout(r, 10));
+      put(foreign(99));
+    });
+    await run(w);
+    assert.ok(w.patches.length >= 1, "the posted comment was edited");
+    assert.doesNotMatch(w.patches.at(-1).join(" "), /curl_cffi|chrome156/);
+    assert.ok(!w.comments.some((c) => /curl_cffi|chrome156/.test(c)));
+  });
+
+  it("no builder session starts in a worktree that no longer exists: the lane defers run.interrupted", async () => {
+    const w = world({ wtExists: true });
+    const git0 = w.io.git, fs0 = w.io.fs.exists;
+    let gone = false, builders = 0;
+    w.io.git = async (a, ...r) => { if (a[0] === "worktree" && a[1] === "add") gone = true; return git0(a, ...r); };
+    w.io.fs.exists = async (p) => (gone ? false : fs0(p));
+    const r0 = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") builders++; return r0(c); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(builders, 0);
   });
 });
