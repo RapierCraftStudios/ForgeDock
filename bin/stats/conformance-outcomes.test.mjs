@@ -210,6 +210,13 @@ describe("conformance outcomes: surfaces and replay (#5283)", () => {
     assert.equal(replayPrs({ prs, verdicts: v, numbers: [3], riskPaths: "docs/**", surfacesOf: stub }).prs[0].outcome, "flagged");
     assert.match(renderReplay(r), /\| #2 \| shadow \| conforms \| domain:frontend \| flagged \|/);
   });
+  it("buildReport wires --replay into the report (JSON) and reports PRs outside the fetched range as missing", async () => {
+    const r = await buildReport({ ...parseArgs(["--conformance-outcomes", "--replay", "1,99", "--enforce-domains", "frontend"]), repo: "o/r", cache: false, local: false },
+      { gh: graphqlGh(0), env: {}, now: () => NOW, git: null, releaseTimes: [], onProgress: () => {} });
+    const rp = r.query.conformance_outcomes.replay;
+    assert.deepEqual(rp.enforce_domains, ["frontend"]);
+    assert.ok(rp.missing.includes(99));
+  });
   it("prsOfPage keeps changed file paths; parseArgs validates --replay and its companions", () => {
     const data = { data: { search: { nodes: [{ number: 5, mergedAt: at(0), files: { nodes: [{ path: "a.ts" }] } }] } } };
     assert.deepEqual(prsOfPage(data, "o/r")[0].files, ["a.ts"]);
