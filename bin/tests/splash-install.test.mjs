@@ -4,10 +4,10 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpDir } from "./_tmp.mjs";
 import {
   installSplash, uninstallSplash, splashState, splashOptedOut, splashStageDir, LOCAL_MARKETPLACE,
 } from "../splash-install.mjs";
@@ -25,7 +25,7 @@ const run = (extra = {}) => installSplash({ pkgRoot: REPO, home, env: env(), exe
 const cmds = () => calls.map((c) => c.args.join(" "));
 
 beforeEach(() => {
-  home = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "fd-splash-"));
+  home = tmpDir("fd-splash-");
   claudeDir = join(home, "cfg");
   mkdirSync(claudeDir, { recursive: true });
   calls = [];
