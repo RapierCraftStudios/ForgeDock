@@ -28,7 +28,7 @@ import {
   findMarkdownFiles,
   parseInstallTier,
   writeForgeYaml,
-  backupExisting,
+  backupForgeYaml,
   backfillForgeYaml,
   manualLowConfidenceKeys,
   isEphemeralCachePath,
@@ -66,6 +66,7 @@ import {
   getInstalledCommandsDriftStatus,
 } from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
+import { checkPrereqs, offerInstall } from "./prereqs.mjs";
 import { guideText, guideWidth, useAnsi } from "./guide.mjs";
 import {
   renderLogo,
@@ -88,7 +89,10 @@ import {
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
 import { checkContext, refreshContextFlow } from "./review-context.mjs";
+import { runConfigCommand } from "./config-history.mjs";
+import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
+import { applyAuthEnv, doctorAppAuth } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
   classifyCommandChanges,
@@ -1084,7 +1088,7 @@ async function initFlow(c) {
     return refreshContextFlow({
       cwd: c.cwd,
       out: c.stdout,
-      deps: { interactive: process.stdin.isTTY === true, confirm, backup: backupExisting, write: atomicWriteFile },
+      deps: { interactive: process.stdin.isTTY === true, confirm, backup: (p) => backupForgeYaml(p, "refresh-context"), write: atomicWriteFile },
     });
   }
   const hasExisting = existsSync(outputPath);
@@ -1120,12 +1124,12 @@ async function initFlow(c) {
     // Hard-fail on unresolved identity placeholders when overwriting an
     // existing config (forge#1850 spec item 4) — never destroy a working
     // forge.yaml in favor of one that can't address a repo.
-    if (hasExisting && (draft.project.owner.value === "your-github-org" || draft.project.repo.value === "your-repo-name")) {
+    if ((draft.project.owner.value === "your-github-org" || draft.project.repo.value === "your-repo-name")) {
       c.stdout.write("\n  Could not determine the GitHub owner/repo for this project.\n");
       c.stdout.write("  Run this inside the target git repository, or use interactive init (npx forgedock init) to edit those fields.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init (minimal)");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const content = buildMinimalForgeYaml({
       projectName: draft.project.name.value,
@@ -1159,12 +1163,12 @@ async function initFlow(c) {
     };
     // Checked on the FINAL accepted values (post-prompt), not the draft —
     // the user may have typed over a placeholder default.
-    if (hasExisting && (v.owner === "your-github-org" || v.repo === "your-repo-name")) {
+    if ((v.owner === "your-github-org" || v.repo === "your-repo-name")) {
       c.stdout.write("\n  Could not determine the GitHub owner/repo for this project.\n");
       c.stdout.write("  Enter real values, or run this inside the target git repository.\n");
       return 1;
     }
-    const backup = backupExisting(outputPath);
+    const backup = backupForgeYaml(outputPath, "init");
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
@@ -1176,7 +1180,7 @@ async function initFlow(c) {
   const { draft, description } = await setupAfterRead(c, await read(c));
   const reviewed = await review(c, draft, description);
   if (!reviewed.aborted) ensureToolStateIgnored(c);
-  celebrate(c, reviewed);
+  if (!reviewed.aborted) celebrate(c, reviewed);
   if (!reviewed.aborted) await maybeOfferDemo(c);
   return reviewed.aborted ? 1 : 0;
 }
@@ -2366,7 +2370,13 @@ async function labelsSetup(repo, domainLabels = []) {
  * Returns 0 if all checks pass (warnings allowed), 1 if any hard check fails.
  * @param {boolean} [fix] - When true, auto-apply deterministic remediations.
  */
-async function doctor(fix = false) {
+// Internal/legacy doctor warnings, shown only with `doctor --verbose` (#5302).
+const INTERNAL_WARNINGS = new Set([
+  "FORGE_HOME env var", "Playwright MCP", "Version-gated features", "CLAUDE.md legacy block",
+  "Resource hygiene", "Persisted toolset home (~/.forge)",
+]);
+
+async function doctor(fix = false, verbose = false) {
   console.log("");
   console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
   console.log("");
@@ -2412,6 +2422,7 @@ async function doctor(fix = false) {
    * @param {string} hint
    */
   function warn(label, hint) {
+    if (!verbose && (INTERNAL_WARNINGS.has(label) || label.startsWith("Restarts:"))) return;
     warnings++;
     console.log(`  ${YELLOW}⚠${RESET}  ${label}`);
     console.log(`       Note: ${hint}`);
@@ -2621,35 +2632,22 @@ async function doctor(fix = false) {
     }
   }
 
-  // ── Check 2: gh CLI installed + authenticated ──────────────────────────────
+  // ── Check 2: prerequisites (Node, git, Claude Code, gh, yq) ───────────────
+  // The same list setup runs (prereqs.mjs, #5302); --fix offers to install what can be installed, with consent.
   let ghAvailable = false;
   {
-    let ghInstalled = false;
-    let ghAuthed = false;
-    try {
-      execSync("gh --version", { stdio: ["ignore", "pipe", "ignore"] });
-      ghInstalled = true;
-    } catch {
-      // gh not installed
+    const quietExec = (cmd, args) => execFileSync(cmd, args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 }).trim();
+    const probe = () => checkPrereqs({ exec: quietExec, nodeVersion: process.versions.node, claudeDir: GLOBAL_CLAUDE_DIR });
+    let results = probe();
+    if (fix && (await offerInstall(results.filter((r) => r.auto), { confirmFn: confirm, write: (t) => process.stdout.write(t) })).length > 0) {
+      fixesApplied++;
+      results = probe();
     }
-
-    if (!ghInstalled) {
-      fail("gh CLI", "Install the GitHub CLI: https://cli.github.com/");
-    } else {
-      try {
-        execSync("gh auth status", { stdio: ["ignore", "pipe", "ignore"] });
-        ghAuthed = true;
-      } catch {
-        // Not authenticated
-      }
-
-      if (ghAuthed) {
-        pass("gh CLI", "installed and authenticated");
-        ghAvailable = true;
-      } else {
-        fail("gh CLI", "Run: gh auth login");
-      }
+    for (const r of results) {
+      if (r.ok) pass(r.label, r.detail);
+      else fail(r.label, `${r.detail}. ${(r.fix ?? []).join("  or  ")}`.trim());
     }
+    ghAvailable = results.find((r) => r.id === "gh")?.ok === true;
   }
 
   // ── Check 3: git configured ────────────────────────────────────────────────
@@ -2763,6 +2761,8 @@ async function doctor(fix = false) {
               warn("review context", `REVIEW_CONTEXT_STALE: generated ${ctxCheck.generated_at}, ${ctxCheck.merged_since} PRs merged since (limit ${ctxCheck.max_merged_prs}). Run: npx forgedock init --refresh-context`);
             }
           } catch { /* advisory check: never fail doctor */ }
+
+          for (const f of validateForgeYaml(content)) (f.level === "error" ? fail : warn)(`forge.yaml ${f.code}`, f.message);
 
           const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
           const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
@@ -3209,32 +3209,6 @@ async function doctor(fix = false) {
     }
   }
 
-  // ── Check 10: yq installed ────────────────────────────────────────────────
-  // yq is a hard dependency: pipeline commands (work-on, review-pr, orchestrate)
-  // read forge.yaml via yq. Without it, those commands fail. Fixed literal
-  // command — no interpolation, so no injection surface (cf. #663/#789/#807).
-  {
-    let yqVersion = "";
-    try {
-      yqVersion = execSync("yq --version", {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
-    } catch {
-      // yq not installed or not on PATH
-    }
-
-    if (yqVersion) {
-      pass("yq", yqVersion);
-    } else {
-      fail(
-        "yq",
-        "Install the YAML processor (used to read forge.yaml): https://github.com/mikefarah/yq#install",
-      );
-    }
-  }
-
   // ── Check 11: Claude Code installed + version compatible ───────────────────
   // The compatibility floor is the @anthropic-ai/claude-code peerDependency in
   // package.json (read dynamically so it never drifts from the declared floor).
@@ -3318,7 +3292,11 @@ async function doctor(fix = false) {
   // token) — this check exists so that state is surfaced instead of silent.
   // See docs/CONFIG.md "GitHub App Install" and forge#1890.
   const botTok = botTokenStatus(); // #4662: lifetime from the refresh stamp; no stamp means no refresher is installed
-  if (botTok.configured) {
+  const appAuth = await doctorAppAuth(); // #5301: broker/BYO App login: identity, source, rate limit
+  if (appAuth.configured) {
+    if (appAuth.status === "pass") pass("GitHub App / bot token", appAuth.detail);
+    else warn("GitHub App / bot token", appAuth.detail);
+  } else if (botTok.configured) {
     const min = (ms) => Math.round(ms / 60000);
     const detail = botTok.remainingMs != null ? `${min(botTok.remainingMs)} min left, refreshed ${min(botTok.ageMs)} min ago (${botTok.refreshedAt})` : botTok.reason;
     if (botTok.ok) pass("GitHub App / bot token", detail);
@@ -3411,7 +3389,7 @@ function help() {
     ["npx forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> [--before s|--after s] | --show <id>", "Unattended multi-milestone train: one durable state file (order, active set, lifecycle), typed STOP reasons, resumable; never edits forge.yaml"],
     ["npx forgedock guards list [--path p] [--json] | backfill --since <date> [--dry-run]", "Fix guards: list the FORGE:GUARD records (test files + protected hunks of merged fixes) covering a path, or build them for already-merged lean lanes"],
     ["npx forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--dry-run] | status [--name <w>]", "Named, scoped, capped watches (forge.yaml issue_watch.watches) that claim matching open issues into lanes or one long-lived orchestrate batch, or (mode: release) pool them and cut themed releases; see docs/ISSUE-WATCH.md"],
-    ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; see docs/SELFTEST.md"],
+    ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>] | --journey [--repo <owner/sandbox>] [--pr <N>] [--update-snapshots]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; --journey runs the packed CLI as a new user (clean environment, then a sandbox repo to a merged PR) and posts FORGE:JOURNEY; see docs/SELFTEST.md"],
     ["npx forgedock prod-watch run [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status", "Production-side watcher (forge.yaml prod_watch): read-only signal sources -> triage -> governor -> issues, kill-switch file, owner digest; see docs/PROD-WATCH.md"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock decisions list [--stale] [--refresh]", "List anchored decisions (FORGE:DECISION); --stale shows those with an anchor missing on the base"],
@@ -3437,6 +3415,7 @@ function help() {
     ["npx forgedock stats --depth [--since <ver|date>] [--min-n N] [--offline] [--repo owner/repo] [--json]", "Light-eligible vs ineligible lane outcomes, by reason/signal, and the #5052 light-lane promotion verdict"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
+    ["npx forgedock doctor --verbose", "Also show internal and legacy checks (FORGE_HOME, Playwright MCP, version-gated features, resource hygiene)"],
     ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
@@ -4009,12 +3988,14 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "review-staging", "release", "gc", "resume-stalled", "demo", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
 let exitCode = 0;
+// #5301: an App login puts a scoped installation token in this process's env (GH_TOKEN) for child gh calls; no login, no change.
+if (command !== "auth") await applyAuthEnv();
 switch (command) {
   case "install": {
     const c = ctx();
@@ -4466,6 +4447,11 @@ switch (command) {
   case "demo":
     await demo();
     break;
+  case "auth": {
+    const { authFromCli } = await import("./auth/app-token.mjs");
+    exitCode = await authFromCli(restArgs);
+    break;
+  }
   case "doctor":
     if (restArgs.includes("--lanes")) {
       // #4866: the lane preflight on demand: every check with pass/fail; exit 1 when any fails
@@ -4476,7 +4462,7 @@ switch (command) {
       exitCode = checks.every((c) => c.ok) ? 0 : 1;
       break;
     }
-    exitCode = await doctor(restArgs.includes("--fix"));
+    exitCode = await doctor(restArgs.includes("--fix"), restArgs.includes("--verbose"));
     break;
   case "report": {
     const { runReport } = await import("./report.mjs");
@@ -4540,11 +4526,14 @@ switch (command) {
         console.log(`\n  Sections already present (unchanged): ${result.alreadyPresent.join(", ") || "none"}`);
         console.log(`\n  All added sections are commented out — edit forge.yaml to enable the ones you need.`);
       }
+    } else if (["history", "diff", "rollback", "record", "import-bak"].includes(subcommand)) {
+      exitCode = runConfigCommand(subcommand, restArgs.slice(1), { cwd: process.cwd() });
     } else {
       console.log(`${RED}Unknown config subcommand: ${subcommand ?? "(none)"}${RESET}`);
       console.log(
         `Usage: ${CYAN}npx forgedock config migrate [dir]${RESET}\n` +
-          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).`,
+          `  Backfills any of the 16 optional forge.yaml sections missing from an existing config (idempotent).\n` +
+          `       ${CYAN}npx forgedock config history | diff <n> | rollback <n> | record [reason] | import-bak [--delete]${RESET}`,
       );
       exitCode = 1;
     }

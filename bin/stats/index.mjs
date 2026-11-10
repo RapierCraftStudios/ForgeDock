@@ -110,7 +110,10 @@ Lane depth (forge#5209; local run logs, gh only for post-merge defect signals, n
                         defects (reopen, revert, a fix PR touching the same files within 7 days), grouped by verdict and
                         by every reason/signal code, plus the #5052 light-lane promotion verdict: light-shaped lanes cost
                         <= 1.2x and wall <= 1.3x model time, defect rate <= eligible full lanes of the same size;
-                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a)
+                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a);
+                        --since defaults to the last 30 days; defect results of closed windows are cached
+                        (--no-cache / --refresh), progress goes to stderr; the output ends with a recommendation
+                        (promote, do not promote, insufficient data) with eligible share and would-be saving
 
 Compounding (forge#4696; GitHub + git of the current clone, no model):
   --compounding         reintroduction rate (guarded fix reopened, or its lines blamed by a later guarded fix within 90 days),
@@ -346,8 +349,14 @@ export async function buildReport(opts, deps = {}) {
     return { repo, query: { pool } };
   }
   if (opts.depth) { // forge#5209: run logs; gh only for post-merge defect signals
-    const st = sinceToTimestamp(opts.since, releaseTimes), sinceMs = st.since ? Date.parse(st.since) : null;
-    const depth = await buildDepth({ runsDir: deps.runsDir ?? runsDir(env), repo, sinceMs, gh: opts.offline ? null : (deps.gh ?? defaultGh), minN: opts.minN });
+    const st = sinceToTimestamp(opts.since, releaseTimes), nowMs = deps.now?.() ?? Date.now();
+    let sinceMs = st.since ? Date.parse(st.since) : null;
+    if (sinceMs == null) { // #5318: no --since must not crawl all history
+      sinceMs = nowMs - DEFAULT_LOOKBACK_DAYS * 86400000;
+      (deps.warn ?? ((t) => process.stderr.write(`${t}\n`)))(`--depth: no --since, using the last ${DEFAULT_LOOKBACK_DAYS} days (pass --since <date> for more)`);
+    }
+    const depth = await buildDepth({ runsDir: deps.runsDir ?? runsDir(env), repo, sinceMs, gh: opts.offline ? null : (deps.gh ?? defaultGh), minN: opts.minN,
+      now: nowMs, env, useCache: opts.cache, refresh: opts.refresh, onProgress: deps.onProgress });
     return { repo, query: { depth } };
   }
   if (opts.efficiency) { // forge#4402: local batch dirs + run logs; gh only for merged issues

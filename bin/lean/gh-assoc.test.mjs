@@ -25,6 +25,7 @@ const sources = (d) => readdirSync(d).flatMap((f) => {
 /** Strict gh: rejects unknown --json fields the way gh does; REST serves the association. */
 const strictGh = (issues) => async (a) => {
   const j = a.indexOf("--json");
+  if (a[0] === "pr" && a[1] === "list") return "[]"; // #5313: open PRs and their closing issues (pr fields, not issue fields)
   if (j >= 0) for (const f of a[j + 1].split(",")) if (!ISSUE_JSON_FIELDS.includes(f)) throw new Error(`Unknown JSON field: "${f}"`);
   if (a[0] === "api") {
     const m = /issues\/(\d+)$/.exec(a[1]);
