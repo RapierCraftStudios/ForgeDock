@@ -106,6 +106,20 @@ describe("gateByRef, run and CLI", () => {
     const g = await gateByRef({ io: w.io, repo: "o/r", branch: "milestone/m-one" });
     assert.equal(g.ok, false); assert.match(g.reasons[0], /fail closed/);
   });
+  it("close after ship: a deleted milestone branch uses the last recorded milestone run (#5393)", async () => {
+    const pd = declaredAcceptance({ body: block("journey: create a task and get a result\nrun: ./j.sh\njourney: live\nrun: ./l.sh\nwhen: post-deploy"), ...owner });
+    const gone = (w) => { const gh = w.io.gh; w.io.gh = async (a) => { if (/\/branches\//.test(a[1])) throw new Error("404"); return gh(a); }; return w; };
+    const ok = [rec(HEAD, { "create a task and get a result": "pass" }), rec(OLD, { live: "pass" }, "post-deploy")];
+    assert.equal(gateMilestone({ epics: [epic(pd, ok)], head: null, stage: "close" }).ok, true);
+    assert.equal(gateMilestone({ epics: [epic(pd, [ok[0]])], head: null, stage: "close" }).ok, false, "post-deploy journey still required");
+    assert.match(gateMilestone({ epics: [epic(pd, [rec(HEAD, { "create a task and get a result": "fail" }), ok[1]])], head: null, stage: "close" }).reasons[0], /is red/);
+    assert.equal(gateMilestone({ epics: [epic(pd, [ok[1]])], head: null, stage: "close" }).ok, false, "no milestone run");
+    const w = gone(world({ comments: [{ ...bot, body: rec(HEAD, { "create a task and get a result": "pass" }).body }] }));
+    assert.equal((await gateByRef({ io: w.io, repo: "o/r", title: "M One", stage: "close" })).ok, true);
+    const w2 = gone(world());
+    assert.equal((await gateByRef({ io: w2.io, repo: "o/r", title: "M One", stage: "close" })).ok, false);
+    assert.match((await gateByRef({ io: gone(world()).io, repo: "o/r", title: "M One", stage: "ship" })).reasons[0], /fail closed/);
+  });
   it("runs journeys, posts the result on the epic with the head, and the gate then passes", async () => {
     const w = world();
     const res = await runMilestoneJourneys({ io: w.io, repo: "o/r", milestone: { number: 3, title: "M One", branch: "milestone/m-one" }, cwd: "/x", head: HEAD, now: () => "2026-11-10T00:00:00Z",
