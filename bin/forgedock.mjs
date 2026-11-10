@@ -66,6 +66,7 @@ import {
   getInstalledCommandsDriftStatus,
 } from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
+import { checkPrereqs, offerInstall } from "./prereqs.mjs";
 import { guideText, guideWidth, useAnsi } from "./guide.mjs";
 import {
   renderLogo,
@@ -1120,7 +1121,7 @@ async function initFlow(c) {
     // Hard-fail on unresolved identity placeholders when overwriting an
     // existing config (forge#1850 spec item 4) — never destroy a working
     // forge.yaml in favor of one that can't address a repo.
-    if (hasExisting && (draft.project.owner.value === "your-github-org" || draft.project.repo.value === "your-repo-name")) {
+    if ((draft.project.owner.value === "your-github-org" || draft.project.repo.value === "your-repo-name")) {
       c.stdout.write("\n  Could not determine the GitHub owner/repo for this project.\n");
       c.stdout.write("  Run this inside the target git repository, or use interactive init (npx forgedock init) to edit those fields.\n");
       return 1;
@@ -1159,7 +1160,7 @@ async function initFlow(c) {
     };
     // Checked on the FINAL accepted values (post-prompt), not the draft —
     // the user may have typed over a placeholder default.
-    if (hasExisting && (v.owner === "your-github-org" || v.repo === "your-repo-name")) {
+    if ((v.owner === "your-github-org" || v.repo === "your-repo-name")) {
       c.stdout.write("\n  Could not determine the GitHub owner/repo for this project.\n");
       c.stdout.write("  Enter real values, or run this inside the target git repository.\n");
       return 1;
@@ -1176,7 +1177,7 @@ async function initFlow(c) {
   const { draft, description } = await setupAfterRead(c, await read(c));
   const reviewed = await review(c, draft, description);
   if (!reviewed.aborted) ensureToolStateIgnored(c);
-  celebrate(c, reviewed);
+  if (!reviewed.aborted) celebrate(c, reviewed);
   if (!reviewed.aborted) await maybeOfferDemo(c);
   return reviewed.aborted ? 1 : 0;
 }
@@ -2366,7 +2367,13 @@ async function labelsSetup(repo, domainLabels = []) {
  * Returns 0 if all checks pass (warnings allowed), 1 if any hard check fails.
  * @param {boolean} [fix] - When true, auto-apply deterministic remediations.
  */
-async function doctor(fix = false) {
+// Internal/legacy doctor warnings, shown only with `doctor --verbose` (#5302).
+const INTERNAL_WARNINGS = new Set([
+  "FORGE_HOME env var", "Playwright MCP", "Version-gated features", "CLAUDE.md legacy block",
+  "Resource hygiene", "Persisted toolset home (~/.forge)",
+]);
+
+async function doctor(fix = false, verbose = false) {
   console.log("");
   console.log(`${BOLD}ForgeDock Doctor${RESET} — Installation Health Check`);
   console.log("");
@@ -2412,6 +2419,7 @@ async function doctor(fix = false) {
    * @param {string} hint
    */
   function warn(label, hint) {
+    if (!verbose && (INTERNAL_WARNINGS.has(label) || label.startsWith("Restarts:"))) return;
     warnings++;
     console.log(`  ${YELLOW}⚠${RESET}  ${label}`);
     console.log(`       Note: ${hint}`);
@@ -2621,35 +2629,22 @@ async function doctor(fix = false) {
     }
   }
 
-  // ── Check 2: gh CLI installed + authenticated ──────────────────────────────
+  // ── Check 2: prerequisites (Node, git, Claude Code, gh, yq) ───────────────
+  // The same list setup runs (prereqs.mjs, #5302); --fix offers to install what can be installed, with consent.
   let ghAvailable = false;
   {
-    let ghInstalled = false;
-    let ghAuthed = false;
-    try {
-      execSync("gh --version", { stdio: ["ignore", "pipe", "ignore"] });
-      ghInstalled = true;
-    } catch {
-      // gh not installed
+    const quietExec = (cmd, args) => execFileSync(cmd, args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 }).trim();
+    const probe = () => checkPrereqs({ exec: quietExec, nodeVersion: process.versions.node, claudeDir: GLOBAL_CLAUDE_DIR });
+    let results = probe();
+    if (fix && (await offerInstall(results.filter((r) => r.auto), { confirmFn: confirm, write: (t) => process.stdout.write(t) })).length > 0) {
+      fixesApplied++;
+      results = probe();
     }
-
-    if (!ghInstalled) {
-      fail("gh CLI", "Install the GitHub CLI: https://cli.github.com/");
-    } else {
-      try {
-        execSync("gh auth status", { stdio: ["ignore", "pipe", "ignore"] });
-        ghAuthed = true;
-      } catch {
-        // Not authenticated
-      }
-
-      if (ghAuthed) {
-        pass("gh CLI", "installed and authenticated");
-        ghAvailable = true;
-      } else {
-        fail("gh CLI", "Run: gh auth login");
-      }
+    for (const r of results) {
+      if (r.ok) pass(r.label, r.detail);
+      else fail(r.label, `${r.detail}. ${(r.fix ?? []).join("  or  ")}`.trim());
     }
+    ghAvailable = results.find((r) => r.id === "gh")?.ok === true;
   }
 
   // ── Check 3: git configured ────────────────────────────────────────────────
@@ -3209,32 +3204,6 @@ async function doctor(fix = false) {
     }
   }
 
-  // ── Check 10: yq installed ────────────────────────────────────────────────
-  // yq is a hard dependency: pipeline commands (work-on, review-pr, orchestrate)
-  // read forge.yaml via yq. Without it, those commands fail. Fixed literal
-  // command — no interpolation, so no injection surface (cf. #663/#789/#807).
-  {
-    let yqVersion = "";
-    try {
-      yqVersion = execSync("yq --version", {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
-    } catch {
-      // yq not installed or not on PATH
-    }
-
-    if (yqVersion) {
-      pass("yq", yqVersion);
-    } else {
-      fail(
-        "yq",
-        "Install the YAML processor (used to read forge.yaml): https://github.com/mikefarah/yq#install",
-      );
-    }
-  }
-
   // ── Check 11: Claude Code installed + version compatible ───────────────────
   // The compatibility floor is the @anthropic-ai/claude-code peerDependency in
   // package.json (read dynamically so it never drifts from the declared floor).
@@ -3435,6 +3404,7 @@ function help() {
     ["npx forgedock stats --depth [--since <ver|date>] [--min-n N] [--offline] [--repo owner/repo] [--json]", "Light-eligible vs ineligible lane outcomes, by reason/signal, and the #5052 light-lane promotion verdict"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
+    ["npx forgedock doctor --verbose", "Also show internal and legacy checks (FORGE_HOME, Playwright MCP, version-gated features, resource hygiene)"],
     ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
@@ -4464,7 +4434,7 @@ switch (command) {
       exitCode = checks.every((c) => c.ok) ? 0 : 1;
       break;
     }
-    exitCode = await doctor(restArgs.includes("--fix"));
+    exitCode = await doctor(restArgs.includes("--fix"), restArgs.includes("--verbose"));
     break;
   case "report": {
     const { runReport } = await import("./report.mjs");

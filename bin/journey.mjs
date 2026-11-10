@@ -623,6 +623,7 @@ import {
   colorMode, motionEnabled, CHROME_STOPS, HERO_MARK, COMPACT_MARK, sleep,
 } from "./cinema.mjs";
 import { detectEnvironment, wslPathToWindows } from "./env-detect.mjs";
+import { checkPrereqs, formatNotReady, offerInstall } from "./prereqs.mjs";
 
 // ---------------------------------------------------------------------------
 // URL opener (default openFn implementation — injectable for tests)
@@ -712,7 +713,7 @@ const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
  * and the journey continues — advisory, never fatal. Includes informational
  * Platform/WSL/Shell rows (via env-detect.mjs) after the pass/fail checks —
  * those three always report `ok: true`, they surface state rather than gate it.
- * @returns {Promise<{ checks: Array<{name, ok, detail, fix?}>, ghReady: boolean }>}
+ * @returns {Promise<{ checks: Array<{name, ok, detail, fix?, blocking?}>, ghReady: boolean, blocking: Array }>}
  */
 export async function preflight(ctx) {
   const { stdout: w } = ctx;
@@ -721,61 +722,16 @@ export async function preflight(ctx) {
   w.write("\n  " + ember("F O R G E D O C K", ctx.mode) + "\n");
   w.write("  " + dimLine(ctx, `──── ${getLogoTagline("install")} ────────────────────`) + "\n\n");
 
-  const rows = [
-    {
-      label: "Node",
-      run: async () => {
-        const major = Number(ctx.nodeVersion.split(".")[0]);
-        return major >= 18
-          ? { ok: true, detail: `v${ctx.nodeVersion}` }
-          : { ok: false, detail: `v${ctx.nodeVersion} — need ≥18`, fix: ["Upgrade Node: https://nodejs.org/"] };
-      },
-    },
-    {
-      label: "git",
-      run: async () => {
-        try {
-          const v = ctx.exec("git", ["--version"]);
-          return { ok: true, detail: v.replace(/^git version\s*/, "") };
-        } catch {
-          return { ok: false, detail: "not found", fix: ["Install git: https://git-scm.com/downloads"] };
-        }
-      },
-    },
-    {
-      label: "Claude Code",
-      run: async () => {
-        const claudeDir = claudeDirOf(ctx);
-        return existsSync(claudeDir)
-          ? { ok: true, detail: `${claudeDir} found` }
-          : { ok: false, detail: `${claudeDir} not found`, fix: ["Install Claude Code: https://claude.com/claude-code"] };
-      },
-    },
-    {
-      label: "GitHub CLI",
-      run: async () => {
-        try {
-          ctx.exec("gh", ["--version"]);
-        } catch {
-          return {
-            ok: false,
-            detail: "not found",
-            fix: ["Install gh: https://cli.github.com/", "Windows: winget install GitHub.cli"],
-          };
-        }
-        try {
-          ctx.exec("gh", ["auth", "status"]);
-          return { ok: true, detail: "authenticated" };
-        } catch {
-          return { ok: false, detail: "not authenticated", fix: ["Run: gh auth login"] };
-        }
-      },
-    },
-  ];
+  // One list shared with `doctor` (prereqs.mjs, #5302). Probed once, shown as rows.
+  const prereqs = checkPrereqs({ exec: ctx.exec, nodeVersion: ctx.nodeVersion, claudeDir: claudeDirOf(ctx), platform: ctx.platform });
+  const rows = prereqs.map((p) => ({
+    label: p.label,
+    run: async () => (p.ok ? { ok: true, detail: p.detail } : { ok: false, detail: p.detail, fix: p.fix }),
+  }));
 
   // Environment reveal rows (platform/WSL/shell) — informational only, never
   // fail the preflight. Appended after the existing 4 checks so `named[3]`
-  // (GitHub CLI, used for `ghReady` below) keeps its index.
+  // (GitHub CLI, used for `ghReady` below) keeps its index; yq follows it.
   const envInfo = detectEnvironment({ platform: ctx.platform, env: ctx.env, release: ctx.release });
   rows.push(
     {
@@ -799,8 +755,8 @@ export async function preflight(ctx) {
   );
 
   const results = await revealRows(rows, { mode: ctx.mode, motion: ctx.motion, writer: w });
-  const named = rows.map((r, i) => ({ name: r.label, ...results[i] }));
-  return { checks: named, ghReady: named[3].ok };
+  const named = rows.map((r, i) => ({ name: r.label, ...results[i], ...(prereqs[i] ? { label: prereqs[i].label, blocking: prereqs[i].blocking, auto: prereqs[i].auto, id: prereqs[i].id } : {}) }));
+  return { checks: named, ghReady: named[3].ok, blocking: named.filter((c) => c.blocking) };
 }
 
 // ---------------------------------------------------------------------------
@@ -2748,16 +2704,11 @@ export async function review(ctx, draft, description) {
     extraFields,
   });
 
-  // Hard-fail on unresolved identity placeholders when OVERWRITING an
-  // existing config (forge#1850 spec item 4): never destroy a working
-  // forge.yaml in favor of one that can't address a repo. A brand-new
-  // (non-existing) config is allowed to write placeholders — that's the
-  // existing, already-flagged (# TODO comments) greenfield-setup path, and
-  // there's nothing valuable to lose. Checked AFTER the review screen so an
-  // interactive edit that fixes the field still passes.
-  if (hasExisting && (accepted.owner === "your-github-org" || accepted.repo === "your-repo-name")) {
-    w.write("\n  Could not determine the GitHub owner/repo for this project.\n");
-    w.write("  " + dimLine(ctx, "Run this inside the target git repository, or edit those fields before accepting.") + "\n");
+  // Never write placeholder identity (#5302; overwrite case: forge#1850 item 4): a config that can't address
+  // a repo is worse than none. Checked AFTER the review screen so an interactive edit that fixes the field passes.
+  if (accepted.owner === "your-github-org" || accepted.repo === "your-repo-name") {
+    w.write("\n  Could not determine the GitHub owner/repo for this project" + (hasExisting ? "." : " — forge.yaml not written.") + "\n");
+    w.write("  " + dimLine(ctx, "Run this inside a git repository with a GitHub origin, then run: npx forgedock init") + "\n");
     return { written: false, todoCount: 0, backupName: null, aborted: true };
   }
 
@@ -3083,7 +3034,19 @@ export async function runJourney(ctx) {
   };
   process.on("SIGINT", onSigint);
   try {
-    await preflight(ctx);
+    const pre = await preflight(ctx);
+    // #5302: a missing blocking prerequisite ends setup here: nothing is installed or written, no success banner.
+    let missing = pre.blocking;
+    if (missing.length > 0) {
+      const installed = await offerInstall(missing, { confirmFn: ctx.confirmFn, write: (t) => ctx.stdout.write(t) });
+      if (installed.length > 0) {
+        missing = checkPrereqs({ exec: ctx.exec, nodeVersion: ctx.nodeVersion, claudeDir: claudeDirOf(ctx), platform: ctx.platform }).filter((p) => p.blocking);
+      }
+    }
+    if (missing.length > 0) {
+      ctx.stdout.write(formatNotReady(missing) + "\n");
+      return 1;
+    }
     // Persist the toolset into ~/.forge/ before linking anything (#1943): when
     // not skipped (git-clone installs are exempt), reassign ctx.forgeHome so
     // every symlink/hook path forge() creates below originates from the
@@ -3099,7 +3062,7 @@ export async function runJourney(ctx) {
     const { draft, description } = await setupAfterRead(ctx, await read(ctx));
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);
-    celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
+    if (!reviewed.aborted) celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });
     await writeInstallReceipt(ctx, { forged });
     if (!reviewed.aborted) await maybeOfferDemo(ctx);
     return reviewed.aborted ? 1 : 0;
