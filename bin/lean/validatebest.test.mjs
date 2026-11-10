@@ -20,7 +20,7 @@ describe("best validate result per id (#5331)", () => {
   it("passedOnHead compares heads only when both are known", () => {
     assert.equal(passedOnHead({ exit: 0, head: "abc" }, "abc"), true);
     assert.equal(passedOnHead({ exit: 0, head: "abc" }, "def"), false);
-    assert.equal(passedOnHead({ exit: 0 }, "def"), true);
+    assert.equal(passedOnHead({ exit: 0 }, "def"), false);
     assert.equal(passedOnHead({ exit: 127 }, "def"), false);
     assert.equal(isToolMissingExit(127), true);
   });

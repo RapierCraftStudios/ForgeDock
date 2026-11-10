@@ -24,5 +24,5 @@ export function bestResults(rows) {
   return [...best.values()];
 }
 
-/** True when the row passed and, if both heads are known, on `head`. */
-export const passedOnHead = (row, head) => row?.exit === 0 && (!row.head || !head || row.head === head);
+/** True when the row passed on `head`; both heads must be known (a row with no recorded head is never "the same head"). */
+export const passedOnHead = (row, head) => row?.exit === 0 && !!row.head && !!head && row.head === head;

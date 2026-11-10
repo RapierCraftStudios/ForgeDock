@@ -2395,7 +2395,8 @@ describe("comment templates", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     const f = parseFactsComment(w.comments.find((c) => markerOf(c) === "FORGE:FACTS"));
     assert.deepEqual(f.rejected, [{ approach: "detection-only guard", why: "hides the cause" }]);
-    assert.deepEqual(f.baselines, [{ command: "node --test test/foo.test.js", exit: 0 }]);
+    assert.equal(f.baselines.length, 1); assert.deepEqual({ ...f.baselines[0], head: undefined }, { command: "node --test test/foo.test.js", exit: 0, head: undefined }); // #5331: the baseline also records the head it ran on
+    assert.match(f.baselines[0].head, /^[0-9a-f]{7,40}$/);
     assert.ok(f.files.length > 0 && !f.files.some((x) => x.startsWith(".forge-lean/")), JSON.stringify(f.files));
     assert.ok(!scopeText({ title: "t", body: "b" }, [{ body: w.comments.find((c) => markerOf(c) === "FORGE:FACTS") }]).includes("detection-only"));
   });

@@ -536,7 +536,7 @@ export async function runCore(o) {
     if (!base) return;
     try {
       const result = await readResult();
-      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract() }) : null;
+      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract(), head: String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim() }) : null;
       if (!rec) return;
       const body = renderFactsRecord(rec);
       if (factsSeen.some((b) => String(b ?? "").includes(body))) return;
@@ -826,6 +826,7 @@ export async function runCore(o) {
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
   let decisionsNote = ""; // #4901: trusted FORGE:DECISION comments newer than the frozen contract, "" otherwise
+  let carriedPasses = []; // #5331: validate ids that passed on the resume head (resume digest); carried into the builder result while HEAD is unchanged
   let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
   /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
@@ -1750,7 +1751,7 @@ export async function runCore(o) {
       if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
         // #4400: the last run's own records as a bounded digest in the builder prompts; never in issueText (contract quotes)
         const d = buildResumeDigest({ state: priorState, comments: trustedComments, contract: frozen, files: resumed ? await changedFiles().catch(() => []) : [], lane, head: String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim() });
-        resumeNote = d.text;
+        resumeNote = d.text; carriedPasses = d.passes ?? [];
         if (d.text) {
           ev({ event: "RESUME_DIGEST", bytes: Buffer.byteLength(d.text, "utf8"), files: d.files, validates: d.validates, reason: d.reason });
           T.decisions.push(`Resume digest given to the builder: ${d.files} file(s), ${d.validates} validate result(s)${d.reason ? `, last run ${d.reason}` : ""}`);
@@ -1922,6 +1923,14 @@ export async function runCore(o) {
       if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
+      if (carriedPasses.length && result && io.fs.write) { // #5331: a validate id that passed on this same head is not re-run: its row is carried, marked
+        const headNow = String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim(), rows = Array.isArray(result.validation) ? result.validation : [];
+        const carry = carriedPasses.filter((x) => x.head === headNow && !rows.some((r) => r?.id === x.id) && (frozen?.validate ?? []).some((v) => v.id === x.id));
+        if (carry.length) {
+          result = { ...result, validation: [...rows, ...carry.map((x) => ({ id: x.id, command: x.command, exit: 0, carried: true }))] };
+          try { await io.fs.write(`${wt}/${RESULT_FILE}`, `${JSON.stringify(result)}\n`); T.decisions.push(`Validate result(s) ${carry.map((x) => x.id).join(", ")} carried from an earlier run: passed on this same head`); } catch { /* the gate reads what is on disk */ }
+        }
+      }
       { // #4374: the builder's self-review against the shared rubric, log only
         const sr = readSelfReview(result);
         if (sr) ev(sr.state === "present" ? { event: "SELF_REVIEW", answers: sr.items.length, no: sr.no } : { event: "SELF_REVIEW_MISSING", state: sr.state });
