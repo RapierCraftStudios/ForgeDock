@@ -3007,3 +3007,4 @@ path is authorized (#5380).
 
 - **Release skip.** `check-spec-size.sh` (and the `spec-size-budget` job `if:` in `check-commands.yml`) now skip same-repo PRs to `main` whose head is `staging` or `release/*`; forks, non-main bases and missing `PR_SAME_REPO` are still budgeted. CI runs the script from the base ref, so the job `if:` is what takes effect first.
 - **Backslash escape.** `mechfix.mjs` `word()` escapes `\` as well as `$` when building the symbol regex (CodeQL incomplete-escaping).
+- **Barrel others (#5406).** `renameDuplicates` reads each detector `others` file: one that imports the name (ES `import`/`export … from` clause incl. default/aliased, or python from-import) or cannot be read sends the dup to `remaining` with nothing rewritten, since a barrel (import then export) is listed as a declarer but breaks when only the declaring file is renamed. A genuine declaring other (no import) still permits the rename; the detector output is unchanged.
