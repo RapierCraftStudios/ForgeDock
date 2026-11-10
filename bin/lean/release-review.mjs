@@ -26,6 +26,19 @@ const SEVERE = new Set(["CRITICAL", "HIGH"]);
 const MANUAL = "use the manual path: forgedock review-staging <PR> (commands/review-pr-staging.md)";
 const blocked = (why) => ({ blocked: true, reason: `${why}; ${MANUAL}` });
 
+/**
+ * scripts/issue-create.sh (programmatic mode) refuses a body file without exactly one `FORGE:BODY-INTEGRITY` marker, so a
+ * finding body gets one appended unless it already carries exactly one. The id is reduced to the marker's allowed chars.
+ */
+export function withIntegrityMarker(body, id) {
+  const text = String(body ?? "");
+  const n = (text.match(/<!-- FORGE:BODY-INTEGRITY:[^>]+ -->/g) ?? []).length;
+  if (n === 1) return text;
+  const clean = text.replace(/<!-- FORGE:BODY-INTEGRITY:[^>]+ -->\n?/g, "").trimEnd();
+  const tag = String(id ?? "finding").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "finding";
+  return `${clean}\n\n<!-- FORGE:BODY-INTEGRITY:${tag} -->\n`;
+}
+
 /** Reviewers whose prompts are prose in the spec (not briefed by the pre-dispatch): marker domain -> spec phase. */
 export const SPEC_PANEL = [
   { domain: "material-change", phase: "Phase 2 (material-change)" },
@@ -200,7 +213,7 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), ma
       try {
         const body = item.body ?? [`Found by the staging review of PR #${pr}.`, ...Object.entries(item).filter(([k, v]) => k !== "title" && ["string", "number"].includes(typeof v)).map(([k, v]) => `- **${k}**: ${v}`)].join("\n");
         const bodyFile = join(dir, "body.md");
-        writeFileSync(bodyFile, body);
+        writeFileSync(bodyFile, withIntegrityMarker(body, `release-${pr}-${item.id ?? item.title ?? "finding"}`));
         let out = "";
         try { out = execFileSync("bash", [join(ROOT, "scripts", "issue-create.sh"), "--title", item.title, "--body-file", bodyFile, "--label", "review-finding", "--label", "staging-review", "--repo", repo], { encoding: "utf8", cwd, env }); } catch (e) { out = String(e.stdout ?? ""); }
         try {

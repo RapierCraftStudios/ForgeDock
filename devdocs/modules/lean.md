@@ -2781,6 +2781,8 @@ Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs`
 
 `realReleaseIo.runningLanes` reads each unfinished batch's state through `openBatch(...).store.load()` (the handle `openBatch` exposes); `release-io.test.mjs` drives it against real batch dirs, since the step tests stub `io`.
 
+`release-review.mjs` `withIntegrityMarker`: a release finding's body gets exactly one `FORGE:BODY-INTEGRITY` marker before `scripts/issue-create.sh` (programmatic mode refuses a body file without one), so the review step can file its findings instead of blocking.
+
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
 
 - `light.mjs` `lightEligibility` takes `hotspots` (scripts/hotspots.sh `files` rows `{path, lines, commits_90d, over}`). A predicted non-test file with `over` (beyond `maintenance.hotspot.file_lines`) is a new hard reason `hotspot` (`<path> (<lines> lines)`).
