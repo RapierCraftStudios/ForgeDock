@@ -83,6 +83,8 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock stats --self-filed [--repo R] [--since D]", "Share of new issues the pipeline filed itself, by kind, against the 15% target (#5207)"],
     ["npx forgedock stats --conformance-outcomes [--repo owner/repo] [--since <date>] [--window-days 7] [--replay <pr,...> --enforce-domains <list>]", "Read-only: do conformance blocks predict post-merge defects (2x2 per repo, failure kind and risk surface; --replay a PR list against an enforce config)"],
     ["npx forgedock stats --depth [--since <ver|date>] [--min-n N] [--offline] [--repo owner/repo] [--json]", "Light-eligible vs ineligible lane outcomes, by reason/signal, and the #5052 light-lane promotion verdict"],
+    ["npx forgedock replay --timelapse <batch|epic> [--repo owner/repo] [--out dir] [--format gif|mp4] [--duration 30-90]", "Read-only 30-90 s time-lapse (frames, vhs tape, GIF/MP4 when vhs is installed) of a recorded batch or epic from the lifecycle event log"],
+    ["npx forgedock stats --origin [--repo R] [--since D] [--json]", "Requested vs pipeline-generated issues by origin, how pipeline-found ones closed, and their cost share (#5294)"],
   ]],
   ["Release", [
     ["npx forgedock selftest [--static] | --live --repo <owner/sandbox> [--lang node|python] [--pr <N>]", "Live contract harness: drives the real gh, git and orchestrate through a disposable sandbox repo (steps create, add, body, resume, merge, remote, cleanup) plus a static check of every gh --json field list; exits non-zero naming the failed step; --pr posts the FORGE:SELFTEST result the staging->main review requires; see docs/SELFTEST.md"],

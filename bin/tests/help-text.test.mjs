@@ -56,3 +56,11 @@ describe("one tagline (#5303)", () => {
     assert.ok(renderLogo({ context: "install" }).includes(TAGLINE));
   });
 });
+
+import { test } from "node:test";
+test("help --all keeps replay --timelapse and stats --origin (#5303)", async () => {
+  const { fullHelp } = await import("../help-text.mjs");
+  const out = fullHelp({ width: 100 });
+  assert.match(out, /replay --timelapse/);
+  assert.match(out, /stats --origin/);
+});
