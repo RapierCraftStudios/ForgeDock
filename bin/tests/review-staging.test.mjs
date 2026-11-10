@@ -483,6 +483,20 @@ describe("review-staging --summary", () => {
     assert.match(w.out[0], /^VERDICT: APPROVE FOR DEPLOY/);
   });
 
+  it("an unreadable PR head branch fails closed: GATE_FAILURE, Feature acceptance BLOCK (#5394)", async () => {
+    for (const read of [async () => { throw new Error("gh down"); }, async () => "\n"]) {
+      const w = await finalized();
+      const orig = w.io.gh;
+      w.io.gh = async (a) => (a[0] === "pr" && a[1] === "view" && a.includes("headRefName") ? read() : orig(a));
+      assert.equal(await reviewStagingFromCli(["42", "--summary"], w.io), 1);
+      const b = posted(w);
+      assert.equal(b.length, 1);
+      assert.ok(b[0].startsWith("<!-- FORGE:GATE_FAILURE -->\n"));
+      assert.ok(!b[0].includes("FORGE:GATE_PASS"));
+      assert.match(b[0], /\| \*\*Feature acceptance\*\* \| `BLOCK` \| PR head branch unreadable/);
+    }
+  });
+
   for (const [name, o, verdict] of [
     ["a CONFIRMED CRITICAL", { findings: [{ severity: "CRITICAL", confidence: "CONFIRMED" }] }, "BLOCK DEPLOY"],
     ["a CONFIRMED HIGH", { findings: [{ severity: "high", confidence: "confirmed" }] }, "NEEDS FIXES FIRST"],
