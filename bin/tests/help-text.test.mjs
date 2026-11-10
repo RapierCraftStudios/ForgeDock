@@ -37,6 +37,10 @@ describe("user-facing errors (#5303)", () => {
 });
 
 describe("help --all", () => {
+  it("descriptions carry no engine-internal term (command names stay literal)", async () => {
+    const { FULL_COMMAND_GROUPS } = await import("../help-text.mjs");
+    for (const [, rows] of FULL_COMMAND_GROUPS) for (const [cmd, desc] of rows) assert.deepEqual(scan(desc.replace(/--wait-lease/g, "")), [], cmd);
+  });
   const text = fullHelp({ width: 100 });
   it("keeps every command, grouped by purpose", () => {
     for (const w of ["Set up", "Run work", "Release", "fix-close-reasons", "schedd", "review-staging", "doctor --lanes"]) assert.ok(text.includes(w), w);
@@ -48,6 +52,7 @@ describe("one tagline (#5303)", () => {
     assert.equal(JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).description, TAGLINE);
     assert.equal(getLogoTagline(""), TAGLINE);
     assert.equal(getLogoTagline("install"), TAGLINE);
+    assert.ok(readFileSync(new URL("../../README.md", import.meta.url), "utf8").includes(TAGLINE), "README tagline");
     assert.ok(renderLogo({ context: "install" }).includes(TAGLINE));
   });
 });
