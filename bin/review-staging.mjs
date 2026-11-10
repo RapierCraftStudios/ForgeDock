@@ -565,11 +565,12 @@ export function stagingVerdict({ ciFailing, testGateInvalid, acceptanceBlocked =
 /**
  * #5336: the feature-acceptance gate of a milestone release PR (head ref `milestone/<slug>` by the feature pattern). A milestone
  * with an epic is blocked by a red or never-run journey, and a SKIP test gate is a blocking finding there, not a pass.
- * Returns the blocking reason or null. A PR that is not from a milestone branch is not gated; an unreadable read fails closed.
+ * Returns the blocking reason or null. A PR that is not from a milestone branch is not gated; an unreadable head branch or gate read fails closed.
  */
 async function acceptanceBlock(io, c, pr, tg) {
   let branch = "";
-  try { branch = (await io.gh(["pr", "view", String(pr), "-R", c.ghRepo, "--json", "headRefName", "--jq", ".headRefName"])).trim(); } catch { return null; }
+  try { branch = (await io.gh(["pr", "view", String(pr), "-R", c.ghRepo, "--json", "headRefName", "--jq", ".headRefName"])).trim(); } catch (e) { return `PR head branch unreadable (${String(e?.message ?? e).slice(0, 120)}; fail closed)`; }
+  if (!branch) return "PR head branch unreadable (empty; fail closed)";
   const [pre, post = ""] = String(c.featurePattern ?? DEFAULT_FEATURE_PATTERN).split("{slug}");
   if (!pre || !branch.startsWith(pre) || !branch.endsWith(post) || branch.length <= pre.length + post.length) return null;
   let g;
