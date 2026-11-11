@@ -23,6 +23,7 @@ cat > "$TMP/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
 case "$1 $2" in
   "api repos/o/r/issues/7/events") cat "$MOCK_EVENTS" ;;
+  "api graphql") echo "${MOCK_VIEWER:-}" ;;
   "issue edit") echo "EDIT $*" >> "$MOCK_LOG" ;;
 esac
 exit 0
@@ -34,11 +35,15 @@ NOEV='[]'
 CLEARED='[{"event":"unlabeled","label":{"name":"needs-human"},"created_at":"2026-01-02T00:00:00Z"}]'
 OLDER='[{"event":"unlabeled","label":{"name":"needs-human"},"created_at":"2025-12-31T00:00:00Z"}]'
 
+BOT_EV='[{"event":"unlabeled","label":{"name":"needs-human"},"created_at":"2026-01-02T00:00:00Z","actor":{"login":"the-bot","type":"User"}}]'
+BOTTYPE_EV='[{"event":"unlabeled","label":{"name":"needs-human"},"created_at":"2026-01-02T00:00:00Z","actor":{"login":"app[bot]","type":"Bot"}}]'
+HUMAN_EV='[{"event":"unlabeled","label":{"name":"needs-human"},"created_at":"2026-01-02T00:00:00Z","actor":{"login":"alice","type":"User"}}]'
+
 # run <dry_run> <events-json>  -> sets LOG (edit calls), ACTION, REASON
 run() {
   : > "$TMP/log"; echo "$2" > "$TMP/ev"
   local out
-  out=$(PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/log" MOCK_EVENTS="$TMP/ev" DRY_RUN="$1" ISSUE="$ISSUE" ISSUE_LABELS="" \
+  out=$(PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/log" MOCK_EVENTS="$TMP/ev" MOCK_VIEWER="${VIEWER:-}" DRY_RUN="$1" ISSUE="$ISSUE" ISSUE_LABELS="" \
     GH_REPO=o/r GH_FLAG="-R o/r" NUM=7 bash -c '
       declare -A DIAG_ACTION DIAG_REASON
       for _ in 1; do
@@ -58,5 +63,17 @@ run false "$CLEARED"
 [ -z "$LOG" ] && echo "$OUT" | grep -q "cleared by a human" && ok "human-cleared: not re-parked" || bad "human-cleared: not re-parked"
 run false "$OLDER"
 echo "$LOG" | grep -q "add-label needs-human" && ok "removal before annotation: still restored" || bad "removal before annotation: still restored"
+
+VIEWER=the-bot run false "$BOT_EV"
+echo "$LOG" | grep -q "add-label needs-human" && ok "#5494: bot-login removal (viewer) restored" || bad "#5494: bot-login removal (viewer) restored"
+VIEWER="" FORGE_BOT_LOGIN=the-bot run false "$BOT_EV"
+echo "$LOG" | grep -q "add-label needs-human" && ok "#5494: bot-login removal (FORGE_BOT_LOGIN) restored" || bad "#5494: bot-login removal (FORGE_BOT_LOGIN) restored"
+unset FORGE_BOT_LOGIN
+VIEWER=the-bot run false "$BOTTYPE_EV"
+echo "$LOG" | grep -q "add-label needs-human" && ok "#5494: Bot-type removal restored" || bad "#5494: Bot-type removal restored"
+VIEWER=the-bot run false "$HUMAN_EV"
+[ -z "$LOG" ] && echo "$OUT" | grep -q "cleared by a human" && ok "#5494: human removal still skipped" || bad "#5494: human removal still skipped"
+VIEWER="" run false "$BOT_EV"
+[ -z "$LOG" ] && ok "#5494: unresolved bot login stays fail-closed" || bad "#5494: unresolved bot login stays fail-closed"
 
 echo "passed=$PASS failed=$FAILN"; [ "$FAILN" -eq 0 ]
