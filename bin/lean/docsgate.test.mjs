@@ -66,3 +66,13 @@ describe("docs gate (#5419)", () => {
     assert.equal(await docsFromCli(["gate", "--milestone", "M", "--repo", "o/r"], { config: cfg, print, io: { gh: async (a) => { if (String(a[1]).includes("issues?milestone")) return JSON.stringify([{ number: 1, state: "closed", labels: ["dashboard"] }]); return JSON.stringify([{ number: 7, title: "M" }]); } } }), 1);
   });
 });
+
+import { precheck } from "./conformance.mjs";
+it("precheck: configured docs.paths files are authorized, others stay scope creep (#5419)", () => {
+  const contract = { requirements: [], deliverables: [{ id: "D1", path: "src/a.mjs" }], preserve: [], validate: [] };
+  const base = { contract, result: { status: "fixed", requirements: [], validation: [], tests: [] }, ignore: [] };
+  const withDocs = precheck({ ...base, changedFiles: ["src/a.mjs", "docs/api/x.md"], docsPaths: ["docs/**"] });
+  assert.ok(!withDocs.failures.some((f) => f.kind === "scope_creep"));
+  const without = precheck({ ...base, changedFiles: ["src/a.mjs", "docs/api/x.md"] });
+  assert.ok(without.failures.some((f) => f.kind === "scope_creep"));
+});
