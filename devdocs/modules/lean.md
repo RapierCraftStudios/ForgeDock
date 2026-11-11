@@ -715,6 +715,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `refactor.mjs` (`refactor:split` step, #4211),
 `light.mjs` (light-lane eligibility and upgrade triggers, forge.yaml `lean.light`, #4448; see its entry below),
 `lightlane.mjs` (light-lane execution: one builder session, derived contract, upgrade to the full lane, #4450; see its entry below),
+`fastforward.mjs` (investigation decides pipeline depth: triage parse, eligibility from the investigation, skipped stages, #5426; see its entry below),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
 push/gh/merge retry patterns).
 
@@ -1910,6 +1911,22 @@ worktree pool reused across issues is deferred; deps are already warm via the sh
 ## Entry 2026-10-23 — FORGE:LITE receipt and the light/full split in the batch report (#4452)
 
 After `LIGHT_DONE`, and again after `LIGHT_UPGRADE`, `runCore` posts a `FORGE:LITE` comment. The body comes from
+`fastforward.mjs` (pure helpers and prompts, #5426) decides the pipeline depth from the investigation. forge.yaml
+`lean.light.source` (`parseLightConfig` adds `source` only for `investigation`; default `text` changes nothing):
+- `source: investigation` and `mode: on` (fresh lane): `lean.mjs` runs `investigationOnlyPrompt` first (step 1 of the plan
+  prompt plus `.forge-lean/triage.json` {files, size, risk, decision_needed}; no contract). invalid/already-fixed/blocked
+  take the existing close handling. Else `parseTriage` (triage.json, fallback: the `### Affected Files` bullets) feeds
+  `fastForwardEligibility` = `lightEligibility` with `source: "investigation"` (predicted files, size and hotspots from the
+  triage; `risk` and `decision_needed` are hard reasons; no text repro requirement). The text verdict is only the
+  `pre_text_<verdict>` signal and `LIGHT_ELIGIBILITY` still logs it. Eligible: `runLightStep` resumes the investigation
+  session (`FF_BUILD_LEAD`), the same gates and the #4450 upgrade apply; `skippedStages` names plan, contract freeze and
+  multi-session review in the trajectory and the FORGE:LITE receipt. Not eligible: `contractStepPrompt` resumes the same
+  session and the full lane continues. A gate upgrade falls back to the existing fresh full plan with the digest.
+- `source: investigation` and `mode: shadow`: lane unchanged; after the plan session `FASTFORWARD_ELIGIBILITY`
+  (`shadow: true`, from the Affected Files section) is logged at no extra cost.
+- `forgedock stats --depth` (`stats/depth.mjs` `fastForwardReport`) reports the eligibility rate and the outcomes
+  (merge, defect, revert) of fast-forwarded, upgraded and full lanes from `FASTFORWARD_ELIGIBILITY`.
+
 `lightlane.mjs` `renderLiteReceipt({lr, eligibility, costUsd, contractHash})` (pure) and contains:
 - the outcome: light or upgraded
 - the diff stat (all files and non-test lines)

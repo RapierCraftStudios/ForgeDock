@@ -200,9 +200,10 @@ const bullets = (xs) => {
  * The FORGE:LITE receipt of a light lane (#4452, parent #4442), without the marker (pure): outcome, diff stat, red/green
  * repro, gates (targeted tests, API shape, derived contract), cost and eligibility, plus the upgrade reasons when the lane
  * moved to the full pipeline. `costUsd` is the lane's true cost so far: the sum of #4407 per-session deltas, never a
- * running session total. `lr` is runLightStep's return; `eligibility` is lightEligibility's.
+ * running session total. `lr` is runLightStep's return; `eligibility` is lightEligibility's. `skipped` (#5426) is
+ * fastforward.mjs skippedStages: listed only on a fast-forwarded lane that did not upgrade.
  */
-export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null, contractHash = null } = {}) {
+export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null, contractHash = null, skipped = [] } = {}) {
   const r = lr && typeof lr === "object" ? lr : {};
   const upgraded = !!r.upgrade;
   const rows = Array.isArray(r.diff?.files) ? r.diff.files : null;
@@ -236,6 +237,8 @@ export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null,
     `**Eligibility:** ${one(e.verdict ?? "unknown", 20)} (mode ${one(e.mode ?? "?", 10)})${e.verdict === "eligible" && !eReasons.length ? ": repro or expected behaviour, predicted files within limits, size S, no risk path" : ""}`,
     ...bullets(eReasons),
   ];
+  const skips = (Array.isArray(skipped) ? skipped : []).filter((x) => x && x.stage); // #5426: a fast-forwarded lane names what it skipped
+  if (skips.length && !upgraded) lines.push("**Fast-forward (investigation decided the depth):** skipped stages", ...bullets(skips.map((x) => `${one(x.stage, 40)}: ${one(x.why)}`)));
   if (upgraded) {
     const ups = (Array.isArray(r.reasons) ? r.reasons : []).filter((x) => x && x.code).map((x) => `${one(x.code, 40)}: ${one(x.detail)}`);
     lines.push("**Upgrade reasons:**", ...bullets(ups.length ? ups : ["unknown"]));

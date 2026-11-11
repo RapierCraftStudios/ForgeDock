@@ -59,6 +59,7 @@ export function depthRows(events, { repo = null, sinceMs = null, issue = null } 
     if (e.event === "RUN_START") { close(); cur = { start: e, elig: null, term: null, shape: "full", attempts: [], findings: 0, conf: 0, pr: null }; continue; }
     if (!cur) continue;
     if (e.event === "LIGHT_ELIGIBILITY") cur.elig = e;
+    else if (e.event === "FASTFORWARD_ELIGIBILITY") cur.ff = e; // #5426
     else if (e.event === "LIGHT_DONE") cur.shape = "light";
     else if (e.event === "LIGHT_UPGRADE") cur.shape = "upgraded";
     else if (e.event === "PHASE_ATTEMPT_USAGE") cur.attempts.push(e);
@@ -75,6 +76,7 @@ export function depthRows(events, { repo = null, sinceMs = null, issue = null } 
     const t = s.term;
     return { issue: Number.isSafeInteger(s.start.issue) ? s.start.issue : issue, repo: s.start.repo ?? null, startTs: s.start.ts ?? null, endTs: t.ts ?? null,
       verdict: String(s.elig.verdict ?? "unknown"), mode: s.elig.mode ?? null, reasons: codesOf(s.elig.reasons), signals: codesOf(s.elig.signals),
+      ff: s.ff ? { verdict: String(s.ff.verdict ?? "unknown"), eligible: s.ff.eligible === true, shadow: s.ff.shadow === true } : null,
       shape: s.shape, outcome: t.reason ?? null, merged: t.reason === "merged", needsHuman: t.reason === "needs-human",
       firstPass: firstPassOf(impl.map((a) => ({ trigger: a.trigger ?? null, restart_of: a.restart_of ?? null }))),
       cost: s.attempts.reduce((n, a) => n + (costOf(a) ?? 0), 0), wallMs: num(t.wall_ms), modelMs: num(t.model_ms),
@@ -219,6 +221,22 @@ export function recommendation(rows, defects, prom) {
   return { decision, eligible_share: r(per(elig.length, rows.length)), eligible_n: elig.length, would_be_saving_usd: saving, eligible_defect_rate: depthCell(elig, defects).defect_rate };
 }
 
+/**
+ * #5426: fast-forward eligibility (the investigation decided the depth) and the outcomes of fast-forwarded lanes. Lanes with a
+ * FASTFORWARD_ELIGIBILITY event are the base; `fast_forwarded` = a non-shadow eligible lane that ended light (LIGHT_DONE),
+ * `upgraded` = one that fell back to the full lane. Merged lanes carry their post-merge defect and revert signals.
+ */
+export function fastForwardReport(rows, defects = new Map()) {
+  const withFf = rows.filter((x) => x.ff);
+  const elig = withFf.filter((x) => x.ff.eligible), live = elig.filter((x) => !x.ff.shadow);
+  const cell = (xs) => {
+    const known = xs.filter((x) => x.merged && typeof defects.get(x.issue)?.revert === "boolean");
+    return { ...depthCell(xs, defects), reverts_n: known.length, revert_rate: known.length ? r(per(known.filter((x) => defects.get(x.issue).revert).length, known.length)) : null };
+  };
+  return { lanes: withFf.length, eligible_n: elig.length, eligibility_rate: r(per(elig.length, withFf.length)), shadow_n: withFf.filter((x) => x.ff.shadow).length,
+    fast_forwarded: cell(live.filter((x) => x.shape === "light")), upgraded: cell(live.filter((x) => x.shape === "upgraded")), full_lane: cell(withFf.filter((x) => !x.ff.eligible || x.ff.shadow)) };
+}
+
 /** Pure report: per verdict, per reason/signal code, and the promotion verdict. */
 export function depthReport({ rows = [], defects = new Map(), minN = DEFAULT_MIN_N, defectsSource = "github" } = {}) {
   const byVerdict = {};
@@ -230,7 +248,7 @@ export function depthReport({ rows = [], defects = new Map(), minN = DEFAULT_MIN
   for (const code of [...new Set(rows.flatMap((x) => [...x.reasons, ...x.signals]))].sort()) byCode[code] = depthCell(rows.filter((x) => x.reasons.includes(code) || x.signals.includes(code)), defects);
   const prom = promotion(rows, defects, minN);
   const unresolved = rows.filter((x) => x.merged && defects.get(x.issue)?.defect === null).length;
-  return { lanes: rows.length, min_n: minN, defects_source: defectsSource, defects_unresolved: unresolved, by_verdict: byVerdict, by_code: byCode, promotion: prom, recommendation: recommendation(rows, defects, prom) };
+  return { lanes: rows.length, min_n: minN, defects_source: defectsSource, defects_unresolved: unresolved, by_verdict: byVerdict, by_code: byCode, promotion: prom, recommendation: recommendation(rows, defects, prom), fast_forward: fastForwardReport(rows, defects) };
 }
 
 const pct = (x) => (x == null ? "n/a" : `${Math.round(x * 100)}%`);
@@ -254,6 +272,11 @@ export function renderDepth(rep, { repo = null, since = null } = {}) {
     + ` (treatment light|upgraded n=${p.n_treatment}, control eligible full n=${p.n_control}, sizes ${p.sizes.length ? p.sizes.join(",") : "none"})`);
   out.push(fmt("cost ratio", ck.cost, "x"), fmt("wall/model", ck.wall, "x"), fmt("defect rate", ck.defects, ""));
   out.push(`  ${p.note}`);
+  const ff = rep.fast_forward;
+  if (ff?.lanes) {
+    out.push(`fast-forward (#5426, investigation decides depth): ${ff.lanes} lane(s) with an investigation verdict, eligible ${pct(ff.eligibility_rate)} (n=${ff.eligible_n}, ${ff.shadow_n} shadow)`);
+    for (const [k, c] of [["fast-forwarded", ff.fast_forwarded], ["upgraded to full", ff.upgraded], ["full lane", ff.full_lane]]) out.push(`${cellLine(k, c)}, reverts ${pct(c.revert_rate)} (n=${c.reverts_n})`);
+  }
   const rc = rep.recommendation;
   if (rc) out.push(`recommendation: ${rc.decision}; eligible share ${pct(rc.eligible_share)} (n=${rc.eligible_n}), would-be saving ${rc.would_be_saving_usd == null ? "n/a" : `$${rc.would_be_saving_usd.toFixed(2)}`} over the window, defect rate on eligible lanes ${pct(rc.eligible_defect_rate)}`);
   return out.join("\n");

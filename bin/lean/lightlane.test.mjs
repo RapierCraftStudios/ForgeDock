@@ -197,6 +197,14 @@ describe("renderLiteReceipt (#4452)", () => {
     assert.ok(!/<!--|undefined|NaN/.test(body), body);
   });
 
+  it("#5426 a fast-forwarded lane lists the skipped stages and why; an upgraded one does not", async () => {
+    const skipped = [{ stage: "plan", why: "small change" }, { stage: "contract freeze", why: "small change" }];
+    const ok = renderLiteReceipt({ lr: await runLightStep(step().ctx), eligibility: ELIG, skipped });
+    assert.match(ok, /\*\*Fast-forward \(investigation decided the depth\):\*\* skipped stages\n  - plan: small change\n  - contract freeze: small change/);
+    assert.ok(!/Fast-forward/.test(renderLiteReceipt({ lr: await runLightStep(step().ctx), eligibility: ELIG })));
+    assert.ok(!/Fast-forward/.test(renderLiteReceipt({ lr: { upgrade: true, reasons: [{ code: "diff_lines", detail: "x" }] }, eligibility: ELIG, skipped })));
+  });
+
   it("an upgraded lane lists the gates that fired and the upgrade reasons; free text is sanitised", async () => {
     const api = { status: "changed", changes: [{ file: "src/foo.js", symbol: "foo", change: "sync-async" }], unknown: [] };
     const r = await runLightStep(step({ api, testRcs: [1, 1], repro: { base: "PASSED", head: "RAN" } }).ctx);
