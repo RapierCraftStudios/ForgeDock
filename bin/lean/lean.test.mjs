@@ -5577,13 +5577,15 @@ describe("shared dependency cache wiring (#4220)", () => {
     const gate = new Promise((r) => { release = r; });
     w.io.deps.prepare = async () => { await gate; done = true; return [{ status: "hit", eco: "pnpm", key: "k", ms: 5, reason: null }]; };
     const inner = w.io.runner;
-    w.io.runner = async (c) => { n++; if (n === 1) { atPlan = done; release(); } else if (n === 2) atImplement = done; return inner(c); };
+    w.io.runner = async (c) => { n++; if (n === 1) { atPlan = done; c.onSpawn?.({ pid: 4242 }); release(); } else if (n === 2) atImplement = done; return inner(c); };
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(atPlan, false, "the plan session did not wait for the install");
     assert.equal(atImplement, true, "implement waited for it");
     const log = readLog(dir, 7);
     assert.ok(log.some((e) => e.event === "LANE_SETUP_TIMING" && e.step === "deps"));
     assert.equal(log.filter((e) => e.event === "FIRST_SESSION").length, 1);
+    const steps = log.filter((e) => e.event === "LANE_SETUP_TIMING").map((e) => e.step);
+    for (const st of ["prompt_assembly", "cli_init"]) assert.ok(steps.includes(st), `${st} timed`);
   });
 
   it("#5434 a failed env.setup still ends needs-human and no implement session starts", async () => {

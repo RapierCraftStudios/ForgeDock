@@ -728,10 +728,10 @@ export async function runCore(o) {
   /** #5236: no account has room: the lane ends deferred `quota.exhausted` (earliest reset) and emits QUOTA_EXHAUSTED, never a spawn or a far pause. */
   const exhaustedStop = (e, x, role) => { ev({ event: "QUOTA_EXHAUSTED", phase: role, earliestReset: x.earliestReset }); return exhaustedDeferral(e, { earliestReset: x.earliestReset, backendId: laneBackendId(process.env, rotator), now: now() }); };
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
-  let firstSession = false, setupWait = null; // #5434
+  let firstSession = false, setupWait = null, firstCallAt = null, packDoneAt = null, spawnLogged = false; // #5434
   async function callRunner(args) {
     let pauses = 0, rotations = 0, pinned = null, credTries = 0;
-    if (!firstSession) { firstSession = true; ev({ event: "FIRST_SESSION", ms: now() - t0, role: args.role ?? null }); } // #5434: lane start to the first model session
+    if (!firstSession) { firstSession = true; firstCallAt = now(); ev({ event: "FIRST_SESSION", ms: firstCallAt - t0, role: args.role ?? null, ...(packDoneAt != null ? { since_context_pack_ms: firstCallAt - packDoneAt } : {}) }); } // #5434: lane start to the first model session
     for (;;) {
       if (smartRotator && !pinned) { const x = poolExhausted(rotator, laneLimited); if (x) throw exhaustedStop(new Error("no account has capacity"), x, args.role); } // #5236: the shim would fall back to the default profile
       // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
@@ -971,7 +971,8 @@ export async function runCore(o) {
     const control = {};
     const governor = startGovernor(control);
     let spawned = null;
-    const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
+    const onSpawn = (child) => { if (!spawnLogged && firstCallAt != null) { spawnLogged = true; ev({ event: "LANE_SETUP_TIMING", step: "cli_init", ms: now() - firstCallAt }); } // #5434: runner call to process spawn
+      if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
     const session = {}, cur = inflight = { n, session, at: now(), flushed: false, opts: { model, mode, trigger, restartOf } };
     const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? laneModel(), resume, system: "", prompt, control, ...(profile ? { profile } : {}), onSpawn, session, agents: explorerAgents(exploreCfg), rereadNudge: true,
       idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}),
@@ -1573,14 +1574,19 @@ export async function runCore(o) {
      * io.contextFacts or any failure gives null: never fails a run. The pack never enters issueText (contract quotes).
      */
     async function contextPackStep() {
-      const pits = await lanePitfalls();
+      const tPits = now(), pits = await lanePitfalls();
+      setupStep("pack_pitfalls", tPits);
       if (ctxCfg.mode === "off" || !io.contextFacts) return null;
       try {
+        const tGh = now();
         const headSha = String(await git(["rev-parse", base])).trim();
         // #4316: linked-issue states are part of the key; a failed lookup only drops them from it
         const links = await linkStateStamp({ gh: ghc, repo, issue, body: iss.body }).catch(() => "");
+        setupStep("pack_gh_reads", tGh);
+        const tCp = now();
         const r = await contextPackFor({ cfg: ctxCfg, issue, repo, headSha, cacheDir: dir, fs: io.fs, stamp: { scope: scopeHash, attempts: priorAttempts(iss.body, trustedComments), links, pitfalls: pits.map((x) => x.sig) },
           gather: () => io.contextFacts({ milestone, repo, issue, iss, comments: trustedComments, cwd: wt, checkout: cwd, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now(), pitfalls: pits }) });
+        setupStep("pack_compile", tCp); packDoneAt = now();
         const p = r.pack;
         const inPack = Array.isArray(p.pitfalls) ? p.pitfalls : [];
         pitMatched = inPack.filter((x) => x.match === "files").length;
@@ -1974,7 +1980,8 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" });
+        const tPrompt = now(), planText = planPrompt(); setupStep("prompt_assembly", tPrompt); // #5434
+        await builder(++attemptN, planText + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
