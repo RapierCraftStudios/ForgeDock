@@ -1591,7 +1591,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#5447 a test plan declaring env: a missing runner is provisioned once and the lane builds; if it stays missing the lane ends env.tool_missing before building", async () => {
-    const contract = { ...CONTRACT, test_plan: { env: ["pytest"] } };
+    const contract = { ...CONTRACT, test_plan: [{ requirement: "R1", proof: "the pytest case no longer errors at collection", level: "unit", level_reason: "cheapest level that observes it", repro: "no-repro", reason: "env-only", command: "node --test test/foo.test.js", env: ["pytest"] }] };
     const w = world({ contract }); let installed = false;
     w.io.deps = { prepare: async () => [] };
     w.io.runCommand = async ({ command }) => { if (/pip install/.test(command)) installed = true; return /pytest --version/.test(command) && !installed ? { rc: 1, output: "No module named pytest" } : { rc: 0, output: "" }; };

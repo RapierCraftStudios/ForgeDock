@@ -301,8 +301,10 @@ export function testRunSummary({ contract, failures = [], repro = null } = {}) {
   return { declared: ids.length, ran: ids.length - skipped.length, redGreen, skipped };
 }
 
-/** #5447: tool names the contract's test plan declares in `test_plan.env` (strings or {tool}); [] when absent. Pure. */
+/** #5447: tool names the contract's test plan declares in `env` (per row of the #5445 `test_plan` array, or `test_plan.env`); strings, comma lists or {tool}; [] when absent. Pure. */
 export function declaredEnv(contract) {
-  const env = contract?.test_plan?.env;
-  return [...new Set((Array.isArray(env) ? env : []).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim()).filter((t) => /^[\w.+-]+$/.test(t)))];
+  const plan = contract?.test_plan;
+  const raw = Array.isArray(plan) ? plan.map((r) => r?.env) : [plan?.env];
+  const names = raw.flatMap((e) => (Array.isArray(e) ? e : typeof e === "string" ? e.split(",") : [])).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim());
+  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t)))];
 }

@@ -157,6 +157,7 @@ describe("#5447 declaredEnv", () => {
   it("reads test_plan.env tool names", async () => {
     const { declaredEnv } = await import("./preflight.mjs");
     assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", { tool: "uv" }, "bad name"] } }), ["pytest", "uv"]);
+    assert.deepEqual(declaredEnv({ test_plan: [{ requirement: "R1", env: "pytest, uv" }, { requirement: "R2" }] }), ["pytest", "uv"]);
     assert.deepEqual(declaredEnv({}), []);
   });
 });
