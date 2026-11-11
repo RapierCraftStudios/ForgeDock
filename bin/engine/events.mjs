@@ -27,6 +27,7 @@ export const EVENT_TYPES = {
   "probe.failed": ["detail", "fix"],
   "regression.detected": ["subject", "metric", "detail"],
   "experiment.verdict": ["experiment", "verdict", "detail"],
+  "watch.dead": ["watch", "repo", "reason", "age_s"],
 };
 
 const scalar = (v) => (typeof v === "number" ? Number.isFinite(v) : typeof v === "boolean" || (typeof v === "string" && v !== ""));

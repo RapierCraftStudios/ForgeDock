@@ -27,7 +27,7 @@ import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
-import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness } from "./issuewatch-parity.mjs";
+import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness, alertDeadWatches } from "./issuewatch-parity.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause", "max_remediations"];
 export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -468,8 +468,8 @@ async function fold({ issue, watch, repo, io, state }) {
 export function formatStatus(s, watch, now = Date.now()) {
   const sel = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane"].filter((k) => (Array.isArray(watch[k]) ? watch[k].length : watch[k])).map((k) => `${k}=${[].concat(watch[k]).join(",")}`).join(" ") || "(all trusted issues)";
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
-  const live = s.heartbeat || s.paused ? watchLiveness(s, now) : null;
-  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, ...(live ? [`  state: ${live.state}${live.state === "paused" || live.state === "stale" ? ` (${live.reason})` : ""}  last heartbeat: ${s.heartbeat ?? "never"}${live.ageMs != null ? ` (${Math.round(live.ageMs / 1000)}s ago)` : ""}`] : []), `  selector: ${sel}`,
+  const live = s.heartbeat || s.paused || s.phase === "exited" ? watchLiveness(s, now) : null;
+  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, ...(live ? [`  state: ${live.state === "dead" ? "DEAD" : live.state}${["paused", "dead", "exited"].includes(live.state) ? ` (${live.reason})` : ""}  last heartbeat: ${s.heartbeat ?? "never"}${live.ageMs != null ? ` (${Math.round(live.ageMs / 1000)}s ago)` : ""}`] : []), `  selector: ${sel}`,
     `  reconciled: ${Object.entries(claimCounts(s)).map(([k, v]) => `${k} ${v}`).join("  ")}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
@@ -509,16 +509,25 @@ export function decisionLaunch({ i, watch, repo, io, state, handles, branches, d
 }
 
 /** Run until done (capped) or `once`; writes status.json each pass. */
-export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {}, cwd }) {
+export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {}, cwd, signals = false }) {
   const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
+  if (state.phase === "exited") { state.phase = "running"; delete state.exitReason; delete state.exitedAt; } // a supervised restart resumes the watch
   const handles = new Map();
   const ctx = decisionContext({ loadPolicy, readFile, cwd: cwd ?? process.cwd() });
   const shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
   const launch = (i) => decisionLaunch({ i, watch, repo, io, state, handles, branches, defaults });
+  // #5465: whatever ends the process, status.json says so instead of staying `running` with a dying heartbeat
+  const markExit = (reason) => {
+    if (state.phase === "done") return;
+    state.phase = "exited"; state.exitReason = String(reason).slice(0, 200); state.exitedAt = new Date(io.now()).toISOString();
+    try { writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n"); } catch { /* the heartbeat goes stale and status shows DEAD */ }
+  };
+  const onSignal = (sig) => { markExit(`stopped by ${sig}`); release(); process.exit(0); };
+  if (signals) for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => onSignal(sig));
   try {
     do {
       state.heartbeat = new Date(io.now()).toISOString(); state.heartbeatEveryMs = intervalMs; // #5313: liveness lives in the state, not a process grep
-      const rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null;
+      let rel = null; try { rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null; } catch { /* unreadable release state: not paused */ }
       if (rel) { // a release job holds staging: no claims, retries or decisions until it ends; the next pass resumes by itself
         state.paused = { reason: `release ${rel.id} in flight${rel.step ? ` (${rel.step})` : ""}`, release: rel.id, since: state.paused?.since ?? state.heartbeat };
         writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
@@ -539,10 +548,11 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
       }
       writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
       if (passErr && once) throw passErr;
-      if (state.phase === "done" || once) break;
+      if (state.phase === "done") break;
+      if (once) { markExit("single pass (--once)"); break; }
       await io.sleep(intervalMs);
     } while (true);
-  } finally { release(); }
+  } catch (e) { markExit(`crashed: ${String(e?.message ?? e)}`); throw e; } finally { if (signals) for (const sig of ["SIGTERM", "SIGINT"]) process.removeAllListeners(sig); release(); }
   return state;
 }
 
@@ -611,14 +621,20 @@ export function ghFailureEffect(args) {
   return "the error is raised to its caller (that step fails)";
 }
 
+export const GH_RETRIES = 3;
+export const GH_BACKOFF_MS = 2000;
+/** #5465: a network or server hiccup worth retrying (TLS/handshake timeout, reset, DNS, HTTP 5xx, 429, secondary rate limit), not a 4xx. */
+export const isTransientGhError = (text) => /TLS handshake timeout|i\/o timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|connection reset|connection refused|unexpected EOF|no such host|temporary failure|HTTP (5\d\d|429)\b|secondary rate limit|abuse detection|timeout awaiting/i.test(String(text ?? ""));
+
 /**
  * #5088: `gh(args)→stdout` over `exec` (execFileSync's signature) with gh's stderr captured instead of leaked. A failure
  * throws an Error naming the call (`.status`, `.stderr` kept); an HTTP 401/403 first `warn`s one line with the call and
  * its effect on the pass (ghFailureEffect).
  */
-export function ghRunner(exec, warn = () => {}) {
+export function ghRunner(exec, warn = () => {}, { retries = GH_RETRIES, sleep = sleepSync, delayMs = GH_BACKOFF_MS } = {}) {
   return (args) => {
-    try { return exec("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }); } catch (e) {
+    for (let attempt = 0; ; attempt++) try { return exec("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }); } catch (e) {
+      if (attempt < retries && isTransientGhError(`${e?.stderr ?? ""}\n${e?.message ?? ""}`)) { sleep(delayMs * 2 ** attempt); continue; } // #5465
       const call = args.slice(0, 3).join(" "), stderr = String(e?.stderr ?? "");
       const first = stderr.split("\n").map((l) => l.trim()).find(Boolean) ?? String(e?.message ?? e).split("\n")[0];
       const code = /HTTP (40[13])\b/.exec(stderr)?.[1];
@@ -633,14 +649,26 @@ const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 
 /** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`; `--dry-run` writes nothing: mode release prints the would-cut set, per-issue/batch the would-claim/fold/skip plan (#5088) and the needs-human classification. */
 export async function issueWatchFromCli(argv, deps = {}) {
   const [op] = argv;
-  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status [--name <w>] [--repo owner/repo] [--stuck [--hours <n>]]";
-  if (!["run", "status"].includes(op)) throw new Error(usage);
+  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status [--name <w>] [--repo owner/repo] [--stuck [--hours <n>]] | install [--name <w>] [--repo owner/repo] [--interval <s>] | watchdog";
+  if (!["run", "status", "install", "watchdog"].includes(op)) throw new Error(usage);
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env, print = deps.print ?? ((l) => console.log(l));
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: the default watch */ }
   const watches = loadWatches(raw);
+  if (op === "watchdog") { // #5465: alert (events.webhook_url) once for every watch whose heartbeat is dead; run by the install timer
+    const { makeEventEmitter } = await import("../engine/events.mjs"), { readEvents } = await import("../engine-cli.mjs");
+    const dead = await alertDeadWatches({ root: watchRoot(env), now: (deps.now ?? Date.now)(), emit: deps.emit ?? ((type, data, ctx) => makeEventEmitter({ repo: ctx.repo, config: readEvents(cwd) }).emitEvent(type, data, ctx)) });
+    for (const w of dead) print(`watch ${w.name} (${w.repo}) DEAD: ${w.live.reason}`);
+    return { ok: true, dead: dead.length };
+  }
   const name = flag(argv, "--name") ?? (Object.keys(watches).length === 1 ? Object.keys(watches)[0] : "default");
   const watch = watches[name] ?? (name === "default" ? validateWatch("default", {}) : null);
   if (!watch) throw new Error(`no watch ${name} in forge.yaml issue_watch.watches`);
+  if (op === "install") {
+    const { installWatchUnit } = await import("./issuewatch-install.mjs");
+    const r = installWatchUnit({ name, repo: flag(argv, "--repo"), interval: flag(argv, "--interval"), cwd, cli: CLI, ...(deps.install ?? {}) });
+    print(`issue-watch ${name}: installed ${r.files.join(", ")}`);
+    return { ok: true, ...r };
+  }
   const io = deps.io ?? realIo(null, env);
   const repo = flag(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
   const dir = watchDir(repo, name, env);
@@ -675,7 +703,7 @@ export async function issueWatchFromCli(argv, deps = {}) {
   const real = deps.io ?? realIo(repo, env);
   const branches = readBranches(cwd);
   const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
-  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, cwd, once: argv.includes("--once"), intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
+  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, cwd, once: argv.includes("--once"), signals: true, intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
   print(formatStatus(state, watch, real.now()));
   return { ok: true, state };
 }

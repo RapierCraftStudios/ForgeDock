@@ -5,6 +5,8 @@
 ```
 forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run]
 forgedock issue-watch status [--name <w>] [--repo owner/repo]
+forgedock issue-watch install [--name <w>] [--repo owner/repo] [--interval <s>]
+forgedock issue-watch watchdog
 ```
 
 `--name` defaults to the only watch in forge.yaml, else `default` (every trusted issue, no caps). `--once` does one pass. `--interval` is the seconds between passes (default 300).
@@ -152,3 +154,10 @@ issue_watch:
 - **Run**: the watch posts a `FORGE:RELEASE_PLAN` comment (theme, reasons, included, pulled and excluded issues, policy) on `tracker:` (default: the first issue of the set), tags the set (milestone `release/<theme>-<date>` for a milestone target, else label `release:<theme>-<date>`), and starts one `orchestrate` batch. When the batch reports it opens the deploy PR (lane to the default branch) once. **The watch never merges it**; promotion stays human-only.
 - **Roll over**: issues left out stay pooled and keep their age. `max_issues` and `until` stop new releases.
 - `forgedock issue-watch run --name <w> --dry-run` prints `would cut: <theme> (N issues, score S; ...)`, the triggers, the theme scores and each issue's theme, and writes nothing.
+
+## Resilience, supervision and DEAD detection (#5465)
+
+- **Retry.** A transient `gh` failure (TLS handshake timeout, connection reset, DNS, HTTP 5xx or 429, secondary rate limit) is retried 3 times with doubling backoff (2 s, 4 s, 8 s) inside the same call. A call that still fails fails its pass only: the pass is logged and recorded as `passError`, and the next pass runs. A 4xx is never retried.
+- **Exit state.** Whenever `run` stops (crash, SIGTERM/SIGINT, `--once`) `status.json` gets `phase: exited`, `exitReason` and `exitedAt`; it is never left as `running`. A restart resumes it.
+- **Supervision.** `forgedock issue-watch install --name <w>` writes a systemd user unit `forgedock-issue-watch-<w>.service` (`Restart=on-failure`, run from the current directory so `forge.yaml` is found) and a 60 s watchdog timer, or a launchd agent (`KeepAlive` on failure) on macOS. A finished (`done`) or stopped watch exits 0 and stays down.
+- **DEAD.** A heartbeat older than 3 × `heartbeatEveryMs` (+60 s grace) is shown as `state: DEAD` by `issue-watch status` and in a `issue-watch` section of `forgedock status`. `issue-watch watchdog` (the install timer) and `forgedock status` post a `watch.dead` event once per dead heartbeat to `events.webhook_url` (see EVENTS.md).
