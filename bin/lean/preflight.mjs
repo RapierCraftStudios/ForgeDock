@@ -300,3 +300,9 @@ export function testRunSummary({ contract, failures = [], repro = null } = {}) {
   const redGreen = repro && repro.base === "FAILED" && repro.head === "RAN" ? 1 : 0;
   return { declared: ids.length, ran: ids.length - skipped.length, redGreen, skipped };
 }
+
+/** #5447: tool names the contract's test plan declares in `test_plan.env` (strings or {tool}); [] when absent. Pure. */
+export function declaredEnv(contract) {
+  const env = contract?.test_plan?.env;
+  return [...new Set((Array.isArray(env) ? env : []).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim()).filter((t) => /^[\w.+-]+$/.test(t)))];
+}

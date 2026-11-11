@@ -5,7 +5,7 @@
  * validate step. Pure, never throws. `toolMisses` filters the validate preflight's misses (run where the lane runs) to the
  * tools a different placement could supply; `lackedTools` names the contract's tools a target is known to lack.
  */
-import { preflightProbes } from "./preflight.mjs";
+import { preflightProbes, declaredEnv } from "./preflight.mjs";
 
 const TOOL_KINDS = new Set(["command", "python-module", "node-module"]);
 
@@ -24,5 +24,8 @@ export function toolMisses(misses) {
 export function lackedTools(contract, lacks) {
   const lack = new Set((Array.isArray(lacks) ? lacks : lacks ? [...lacks] : []).map(String));
   if (!lack.size || !contract || typeof contract !== "object") return { tools: [], ids: [] };
-  try { return toolMisses(preflightProbes(contract, { cap: 1000 }).probes.filter((p) => lack.has(p.tool))); } catch { return { tools: [], ids: [] }; }
+  try {
+    const declared = declaredEnv(contract).filter((t) => lack.has(t)).map((tool) => ({ kind: "command", tool, ids: ["test_plan.env"] })); // #5447
+    return toolMisses([...preflightProbes(contract, { cap: 1000 }).probes.filter((p) => lack.has(p.tool)), ...declared]);
+  } catch { return { tools: [], ids: [] }; }
 }

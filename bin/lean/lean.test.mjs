@@ -1570,6 +1570,19 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0); assert.equal(again, 2, "the toolchain prepare plus exactly one provisioning retry");
   });
 
+  it("#5447 a test plan declaring env: a missing runner is provisioned once and the lane builds; if it stays missing the lane ends env.tool_missing before building", async () => {
+    const contract = { ...CONTRACT, test_plan: { env: ["pytest"] } };
+    const w = world({ contract }); let installed = false;
+    w.io.deps = { prepare: async () => [] };
+    w.io.runCommand = async ({ command }) => { if (/pip install/.test(command)) installed = true; return /pytest --version/.test(command) && !installed ? { rc: 1, output: "No module named pytest" } : { rc: 0, output: "" }; };
+    const ok = await run(w, { conformance: "enforce" });
+    assert.notEqual(ok.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.ok(installed);
+    const w2 = world({ contract });
+    w2.io.runCommand = async ({ command }) => (/pytest --version/.test(command) ? { rc: 1, output: "" } : { rc: 0, output: "" });
+    const r = await run(w2, { conformance: "enforce" });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0);
+  });
+
   it("#5447 a failed install covering a changed file blocks through the gate (needs-human env.tool_missing, not merged); an unrelated failed install is only logged", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }];
     const w = world({ validation: v }); let calls = 0;

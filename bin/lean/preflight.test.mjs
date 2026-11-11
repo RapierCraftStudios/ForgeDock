@@ -152,3 +152,11 @@ describe("#5447 unrunnable tests: install classification and the Tests summary",
     assert.deepEqual(t, { declared: 3, ran: 2, redGreen: 1, skipped: [{ id: "V2", reason: "validate_env" }] });
   });
 });
+
+describe("#5447 declaredEnv", () => {
+  it("reads test_plan.env tool names", async () => {
+    const { declaredEnv } = await import("./preflight.mjs");
+    assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", { tool: "uv" }, "bad name"] } }), ["pytest", "uv"]);
+    assert.deepEqual(declaredEnv({}), []);
+  });
+});
