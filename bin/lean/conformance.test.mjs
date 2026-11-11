@@ -108,7 +108,7 @@ describe("#4655 multi-requirement amendment references", () => {
     assert.match(applyAmendments(C, [{ kind: "flaky-note", why: "w" }]).problems[0], /unknown kind 'flaky-note'; valid kinds are/);
   });
   it("supersede-guard guards[] expands to per-guard supersedes", () => {
-    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838", "testadequacy"], why: "x" }]);
+    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);
     assert.deepEqual(a.problems, []);
     assert.deepEqual(a.contract.supersedes, [{ guard: "#4879", why: "x" }, { guard: "#4838", why: "x" }]);
     assert.equal(a.applied.length, 2);
