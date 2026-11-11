@@ -117,6 +117,7 @@ jobs:
           bash scripts/owner-route-parity.test.sh
           bash scripts/review-pr-side-effects.test.sh
           bash scripts/resolve-deploy-gate.test.sh
+          bash scripts/recover-orphans-stateless.test.sh
       - name: Run affected-files-check / maintenance-scan tests
         if: runner.os != 'macOS'
         run: |
