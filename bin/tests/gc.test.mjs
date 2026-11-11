@@ -611,6 +611,23 @@ describe("scheduled and disk-pressure hygiene, wider ownership (#5421)", () => {
     assert.deepEqual(destructive(w), ["volume rm lane_data"]);
   });
 
+  it("lane compose resources of a live lane are kept; stale and exited ones are reclaimed (#5496)", async () => {
+    const lane = (name, issue, extra = {}) => ({ Names: name, CreatedAt: dockerTime(NOW - 30 * H), Labels: `com.docker.compose.project=forgedock-lane-${issue}`, Size: "1kB", State: "exited", ...extra });
+    const w = world({
+      containers: [lane("a-db-1", 77), lane("b-db-1", 88, { State: "running" }), lane("b-redis-1", 88), lane("c-db-1", 99)],
+      volumes: [
+        { Name: "b_data", Labels: "com.docker.compose.project=forgedock-lane-88", CreatedAt: new Date(NOW - 30 * H).toISOString() },
+        { Name: "c_data", Labels: "com.docker.compose.project=forgedock-lane-99", CreatedAt: new Date(NOW - 30 * H).toISOString() },
+        { Name: "a_data", Labels: "com.docker.compose.project=forgedock-lane-77", CreatedAt: new Date(NOW - 30 * H).toISOString() },
+      ],
+    });
+    w.alive.add(4242);
+    writeLedger(w, { pid: 4242 }); // issue 77, owner alive
+    const r = await run(w, ["--apply", "--docker"]);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(destructive(w).sort(), ["rm -f c-db-1", "volume rm c_data"]);
+  });
+
   it("legacy .forge/worktrees dirs: reclaimed only when clean and on a remote; unpushed, dirty or marker-less ones are kept", async () => {
     const w = world();
     const legacy = join(w.repo, ".forge", "worktrees");

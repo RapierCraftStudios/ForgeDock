@@ -29,6 +29,20 @@
 // YAML parser
 // ---------------------------------------------------------------------------
 
+/** A block-list item without its trailing comment and surrounding quotes. */
+function unquoteListItem(raw) {
+  const q = raw.match(/^"([^"]*)"|^'([^']*)'/);
+  return q ? (q[1] ?? q[2]) : raw.replace(/\s+#.*$/, "").trim();
+}
+
+/** `[a, "b, c"]` -> ["a", "b, c"]; null when `value` is not a flow list (kept as the raw string). */
+function flowList(value) {
+  const m = value.match(/^\[(.*)\]$/);
+  if (!m) return null;
+  const items = [...m[1].matchAll(/\s*(?:"([^"]*)"|'([^']*)'|([^,]*?))\s*(?:,|$)/g)].map((x) => x[1] ?? x[2] ?? x[3]);
+  return items.filter((x, k) => !(x === "" && k === items.length - 1 || x === undefined)).map((x) => x.trim());
+}
+
 /**
  * Minimal YAML parser for forge.yaml files.
  *
@@ -38,22 +52,40 @@
  *   - Nested scalars under a section: `  key: value`
  *   - Comments (`# ...`) and blank lines are skipped
  *   - Both LF and CRLF line endings (split on /\r?\n/)
+ *   - Lists of scalars as string arrays (forge#5504): flow `key: [a, "b"]` at top level or under a section, and
+ *     block `  key:` followed by deeper-indented `- item` lines under a section
  *
- * Does NOT handle: arrays, multi-line values, anchors, aliases, or other
+ * Does NOT handle: nested lists of maps, multi-line values, anchors, aliases, or other
  * YAML features. Intended only for the flat key-value structure of forge.yaml.
  *
  * @param {string} raw - Raw string content of a forge.yaml file.
  * @param {{dottedSections?: string[]}} [opts] - forge#5206: sections whose nested keys may also contain `.` and `-`
  *   after the first character (e.g. `experiment:` arm overrides `on.lean.explore: on`); other sections are unchanged.
- * @returns {Record<string, string | Record<string, string>>}
+ * @returns {Record<string, string | string[] | Record<string, string | string[]>>}
  */
 export function parseForgeYaml(raw, { dottedSections = [] } = {}) {
   const result = {};
   let currentSection = null;
+  const lines = raw.split(/\r?\n/);
 
-  for (const line of raw.split(/\r?\n/)) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     // Skip comments and blank lines
     if (/^\s*#/.test(line) || /^\s*$/.test(line)) continue;
+
+    // Nested block list under a section: `  key:` then deeper `- item` lines (forge#5504)
+    const listKey = currentSection && line.match(/^(\s+)([a-zA-Z_][a-zA-Z0-9_]*):\s*(?:#.*)?$/);
+    if (listKey && typeof result[currentSection] === "object") {
+      const items = [];
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        if (/^\s*(#.*)?$/.test(lines[j])) continue;
+        const it = lines[j].match(/^(\s*)-\s+(.*?)\s*$/);
+        if (!it || it[1].length < listKey[1].length) break;
+        items.push(unquoteListItem(it[2]));
+      }
+      if (items.length) { result[currentSection][listKey[2]] = items; i = j - 1; continue; }
+    }
 
     // Top-level section header: `section:` (no value on same line)
     const sectionMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*):\s*(?:#.*)?$/);
@@ -72,7 +104,7 @@ export function parseForgeYaml(raw, { dottedSections = [] } = {}) {
       const value = topScalarMatch[2] ?? topScalarMatch[4]?.trim();
       if (key && value !== undefined) {
         currentSection = null;
-        result[key] = value;
+        result[key] = topScalarMatch[2] === undefined ? flowList(value) ?? value : value;
       }
       continue;
     }
@@ -92,7 +124,7 @@ export function parseForgeYaml(raw, { dottedSections = [] } = {}) {
           value !== undefined &&
           typeof result[currentSection] === "object"
         ) {
-          result[currentSection][key] = value;
+          result[currentSection][key] = nestedMatch[2] === undefined ? flowList(value) ?? value : value;
         }
       }
     }

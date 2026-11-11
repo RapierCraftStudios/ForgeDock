@@ -192,6 +192,20 @@ describe("fixStep", () => {
     assert.deepEqual(s.log.filter((e) => e[0] === "lane").map((e) => e[1]), [101, 100]);
   });
 
+  it("only cancelled CI: no CI issue, no lane, no round spent; re-summarises and goes on", async () => {
+    const pass = { code: 0, data: { verdict: "APPROVE FOR DEPLOY", marker: "FORGE:GATE_PASS", ciFailing: 0 }, lines: [] };
+    const s = fakeSeam({ summary: pass });
+    const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 2, ciCancelOnly: true } } }));
+    assert.deepEqual(s.log, [["summary", []]]);
+    assert.equal(r.blocked, undefined);
+    assert.equal(r.verdict, "APPROVE FOR DEPLOY");
+    const still = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 1, ciCancelOnly: true }, lines: [] };
+    const s2 = fakeSeam({ summary: still });
+    const r2 = await fixStep(ctx(s2, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 1, ciCancelOnly: true } } }));
+    assert.match(r2.reason, /still cancelled/);
+    assert.ok(!s2.log.some((e) => e[0] === "ci-issue" || e[0] === "lane"));
+  });
+
   it("blocks when the verdict is not a pass but there is nothing to fix", async () => {
     assert.match((await fixStep(ctx(fakeSeam(), { review: { result: { ...failed, blocking: [], ciFailing: 0 } } }))).reason, /nothing to fix|neither/);
   });

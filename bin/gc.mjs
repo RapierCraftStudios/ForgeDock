@@ -154,7 +154,7 @@ const errText = (e) => String(e?.stderr || e?.message || e).trim().split("\n")[0
  */
 export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs = LEDGER_TTL_MS, ttlMs = null, deleteMergedBranches = true, now = Date.now() } = {}) {
   const P = probes, fs = P.fs ?? nodeFs;
-  const items = [], notes = [], seen = new Set(), liveIds = new Set(), ledgers = [];
+  const items = [], notes = [], seen = new Set(), liveIds = new Set(), ledgers = [], liveLaneIssues = new Set();
   const want = (type) => scopes.has(SCOPE_OF[type]);
   const ttl = (type) => (Number.isFinite(ttlMs?.[type]) ? ttlMs[type] : olderThanMs); // forge.yaml hygiene TTLs, else --older-than
   const add = (it) => { const k = `${it.type}:${it.id}`; if (seen.has(k)) return; seen.add(k); items.push(it); };
@@ -232,6 +232,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       const sameHost = j.host === P.host;
       // A live owner on this host is a running lane, even past `expires` (long CI waits refresh it only on register).
       const stale = sameHost ? !(Number.isSafeInteger(j.pid) && P.alive(j.pid)) : Number(j.expires) < now;
+      if (!stale && j.issue != null) liveLaneIssues.add(String(j.issue));
       ledgers.push({ path, batch: j.batch, lane: j.lane, repo: j.repo ?? null, stale });
       for (const r of j.resources) {
         const type = TYPE_OF_KIND[r.kind];
@@ -280,9 +281,15 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
 
   // ---- 2. docker: labelled forgedock.owner=1 is owned; everything else is "not owned" ----
   if (want("container") || want("volume")) {
+    let psOut = null, psErr = null;
+    try { psOut = jsonLines(await P.docker(["ps", "-a", "--size", "--no-trunc", "--format", "{{json .}}"])); } catch (e) { psErr = e; }
+    // #5496: a lane compose project is live when its issue has a live ledger or any of its containers is running.
+    const runningLane = new Set((psOut ?? []).filter((c) => /^running$/i.test(String(c.State ?? "")) || /^up\b/i.test(String(c.Status ?? ""))).map((c) => String(parseLabels(c.Labels)["com.docker.compose.project"] ?? "")));
     const ownedBy = (labels, createdMs, type) => {
-      const lane = LANE_COMPOSE_RE.test(String(labels["com.docker.compose.project"] ?? "")); // #5421: lane compose project by name
+      const project = String(labels["com.docker.compose.project"] ?? "");
+      const lane = LANE_COMPOSE_RE.test(project); // #5421: lane compose project by name
       if (labels["forgedock.owner"] !== "1" && !lane) return { owned: false, action: "report", reason: "not owned" };
+      if (labels["forgedock.owner"] !== "1" && (liveLaneIssues.has(project.match(/^forgedock-lane-(\d+)/)[1]) || runningLane.has(project))) return { owned: true, action: "report", reason: "live lane compose project" };
       let exp = Number(labels["forgedock.expires"]);
       if (Number.isFinite(exp) && exp > 0 && exp < 1e12) exp *= 1000;
       if (Number.isFinite(exp) && exp > 0 && exp < now) return { owned: true, action: "reclaim", reason: "forgedock label, expired" };
@@ -291,7 +298,8 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
     };
     if (want("container")) {
       try {
-        for (const c of jsonLines(await P.docker(["ps", "-a", "--size", "--no-trunc", "--format", "{{json .}}"]))) {
+        if (psErr) throw psErr;
+        for (const c of psOut) {
           const name = String(c.Names ?? c.ID ?? "").split(",")[0];
           if (!name || seen.has(`container:${name}`)) continue;
           if (liveIds.has(`container:${name}`)) continue;
