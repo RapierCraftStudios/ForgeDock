@@ -19,7 +19,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -45,6 +45,7 @@ const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or dir
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
+import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
@@ -265,7 +266,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -394,6 +395,7 @@ export async function runCore(o) {
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   const kinds = normalizeKindModes(conformanceKinds); // engine.conformance_kinds: a failure code's own mode
   let domains = [], domainsLogged = null; // #5099: review domains the diff touches (review-roster.sh path triggers)
+  let reproQ = null; // #5446: repro_quality of the frozen repro_test, carried on RUN_TERMINAL
   let firstReview = null; // #5345: the first gate judgement and review.incomplete of the first reply, on RUN_TERMINAL
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
@@ -530,7 +532,7 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
-      conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}),
+      ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
@@ -1525,7 +1527,25 @@ export async function runCore(o) {
       }
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
+      if (reproQuality !== "off" && words.base === "FAILED" && words.head === "RAN") words = { ...words, ...(await reproQualityOf(t)) };
       return words;
+    };
+
+    /** #5446: patch-echo + targeted mutation of the fix; {quality, enforce}. Never throws (a dirty tree after a mutation is an anomaly). */
+    const reproQualityOf = async (t) => {
+      try {
+        const files = (await changedFiles()).filter((f) => !isTestPath(f));
+        const srcDiff = files.length ? String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...files])) : "";
+        const tests = (await changedFiles()).filter((f) => isTestPath(f));
+        const testDiff = tests.length ? String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...tests])) : "";
+        const echo = patchEcho({ testDiff, srcDiff });
+        const m = echo ? { results: [] } : await runReproMutations({ mutations: mutationsOf(srcDiff), command: String(t.command), git, runCommand: async (a) => io.runCommand(a).then((x) => x?.r ?? x), cwd: wt, env: laneEnv(), readFile: io.fs.read, writeFile: io.fs.write });
+        const quality = classifyRepro({ repro_test: t, echo, mutations: m.results });
+        reproQ = quality;
+        ev({ event: "REPRO_QUALITY", quality, mutations: m.results.map((x) => `${x.kind}:${x.file}:${x.line}:${x.status}`), ...(m.skipped ? { skipped: m.skipped } : {}) });
+        T.decisions.push(`repro_quality: ${quality}`);
+        return { quality, enforce: reproQuality === "enforce" };
+      } catch (e) { T.anomalies.push(`repro_quality: ${String(e?.message ?? e).slice(0, 200)}`); return {}; }
     };
 
     // ---- 3. builder: plan call -> frozen contract -> implement call in the same session ----
@@ -2589,7 +2609,7 @@ export async function runCore(o) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
           prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
+            : reviewerPrompt({ reproFlag: reproQ, issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
