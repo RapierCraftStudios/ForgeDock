@@ -56,6 +56,7 @@ import { docsFailures } from "./docsgate.mjs";
 import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
+import { startSpeculative } from "./overlap.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
@@ -2634,13 +2635,23 @@ export async function runCore(o) {
     const IGNORE = [`${LEAN_DIR}/`];
     /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
     function reviewOnce() { return phaseLedger.during("review", reviewOnceRaw); }
-    async function reviewOnceRaw() {
+    /** The reviewer's inputs and full prompt for the current head: no lane state is touched, so it can run before precheck finishes (#5436). */
+    async function reviewPrep() {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
       // #5339: validate-command paths that fake the real path (mocks, fakes, stubs): they cannot verify an e2e/manual requirement
       const cmdPaths = [...new Set((effective.validate ?? []).flatMap((v) => String(v.command ?? "").split(/\s+/)).map((t) => t.replace(/^["']+|["']+$/g, "")).filter((t) => listed.has(t)))];
       const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE, e2e: { faked: fakedPaths(cmdPaths, (x) => readFileSync(join(wt, x), "utf8")), checks: vcfg.e2e?.checks ?? [], isSpec: (x) => e2eSpecs([x], vcfg.e2e).length > 0 } };
+      const prompt = reviewerPrompt({ reproFlag: reproQ, issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) });
+      return { ctx, prompt };
+    }
+    const reviewerCall = (prompt) => callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true, prompt });
+    /** #5436: the first reviewer call, started beside guard+precheck by gate(); null when none is pending. */
+    let specReview = null;
+    async function reviewOnceRaw() {
+      const spec = specReview; specReview = null;
+      const { ctx, prompt } = await reviewPrep();
       let d = null, first = null;
       for (let t = 0; t < 3; t++) {
         // #4327/#5164: a third run only when the repaired reply is incomplete solely by reviewer slips (unresolved evidence paths, coverage misquotes).
@@ -2651,9 +2662,9 @@ export async function runCore(o) {
         // #4160: a reply with rows missing is re-asked for those ids only; an unparseable one gets the full prompt again.
         const repair = first && (d.state === "review.incomplete" || d.state === "review.inconsistent");
         await renew();
-        const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] })
-            : reviewerPrompt({ reproFlag: reproQ, issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
+        let rr, got = false;
+        if (t === 0 && spec) { try { rr = await spec.adopt(); got = true; T.decisions.push("Review started beside guard+precheck and adopted (#5436)"); } catch { got = false; } }
+        if (!got) rr = await reviewerCall(repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] }) : prompt);
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
@@ -2763,7 +2774,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: 0, broken: 0, skipped: 0, wall_ms: 0, error: true }; return []; }
       const note = `Guard gate selected ${sel.map((x) => `#${x.guard.issue} (${x.reason})`).join("; ")}${r.skipped.length ? `; skipped: ${r.skipped.join("; ")}` : ""}${r.failures.length && shadow ? "; shadow: would block" : ""}`;
       if (note !== guardNoted) { guardNoted = note; T.decisions.push(note); }
-      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
+      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), reasons: Object.fromEntries(sel.map((x) => [x.guard.issue, x.reason])), batches: r.batches, ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
       for (const f of r.failures) ev({ event: "guard_broken", guard: f.guard, test: f.test });
       return r.failures;
     }
@@ -2782,7 +2793,11 @@ export async function runCore(o) {
       return { files: ui, ran: want.run, reason: want.reason, highRisk: riskPathHits(ui, riskPaths).length > 0 };
     }
     let amendFixed = false;
+    /** #5436: a review started beside guard+precheck is dropped on every return that does not reach the reviewer. */
     async function gate() {
+      try { return await gateRun(); } finally { specReview?.discard(); specReview = null; }
+    }
+    async function gateRun() {
       await refreshIssue("conformance");
       result = (await readResult()) ?? result;
       files = await changedFiles();
@@ -2820,6 +2835,18 @@ export async function runCore(o) {
       const gateHead = String(await git(["rev-parse", "HEAD"])).trim();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
+      const rx = await relaxationsOf(files); // #5237
+      relaxations = rx.relaxations;
+      if (relaxations.length) {
+        ev({ event: "RELAXATION_DETECTED", files: [...new Set(relaxations.map((r) => r.file))], count: relaxations.length, negatives: rx.negatives });
+        const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
+        if (!T.decisions.includes(note)) T.decisions.push(note);
+      }
+      // #5436: the review reads the same committed diff as guard+precheck, so its session starts now; reviewOnce adopts it, any earlier return discards it
+      const repro = await reproOf(effective);
+      // a precheck that already fails on facts at hand (no engine rerun) would discard the review, so it is not started then
+      const early = triggerMode === "enforce" || amendProblems.length ? null : precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, frozen, repro, repoHas: repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) });
+      specReview = !early || early.failures.length ? null : startSpeculative(async () => reviewerCall((await reviewPrep()).prompt));
       const gateT0 = now(); let validateMs = 0;
       // #4693: guards run beside the validate rerun; SPEC-11: the substituted-original rerun shares the one validate phase
       const validatePhase = phaseLedger.during("validate", async () => ({ runs: await rerunFailedValidatesRaw(effective), subs: await rerunSubstitutedOriginals(effective) })).finally(() => { validateMs = now() - gateT0; });
@@ -2842,14 +2869,7 @@ export async function runCore(o) {
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
       const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
       const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
-      const rx = await relaxationsOf(files); // #5237
-      relaxations = rx.relaxations;
-      if (relaxations.length) {
-        ev({ event: "RELAXATION_DETECTED", files: [...new Set(relaxations.map((r) => r.file))], count: relaxations.length, negatives: rx.negatives });
-        const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
-        if (!T.decisions.includes(note)) T.decisions.push(note);
-      }
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro, validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
