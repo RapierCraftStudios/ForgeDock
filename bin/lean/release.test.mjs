@@ -222,7 +222,7 @@ describe("release post-merge step (#5213)", () => {
   const PKG = Buffer.from(JSON.stringify({ version: "1.2.3" })).toString("base64");
   /** gh answers for the post-merge calls; `o` tunes them. */
   const pmWorld = (o = {}) => {
-    const st = { runs: o.runs ?? [[{ databaseId: 5, status: "completed", conclusion: "success" }]], runCalls: 0, dispatched: 0, syncPrs: o.syncPrs ?? [], created: 0 };
+    const st = { runs: o.runs ?? [[{ databaseId: 5, status: "completed", conclusion: "success" }]], runCalls: 0, dispatched: 0, syncPrs: o.syncPrs ?? [], created: 0, bodies: [], views: 0 };
     return {
       st,
       pm: (a) => {
@@ -230,19 +230,24 @@ describe("release post-merge step (#5213)", () => {
         if (a[0] === "pr" && a[1] === "view" && j.includes("mergeCommit")) return JSON.stringify({ state: o.prState ?? "MERGED", mergeCommit: { oid: SHA } });
         if (a[0] === "run" && a[1] === "list") { assert.ok(j.includes(`--commit ${SHA}`) && j.includes(`--workflow ${o.wf ?? "publish.yml"}`)); const r = st.runs[Math.min(st.runCalls++, st.runs.length - 1)]; return JSON.stringify(r); }
         if (a[0] === "workflow" && a[1] === "run") { st.dispatched++; assert.ok(a.includes("main")); return ""; }
-        if (a[0] === "api" && j.includes("contents/package.json")) return PKG;
+        if (a[0] === "api" && j.includes("contents/package.json?ref=staging") && a.includes("--jq")) return Buffer.from(JSON.stringify({ version: o.stagingVersion ?? "1.2.2" })).toString("base64");
+        if (a[0] === "api" && j.includes("contents/package.json") && a.includes("--jq")) return PKG;
+        if (a[0] === "api" && j.includes("git/ref/heads/staging")) return "s".repeat(40);
+        if (a[0] === "api" && a.includes("POST") && j.includes("git/refs")) { st.refs = (st.refs ?? 0) + 1; return ""; }
+        if (a[0] === "api" && a.includes("PUT")) { (st.puts ??= []).push(a); return ""; }
+        if (a[0] === "api" && j.includes("contents/") && j.includes("ref=staging")) return JSON.stringify({ sha: "f".repeat(40), content: Buffer.from(JSON.stringify({ name: "x", version: "1.2.2" })).toString("base64") });
         if (a[0] === "api" && j.includes("branches/chore/sync-version-1.2.3")) { if (o.noBranch) throw new Error("404"); return "x"; }
         if (a[0] === "pr" && a[1] === "list" && j.includes("chore/sync-version")) return JSON.stringify(st.syncPrs);
-        if (a[0] === "pr" && a[1] === "create") { st.created++; assert.ok(a.includes("staging") && a.includes("chore/sync-version-1.2.3")); return "https://github.com/o/r/pull/30"; }
-        if (a[0] === "pr" && a[1] === "view" && j.includes("statusCheckRollup")) return JSON.stringify({ state: "OPEN", headRefOid: "c".repeat(40), statusCheckRollup: o.checks ?? [{ conclusion: "SUCCESS" }] });
-        if (a[0] === "pr" && a[1] === "merge" && Number(a[2]) >= 30) return "";
+        if (a[0] === "pr" && a[1] === "create") { st.created++; st.bodies.push(a[a.indexOf("--body") + 1]); assert.ok(a.includes("staging") && a.includes("chore/sync-version-1.2.3")); return "https://github.com/o/r/pull/30"; }
+        if (a[0] === "pr" && a[1] === "view" && j.includes("--json state") && Number(a[2]) >= 30) return JSON.stringify({ state: st.views++ >= (o.mergesAfter ?? 0) ? (o.final ?? "MERGED") : "OPEN" });
+        if (a[0] === "pr" && a[1] === "merge" && Number(a[2]) >= 30) { if (o.autoFails) throw new Error("auto merge is not allowed"); return ""; }
         return undefined;
       },
     };
   };
   const run = (o = {}, config = {}) => {
     const w = pmWorld(o), io = fakeIo({ pm: w.pm, ...o });
-    const ctx = { io, repo: REPO, def: "main", staging: "staging", config: { postMerge: { publishPolls: 2, runPolls: 2, branchPolls: 2, checkPolls: 2, artifactTries: 3 }, ...config }, state: { steps: { "release-pr": { result: { pr: 7 } } } } };
+    const ctx = { io, repo: REPO, def: "main", staging: "staging", config: { postMerge: { publishPolls: 2, runPolls: 2, branchPolls: 2, autoPolls: 2, artifactTries: 3 }, ...config }, state: { steps: { "release-pr": { result: { pr: 7 } } } } };
     return postMergeStep(ctx).then((out) => ({ out, io, st: w.st }));
   };
 
@@ -290,27 +295,46 @@ describe("release post-merge step (#5213)", () => {
     assert.match(b.out.reason, /artifact_check/);
   });
 
-  it("R4: version_sync opens the sync PR to staging and merges it with --match-head-commit when green", async () => {
+  it("R4: version_sync opens the sync PR then enables auto-merge; staging already synced makes no calls", async () => {
     const { out, st, io } = await run({}, { versionSync: true });
     assert.equal(st.created, 1);
+    assert.match(st.bodies[0], /^docs-not-needed: \S/m);
     assert.equal(out.sync.merged, true);
-    assert.ok(io.calls.some((a) => a[1] === "merge" && a.includes("30") && a.includes("--match-head-commit") && a.includes("c".repeat(40))));
+    assert.equal(out.sync.pr, 30);
+    const kinds = io.calls.filter((a) => a[0] === "pr" && (a[1] === "create" || a[1] === "merge")).map((a) => a[1]);
+    assert.deepEqual(kinds, ["create", "merge"]);
+    assert.ok(io.calls.some((a) => a[1] === "merge" && a.includes("--merge") && a.includes("--auto") && !a.includes("--match-head-commit")));
+    const synced = await run({ stagingVersion: "1.2.3" }, { versionSync: true });
+    assert.equal(synced.out.sync.skipped, true);
+    assert.ok(!synced.io.calls.some((a) => (a[0] === "pr" && ["create", "merge", "list"].includes(a[1])) || a[0] === "api" && a.join(" ").includes("branches/")));
+    assert.equal(synced.st.created, 0);
   });
 
-  it("version_sync reuses an open sync PR, skips a merged one, and never merges red or check-less PRs", async () => {
+  it("version_sync reuses an open sync PR and skips a merged one", async () => {
     const open = await run({ syncPrs: [{ number: 31, state: "OPEN" }] }, { versionSync: true });
     assert.equal(open.st.created, 0);
-    assert.ok(open.io.calls.some((a) => a[1] === "merge" && a.includes("31")));
+    assert.ok(open.io.calls.some((a) => a[1] === "merge" && a.includes("31") && a.includes("--auto")));
     const merged = await run({ syncPrs: [{ number: 32, state: "MERGED" }] }, { versionSync: true });
     assert.equal(merged.out.sync.merged, true);
     assert.ok(!merged.io.calls.some((a) => a[1] === "merge"));
-    for (const checks of [[], [{ conclusion: "FAILURE" }], [{ conclusion: "SUCCESS" }, { status: "IN_PROGRESS", state: "PENDING" }]]) {
-      const r = await run({ syncPrs: [{ number: 33, state: "OPEN" }], checks }, { versionSync: true });
-      assert.equal(r.out.blocked, true, JSON.stringify(checks));
-      assert.ok(!r.io.calls.some((a) => a[1] === "merge"));
+  });
+
+  it("R5: a missing sync branch is cut from staging with a version-only commit, then the PR opens", async () => {
+    const { out, st } = await run({ noBranch: true }, { versionSync: true });
+    assert.equal(st.refs, 1);
+    assert.deepEqual(st.puts.map((a) => a.find((x) => x.startsWith("sha="))), ["sha=" + "f".repeat(40), "sha=" + "f".repeat(40)]);
+    assert.equal(st.created, 1);
+    assert.equal(out.sync.merged, true);
+  });
+
+  it("R4: an auto-merge that is not done in time, is closed, or cannot be enabled is a warning, not blocked", async () => {
+    for (const o of [{ mergesAfter: 99 }, { final: "CLOSED" }, { autoFails: true }]) {
+      const { out, io } = await run(o, { versionSync: true });
+      assert.equal(out.published, true, JSON.stringify(o));
+      assert.equal(out.sync.merged, false);
+      assert.match(out.sync.warning, /version-sync PR #30/);
+      assert.ok(io.printed.some((l) => l.includes("WARNING")));
     }
-    const nb = await run({ noBranch: true }, { versionSync: true });
-    assert.equal(nb.out.blocked, true);
   });
 
   it("R1: through the job, a blocked post-merge is retried on resume and finishes once the run exists", async () => {

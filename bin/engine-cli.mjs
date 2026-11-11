@@ -2371,6 +2371,7 @@ async function scheddDue() {
   const leanIo = (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
+  await sweepOrphanPrFollowups({ repo, io: leanIo }); // #5505: close open PRs whose issue is closed
   try { const prem = await import("./lean/needs-human-premise.mjs"); await prem.sweepPremises({ repo, io: { gh: (a) => leanIo.gh(a), pkgVersion: prem.registryPkgVersion } }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
   try { // #4894: opt-in nightly live selftest (forge.yaml selftest.nightly_interval_hours); best effort
     const { nightlyDue, launchNightly } = await import("./lean/selftest-nightly.mjs");
@@ -2378,6 +2379,15 @@ async function scheddDue() {
     const launch = () => launchNightly({ cli: fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), repo });
     await nightlyDue({ repo, cwd: process.cwd(), io: leanIo, launch });
   } catch { /* never stops the other sweeps */ }
+}
+
+/** #5505: close or follow up the open lane PRs whose issue is closed (orphan-pr sweep); never throws. */
+async function sweepOrphanPrFollowups({ repo, io, dryRun = false }) {
+  try {
+    const { sweepOrphanPrs } = await import("./lean/orphan-pr.mjs");
+    const base = readBranches().staging ?? "staging";
+    return await sweepOrphanPrs({ repo, cwd: process.cwd(), io, base, dryRun });
+  } catch { return []; }
 }
 
 /** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */
@@ -2903,6 +2913,8 @@ export async function probeFromCli(argv, deps = {}) {
     for (const r of parkedRows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
     const { formatParkedSweepSummary } = await import("./lean/parked-sweep.mjs");
     console.log(formatParkedSweepSummary(parkedRows) || "parked: nothing released");
+    const orphanRows = await sweepOrphanPrFollowups({ repo, io: leanIo, dryRun: argv.includes("--dry-run") }); // #5505
+    console.log((await import("./lean/orphan-pr.mjs")).formatOrphanSummary(orphanRows) || "orphan PRs: none");
     return { rows, parkedRows };
   }
   const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");

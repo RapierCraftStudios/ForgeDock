@@ -181,6 +181,10 @@ RUN_ID=$(gh run list --workflow={deploy.workflow} --limit 1 --json databaseId --
 gh run view $RUN_ID --json status,conclusion,jobs
 ```
 
+#### Step 3A2: Keep the issue open until the backport merges (#5505)
+
+A hotfix that ships from a `hotfix/*` branch needs a backport PR to `staging`. Do not close the incident issue at hotfix time: label it `backport-pending` (`gh issue edit {NUMBER} --add-label backport-pending`) and leave it open. The orphan-pr sweep (`forgedock probe --due`, schedd timer) keeps that issue's PRs open, and when the `hotfix/*` or `backport/*` PR naming the issue merges it removes the label and closes the issue.
+
 #### Step 3B: Post deploy status
 
 ```bash

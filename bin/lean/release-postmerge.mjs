@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * Post-merge step of `forgedock release` (#5213, part 3 of #5208): confirm or dispatch the publish run for the merge commit,
- * wait for the published artifact (`release.artifact_check`), then open and merge the version-sync PR (`release.version_sync`).
+ * wait for the published artifact (`release.artifact_check`), then open and auto-merge the version-sync PR (`release.version_sync`).
  * Every wait is bounded (`ctx.config.postMerge` overrides the bounds) and ends in `{blocked}`, never a throw, so a resume
  * retries the step; each sub-step is idempotent (an existing run, PR or merged PR is reused). Rationale:
  * devdocs/decisions/5208-release-postmerge.md.
@@ -15,7 +15,7 @@ const BOUNDS = {
   runPolls: 90, runPollMs: 20_000, // wait for the run to finish
   artifactTries: 8, artifactBaseMs: 5_000, artifactMaxMs: 120_000, // npm propagation: exponential backoff
   branchPolls: 6, branchPollMs: 10_000, // wait for the sync branch to be pushed
-  checkPolls: 30, checkPollMs: 20_000, // wait for the sync PR's checks
+  autoPolls: 30, autoPollMs: 20_000, // wait for the sync PR's auto-merge
 };
 const json = (s) => JSON.parse(String(s || "null"));
 const blocked = (reason) => ({ blocked: true, reason });
@@ -64,35 +64,52 @@ async function artifact(ctx, b) {
   return { err: `release.artifact_check still failing after ${b.artifactTries} tries: ${config.artifactCheck}` };
 }
 
+const b64 = (s) => Buffer.from(String(s).replace(/\s/g, ""), "base64").toString("utf8");
+const semverLt = (a, b) => { const x = String(a).split(/[.-]/).map(Number), y = String(b).split(/[.-]/).map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false; };
+const VERSION_FILES = ["package.json", ".claude-plugin/plugin.json"];
+
+/** The sync branch is missing (publish.yml failed before pushing): cut it from the staging head with a version-only commit, through the gh API. */
+async function createSyncBranch({ io, repo, staging }, branch, version) {
+  const base = String(await io.gh(["api", `repos/${repo}/git/ref/heads/${staging}`, "--jq", ".object.sha"])).trim();
+  await io.gh(["api", "-X", "POST", `repos/${repo}/git/refs`, "-f", `ref=refs/heads/${branch}`, "-f", `sha=${base}`]);
+  for (const f of VERSION_FILES) {
+    let cur;
+    try { cur = json(await io.gh(["api", `repos/${repo}/contents/${f}?ref=${staging}`])); } catch { if (f === "package.json") throw new Error(`${f} unreadable on ${staging}`); continue; }
+    const doc = JSON.parse(b64(cur.content));
+    doc.version = version;
+    await io.gh(["api", "-X", "PUT", `repos/${repo}/contents/${f}`, "-f", `message=chore: sync version ${version} to ${staging}`, "-f", `content=${Buffer.from(JSON.stringify(doc, null, 2) + "\n").toString("base64")}`, "-f", `sha=${cur.sha}`, "-f", `branch=${branch}`]);
+  }
+}
+
+/** The release PR's version goes back to staging (#5513): publish.yml cannot open the PR (enterprise policy), so the host does, then enables auto-merge. */
 async function versionSync(ctx, sha, b) {
   const { io, repo, staging } = ctx;
-  const pkg = JSON.parse(Buffer.from(String(await io.gh(["api", `repos/${repo}/contents/package.json?ref=${sha}`, "--jq", ".content"])).replace(/\s/g, ""), "base64").toString("utf8"));
-  const branch = `chore/sync-version-${pkg.version}`;
+  const read = async (ref) => JSON.parse(b64(await io.gh(["api", `repos/${repo}/contents/package.json?ref=${ref}`, "--jq", ".content"]))).version;
+  const version = await read(sha);
+  const cur = await read(staging);
+  if (!semverLt(cur, version)) return { skipped: true, version, staging: cur };
+  const branch = `chore/sync-version-${version}`;
   const find = async () => json(await io.gh(["pr", "list", "--repo", repo, "--base", staging, "--head", branch, "--state", "all", "--json", "number,state", "--limit", "1"]))?.[0] ?? null;
   let pr = await find();
   if (pr?.state === "MERGED") return { pr: pr.number, merged: true, reused: true };
   if (!pr) {
     const has = await poll(io, b.branchPolls, b.branchPollMs, async () => { try { await io.gh(["api", `repos/${repo}/branches/${branch}`, "--jq", ".name"]); return true; } catch { return false; } });
-    if (!has) return { err: `version-sync branch ${branch} did not appear; publish.yml may have skipped the sync, open it by hand` };
-    const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", staging, "--head", branch, "--title", `chore: sync version ${pkg.version} to ${staging}`, "--body", `Version-only sync of the ${pkg.version} release back to ${staging} (forgedock release).`])).trim();
+    if (!has) {
+      try { await createSyncBranch(ctx, branch, version); } catch (e) { return { err: `version-sync branch ${branch} is missing and could not be created (${String(e.message).split("\n")[0]}); open it by hand` }; }
+    }
+    const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", staging, "--head", branch, "--title", `chore: sync version ${version} to ${staging}`, "--body", `Version-only sync of the ${version} release back to ${staging} (forgedock release).\n\ndocs-not-needed: version-only sync, no behaviour change`])).trim();
     const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
     if (!Number.isSafeInteger(n)) return { err: `gh pr create returned no PR url: ${url}` };
     pr = { number: n };
   }
-  let red = null;
-  const green = await poll(io, b.checkPolls, b.checkPollMs, async () => {
-    const v = json(await io.gh(["pr", "view", String(pr.number), "--repo", repo, "--json", "state,headRefOid,statusCheckRollup"]));
-    if (v?.state === "MERGED") return { head: null, already: true };
-    const res = (v?.statusCheckRollup ?? []).map((c) => String(c.conclusion || c.state || "").toUpperCase());
-    if (res.some((r) => r && !GREEN.has(r) && !["PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED"].includes(r))) { red = res.find((r) => r && !GREEN.has(r) && !["PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED"].includes(r)); return { red: true }; }
-    return res.length && res.every((r) => GREEN.has(r)) ? { head: v.headRefOid } : null;
+  const warn = (why) => ({ pr: pr.number, merged: false, warning: `version-sync PR #${pr.number} ${why}; merge it by hand so ${staging} reaches ${version}` });
+  try { await io.gh(["pr", "merge", String(pr.number), "--repo", repo, "--merge", "--auto"]); } catch (e) { return warn(`could not enable auto-merge (${String(e.message).split("\n")[0]})`); }
+  const end = await poll(io, b.autoPolls, b.autoPollMs, async () => {
+    const st = json(await io.gh(["pr", "view", String(pr.number), "--repo", repo, "--json", "state"]))?.state;
+    return st === "MERGED" || st === "CLOSED" ? st : null;
   });
-  if (green?.already) return { pr: pr.number, merged: true };
-  if (green?.red) return { err: `version-sync PR #${pr.number} has a failing check (${red}); fix and merge it by hand` };
-  // GITHUB_TOKEN PRs get no CI, so "no checks" is a stop, not a green light.
-  if (!green) return { err: `version-sync PR #${pr.number} has no passing checks yet (a PR opened by GITHUB_TOKEN gets no CI: close and reopen it); resume once green` };
-  await io.gh(["pr", "merge", String(pr.number), "--repo", repo, "--merge", "--match-head-commit", green.head]);
-  return { pr: pr.number, merged: true };
+  if (end === "MERGED") return { pr: pr.number, merged: true };
+  return warn(end === "CLOSED" ? "was closed without merging" : "did not merge in time (auto-merge is enabled)");
 }
 
 /** @returns {Promise<{published, run, artifact, sync}|{blocked: true, reason: string}|{stopped: true, why: string}>} */
@@ -115,11 +132,12 @@ export async function postMergeStep(ctx) {
   if (config.versionSync) {
     sync = await versionSync(ctx, sha, b);
     if (sync.err) return blocked(sync.err);
+    if (sync.warning) io.print(`release: WARNING ${sync.warning}`);
   }
   if (state.release?.branch) {
     const gone = cleanupSnapshot({ git: io.git, branch: state.release.branch });
     if (!gone.deleted) io.print(`release: could not delete ${state.release.branch} (${gone.why}); delete it by hand`);
   }
-  io.print(`release: published (run ${pub.run}${pub.dispatched ? ", dispatched" : ""})${art ? ", artifact confirmed" : ""}${sync ? `, version-sync PR #${sync.pr} merged` : ""}`);
+  io.print(`release: published (run ${pub.run}${pub.dispatched ? ", dispatched" : ""})${art ? ", artifact confirmed" : ""}${sync?.pr ? `, version-sync PR #${sync.pr} ${sync.merged ? "merged" : "pending"}` : sync?.skipped ? ", staging already synced" : ""}`);
   return { published: true, merge: sha, run: pub.run, dispatched: pub.dispatched, artifact: art?.ok ?? null, sync };
 }
