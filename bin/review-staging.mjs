@@ -524,7 +524,8 @@ export const CI_EXCLUDED_CHECKS = ["forgedock/verify", "forge/deploy-gate", "Che
 
 const parseChecks = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
 
-const isRed = (k) => k?.bucket === "fail" || k?.bucket === "cancel";
+/** An unfinished (`pending`) check is not green: a rerun that outlives its poll must not read as a pass (#5510). */
+const isRed = (k) => k?.bucket === "fail" || k?.bucket === "cancel" || k?.bucket === "pending";
 
 /**
  * The required-check set classifyChecks gets. An unreadable protection read (e.g. a non-admin token) must not let
@@ -550,7 +551,7 @@ export function classifyChecks(checks, required = []) {
  */
 function redChecks(checks, required = []) {
   const passed = new Set(checks.filter((k) => k?.bucket === "pass").map((k) => k.name));
-  const red = checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && isRed(k) && !(k.bucket === "cancel" && passed.has(k.name)));
+  const red = checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && isRed(k) && !((k.bucket === "cancel" || k.bucket === "pending") && passed.has(k.name)));
   const req = new Set(required);
   if (!req.size) return { blockRows: red, warnings: [] };
   return { blockRows: red.filter((k) => req.has(k.name)), warnings: [...new Set(red.filter((k) => !req.has(k.name)).map((k) => String(k.name)))] };
