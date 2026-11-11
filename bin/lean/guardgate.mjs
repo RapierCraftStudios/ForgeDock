@@ -187,7 +187,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
     const groups = new Map();
     for (const j of jobs) {
       const s = `@@guard@@${extname(j.path)}`, key = commandFor(s, contract, guardCommand);
-      if (!key || !key.endsWith(s) || key.indexOf(s) !== key.length - s.length) continue;
+      if (!key || !key.endsWith(s) || key.indexOf(s) !== key.lastIndexOf(s)) continue;
       const prefix = key.slice(0, key.length - s.length);
       groups.set(prefix, [...(groups.get(prefix) ?? []), j]);
     }
