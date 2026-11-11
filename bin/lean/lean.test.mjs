@@ -242,7 +242,8 @@ describe("core work-on", () => {
     assert.equal(w.followups.length, 0);
     const ev = readLog(dir, 7).map((e) => e.event);
     assert.ok(ev.includes("CONTRACT_FROZEN") && ev.includes("CONFORMANCE"));
-    assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
+    assert.equal(ev[0], "RUN_START"); assert.equal(ev.filter((e) => e === "RUN_TERMINAL").length, 1);
+    assert.ok(ev.slice(ev.indexOf("RUN_TERMINAL") + 1).every((e) => /^(POSTRUN_|LEDGER_|BRANCH_DELET|TEARDOWN|WORKTREE|GUARD_|STRUCTURE_DELTA)/.test(e)), "#5437: only post-run bookkeeping follows RUN_TERMINAL");
   });
 
   it("investigation and plan comments are posted before the reviewer runs and before the in-review label", async () => {
@@ -270,8 +271,9 @@ describe("core work-on", () => {
     const mapped = w.telemetry.map((t) => mapRecord(t, 5)).filter(Boolean);
     assert.deepEqual(mapped.filter((m) => m.event === "phase_attempt").map((m) => m.phase), ["implement", "implement", "review"]);
     assert.equal(mapped[0].payload.input_tokens, 10);
-    assert.equal(mapped.at(-1).event, "run_terminal");
-    assert.equal(mapped.at(-1).payload.reason, "merged");
+    const term = mapped.filter((m) => m.event === "run_terminal");
+    assert.equal(term.length, 1);
+    assert.equal(term[0].payload.reason, "merged");
   });
 
   it("invalid with evidence: the investigation is the evidence comment, closes, trajectory rows", async () => {
@@ -4789,6 +4791,18 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");
     assert.doesNotMatch(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#4785\\"/, "precheck does not report the superseded #4785");
   });
+  it("#5436 the review starts beside guard+precheck: a green gate adopts it once, a red guard resumes the builder and the review is not applied", async () => {
+    const green = world({ prList: [] });
+    assert.equal((await run(green)).terminalReason, "merged");
+    assert.equal(reviewers(green).length, 1, "one reviewer session, started early and adopted");
+    const mkGuard = (issue) => ({ v: 1, issue, pr: issue * 10, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: `guard ${issue}` });
+    const dir = tmpDir("guard-overlap-");
+    const w = world({ prList: [], baseFiles: { ":src/foo.js": "old" } });
+    w.io.runCommand = async (a) => ({ rc: String(a?.cwd).includes("guardbase-") ? 0 : 1, output: "guard test failed" });
+    await run(w, { dir, worktreeRoot: dir, loadGuards: async () => [mkGuard(9)] });
+    assert.ok(builders(w).length >= 2, "a failing guard still resumes the builder");
+
+  });
   it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
     const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
     assert.deepEqual(parseAmendmentsComment(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });
@@ -5568,7 +5582,7 @@ describe("shared dependency cache wiring (#4220)", () => {
     return d;
   };
 
-  it("#4220 prepare runs once with the lane worktree after it exists and before the first runner call; DEPS_PREPARED is logged", async () => {
+  it("#4220 prepare runs once with the lane worktree after it exists (#5434: it overlaps the plan session); DEPS_PREPARED is logged", async () => {
     const dir = tmpDir("deps-");
     const w = world(); w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
     const d = depsIo(w);
@@ -5577,7 +5591,6 @@ describe("shared dependency cache wiring (#4220)", () => {
     assert.equal(d.calls[0].wt, "/wt/lean-7");
     assert.match(d.calls[0].repoKey, /^[A-Za-z0-9._-]+-[0-9a-f]{8}$/);
     assert.equal(d.calls[0].worktreeAdded, true);
-    assert.equal(d.calls[0].runnerCallsBefore, 0);
     const ev = readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED");
     assert.deepEqual(ev.map((e) => [e.status, e.eco, e.key]), [["hit", "pnpm", "0123456789abcdef"]]);
     assert.ok(w.envs.length >= 2);
@@ -5587,6 +5600,35 @@ describe("shared dependency cache wiring (#4220)", () => {
       assert.ok(e.FORGE_DOCKER_LABELS, "existing keys stay");
       assert.match(e.TMPDIR, /runs\/7-/, "the engine's TMPDIR wins over the cache env");
     }
+  });
+
+
+  it("#5434 the plan session starts while deps install runs; implement waits for the install and logs the setup timings", async () => {
+    const dir = tmpDir("deps-overlap-");
+    const w = world(); depsIo(w);
+    let release, done = false, atPlan = null, atImplement = null, n = 0;
+    const gate = new Promise((r) => { release = r; });
+    w.io.deps.prepare = async () => { await gate; done = true; return [{ status: "hit", eco: "pnpm", key: "k", ms: 5, reason: null }]; };
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { n++; if (n === 1) { atPlan = done; c.onSpawn?.({ pid: 4242 }); release(); } else if (n === 2) atImplement = done; return inner(c); };
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(atPlan, false, "the plan session did not wait for the install");
+    assert.equal(atImplement, true, "implement waited for it");
+    const log = readLog(dir, 7);
+    assert.ok(log.some((e) => e.event === "LANE_SETUP_TIMING" && e.step === "deps"));
+    assert.equal(log.filter((e) => e.event === "FIRST_SESSION").length, 1);
+    const steps = log.filter((e) => e.event === "LANE_SETUP_TIMING").map((e) => e.step);
+    for (const st of ["prompt_assembly", "cli_init"]) assert.ok(steps.includes(st), `${st} timed`);
+  });
+
+  it("#5434 a failed env.setup still ends needs-human and no implement session starts", async () => {
+    const dir = tmpDir("deps-setupfail-");
+    const w = world(); depsIo(w);
+    w.io.runSetup = async () => ({ exit: 3, stdout: "", stderr: "nope" });
+    const r = await run(w, { dir, envSetup: "false" });
+    assert.notEqual(r.terminalReason, "merged");
+    assert.ok(w.calls.filter((c) => c[0] === "runner").length <= 1, "only the plan session ran");
+    assert.equal(r.code, OUTCOME_CODES.ENV_SETUP_FAILED);
   });
 
   it("#4220 a prepare that throws or fails, or an env() that throws, never changes the outcome; no io.deps is the old behaviour", async () => {
@@ -6015,7 +6057,7 @@ describe("toolchain pins and env.setup at lane setup (#4163)", () => {
     assert.equal(r.terminalReason, "needs-human");
     assert.equal(r.code, OUTCOME_CODES.ENV_SETUP_FAILED);
     assert.equal(OUTCOME_CODES.ENV_SETUP_FAILED, "env.setup_failed");
-    assert.equal(builders(w).length, 0, "the builder never runs");
+    assert.ok(builders(w).length <= 1, "only the read-only plan session ran, never implement (#5434)");
     assert.equal(w.prs.length, 0);
     const nh = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN"));
     assert.match(nh, /Environment error \(not a build failure\)/); assert.match(nh, /role app_user does not exist/);
@@ -8214,6 +8256,66 @@ describe("admission disk ceiling (#5421)", () => {
     assert.equal(await nearCeilingDisk({ host: host(2000), minFreeGb: 5 }), true);
     assert.equal(await nearCeilingDisk({ host: host(20000), minFreeGb: 5 }), false);
     assert.equal((await diskLowAdmission({ host: host(2000), minFreeGb: 5 })).reasons.length, 2);
+  });
+});
+
+describe("#5437 post-run bookkeeping", () => {
+  const names = (dir) => readLog(dir, 7).map((x) => x.event);
+  it("a merged lane reports RUN_TERMINAL before its branch delete, ledger clear and post-run jobs, and records each job", async () => {
+    const dir = tmpDir("postrun-merge-");
+    const w = world();
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const ev = names(dir), term = ev.indexOf("RUN_TERMINAL");
+    assert.ok(term >= 0);
+    for (const e of ["BRANCH_DELETED", "LEDGER_CLEARED"]) if (ev.includes(e)) assert.ok(ev.indexOf(e) > term, `${e} after RUN_TERMINAL`);
+    const ok = readLog(dir, 7).filter((x) => x.event === "POSTRUN_OK").map((x) => x.job);
+    for (const j of ["branch-delete", "trajectory", "teardown"]) assert.ok(ok.includes(j), `${j} recorded`);
+    assert.ok(ev.indexOf("POSTRUN_OK") > term);
+    assert.ok(!ev.includes("POSTRUN_FAILED"));
+  });
+  it("deferPostRun hands the jobs to the caller: nothing ran before postRun(), everything after", async () => {
+    const dir = tmpDir("postrun-defer-");
+    const w = world();
+    const r = await run(w, { dir, deferPostRun: true });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(typeof r.postRun, "function");
+    assert.ok(!names(dir).includes("POSTRUN_OK"), "no job before the caller runs them");
+    assert.equal(traj(w).length, 0, "trajectory is a post-run job");
+    await r.postRun();
+    assert.ok(names(dir).includes("POSTRUN_OK"));
+    assert.equal(traj(w).length, 1);
+  });
+  it("builder commits are signed when made: a commit-msg hook chains the repo's hooks and rides the lane env (R6)", async () => {
+    const dir = tmpDir("postrun-signoff-");
+    const w = world();
+    w.io.runTmp = { prune: async () => {}, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    w.io.fs.list = async () => ["pre-commit", "commit-msg", "applypatch-msg.sample"];
+    const base = w.io.runCommand; w.io.runCommand = async (a) => (/^chmod /.test(a.command) ? { r: { exit: 0 } } : base ? base(a) : { rc: 0, output: "" });
+    await run(w, { dir });
+    const hook = Object.entries(w.files).filter(([p]) => /\/hooks\//.test(p));
+    assert.ok(hook.some(([p, t]) => /commit-msg$/.test(p) && /Signed-off-by/.test(t) && /exec '.*\/commit-msg'/.test(t)), "commit-msg signs and chains the repo's own");
+    assert.ok(hook.some(([p, t]) => /pre-commit$/.test(p) && /exec /.test(t)), "other hooks are forwarded");
+    assert.ok(!hook.some(([p]) => /\.sample$/.test(p)));
+    assert.ok(names(dir).includes("SIGNOFF_HOOK"));
+  });
+  it("an unmerged lane keeps its teardown inline and has no postRun", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "x", evidence: ["a:1"], tests: [] } });
+    const r = await run(w, { deferPostRun: true });
+    assert.equal(r.terminalReason, "invalid");
+    assert.equal(r.postRun, undefined);
+    assert.equal(traj(w).length, 1);
+  });
+  it("an invalid verdict closes the issue and labels it in parallel", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "x", evidence: ["a:1"], tests: [] } });
+    let labelStarted = false, closeSawLabel = null;
+    const gh = w.io.gh, tl = w.io.transitionLabel;
+    w.io.transitionLabel = async (n, st) => { if (st === "invalid") labelStarted = true; return tl(n, st); };
+    w.io.gh = async (a, o) => { if (a[0] === "issue" && a[1] === "close") { for (let i = 0; i < 30 && !labelStarted; i++) await new Promise((x) => setTimeout(x, 5)); closeSawLabel = labelStarted; } return gh(a, o); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "invalid");
+    assert.equal(closeSawLabel, true, "the label call started before the close finished");
+    assert.equal(w.closed.length, 1);
   });
 });
 
