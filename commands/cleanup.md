@@ -214,11 +214,11 @@ echo "=== Open issues with a terminal workflow label ==="
 for LABEL in "workflow:merged" "workflow:merged-unverified"; do
   gh issue list {GH_FLAG} --state open --label "$LABEL" --limit 200 \
     --json number,title \
-    --jq ".[] | \"#\(.number) — \(.title[:60]) [label: $LABEL] → fix: gh issue edit \(.number) --remove-label workflow:merged\"" 2>/dev/null
+    --jq ".[] | \"#\(.number) — \(.title[:60]) [label: $LABEL]\"" 2>/dev/null
 done
 ```
 
-Report-only. `workflow:merged-unverified` is set by `issue-watch` when a merge fails verification: a human decides, then removes it.
+Report-only. To fix an issue, the operator removes the label by hand (`gh issue edit <n> --remove-label workflow:merged`). `workflow:merged-unverified` is set by `issue-watch` when a merge fails verification: a human decides, then removes it.
 
 ---
 
