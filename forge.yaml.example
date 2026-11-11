@@ -931,6 +931,14 @@ branches:
 #   # ingress does not send them to the service that implements them. Blocking when set.
 #   # topology:
 #   #   route_reachability: "bash scripts/check-ingress.sh"
+#   # #5428 page gate (optional; default on only for repos with Next app/**/page.* files).
+#   # A public page needs a design spec, SEO intent/ICP brief and GEO brief, plus sitemap/metadata/canonical/structured data.
+#   # pages:
+#   #   enabled: true
+#   #   routes: ["web/pages/**"]
+#   #   icp_doc: "docs/icp.md"
+#   #   require: [design, seo_intent, geo]
+#   #   forbid_patterns: ["\\[\\[null\\]\\]"]
 #   # #5419 user docs (optional, default unset = off; leave unset for library/CLI repos).
 #   # A diff touching a user-facing surface needs a docs change; added /docs links must resolve.
 #   # docs:

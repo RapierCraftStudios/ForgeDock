@@ -936,3 +936,5 @@ EOF
 ```
 
 Notify the user: `Review complete for PR #X. Verdict: [VERDICT].` with the domains, agents (names, dispatch mode), integration checks and issues created, plus the merge result under auto-merge (`PR merged and issue closed.` / `Merge FAILED — see issue.`) and the demilestoned count for a milestone PR. For a risk-scaled run, tip: `--thorough` enables full union dispatch for release-critical reviews.
+
+**Page domains (forge#5428)**: when the diff adds or changes a public page (`app/**/page.*`, forge.yaml `pages.routes`), the `design` and `seo-geo` review domains join the panel (`bin/lean/review-trigger.mjs` `pathDomains`, checks in `DOMAIN_CHECKS`): an unmet page-gate item is a regression.

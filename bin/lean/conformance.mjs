@@ -34,6 +34,7 @@ export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
+import { contractBriefProblems } from "./pagegate.mjs"; // #5428
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -454,7 +455,7 @@ export function weakenedE2eDecisions(c) {
   }).map((k) => k.id).filter(Boolean);
 }
 
-export function validateContract(c, issueText, { repro = false } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -514,6 +515,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     }
   }
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
+  if (pages) problems.push(...contractBriefProblems(c, pages)); // #5428: page deliverables need page_gate briefs
   return { ok: problems.length === 0, problems };
 }
 
@@ -959,7 +961,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, docsPaths = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1034,6 +1036,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
   failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
+  failures.push(...(pageFailures ?? [])); // #5428: forge.yaml pages
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
