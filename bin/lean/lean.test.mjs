@@ -5567,7 +5567,7 @@ describe("shared dependency cache wiring (#4220)", () => {
     return d;
   };
 
-  it("#4220 prepare runs once with the lane worktree after it exists and before the first runner call; DEPS_PREPARED is logged", async () => {
+  it("#4220 prepare runs once with the lane worktree after it exists (#5434: it overlaps the plan session); DEPS_PREPARED is logged", async () => {
     const dir = tmpDir("deps-");
     const w = world(); w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
     const d = depsIo(w);
@@ -5576,7 +5576,6 @@ describe("shared dependency cache wiring (#4220)", () => {
     assert.equal(d.calls[0].wt, "/wt/lean-7");
     assert.match(d.calls[0].repoKey, /^[A-Za-z0-9._-]+-[0-9a-f]{8}$/);
     assert.equal(d.calls[0].worktreeAdded, true);
-    assert.equal(d.calls[0].runnerCallsBefore, 0);
     const ev = readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED");
     assert.deepEqual(ev.map((e) => [e.status, e.eco, e.key]), [["hit", "pnpm", "0123456789abcdef"]]);
     assert.ok(w.envs.length >= 2);
@@ -5586,6 +5585,35 @@ describe("shared dependency cache wiring (#4220)", () => {
       assert.ok(e.FORGE_DOCKER_LABELS, "existing keys stay");
       assert.match(e.TMPDIR, /runs\/7-/, "the engine's TMPDIR wins over the cache env");
     }
+  });
+
+
+  it("#5434 the plan session starts while deps install runs; implement waits for the install and logs the setup timings", async () => {
+    const dir = tmpDir("deps-overlap-");
+    const w = world(); depsIo(w);
+    let release, done = false, atPlan = null, atImplement = null, n = 0;
+    const gate = new Promise((r) => { release = r; });
+    w.io.deps.prepare = async () => { await gate; done = true; return [{ status: "hit", eco: "pnpm", key: "k", ms: 5, reason: null }]; };
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { n++; if (n === 1) { atPlan = done; c.onSpawn?.({ pid: 4242 }); release(); } else if (n === 2) atImplement = done; return inner(c); };
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(atPlan, false, "the plan session did not wait for the install");
+    assert.equal(atImplement, true, "implement waited for it");
+    const log = readLog(dir, 7);
+    assert.ok(log.some((e) => e.event === "LANE_SETUP_TIMING" && e.step === "deps"));
+    assert.equal(log.filter((e) => e.event === "FIRST_SESSION").length, 1);
+    const steps = log.filter((e) => e.event === "LANE_SETUP_TIMING").map((e) => e.step);
+    for (const st of ["prompt_assembly", "cli_init"]) assert.ok(steps.includes(st), `${st} timed`);
+  });
+
+  it("#5434 a failed env.setup still ends needs-human and no implement session starts", async () => {
+    const dir = tmpDir("deps-setupfail-");
+    const w = world(); depsIo(w);
+    w.io.runSetup = async () => ({ exit: 3, stdout: "", stderr: "nope" });
+    const r = await run(w, { dir, envSetup: "false" });
+    assert.notEqual(r.terminalReason, "merged");
+    assert.ok(w.calls.filter((c) => c[0] === "runner").length <= 1, "only the plan session ran");
+    assert.equal(r.code, OUTCOME_CODES.ENV_SETUP_FAILED);
   });
 
   it("#4220 a prepare that throws or fails, or an env() that throws, never changes the outcome; no io.deps is the old behaviour", async () => {
@@ -5997,7 +6025,7 @@ describe("toolchain pins and env.setup at lane setup (#4163)", () => {
     assert.equal(r.terminalReason, "needs-human");
     assert.equal(r.code, OUTCOME_CODES.ENV_SETUP_FAILED);
     assert.equal(OUTCOME_CODES.ENV_SETUP_FAILED, "env.setup_failed");
-    assert.equal(builders(w).length, 0, "the builder never runs");
+    assert.ok(builders(w).length <= 1, "only the read-only plan session ran, never implement (#5434)");
     assert.equal(w.prs.length, 0);
     const nh = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN"));
     assert.match(nh, /Environment error \(not a build failure\)/); assert.match(nh, /role app_user does not exist/);
