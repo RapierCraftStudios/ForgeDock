@@ -278,8 +278,10 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.equal(pc.failures[0].kind, "validate_env"); assert.equal(pc.failures[0].tool, "yaml");
     assert.match(pc.failures[0].detail, /could not run: the host is missing Python module 'yaml'/);
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 127, output: "bash: line 1: pytest: command not found" } } })), ["env.tool_missing"]);
-    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 127, output: "bash: pytest: command not found" } } })), [], "CI-verified head: like a validate left to CI");
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 127, output: "bash: pytest: command not found" } } })), ["env.tool_missing"], "#5447: a CI-verified head never covers a test the host could not run");
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 0, output: "" } } })), [], "a passing rerun counts as passed");
+    { const pc5447 = precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 127, output: "bash: pytest: command not found" } } }); assert.deepEqual(pc5447.ciCovered, [], "#5447: validate_env is never ciCovered"); assert.equal(pc5447.failures[0].kind, "validate_env"); }
+    { const un = precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files }); assert.ok(un.failures.length > 0 && un.ciCovered.length === 0, "#5447: a declared test with no executed result blocks"); }
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError: 1 !== 2" } } })), ["conformance.unimplemented"]);
     // #4906: a rerun that timed out (rc 124) is infrastructure, never conformance.unimplemented
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 124, output: "(timed out)" } } })), ["env.validate_timeout"]);

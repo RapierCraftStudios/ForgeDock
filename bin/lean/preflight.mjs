@@ -262,3 +262,49 @@ export async function runPreflight({ contract, run, git, env = {}, repoHas = () 
   }
   return { misses, skipped, reverted };
 }
+
+const JS_ECO = new Set(["pnpm", "npm", "yarn"]);
+const SRC_BY_ECO = (eco) => (JS_ECO.has(eco) ? /\.(?:[cm]?[jt]sx?|vue|svelte)$/i : /\.py$/i);
+const underDir = (dir, f) => !dir || dir === "." || f === dir || f.startsWith(`${dir}/`);
+/**
+ * #5447: the failed dependency installs of `results` (depcache prepare rows). One that covers a changed source file of its
+ * ecosystem (its dir, "." for the root) is blocking (env.tool_missing, kind dep_install); the rest, and a failure with no
+ * ecosystem to place, are logged only. Pure.
+ */
+export function depInstallFailures({ results = [], changedFiles = [] } = {}) {
+  const block = [], logged = [];
+  const dirs = (Array.isArray(results) ? results : []).map((r) => r?.dir).filter((d) => d && d !== ".");
+  for (const r of Array.isArray(results) ? results : []) {
+    if (r?.status !== "failed") continue;
+    const label = `${r.eco ?? "dependencies"}${r.dir && r.dir !== "." ? ` in ${r.dir}` : ""}: ${r.reason ?? "install failed"}`;
+    const rx = SRC_BY_ECO(r.eco);
+    const hit = r.eco ? changedFiles.find((f) => rx.test(f) && underDir(r.dir, f) && (r.dir && r.dir !== "." ? true : !dirs.some((d) => underDir(d, f)))) : null;
+    if (hit) block.push({ code: "env.tool_missing", kind: "dep_install", tool: r.eco, detail: `dependency install failed (${label}) for a package the changed file ${hit} imports (environment, not the change)` });
+    else logged.push(`Dependency install failed, unrelated to the changed files: ${label}`);
+  }
+  return { block, logged };
+}
+
+/**
+ * #5447: declared vs ran for the FORGE:TRAJECTORY Tests row. Declared: each validate plus the repro_test. Skipped: a
+ * declared id named by an env/missing/timeout failure of `failures` (reason = its kind). redGreen: repro BASE=FAILED HEAD=RAN.
+ */
+export function testRunSummary({ contract, failures = [], repro = null } = {}) {
+  const ids = contractCommands(contract).map((c) => c.id);
+  const skipped = [];
+  for (const f of failures) {
+    if (!["validate_env", "validate_missing", "validate_timeout", "repro_env", "dep_install"].includes(f?.kind)) continue;
+    const id = f.kind === "repro_env" ? "repro_test" : /validate (\S+)/.exec(String(f.detail))?.[1];
+    if (id && ids.includes(id) && !skipped.some((s) => s.id === id)) skipped.push({ id, reason: f.kind });
+  }
+  const redGreen = repro && repro.base === "FAILED" && repro.head === "RAN" ? 1 : 0;
+  return { declared: ids.length, ran: ids.length - skipped.length, redGreen, skipped };
+}
+
+/** #5447: tool names the contract's test plan declares in `env` (per row of the #5445 `test_plan` array, or `test_plan.env`); strings, comma lists or {tool}; [] when absent. Pure. */
+export function declaredEnv(contract) {
+  const plan = contract?.test_plan;
+  const raw = Array.isArray(plan) ? plan.map((r) => r?.env) : [plan?.env];
+  const names = raw.flatMap((e) => (Array.isArray(e) ? e : typeof e === "string" ? e.split(",") : [])).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim());
+  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t)))];
+}

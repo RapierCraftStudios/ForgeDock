@@ -1078,7 +1078,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
         continue;
       }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
-      if (miss && ciVerified) { ciCovered.push(v.id); continue; }
+      // #5447: CI may not run this test, so a missing tool on the rerun is never covered by a CI-verified head
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });

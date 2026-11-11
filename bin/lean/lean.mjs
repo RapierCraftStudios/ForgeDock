@@ -27,7 +27,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -384,6 +384,7 @@ export async function runCore(o) {
   }
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
+  let depResults = [], gateProvisioned = false; // #5447
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
   const ctxBase = parseContextPackConfig(o.contextPack ?? {});
@@ -1511,6 +1512,7 @@ export async function runCore(o) {
       const tD = now();
       let res;
       try { res = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
+      depResults = Array.isArray(res) ? res : []; // #5447: classified against the changed files at the gate
       setupStep("deps", tD);
       for (const r of Array.isArray(res) ? res : []) {
         ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
@@ -2180,6 +2182,19 @@ export async function runCore(o) {
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
+      }
+      { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t}`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        let envMiss = await probeEnv();
+        if (envMiss.length) {
+          try {
+            if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined });
+            if (envMiss.includes("pytest") && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
+            envMiss = await probeEnv();
+            ev({ event: "TESTPLAN_ENV_PROVISIONED", remaining: envMiss });
+          } catch { /* keep the original miss */ }
+        }
+        if (envMiss.length) return await needsHuman(`This host lacks ${envMiss.join(", ")}, which the contract's test plan declares in env; the lane is re-placed on a host that has it before the builder implements.`, OUTCOME_CODES.ENV_TOOL_MISSING);
       }
       { // #5450: the frozen validate entries' `env` names verify.sandboxes; none declared: no provider call
         const names = envNamesOf(frozen);
@@ -2983,6 +2998,23 @@ export async function runCore(o) {
       }
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
       const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
+      const depFail = depInstallFailures({ results: depResults, changedFiles: files });
+      for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);
+      pc.failures.push(...depFail.block);
+      // #5447: a test that could not run gets one provisioning pass (dependencies, pytest) and a fresh gate before the lane is given up
+      const unrun = pc.failures.filter((f) => ["validate_env", "repro_env", "dep_install"].includes(f.kind));
+      const wantsPytest = unrun.some((f) => /pytest/.test(`${f.tool ?? ""} ${f.detail}`));
+      if (unrun.length && !gateProvisioned && (io.deps?.prepare || (wantsPytest && io.runCommand))) {
+        gateProvisioned = true;
+        try {
+          if (io.deps?.prepare) { const rp = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); depResults = Array.isArray(rp) ? rp : []; }
+          if (wantsPytest && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
+        } catch { /* the rerun below reports what is still missing */ }
+        ev({ event: "GATE_PROVISIONED", kinds: [...new Set(unrun.map((f) => f.kind))] });
+        return await gate();
+      }
+      T.tests = testRunSummary({ contract: effective, failures: pc.failures, repro: repro });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });

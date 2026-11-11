@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands } from "./preflight.mjs";
+import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -130,5 +130,34 @@ describe("#5020 repro_test is probed like a validate command", () => {
   it("preflightProbes probes the repro command's tool", () => {
     const { probes } = preflightProbes(c);
     assert.ok(probes.some((p) => p.tool === "madeuptool" && p.ids.includes("repro_test")));
+  });
+});
+
+describe("#5447 unrunnable tests: install classification and the Tests summary", () => {
+  it("a failed install covering a changed source file blocks; an unrelated one is logged", () => {
+    const results = [{ status: "failed", eco: "poetry", dir: "services/cortex", reason: "install failed" }, { status: "failed", eco: "npm", dir: "web", reason: "ERESOLVE" }, { status: "miss-installed", eco: "uv", dir: "." }];
+    const r = depInstallFailures({ results, changedFiles: ["services/cortex/app/x.py", "README.md"] });
+    assert.deepEqual(r.block.map((f) => [f.code, f.kind, f.tool]), [["env.tool_missing", "dep_install", "poetry"]]);
+    assert.equal(r.logged.length, 1); assert.match(r.logged[0], /npm in web/);
+    assert.deepEqual(depInstallFailures({ results: [{ status: "failed", eco: null, reason: "x" }], changedFiles: ["a.py"] }).block, []);
+  });
+  it("a root install failure does not block for a file owned by a nested project", () => {
+    const results = [{ status: "failed", eco: "uv", dir: ".", reason: "r" }, { status: "hit", eco: "uv", dir: "svc" }];
+    assert.deepEqual(depInstallFailures({ results, changedFiles: ["svc/a.py"] }).block, []);
+    assert.equal(depInstallFailures({ results, changedFiles: ["top.py"] }).block.length, 1);
+  });
+  it("testRunSummary counts declared, ran, red->green and skipped(reason)", () => {
+    const c = { validate: [{ id: "V1", command: "a" }, { id: "V2", command: "b" }], repro_test: { command: "c" } };
+    const t = testRunSummary({ contract: c, failures: [{ kind: "validate_env", detail: "validate V2 (`b`) could not run" }], repro: { base: "FAILED", head: "RAN" } });
+    assert.deepEqual(t, { declared: 3, ran: 2, redGreen: 1, skipped: [{ id: "V2", reason: "validate_env" }] });
+  });
+});
+
+describe("#5447 declaredEnv", () => {
+  it("reads test_plan.env tool names", async () => {
+    const { declaredEnv } = await import("./preflight.mjs");
+    assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", { tool: "uv" }, "bad name"] } }), ["pytest", "uv"]);
+    assert.deepEqual(declaredEnv({ test_plan: [{ requirement: "R1", env: "pytest, uv" }, { requirement: "R2" }] }), ["pytest", "uv"]);
+    assert.deepEqual(declaredEnv({}), []);
   });
 });

@@ -3090,6 +3090,14 @@ path is authorized (#5380).
 
 `issuewatch-verify.mjs` `verifyMerge`: a `cancelled`/`stale` check on the merge commit (a concurrency group cancelled it for a newer commit) is no longer red. `resolveSuperseded` reads `compare/<sha>...<lane>` (newest first, cap 10) and the newest descendant that ran the same check decides: success/neutral/skipped passes (evidence line), a failure fails (`CI red: a cancelled check on the merge commit was superseded by a failing run`), no finished run yet is `pending`. Required checks cancelled on the merged head resolve the same way (a manual cancel is indistinguishable). A genuinely failed check still fails `<lane> CI red on the merge commit`; `forgedock/verify` stays report-only.
 
+## #5447: a declared test that cannot run blocks the merge
+
+- `precheck` no longer lets a CI-verified head cover a validate whose rerun hit a missing tool or module (`validate_env`, `env.tool_missing`): CI may not run that test, so it ends needs-human before merge.
+- `gate()` classifies the lane's dependency installs (`depResults`, the depcache `prepare` rows, each with `dir`) with `depInstallFailures` (`preflight.mjs`): a failed install covering a changed source file of its ecosystem is a blocking `dep_install` failure (`env.tool_missing`); unrelated failures are logged in the trajectory decisions.
+- A `validate_env`, `repro_env` or `dep_install` failure gets one provisioning pass (`io.deps.prepare`, `pip install pytest` when pytest is named) and one fresh `gate()` (`gateProvisioned`) before the lane ends needs-human.
+- `T.tests` (`testRunSummary`) renders the FORGE:TRAJECTORY `Tests` row: `N declared, N ran, N red→green, N skipped(reason)`.
+- A contract `test_plan.env` (tool names, `declaredEnv` in `preflight.mjs`) is probed on the lane host before building: one provisioning pass, else `env.tool_missing` so placement moves the lane (`lackedTools` in `toolplace.mjs` names those tools). The field itself is defined by #5445.
+
 ## Entry 2026-11-11 — reopened issues drop workflow:merged (#5443)
 
 `issuewatch.mjs` `verifyClosed`: the failed-verify `gh issue edit` (still one call, one `done.label` step) now also adds `workflow:merged-unverified` and removes `workflow:merged`. `bin/labels.json` defines the new label. `templates/workflows/forgedock-reopen-clean.yml` (scaffoldable, `issues: write` only) removes both labels on any `reopened` event, covering human reopens. `commands/cleanup.md` Phase 1E reports open issues carrying either label. `DEFAULT_SKIP_LABELS` is unchanged. Tests: `issuewatch.test.mjs` "swaps workflow:merged".
