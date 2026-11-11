@@ -3079,7 +3079,7 @@ path is authorized (#5380).
 
 - **Queue.** `postrun.mjs` `makePostRun`: named, ordered, idempotent jobs; a failing job retries (3x, backoff) and records `POSTRUN_OK` / `POSTRUN_FAILED`, never changing the outcome.
 - **Merged lane.** `lean.mjs` queues branch delete, structure telemetry emit, guard, FORGE:FACTS, trajectory and teardown (worktree, ledger clear) as jobs; `RUN_TERMINAL` is reported first. `deferPostRun: true` (engine-cli) returns them as `result.postRun`; `orchestrate.mjs` runs it after the slot frees and waits for it before the batch ends; `run-issue` awaits it before exit. Without the option `finish` runs them inline. Other reasons keep teardown before `RUN_TERMINAL`.
-- **Sign-off.** `installSignoffHook` puts a commit-msg hook (chaining the repo's own hooks) on the builder env via `GIT_CONFIG_*` so builder commits are signed when made; `ensureSignedOff` stays the fallback.
+- **Sign-off.** `installSignoffHook` puts a commit-msg hook (chaining the repo's own hooks) on the builder env only (not `laneEnv()`, so validate/test commands and their fixture repos never see it, #5487) via `GIT_CONFIG_*` so builder commits are signed when made; `ensureSignedOff` stays the fallback.
 - **Invalid.** the close and the `workflow:invalid` label run in `Promise.all`.
 
 ## Entry 2026-11-11 — sandbox_start step timings and opt-in local warm worktrees (#5435)
