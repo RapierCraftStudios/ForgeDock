@@ -8180,3 +8180,20 @@ describe("admission disk ceiling (#5421)", () => {
     assert.equal((await diskLowAdmission({ host: host(2000), minFreeGb: 5 })).reasons.length, 2);
   });
 });
+
+import { precheck as precheck5440 } from "./conformance.mjs";
+describe("#5440 precheck scope: directory deliverable and renumbered migration", () => {
+  const mk = (path) => ({ requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [{ id: "D8", path, change: "regenerate", requirements: ["R1"] }], validate: [] });
+  const res = { requirements: [{ id: "R1", status: "implemented" }], validation: [] };
+  const creep = (contract, changedFiles) => precheck5440({ contract, result: res, changedFiles }).failures.filter((f) => f.kind === "scope_creep");
+  it("directory deliverable without a slash: files beneath it are not scope_creep (#40566 shape); a sibling is", () => {
+    const c = mk("listings/official/travel");
+    assert.equal(creep(c, ["listings/official/travel/agent.md", "listings/official/travel/page.md"]).length, 0);
+    assert.equal(creep(c, ["listings/official/travel2/agent.md"]).length, 1);
+  });
+  it("renumbered migration (0637_* -> 0639_*) stays covered; an unrelated file is still scope_creep", () => {
+    const c = mk("db/migrations/0637_*");
+    assert.equal(creep(c, ["db/migrations/0639_add_x.sql"]).length, 0);
+    assert.equal(creep(c, ["db/migrations/0639_add_x.sql", "src/billing.js"]).length, 1);
+  });
+});
