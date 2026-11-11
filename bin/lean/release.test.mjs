@@ -34,9 +34,11 @@ function fakeIo(world = {}) {
       if (a[0] === "pr" && a[1] === "view" && j.includes("--json state,mergeCommit,headRefOid")) return JSON.stringify({ state: w.prState ?? "OPEN", mergeCommit: w.prState === "MERGED" ? { oid: "m".repeat(40) } : null, headRefOid: HEAD });
       if (j.includes("--json headRefOid")) return JSON.stringify({ headRefOid: HEAD });
       if (j.includes("--json comments")) return JSON.stringify({ comments: w.comments });
-      if (a[0] === "api" && /\/commits\/[^/]+\/status$/.test(a[1])) return JSON.stringify(w.statusGate ? [{ name: "forge/deploy-gate", conclusion: w.statusGate }] : []);
+      if (a[0] === "api" && /\/commits\/[^/]+\/status$/.test(a[1])) return JSON.stringify(io.reran && w.afterRerun ? [{ name: "forge/deploy-gate", conclusion: w.afterRerun }] : w.statusGate ? [{ name: "forge/deploy-gate", conclusion: w.statusGate }] : []);
       if (a[0] === "api") return JSON.stringify(w.gate ? [{ name: "forge/deploy-gate", conclusion: w.gate }] : []);
       if (a[0] === "pr" && a[1] === "merge") return "";
+      if (a[0] === "run" && a[1] === "list") return JSON.stringify(w.noRun ? [] : [{ databaseId: 42 }]);
+      if (a[0] === "run" && a[1] === "rerun") { if (w.rerunFails) throw new Error("run in progress"); io.reran = (io.reran ?? 0) + 1; return ""; }
       throw new Error(`unexpected gh ${j}`);
     },
   };
@@ -82,6 +84,31 @@ describe("release job (#5211)", () => {
     assert.ok(ok.io.calls.some((a) => a[1] === "merge" && a.includes("--match-head-commit")));
     const pend = await promote({ gate: null, statusGate: "pending" }, { opts: { merge: true } });
     assert.equal(pend.out.status, "stopped");
+  });
+
+  it("#5417: a pending gate is re-run on the head, awaited, and --merge then merges", async () => {
+    const r = await promote({ gate: null, statusGate: "pending", afterRerun: "success" }, { opts: { merge: true } });
+    assert.equal(r.out.status, "done");
+    assert.equal(r.io.reran, 1);
+    assert.ok(r.io.calls.some((a) => a[0] === "run" && a.includes("--commit") && a.includes(HEAD)));
+    assert.ok(r.io.calls.some((a) => a[1] === "merge"));
+    assert.equal(r.io.sleeps.length, 1);
+  });
+
+  it("#5417: without --merge the wait still happens, then the merge command is printed", async () => {
+    const r = await promote({ gate: null, statusGate: "pending", afterRerun: "success" });
+    assert.equal(r.io.reran, 1);
+    assert.ok(r.io.printed.some((l) => l.includes("gh pr merge 7")));
+  });
+
+  it("#5417: a gate that stays pending stops after the bounded polls; a failing rerun does not throw", async () => {
+    const r = await promote({ gate: null, statusGate: "pending", rerunFails: true }, { opts: { merge: true } });
+    assert.equal(r.out.status, "stopped");
+    assert.equal(r.io.sleeps.length, 12);
+    assert.ok(!r.io.calls.some((a) => a[1] === "merge"));
+    const f = await promote({ gate: "failure" }, { opts: { merge: true } });
+    assert.equal(f.io.sleeps.length, 0);
+    assert.equal(f.io.reran, undefined);
   });
 
   it("#5266: a release PR merged by hand moves to post-merge with the merge sha, without the opt-in stop", async () => {
