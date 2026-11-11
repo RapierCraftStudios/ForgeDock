@@ -3049,6 +3049,13 @@ path is authorized (#5380).
 
 `prompts.mjs` `builderPlanPrompt` and `PREFILTER_SYSTEM`: a feature request whose behaviour is already reachable (same semantics under another name, or a stdlib or dependency function the project wraps or re-exports) is a duplicate. The verdict is INVALID (result status `invalid`, no new verdict value), with the equivalent and its path as evidence; the project deprecating that capability counts against adding an alias.
 
+## Entry 2026-11-11 — post-run bookkeeping off the lane's critical path (#5437)
+
+- **Queue.** `postrun.mjs` `makePostRun`: named, ordered, idempotent jobs; a failing job retries (3x, backoff) and records `POSTRUN_OK` / `POSTRUN_FAILED`, never changing the outcome.
+- **Merged lane.** `lean.mjs` queues branch delete, structure telemetry emit, guard, FORGE:FACTS, trajectory and teardown (worktree, ledger clear) as jobs; `RUN_TERMINAL` is reported first. `deferPostRun: true` (engine-cli) returns them as `result.postRun`; `orchestrate.mjs` runs it after the slot frees and waits for it before the batch ends; `run-issue` awaits it before exit. Without the option `finish` runs them inline. Other reasons keep teardown before `RUN_TERMINAL`.
+- **Sign-off.** `installSignoffHook` puts a commit-msg hook (chaining the repo's own hooks) on the builder env via `GIT_CONFIG_*` so builder commits are signed when made; `ensureSignedOff` stays the fallback.
+- **Invalid.** the close and the `workflow:invalid` label run in `Promise.all`.
+
 ## Entry 2026-11-11 — sandbox_start step timings and opt-in local warm worktrees (#5435)
 
 `lean.mjs` times each `sandbox_start` step (`fetch`, `resume_probe`, `salvage_cleanup`, `warm_claim`, `worktree_add`, `toolchain`) via `step()`: a `SANDBOX_STEP {step, ms}` event plus `phaseledger.addStep`, which adds a `steps` object (ms) to that phase in `snapshot()` (not added to the phase total; shape and `LANE_PHASES` order unchanged). The resume probe's `gh pr list` and `ls-remote` now run in parallel. `warmtree.mjs`: with `FORGE_LOCAL_WARM_TREES=1..4` (or `o.warmTrees`, default off) a fresh, non-resumed lane claims a detached tree from `<worktreeRoot>/warm/` (`worktree move` + `checkout -B branch <base sha>`), verifies `HEAD` against the resolved base sha, then `refillWarm` tops the pool up best effort. Any error removes the claimed tree and falls to the cold `addLaneWorktree` path; the pool never fails a lane. Tests: `warmtree.test.mjs` (6). Cost: 0 LLM calls.
