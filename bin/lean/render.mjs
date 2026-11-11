@@ -213,8 +213,10 @@ export function renderStructure(s) {
   ];
   return `**Structure**\n| Delta | Value |\n| --- | --- |\n${rows.map(([k, v]) => `| ${k} | ${esc(v)} |`).join("\n")}\n\n`;
 }
+/** #5447: `N declared, N ran, N red→green, N skipped(reason)`. */
+const testsCell = (t) => `${t.declared} declared, ${t.ran} ran, ${t.redGreen} red→green, ${t.skipped?.length ?? 0} skipped${t.skipped?.length ? `(${[...new Set(t.skipped.map((s) => s.reason))].join(", ")})` : ""}`;
 export function renderTrajectory(T) {
-  const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ...(T.verify ? [["Verify", T.verify]] : []), ["Review", T.review], ["PR", T.pr], ["Base Sync", T.baseSync ?? "not needed"], ["Merge", T.merge], ["Close", T.close]];
+  const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ...(T.verify ? [["Verify", T.verify]] : []), ...(T.tests ? [["Tests", testsCell(T.tests)]] : []), ["Review", T.review], ["PR", T.pr], ["Base Sync", T.baseSync ?? "not needed"], ["Merge", T.merge], ["Close", T.close]];
   const cellPair = (v) => {
     const [res, notes] = Array.isArray(v) ? v : [v, ""];
     return `${cell(res ?? "not reached")} | ${notes ? cell(notes) : "-"}`;

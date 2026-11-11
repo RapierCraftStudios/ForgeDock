@@ -22,3 +22,9 @@ describe("remote tool placement (#5331)", () => {
     assert.deepEqual(lackedTools(null, ["promtool"]), { tools: [], ids: [] });
   });
 });
+
+describe("#5447 test_plan.env", () => {
+  it("a declared env tool the target lacks is named", () => {
+    assert.deepEqual(lackedTools({ test_plan: { env: ["pytest"] }, validate: [] }, ["pytest"]), { tools: ["pytest"], ids: ["test_plan.env"] });
+  });
+});

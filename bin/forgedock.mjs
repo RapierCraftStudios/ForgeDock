@@ -995,6 +995,17 @@ async function batchHealthSection(c, batchId) {
   } catch { /* status never fails on batch health */ }
 }
 
+/** #5465: issue-watch health; a dead watch is flagged and alerted once (events.webhook_url). */
+async function watchHealthSection(c) {
+  try {
+    const [{ listWatches, alertDeadWatches }, { watchRoot }, { makeEventEmitter }, { readEvents }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs"), import("./engine/events.mjs"), import("./engine-cli.mjs")]);
+    const rows = listWatches(watchRoot());
+    if (!rows.length) return;
+    await alertDeadWatches({ root: watchRoot(), emit: (type, data, ctx) => makeEventEmitter({ repo: ctx.repo, config: readEvents(c.cwd) }).emitEvent(type, data, ctx) });
+    c.stdout.write(`  issue-watch\n${rows.map((w) => `    ${w.name} (${w.repo}): ${w.live.state === "dead" ? "DEAD" : w.live.state}${["dead", "exited"].includes(w.live.state) ? ` - ${w.live.reason}` : ""}`).join("\n")}\n\n`);
+  } catch { /* status never fails on watch health */ }
+}
+
 /** Compact status screen for configured/managed directories. */
 /** #5174: the status `host` row: the host_overloaded line, else `load X.X/core ...`; null (rendered `unknown`) on any failure. */
 async function hostLoadRow(cwd) {
@@ -4035,6 +4046,7 @@ switch (command) {
     if (statusDir) c.cwd = resolve(statusDir);
     await statusScreen(c);
     await batchHealthSection(c, bi === -1 ? null : statusArgs[bi + 1] ?? null);
+    await watchHealthSection(c);
     break;
   }
   case "uninstall":

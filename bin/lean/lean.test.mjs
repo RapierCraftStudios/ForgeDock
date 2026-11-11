@@ -971,6 +971,9 @@ describe("core work-on", () => {
   });
 });
 
+import { e2eCheckFor } from "./postdeploy-check.mjs";
+import { autoPostDeployE2e } from "./conformance.mjs";
+
 describe("conformance gate (frozen contract, precheck, structured review)", () => {
   const Q2 = "Existing callers of foo keep working.";
   const two = (d2 = "deliver", extra = {}) => ({ ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: Q2, disposition: d2, ...(d2 === "defer" || d2 === "post-deploy" ? { bucket: "post-deploy" } : {}), ...extra }],
@@ -1047,6 +1050,18 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(w.comments.find((c) => c.includes("FORGE:AMENDMENT")), /\| defer \| R2 \| callers live in another module/);
     assert.ok(w.comments.findIndex((c) => c.includes("FORGE:REVIEW")) < w.comments.findIndex((c) => c.includes("FORGE:TRACKED")));
     assert.equal(w.closed[0].at(-1), "completed");
+  });
+
+  it("#5468 prod-only e2e_unverified is the only finding: the engine converts it to a post-deploy check and the lane merges", async () => {
+    const PQ = "https://store.example.io/{slug}/agent.md returns 200 for every published listing [type:e2e]";
+    const k = two("deliver", { quote: PQ });
+    const kFrozen = autoPostDeployE2e(k).contract; // the engine's freeze rewrite: the reviewer judges the post-deploy row
+    const w = world({ contract: k, body: `${ISSUE_BODY}\n- ${PQ}`, claims: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], reviews: [conf({ issue_coverage: [{ quote: "foo must handle a null argument without throwing.", status: "covered" }, { quote: PQ, status: "covered" }] }, kFrozen, files2)], resumeChanged: files2 });
+    const g = e2eCheckFor("R2", PQ); // the fake git cannot show the engine's commit: serve the generated entry as HEAD's checks file
+    w.baseFiles = { "HEAD:.forge/post-deploy-checks.json": JSON.stringify({ [g.id]: g.entry }) };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.notEqual(r.code, "conformance.e2e_unverified");
+    assert.equal(w.merges.length, 1);
   });
 
   for (const d of ["defer", "post-deploy"]) {
@@ -1559,6 +1574,47 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(reviewers(w).length, 0);
     assert.match(builders(w)[2][4], /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
     assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
+  });
+
+  it("#5447 replay: a missing test module is provisioned once and the lane retries; if it stays missing it ends env.tool_missing, never merged", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: v }); let provisioned = 0, installed = false;
+    w.io.deps = { prepare: async () => { provisioned++; installed = true; return []; } };
+    w.io.runCommand = async () => (installed ? { rc: 0, output: "" } : { rc: 1, output: "ModuleNotFoundError: No module named 'pytest'" });
+    const ok = await run(w, { conformance: "enforce" });
+    assert.notEqual(ok.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(provisioned >= 1, true);
+    const w2 = world({ validation: v }); let again = 0;
+    w2.io.deps = { prepare: async () => { again++; return []; } };
+    w2.io.runCommand = async () => ({ rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" });
+    const r = await run(w2, { conformance: "enforce" });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0); assert.equal(again, 2, "the toolchain prepare plus exactly one provisioning retry");
+  });
+
+  it("#5447 a test plan declaring env: a missing runner is provisioned once and the lane builds; if it stays missing the lane ends env.tool_missing before building", async () => {
+    const contract = { ...CONTRACT, test_plan: [{ requirement: "R1", proof: "the pytest case no longer errors at collection", level: "unit", level_reason: "cheapest level that observes it", repro: "no-repro", reason: "env-only", command: "node --test test/foo.test.js", env: ["pytest"] }] };
+    const w = world({ contract }); let installed = false;
+    w.io.deps = { prepare: async () => [] };
+    w.io.runCommand = async ({ command }) => { if (/pip install/.test(command)) installed = true; return /pytest --version/.test(command) && !installed ? { rc: 1, output: "No module named pytest" } : { rc: 0, output: "" }; };
+    const ok = await run(w, { conformance: "enforce" });
+    assert.notEqual(ok.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.ok(installed);
+    const w2 = world({ contract });
+    w2.io.runCommand = async ({ command }) => (/pytest --version/.test(command) ? { rc: 1, output: "" } : { rc: 0, output: "" });
+    const r = await run(w2, { conformance: "enforce" });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0);
+  });
+
+  it("#5447 a failed install covering a changed file blocks through the gate (needs-human env.tool_missing, not merged); an unrelated failed install is only logged", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }];
+    const w = world({ validation: v }); let calls = 0;
+    w.io.deps = { prepare: async () => { calls++; return [{ status: "failed", eco: "npm", dir: ".", key: null, ms: 1, reason: "install failed: ERESOLVE" }]; } };
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w.merges.length, 0);
+    assert.equal(calls, 2, "the toolchain prepare plus exactly one provisioning retry");
+    assert.match(nhBody(w), /dependency install failed \(npm: install failed: ERESOLVE\) for a package the changed file/);
+    const w2 = world({ validation: v });
+    w2.io.deps = { prepare: async () => [{ status: "failed", eco: "poetry", dir: "services/other", key: null, ms: 1, reason: "install failed" }] };
+    const r2 = await run(w2, { conformance: "enforce" });
+    assert.notEqual(r2.code, OUTCOME_CODES.ENV_TOOL_MISSING);
   });
 
   it("#4323 a validate the host cannot run (missing module) ends env.tool_missing naming it: no builder resume, no reviewer", async () => {
@@ -2468,6 +2524,7 @@ describe("comment templates", () => {
     const m = renderTrajectory(base);
     assert.match(m, /^## Pipeline Trajectory — #9\n\n\| Phase \| Result \| Notes \|/);
     for (const row of ["| Validate | CONFIRMED | 2 evidence item(s) |", "| Review | PASS | 1 round |", "| PR | #5 | opened |", "| Merge | all | merged at abc |", "| Close | issue closed (completed) | label workflow:merged |", "- d1", "- none", "_cost $1_"]) assert.ok(m.includes(row), row);
+    assert.match(renderTrajectory({ ...base, tests: { declared: 3, ran: 2, redGreen: 1, skipped: [{ id: "V2", reason: "validate_env" }] } }), /\| Tests \| 3 declared, 2 ran, 1 red→green, 1 skipped\(validate_env\) \|/);
     const nh = renderTrajectory({ issue: 9, validate: "CONFIRMED", anomalies: ["needs-human: Review FAIL twice"], close: ["left open", "label needs-human"] });
     assert.match(nh, /\| Implement \| not reached \| - \|/);
     assert.match(nh, /\*\*Anomalies\*\*\n- needs-human: Review FAIL twice/);
@@ -7783,7 +7840,7 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     return w;
   };
   const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
-  const ON = { light: { mode: "on" } };
+  const ON = { light: { mode: "on", source: "text" } };
 
   it("nothing triggers: exactly one builder session (no plan) plus the review; the derived contract is frozen and posted", async () => {
     const w = lworld(), dir = tmpDir("light-");
@@ -8249,6 +8306,95 @@ describe("#5347 lane: the build opens with its independent reads in one turn", (
     assert.deepEqual(pack.files, ["src/a.js", "src/b.js"]);
     assert.deepEqual(compileContextPack({ issue: 9, links: [], attempts: [], ledger: [], facts: [] }).files, []);
     assert.match(buildOpeningNote({ paths: ["src/a.js"], packFiles: pack.files }), /Context pack files \(touched by earlier PRs on these symbols\): src\/b\.js/);
+  });
+});
+
+describe("#5426 investigation decides pipeline depth (lean.light.source: investigation)", () => {
+  const BODY = "foo crashes when it gets a null argument.\n\n- foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const RESULT = { status: "fixed", summary: "fixed foo", requirement: "foo must handle a null argument without throwing.", repro_test: RT, test_plan: TEST_PLAN, tests: [{ command: RT.command, result: "pass", fails_without_fix: true }] };
+  const FF = { light: { mode: "on", source: "investigation" } };
+  const TRIAGE = { files: ["src/foo.js"], size: "S", risk: false, decision_needed: false };
+  const fworld = (o = {}) => {
+    const w = world({ labels: [{ name: "bug" }], body: BODY, result: RESULT, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT }, ...o });
+    w.numstat = o.numstat ?? "5\t1\tsrc/foo.js\n20\t0\ttest/foo.test.js\n";
+    w.io.redGreen = async () => o.repro ?? { base: "FAILED", head: "RAN" };
+    w.io.runCommand = async () => ({ rc: 0, output: "" });
+    w.io.apiShape = async () => ({ status: "none", changes: [], unknown: [] });
+    const orig = w.io.runner; // the investigator writes triage.json beside investigation.md
+    w.io.runner = async (c) => {
+      const r = await orig(c);
+      if (c.role === "builder" && /triage\.json/.test(c.prompt) && o.triage !== null) { const p = `${WT}/.forge-lean/triage.json`; w.files[p] = JSON.stringify(o.triage ?? TRIAGE); w.mtimes[p] = Date.now(); }
+      return r;
+    };
+    return w;
+  };
+  const ev = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
+
+  it("a trivial issue that names no file fast-forwards: investigate, one resumed implement session, gates, merge; skipped stages are named", async () => {
+    const w = fworld(), dir = tmpDir("ff-");
+    const r = await run(w, { dir, ...FF });
+    assert.equal(r.terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 2, "investigation plus one implement session, no contract step");
+    assert.match(b[0][4], /PLANNING ONLY/); assert.match(b[0][4], /triage\.json/); assert.ok(!b[0][4].includes('{"requirements":['));
+    assert.equal(b[1][2], "sess-1", "the implement session resumes the investigation session");
+    assert.match(b[1][4], /fast-forwards this issue/); assert.match(b[1][4], /failing regression test first/);
+    assert.equal(ev(dir, "LIGHT_ELIGIBILITY")[0].verdict, "ambiguous", "the text heuristic is only a shadow signal");
+    const e = ev(dir, "FASTFORWARD_ELIGIBILITY")[0];
+    assert.equal(e.verdict, "eligible"); assert.equal(e.light, true); assert.equal(e.shadow, false);
+    assert.equal(ev(dir, "LIGHT_DONE").length, 1);
+    assert.ok(traj(w)[0].includes("Fast-forward: skipped plan, contract freeze, multi-session review"), traj(w)[0]);
+    const lite = w.comments.find((c) => c.includes("<!-- FORGE:LITE -->"));
+    assert.match(lite, /Fast-forward \(investigation decided the depth\)/);
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:INVESTIGATION -->")));
+  });
+
+  it("an invalid verdict closes with evidence after the investigation alone", async () => {
+    const w = fworld({ changed: [], stages: { investigation: "**Verdict**: INVALID\n\n### What We Found\n- src/foo.js:3 already guards null" },
+      result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } });
+    const r = await run(w, { dir: tmpDir("ff-invalid-"), ...FF });
+    assert.equal(r.terminalReason, "invalid");
+    assert.equal(builders(w).length, 1);
+    assert.match(w.comments.find((c) => c.includes("FORGE:INVESTIGATION")), /Verdict\*\*: INVALID/);
+  });
+
+  it("a risk path in the predicted files goes to the full lane: the contract step resumes the investigation session", async () => {
+    const w = fworld({ triage: { ...TRIAGE, files: ["src/auth/session.js"] } }), dir = tmpDir("ff-risk-");
+    const r = await run(w, { dir, ...FF });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(ev(dir, "LIGHT_DONE").length, 0);
+    assert.ok(ev(dir, "FASTFORWARD_ELIGIBILITY")[0].reasons.some((x) => x.code === "risk_path"));
+    const b = builders(w);
+    assert.ok(b.length >= 3, "investigation, contract step, implement");
+    assert.equal(b[1][2], "sess-1"); assert.match(b[1][4], /\{"requirements":\[/); assert.match(b[1][4], /PLANNING ONLY/);
+    assert.equal(w.comments.filter((c) => c.includes("<!-- FORGE:CONTRACT -->")).length, 1);
+  });
+
+  it("a gate failing after the fast-forward upgrades to the full lane (existing #4450 safety net)", async () => {
+    const w = fworld({ repro: { base: "PASSED", head: "RAN" } }), dir = tmpDir("ff-up-");
+    await run(w, { dir, ...FF });
+    const up = ev(dir, "LIGHT_UPGRADE");
+    assert.equal(up.length, 1); assert.ok(up[0].reasons.some((x) => x.code === "repro_not_red"));
+    assert.equal(ev(dir, "LIGHT_DONE").length, 0);
+    assert.ok(builders(w).length >= 4, "investigation, implement, then the full lane's plan and implement");
+  });
+
+  it("source investigation in shadow mode keeps the full lane and logs the investigation verdict beside it", async () => {
+    const w = fworld({ triage: null }), dir = tmpDir("ff-shadow-");
+    const r = await run(w, { dir, light: { mode: "shadow", source: "investigation" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).every((x) => !/triage\.json/.test(x[4])), "no investigation-only call");
+    const e = ev(dir, "FASTFORWARD_ELIGIBILITY");
+    assert.equal(e.length, 1); assert.equal(e[0].shadow, true);
+    assert.equal(ev(dir, "LIGHT_DONE").length, 0);
+  });
+
+  it("source: text (the kill-switch) is unchanged: no fast-forward event, no investigation-only call", async () => {
+    const w = fworld(), dir = tmpDir("ff-text-");
+    await run(w, { dir, light: { mode: "on", source: "text" } });
+    assert.equal(ev(dir, "FASTFORWARD_ELIGIBILITY").length, 0);
+    assert.ok(builders(w).every((x) => !/triage\.json/.test(x[4])));
   });
 });
 

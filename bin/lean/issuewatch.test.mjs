@@ -5,8 +5,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
-import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner } from "./issuewatch.mjs";
+import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner, isTransientGhError } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
+import { stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
+const require_stuck = (s, now) => formatStuck(stuckClaims(s, now));
 
 const tmp = () => tmpDir("iw-");
 const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, authorAssociation: "OWNER", author: { login: "me" }, createdAt: "2026-10-01T00:00:00Z", ...o });
@@ -45,7 +47,7 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, 
       return "";
     },
     launch: (n, lane) => { launched.push([n, lane]); return { poll: () => ({ code: exit(n) }) }; },
-    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false } };
+    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false, results: (id) => io.results?.[id] ?? null }, remediated: [], remediate: (n, lane, code) => { io.remediated.push([n, lane, code]); return { poll: () => (io.remediateExit === undefined ? null : { code: io.remediateExit }) }; } };
   return io;
 }
 
@@ -363,7 +365,7 @@ async function settleOne(opts = {}, { ticks = 1, gap = 0 } = {}) {
   await tick({ watch, repo: "o/r", io, state, handles }); // claim + launch
   for (let i = 0; i < ticks; i++) { await tick({ watch, repo: "o/r", io, state, handles }); io.tickClock(gap); }
   const posted = io.calls.filter((a) => a[1] === "comment").map((a) => a[a.indexOf("--body") + 1]);
-  return { state, io, posted, reopened: io.calls.some((a) => a[1] === "reopen"), escalated: io.calls.some((a) => a[1] === "edit" && a.includes("needs-human")) };
+  return { state, io, posted, reopened: io.calls.some((a) => a[1] === "reopen"), escalated: io.calls.some((a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))) };
 }
 
 test("verify: a merged, reviewed, green lane PR is verified and the evidence is posted", async () => {
@@ -469,7 +471,15 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
   assert.equal(r.posted.length, 0);
 });
 
-for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
+test("verify: failed verify swaps workflow:merged for workflow:merged-unverified", async () => {
+  const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
+  const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
+  const edits = r.io.calls.filter((a) => a[1] === "edit" && a.includes("needs-human,workflow:merged-unverified"));
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0][edits[0].indexOf("--remove-label") + 1], "workflow:merged");
+});
+
+for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))], ["comment", (a) => a[1] === "comment"]]) {
   test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
     const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
     let failing = true;
@@ -486,7 +496,7 @@ for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs
     await tick({ watch, repo: "o/r", io, state, handles });
     const n = (f) => io.calls.filter(f).length;
     assert.equal(n((a) => a[1] === "comment"), what === "comment" ? 2 : 1); // the failed attempt is recorded too
-    assert.equal(n((a) => a[1] === "edit" && a.includes("needs-human")), what === "label" ? 2 : 1);
+    assert.equal(n((a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))), what === "label" ? 2 : 1);
     assert.equal(n((a) => a[1] === "reopen"), 1);
     assert.deepEqual(state.unverified, [1]);
     assert.deepEqual(state.pendingVerify, []);
@@ -631,4 +641,85 @@ test("#5088 ghRunner names the failing call; 401/403 also warn with the effect o
   assert.equal(ghRunner((cmd, args, opts) => { seen = { cmd, args, opts }; return "out"; })(["repo", "view"]), "out");
   assert.equal(seen.cmd, "gh");
   assert.deepEqual(seen.opts.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+const TLS = Object.assign(new Error("gh failed"), { status: 1, stderr: 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout\n' });
+
+test("#5465 fault injection: ghRunner retries a transient TLS timeout with backoff, never a 4xx", () => {
+  const naps = []; let calls = 0;
+  const gh = ghRunner(() => { if (calls++ < 2) throw TLS; return "ok"; }, () => {}, { sleep: (ms) => naps.push(ms), delayMs: 10 });
+  assert.equal(gh(["issue", "view", "1"]), "ok");
+  assert.deepEqual(naps, [10, 20]);
+  let n = 0;
+  const hard = ghRunner(() => { n++; throw Object.assign(new Error("x"), { stderr: "gh: Not Found (HTTP 404)" }); }, () => {}, { sleep: () => {} });
+  assert.throws(() => hard(["issue", "view", "1"]), /failed: gh: Not Found/);
+  assert.equal(n, 1);
+  let m = 0;
+  assert.throws(() => ghRunner(() => { m++; throw TLS; }, () => {}, { sleep: () => {}, retries: 2 })(["api", "x"]), /TLS handshake timeout/);
+  assert.equal(m, 3);
+  for (const t of ["HTTP 502", "HTTP 429", "read: ECONNRESET", "You have exceeded a secondary rate limit"]) assert.ok(isTransientGhError(t), t);
+  assert.ok(!isTransientGhError("HTTP 403: Resource not accessible"));
+});
+
+test("#5465 fault injection: a TLS timeout on one gh call keeps the watch up and the next tick claims", async () => {
+  const dir = tmp(), watch = validateWatch("w", { until: "2026-10-30T00:10:00Z" }), io = fakeIo(dir, [iss(1)]);
+  let fail = true; const gh = io.gh;
+  io.gh = async (a) => { if (fail) { fail = false; throw TLS; } return gh(a); };
+  io.sleep = async () => { io.tickClock(300000); };
+  const errs = console.error; console.error = () => {};
+  let state; try { state = await runWatch({ watch, repo: "o/r", io, dir, intervalMs: 300000 }); } finally { console.error = errs; }
+  assert.deepEqual(state.claimed, [1]);
+  assert.notEqual(state.phase, "exited");
+});
+
+test("#5465 a crash or a single pass leaves phase exited with the reason, never running", async () => {
+  const dir = tmp(), io = fakeIo(dir, []);
+  io.sleep = async () => { throw new Error("disk gone"); };
+  const errs = console.error; console.error = () => {};
+  try { await assert.rejects(runWatch({ watch: W({}), repo: "o/r", io, dir, intervalMs: 1 }), /disk gone/); } finally { console.error = errs; }
+  const s = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
+  assert.equal(s.phase, "exited"); assert.match(s.exitReason, /crashed: disk gone/);
+  const text = formatStatus(s, W({}), io.now());
+  assert.match(text, /\[exited,/); assert.match(text, /state: exited \(crashed: disk gone\)/);
+});
+
+const batchState = (o = {}) => ({ claimed: [1, 2, 3, 4], inflight: [1, 2, 3, 4], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: { 1: "staging", 2: "staging", 3: "staging", 4: "staging" }, phase: "running", batch: "b1", ...o });
+const parkedRow = (code) => ({ outcome: "needs-human", code });
+
+test("inflight drops issues whose batch result is final and parked lanes get remediation", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: parkedRow("conformance.e2e_unverified"), 2: parkedRow("conformance.unimplemented"), 3: parkedRow("maintenance.hotspot_growth"), 4: { outcome: "needs-human" } } };
+  const state = batchState();
+  await tick({ watch: W({ mode: "batch" }), repo: "o/r", io, state });
+  assert.deepEqual(state.inflight, []); // the batch has not reported, yet every result is final
+  assert.deepEqual(io.remediated.map((r) => r[0]), [1, 2, 3]);
+  assert.deepEqual(io.remediated[0], [1, "staging", "conformance.e2e_unverified"]);
+  assert.equal(state.outcomes[4].kind, "needs-human"); // no terminal code: not a mechanical park
+  const t = formatStatus(state, W({ mode: "batch" }), io.now());
+  assert.match(t, /parked 3/); assert.match(t, /needs-human 1/);
+});
+
+test("a failed remediation lane makes the parked issue needs-human with the reason; budget caps lanes", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: parkedRow("ci.red"), 2: parkedRow("ci.red") } };
+  io.remediateExit = 1;
+  const state = batchState({ claimed: [1, 2], inflight: [1, 2] });
+  await tick({ watch: W({ mode: "batch", max_remediations: "1" }), repo: "o/r", io, state });
+  assert.equal(io.remediated.length, 1);
+  assert.equal(state.outcomes[1].kind, "needs-human");
+  assert.match(state.outcomes[1].reason, /exited 1/);
+  assert.ok(io.calls.some((a) => a[1] === "edit" && a.includes("needs-human")));
+});
+
+test("a needs-human issue a person cleared with a new comment is re-claimed; stuck lists old claims", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: { outcome: "needs-human" } } };
+  const state = batchState({ claimed: [1], inflight: [1], started: io.now() - 30 * 3600_000 });
+  const w = W({ mode: "batch" });
+  await tick({ watch: w, repo: "o/r", io, state });
+  assert.match(require_stuck(state, io.now()), /#1 claimed 30h ago.*needs-human/);
+  const at = state.outcomes[1].at;
+  io.gh = ((orig) => async (a) => (a[1] === "view" && a.includes("state,labels,comments") ? JSON.stringify({ state: "OPEN", labels: [], comments: [{ authorAssociation: "OWNER", body: "fixed the cause", createdAt: new Date(at + 1000).toISOString() }] }) : orig(a)))(io.gh);
+  await tick({ watch: w, repo: "o/r", io, state });
+  assert.ok(!state.outcomes?.[1]); // released, then re-selected is up to planClaims
 });

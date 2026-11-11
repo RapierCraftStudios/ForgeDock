@@ -33,6 +33,7 @@ call, no consumer required. With no configuration the events go only to a local 
 | `release.promoted` | A probed fix reached the default branch (`forgedock probe` sweep: a recorded pass or fail, so once per fix, only for issues declaring `forge-probe`). | `fix`, `default_branch` |
 | `regression.detected` | A windowed post-deploy check failed and filed a regression issue (`forgedock probe --due`, daemon timer; `issue` is the monitored follow-up). | `subject`, `metric`, `detail` |
 | `experiment.verdict` | `forgedock stats --experiment <id> --emit-event` found targets `met` or `missed` (`inconclusive` is not emitted; plain `stats` never emits). | `experiment`, `verdict`, `detail` |
+| `watch.dead` | An `issue-watch` heartbeat is older than 3 passes: the process is gone (`forgedock issue-watch watchdog` or `forgedock status`; once per dead heartbeat). | `watch`, `repo`, `reason`, `age_s` |
 
 ## Local sink
 

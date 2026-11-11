@@ -32,7 +32,7 @@ const INCIDENTAL_RE = /(^|\/)(CHANGELOG|CHANGES|HISTORY)(\.[a-z]+)?$|(^|\/)(pack
 export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
-import { CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { CHECK_ID_RE, e2eCheckFor } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
@@ -1078,7 +1078,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
         continue;
       }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
-      if (miss && ciVerified) { ciCovered.push(v.id); continue; }
+      // #5447: CI may not run this test, so a missing tool on the rerun is never covered by a CI-verified head
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });
@@ -1383,11 +1383,45 @@ export function isE2eCommand(command, e2e = null) {
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
+/** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
+export function prodOnlyE2e(quote) {
+  const q = String(quote ?? "");
+  if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q);
+}
+/**
+ * #5468: rewrite production-only e2e/manual rows (deliver or defer; only `only` ids when given) to `post-deploy` with a generated
+ * check id. Pure; returns {contract, converted:[{id, check, entry}]}. A row whose quote names no probeable URL is left alone.
+ */
+export function autoPostDeployE2e(contract, only = null) {
+  const converted = [];
+  const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
+    if (!["deliver", "defer"].includes(r?.disposition) || !wantsE2e(r) || (only && !only.includes(r.id)) || isOutOfBand(r) || !prodOnlyE2e(r.quote)) return r;
+    const g = e2eCheckFor(r.id, r.quote);
+    if (!g) return r;
+    converted.push({ id: r.id, check: g.id, entry: g.entry });
+    return { ...r, disposition: "post-deploy", bucket: "post-deploy", check: g.id, local_infeasible_why: "the observable exists only in production (live domain or deploy), so no local fixture can check it", why: "production-only e2e/manual criterion: converted by the engine to a post-deploy check (#5468)" };
+  });
+  return { contract: converted.length ? { ...contract, requirements } : contract, converted };
+}
+/** #5468: the row ids named by `e2e_row` failures when every failure is one; null otherwise (anything else blocks as before). */
+export function loneE2eRows(failures) {
+  const fs = failures ?? [];
+  if (!fs.length || !fs.every((f) => f?.code === C.CONFORMANCE_E2E_UNVERIFIED && f.kind === "e2e_row")) return null;
+  const ids = fs.map((f) => /^(\S+) is a /.exec(String(f.detail ?? ""))?.[1]);
+  return ids.every(Boolean) ? [...new Set(ids)] : null;
+}
+/** #5468 (#5450): a validate that declares `env` names of configured test sandboxes (forge.yaml `sandboxes`) runs against a provisioned live service: the route for an e2e check that can run pre-merge. */
+export function sandboxedRun(v, e2e = null) {
+  const known = e2e?.sandboxes ?? [];
+  const names = Array.isArray(v?.env) ? v.env : typeof v?.env === "string" ? v.env.split(",") : [];
+  return names.some((n) => known.includes(String(n).trim()));
+}
 /** #4726: true when a V-ref named in the row's `validated_by` resolves to a contract validate command that is a real e2e check. */
 export function e2eVerified(row, contract, e2e = null) {
   const by = String(row?.validated_by ?? "");
   const refs = (contract?.validate ?? []).filter((v) => v?.id && new RegExp(`(?:^|[^A-Za-z0-9_])${v.id}(?![A-Za-z0-9_])`).test(by));
-  return refs.some((v) => isE2eCommand(v.command, e2e)) || (!refs.length && isE2eCommand(by, e2e));
+  return refs.some((v) => isE2eCommand(v.command, e2e) || sandboxedRun(v, e2e)) || (!refs.length && isE2eCommand(by, e2e));
 }
 /**
  * The engine's decision from the reviewer's rows. state: conforms | nonconforming | review.unparseable | review.incomplete
@@ -1412,7 +1446,7 @@ export function decide(raw, ctx) {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
       const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
-      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance${ctx.e2e?.sandboxes?.length ? `; it can run pre-merge: declare env: [${ctx.e2e.sandboxes.slice(0, 3).join(", ")}] on its validate to use the test sandbox (#5450), do not defer it` : ""}` });
     } else if (r.disposition === "defer" && wantsE2e(r)) {
       // #5339: a deferred e2e/manual requirement is not met; only a post-deploy one is transferred to the epic (the lane closes partial)
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
