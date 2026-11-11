@@ -205,3 +205,30 @@ describe("light.mjs purity (#4448)", () => {
     for (const m of ["node:fs", "node:child_process", "node:net", "node:http", "node:https"]) assert.equal(src.includes(`"${m}"`), false, m);
   });
 });
+
+describe("lightEligibility source/size/pre_text (#5426)", () => {
+  const base = { title: "fix", body: "tidy the helper", predictedFiles: ["src/a.py"], cfg: ON };
+  it("source text is unchanged: no repro is a soft reason, no source signal", () => {
+    const r = lightEligibility(base);
+    assert.equal(r.signals.some((s) => s.code === "source_investigation"), false);
+    assert.equal(r.reasons.some((x) => x.code === "no_repro"), true);
+  });
+  it("source investigation records the source and drops the text repro requirement", () => {
+    const r = lightEligibility({ ...base, source: "investigation", size: "S" });
+    assert.equal(r.light, true);
+    assert.equal(r.signals.some((s) => s.code === "source_investigation"), true);
+  });
+  it("size override M is a hard size reason; pre_text is a signal only", () => {
+    const m = lightEligibility({ ...base, source: "investigation", size: "M" });
+    assert.equal(m.light, false);
+    assert.equal(m.reasons.some((x) => x.code === "size"), true);
+    const p = lightEligibility({ ...base, source: "investigation", size: "S", preText: "ineligible" });
+    assert.equal(p.light, true);
+    assert.equal(p.signals.some((s) => s.code === "pre_text_ineligible"), true);
+  });
+  it("parseLightConfig accepts source text|investigation only", () => {
+    assert.equal(parseLightConfig({ source: "investigation" }).source, "investigation");
+    assert.equal(parseLightConfig({ source: "text" }).source, "text");
+    assert.equal("source" in parseLightConfig({ source: "bogus" }), false);
+  });
+});

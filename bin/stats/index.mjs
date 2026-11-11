@@ -120,7 +120,9 @@ Lane depth (forge#5209; local run logs, gh only for post-merge defect signals, n
                         defects (reopen, revert, a fix PR touching the same files within 7 days), grouped by verdict and
                         by every reason/signal code, plus the #5052 light-lane promotion verdict: light-shaped lanes cost
                         <= 1.2x and wall <= 1.3x model time, defect rate <= eligible full lanes of the same size;
-                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a);
+                        "insufficient data" under --min-n per cell. With lean.light.source: investigation (#5426) it also
+                        reports the fast-forward eligibility rate and the outcomes (merge, defects, reverts) of
+                        fast-forwarded, upgraded and full lanes. --offline skips the defect crawl (n/a);
                         --since defaults to the last 30 days; defect results of closed windows are cached
                         (--no-cache / --refresh), progress goes to stderr; the output ends with a recommendation
                         (promote, do not promote, insufficient data) with eligible share and would-be saving

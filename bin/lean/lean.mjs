@@ -90,6 +90,7 @@ import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
+import { fastForwardSource, parseTriage, fastForwardEligibility, fastForwardEvent, skippedStages, skippedLine, investigationOnlyPrompt, contractStepPrompt, TRIAGE_FILE, FF_BUILD_LEAD } from "./fastforward.mjs"; // #5426
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
 import { pickSalvage } from "./salvage-resume.mjs";
 import { makePostRun } from "./postrun.mjs";
@@ -2026,7 +2027,8 @@ export async function runCore(o) {
       lightVerdict = elig.verdict;
       if (elig.mode !== "off") T.decisions.push(`Light lane ${elig.mode}: ${elig.verdict}${elig.reasons.length ? ` (${elig.reasons.map((x) => x.code).join(", ")})` : ""}`);
       // #4451: a light try skips the hotspots and the context pack; an upgrade computes them before the plan call
-      const lightTry = elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover;
+      const ffSource = fastForwardSource(o.light), ffFresh = ffSource === "investigation" && !frozen && !resumed && !salvagedRef && !recover; // #5426: the text verdict above is only a shadow signal then
+      const lightTry = ffSource === "text" && elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover;
       if (!lightTry) hotFacts = namedHot; // #4451: a light try still gives its builder no hotspot facts
       enumList = io.enumeratingTests ? ((await within(io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }), waitMs)) ?? []) : [];
       if (enumList === TIMED_OUT) enumList = [];
@@ -2038,12 +2040,28 @@ export async function runCore(o) {
       }
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
-      if (lightTry) {
+      let ffPlan = "full", ffGo = false, lightElig = elig, lightPred = null, ffTriage = null; // #5426: how the plan call runs; ffGo = fast-forward to the light step
+      const ffTriageOf = async (raw) => parseTriage(raw, await io.fs.read(`${wt}/${INVESTIGATION_FILE}`).catch(() => ""));
+      if (ffFresh && elig.mode === "on") { // #5426: investigation first; its verdict, predicted files and size pick the depth
+        await builder(++attemptN, investigationOnlyPrompt(issue, tcOpts()), null, true, () => investigationOnlyPrompt(issue, tcOpts()), { trigger: "plan" });
+        planned = true; result = await readResult();
+        if (["invalid", "already-fixed", "blocked"].includes(result?.status)) ffPlan = "none"; // the shared close/block handling below
+        else {
+          ffTriage = await ffTriageOf(await io.fs.read(`${wt}/${TRIAGE_FILE}`).catch(() => null));
+          const fh = await hotspotsOf({ paths: ffTriage.files });
+          lightElig = fastForwardEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], triage: ffTriage, textFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: fh?.files ?? [], cfg: o.light ?? {} });
+          ev(fastForwardEvent(lightElig, ffTriage));
+          T.decisions.push(`Investigation decides depth: ${lightElig.verdict}${lightElig.reasons.length ? ` (${lightElig.reasons.map((x) => x.code).join(", ")})` : ""}`);
+          ffGo = lightElig.light; lightPred = ffTriage.files; hotFacts = fh ?? hotFacts;
+          if (!ffGo) ffPlan = "contract";
+        }
+      }
+      if (lightTry || ffGo) {
         { const f = await gateSetup(); if (f) return f; } // #5434: the light build is an implement-class session
         liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
-        const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() }),
-          build: () => builder(++attemptN, lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants), null, true, undefined, { trigger: "build" }),
+        const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: lightPred ?? namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() }),
+          build: () => builder(++attemptN, (ffGo ? FF_BUILD_LEAD : "") + lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants), ffGo ? sessionId : null, true, undefined, { trigger: "build" }),
           readResult, checkpoint: () => checkpoint("light build"), changedFiles, reproOf, numstat: () => git(["diff", "--numstat", `${base}...HEAD`]),
           runTests: async (cmds) => (io.runCommand ? runLightTests({ commands: mergeChecks(vcfg.invariants ?? [], cmds).commands, parallelism: Number(verifyParallelism()) || 1, now, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, acquire: () => heavyAcquire("precheck"), // #4451: host-capped
             run: ({ command, timeoutMs, workers }) => { const env = laneEnv(); return io.runCommand({ command, cwd: wt, timeoutMs, env: env.FORGE_HOST_PARALLELISM ? { ...env, FORGE_HOST_PARALLELISM: String(workers) } : env }); } }) : null),
@@ -2060,13 +2078,14 @@ export async function runCore(o) {
           await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
           ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro, cost_usd: usage.cost_usd });
           T.decisions.push(`Light lane: one builder session, contract ${hash} derived from the diff and the test`);
-          try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: elig, costUsd: usage.cost_usd, contractHash: hash })); } catch { /* #4452: the receipt is best effort */ }
+          if (ffGo) { T.decisions.push(skippedLine(lightElig)); await flushStages({ status: "fixed" }, ["investigation"]); } // #5426: FORGE:INVESTIGATION is read downstream
+          try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: lightElig, costUsd: usage.cost_usd, contractHash: hash, skipped: ffGo ? skippedStages(lightElig) : [] })); } catch { /* #4452: the receipt is best effort */ }
         } else {
           lightCommits = lr.files.length > 0;
           ev({ event: "LIGHT_UPGRADE", reasons: lr.reasons, cost_usd: usage.cost_usd });
           lightUpgrade = lr.reasons.map((x) => x.code);
           T.decisions.push(`Light lane upgraded to the full lane: ${lr.reasons.map((x) => x.code).join(", ")}`);
-          try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: elig, costUsd: usage.cost_usd })); } catch { /* #4452: the receipt is best effort */ }
+          try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: lightElig, costUsd: usage.cost_usd })); } catch { /* #4452: the receipt is best effort */ }
           const d = buildResumeDigest({ state: null, comments: trustedComments, contract: null, files: lr.files, lane });
           resumeNote = d.text + upgradeNote(lr.reasons);
           result = null; // the light result.json must not read as the plan's verdict
@@ -2076,8 +2095,8 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        const tPrompt = now(), planText = planPrompt(); setupStep("prompt_assembly", tPrompt); // #5434
-        await builder(++attemptN, planText + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" });
+        if (ffPlan === "contract") await builder(++attemptN, contractStepPrompt(issue, tcOpts()) + recoverNote() + decisionsNote, sessionId, true, planPrompt, { mode: "resume", trigger: "plan" }); // #5426: same session, investigation already written
+        else if (ffPlan === "full") { const tPrompt = now(), planText = planPrompt(); setupStep("prompt_assembly", tPrompt); await builder(++attemptN, planText + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" }); }
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -2095,6 +2114,7 @@ export async function runCore(o) {
         }
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
+        if (ffFresh && elig.mode === "shadow") { const tri = await ffTriageOf(null); ev(fastForwardEvent(fastForwardEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], triage: tri, textFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: (hotFacts?.files ?? []).filter((f) => tri.files.includes(f?.path ?? f)), cfg: o.light ?? {} }), tri, { shadow: true })); } // #5426: zero extra cost, no extra runner call
         { const f = await gateSetup(); if (f) return f; } // #5434: the contract checks below run commands with the lane env
         // #4353: the engine's scope gate is the only scope authority; a pure file-scope validate is dropped before it is checked or frozen
         const dropScope = (c) => {

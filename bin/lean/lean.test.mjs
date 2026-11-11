@@ -7798,7 +7798,7 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     return w;
   };
   const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
-  const ON = { light: { mode: "on" } };
+  const ON = { light: { mode: "on", source: "text" } };
 
   it("nothing triggers: exactly one builder session (no plan) plus the review; the derived contract is frozen and posted", async () => {
     const w = lworld(), dir = tmpDir("light-");
@@ -8264,6 +8264,95 @@ describe("#5347 lane: the build opens with its independent reads in one turn", (
     assert.deepEqual(pack.files, ["src/a.js", "src/b.js"]);
     assert.deepEqual(compileContextPack({ issue: 9, links: [], attempts: [], ledger: [], facts: [] }).files, []);
     assert.match(buildOpeningNote({ paths: ["src/a.js"], packFiles: pack.files }), /Context pack files \(touched by earlier PRs on these symbols\): src\/b\.js/);
+  });
+});
+
+describe("#5426 investigation decides pipeline depth (lean.light.source: investigation)", () => {
+  const BODY = "foo crashes when it gets a null argument.\n\n- foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const RESULT = { status: "fixed", summary: "fixed foo", requirement: "foo must handle a null argument without throwing.", repro_test: RT, test_plan: TEST_PLAN, tests: [{ command: RT.command, result: "pass", fails_without_fix: true }] };
+  const FF = { light: { mode: "on", source: "investigation" } };
+  const TRIAGE = { files: ["src/foo.js"], size: "S", risk: false, decision_needed: false };
+  const fworld = (o = {}) => {
+    const w = world({ labels: [{ name: "bug" }], body: BODY, result: RESULT, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT }, ...o });
+    w.numstat = o.numstat ?? "5\t1\tsrc/foo.js\n20\t0\ttest/foo.test.js\n";
+    w.io.redGreen = async () => o.repro ?? { base: "FAILED", head: "RAN" };
+    w.io.runCommand = async () => ({ rc: 0, output: "" });
+    w.io.apiShape = async () => ({ status: "none", changes: [], unknown: [] });
+    const orig = w.io.runner; // the investigator writes triage.json beside investigation.md
+    w.io.runner = async (c) => {
+      const r = await orig(c);
+      if (c.role === "builder" && /triage\.json/.test(c.prompt) && o.triage !== null) { const p = `${WT}/.forge-lean/triage.json`; w.files[p] = JSON.stringify(o.triage ?? TRIAGE); w.mtimes[p] = Date.now(); }
+      return r;
+    };
+    return w;
+  };
+  const ev = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
+
+  it("a trivial issue that names no file fast-forwards: investigate, one resumed implement session, gates, merge; skipped stages are named", async () => {
+    const w = fworld(), dir = tmpDir("ff-");
+    const r = await run(w, { dir, ...FF });
+    assert.equal(r.terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 2, "investigation plus one implement session, no contract step");
+    assert.match(b[0][4], /PLANNING ONLY/); assert.match(b[0][4], /triage\.json/); assert.ok(!b[0][4].includes('{"requirements":['));
+    assert.equal(b[1][2], "sess-1", "the implement session resumes the investigation session");
+    assert.match(b[1][4], /fast-forwards this issue/); assert.match(b[1][4], /failing regression test first/);
+    assert.equal(ev(dir, "LIGHT_ELIGIBILITY")[0].verdict, "ambiguous", "the text heuristic is only a shadow signal");
+    const e = ev(dir, "FASTFORWARD_ELIGIBILITY")[0];
+    assert.equal(e.verdict, "eligible"); assert.equal(e.light, true); assert.equal(e.shadow, false);
+    assert.equal(ev(dir, "LIGHT_DONE").length, 1);
+    assert.ok(traj(w)[0].includes("Fast-forward: skipped plan, contract freeze, multi-session review"), traj(w)[0]);
+    const lite = w.comments.find((c) => c.includes("<!-- FORGE:LITE -->"));
+    assert.match(lite, /Fast-forward \(investigation decided the depth\)/);
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:INVESTIGATION -->")));
+  });
+
+  it("an invalid verdict closes with evidence after the investigation alone", async () => {
+    const w = fworld({ changed: [], stages: { investigation: "**Verdict**: INVALID\n\n### What We Found\n- src/foo.js:3 already guards null" },
+      result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } });
+    const r = await run(w, { dir: tmpDir("ff-invalid-"), ...FF });
+    assert.equal(r.terminalReason, "invalid");
+    assert.equal(builders(w).length, 1);
+    assert.match(w.comments.find((c) => c.includes("FORGE:INVESTIGATION")), /Verdict\*\*: INVALID/);
+  });
+
+  it("a risk path in the predicted files goes to the full lane: the contract step resumes the investigation session", async () => {
+    const w = fworld({ triage: { ...TRIAGE, files: ["src/auth/session.js"] } }), dir = tmpDir("ff-risk-");
+    const r = await run(w, { dir, ...FF });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(ev(dir, "LIGHT_DONE").length, 0);
+    assert.ok(ev(dir, "FASTFORWARD_ELIGIBILITY")[0].reasons.some((x) => x.code === "risk_path"));
+    const b = builders(w);
+    assert.ok(b.length >= 3, "investigation, contract step, implement");
+    assert.equal(b[1][2], "sess-1"); assert.match(b[1][4], /\{"requirements":\[/); assert.match(b[1][4], /PLANNING ONLY/);
+    assert.equal(w.comments.filter((c) => c.includes("<!-- FORGE:CONTRACT -->")).length, 1);
+  });
+
+  it("a gate failing after the fast-forward upgrades to the full lane (existing #4450 safety net)", async () => {
+    const w = fworld({ repro: { base: "PASSED", head: "RAN" } }), dir = tmpDir("ff-up-");
+    await run(w, { dir, ...FF });
+    const up = ev(dir, "LIGHT_UPGRADE");
+    assert.equal(up.length, 1); assert.ok(up[0].reasons.some((x) => x.code === "repro_not_red"));
+    assert.equal(ev(dir, "LIGHT_DONE").length, 0);
+    assert.ok(builders(w).length >= 4, "investigation, implement, then the full lane's plan and implement");
+  });
+
+  it("source investigation in shadow mode keeps the full lane and logs the investigation verdict beside it", async () => {
+    const w = fworld({ triage: null }), dir = tmpDir("ff-shadow-");
+    const r = await run(w, { dir, light: { mode: "shadow", source: "investigation" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).every((x) => !/triage\.json/.test(x[4])), "no investigation-only call");
+    const e = ev(dir, "FASTFORWARD_ELIGIBILITY");
+    assert.equal(e.length, 1); assert.equal(e[0].shadow, true);
+    assert.equal(ev(dir, "LIGHT_DONE").length, 0);
+  });
+
+  it("source: text (the kill-switch) is unchanged: no fast-forward event, no investigation-only call", async () => {
+    const w = fworld(), dir = tmpDir("ff-text-");
+    await run(w, { dir, light: { mode: "on", source: "text" } });
+    assert.equal(ev(dir, "FASTFORWARD_ELIGIBILITY").length, 0);
+    assert.ok(builders(w).every((x) => !/triage\.json/.test(x[4])));
   });
 });
 
