@@ -126,7 +126,7 @@ async function runReview({ seam, pr, def, delta = null }) {
   if ((st.notes ?? []).length) await seam.addNotes(pr, st.notes);
   const sum = await seam.summary({ pr, filed });
   if (!sum.data) return blocked(`the gate summary was not posted (exit ${sum.code}): ${(sum.lines ?? []).slice(-1).join("").slice(0, 200)}`);
-  return { pr, head: st.head, verdict: sum.data.verdict, marker: sum.data.marker, ciFailing: sum.data.ciFailing, filed, blocking, delta: st.delta?.from ?? null };
+  return { pr, head: st.head, verdict: sum.data.verdict, marker: sum.data.marker, ciFailing: sum.data.ciFailing, ciCancelOnly: Boolean(sum.data.ciCancelOnly), filed, blocking, delta: st.delta?.from ?? null };
 }
 
 /** Review step. @returns {{pr, head, verdict, marker, filed, blocking}|{blocked: true, reason: string}} */
@@ -143,6 +143,17 @@ export async function fixStep(ctx) {
   const seam = seamOf(ctx);
   for (let round = 0; r.marker !== "FORGE:GATE_PASS"; round++) {
     if (round >= MAX_FIX_ROUNDS) return blocked(`still ${r.verdict} after ${MAX_FIX_ROUNDS} fix round(s)`);
+    // Only cancelled duplicate runs are red (#5502): nothing to fix. The summary reruns them once; re-summarise without spending the round.
+    if (!r.blocking?.length && r.ciFailing > 0 && r.ciCancelOnly) {
+      const sum = await seam.summary({ pr: r.pr, filed: r.filed ?? [] });
+      if (!sum.data) return blocked(`the gate summary was not posted (exit ${sum.code}) after rerunning the cancelled checks of #${r.pr}`);
+      r = { ...r, verdict: sum.data.verdict, marker: sum.data.marker, ciFailing: sum.data.ciFailing, ciCancelOnly: Boolean(sum.data.ciCancelOnly) };
+      ctx.state.steps.review = { ...ctx.state.steps.review, result: r };
+      ctx.save();
+      if (r.marker === "FORGE:GATE_PASS") break;
+      if (r.ciCancelOnly) return blocked(`required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
+      round--; continue;
+    }
     // Blocking findings are already filed issues; red CI has none, so it gets one issue naming the failing checks.
     const issues = [...(r.blocking ?? [])];
     if (r.ciFailing > 0) {

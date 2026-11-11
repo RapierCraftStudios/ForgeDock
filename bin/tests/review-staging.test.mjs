@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, requiredSet, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, cancelOnlyChecks, requiredSet, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -300,7 +300,7 @@ function postWorld(o = {}) {
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     run: async (cmd, args, opts) => {
-      if (cmd === "gh") { w.gh.push(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "[]", stderr: "" }; }
+      if (cmd === "gh") { w.gh.push(args); if (o.ciFn) return o.ciFn(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "[]", stderr: "" }; }
       const script = args[0].split("/").pop(), sub = args[1];
       w.scripts.push({ script, sub, args, env: opts.env });
       if (script === "review-staging-post.sh" && sub === "delivery") return o.delivery ?? { code: 0, stdout: "DELIVERY: OK (2/2 ...)", stderr: "" };
@@ -572,6 +572,39 @@ describe("review-staging --summary", () => {
     const w = await finalized({ ci: red, protectionErr: "gh: Resource not accessible by integration (HTTP 403)" });
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 1);
     assert.match(posted(w)[0], /FORGE:GATE_FAILURE[\s\S]*CI failing \(1 required/);
+  });
+
+  it("pass beats cancelled duplicate of the same check name", async () => {
+    const ck = [{ name: "CI", bucket: "pass" }, { name: "CI", bucket: "cancel" }];
+    assert.deepEqual(classifyChecks(ck, ["CI"]), { blocking: 0, warnings: [] });
+    assert.deepEqual(cancelOnlyChecks(ck, ["CI"]), []);
+    const w = await finalized({ ci: JSON.stringify(ck), required: ["CI"] });
+    assert.equal(await reviewStagingFromCli(["--summary", "--json"], w.io), 0);
+    assert.equal(w.gh.filter((a) => a[1] === "rerun").length, 0);
+    assert.equal(JSON.parse(w.out.at(-1)).ciFailing, 0);
+  });
+
+  it("a cancel-only required check is rerun once, waited for, and counts only if it is still red", async () => {
+    const link = "https://github.com/o/r/actions/runs/777/job/1";
+    const run = (after) => {
+      let reran = false;
+      return { ciFn: (a) => {
+        if (a[1] === "rerun") { reran = true; return { code: 0, stdout: "", stderr: "" }; }
+        const b = !reran ? "cancel" : after;
+        return { code: 0, stdout: JSON.stringify([{ name: "CI", bucket: b, link }, ...(b === "pass" ? [{ name: "CI", bucket: "cancel", link }] : [])]), stderr: "" };
+      } };
+    };
+    for (const [after, ciFailing] of [["pass", 0], ["fail", 1]]) {
+      const w = await finalized({ ...run(after), required: ["CI"] });
+      w.io.sleep = async () => {};
+      await reviewStagingFromCli(["--summary", "--json"], w.io);
+      assert.deepEqual(w.gh.filter((a) => a[1] === "rerun"), [["run", "rerun", "777", "-R", "o/r"]]);
+      const d = JSON.parse(w.out.at(-1));
+      assert.equal(d.ciFailing, ciFailing, after);
+      assert.equal(d.ciCancelOnly, false);
+    }
+    const ck = [{ name: "CI", bucket: "cancel", link }, { name: "lint", bucket: "fail" }];
+    assert.deepEqual(cancelOnlyChecks(ck, ["CI", "lint"]), [{ name: "CI", link }]);
   });
 
   it("forge.yaml gate.required_checks adds required checks", () => {

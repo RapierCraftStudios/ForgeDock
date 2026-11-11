@@ -3159,3 +3159,7 @@ R3/R5/R7 follow-up (#5450): image sandboxes join a per-lane network `forge-sbx-<
 ### Cross-batch ownership (#5471)
 
 `--add`, `--requeue` (and `--resume <id> N...` extras) skip/refuse an issue another live batch of the repo has pending, running or held (`batch.mjs` `ownerOf`, which counts `hold` rows), reported as `owned by <batch>`; `--force "<reason>"` overrides. `makeDispatchCheck` takes an `owner` seam (`dispatchOwner`: a batch running the issue wins, else the lower batch id) and defers `batch.owned` before the GitHub lease check; a batch started with `--force` skips it. `schedd status` warns (`sharedPendingLines`) when two hosted batches share a pending issue.
+
+### Cancelled duplicate CI runs (#5502)
+
+`review-staging.mjs` `classifyChecks` treats a check name with any `pass` on the head as green: push-event and pull_request-event runs share a concurrency group, which cancels one copy. A required name whose only results are `cancel` (`cancelOnlyChecks`) gets one `gh run rerun` per run (id parsed from the check link), the summary polls (20s, up to 45) until none is pending, then reclassifies; it fails only if the rerun does. `--summary --json` gains `ciCancelOnly` (red checks all cancelled). `release-review.mjs` `fixStep` with `blocking` empty and `ciCancelOnly` files no CI issue, runs no lane and spends no fix round: it re-summarises via `seam.summary`, and blocks only if the checks are still cancelled after that rerun.

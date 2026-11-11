@@ -540,11 +540,50 @@ export function requiredSet({ checks = [], unreadable = false } = {}, extra = []
  * (no protection, or a failed read: indistinguishable) keeps every red check blocking (fail closed).
  */
 export function classifyChecks(checks, required = []) {
-  const red = checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && isRed(k));
+  const { blockRows, warnings } = redChecks(checks, required);
+  return { blocking: blockRows.length, warnings };
+}
+
+/**
+ * classifyChecks' rows. A name with any `pass` on the head is green whatever cancelled duplicates it has (push-event and
+ * pull_request-event runs share a concurrency group, which cancels one of them: #5502).
+ */
+function redChecks(checks, required = []) {
+  const passed = new Set(checks.filter((k) => k?.bucket === "pass").map((k) => k.name));
+  const red = checks.filter((k) => !CI_EXCLUDED_CHECKS.includes(k?.name) && isRed(k) && !(k.bucket === "cancel" && passed.has(k.name)));
   const req = new Set(required);
-  if (!req.size) return { blocking: red.length, warnings: [] };
-  const hit = red.filter((k) => req.has(k.name));
-  return { blocking: hit.length, warnings: [...new Set(red.filter((k) => !req.has(k.name)).map((k) => String(k.name)))] };
+  if (!req.size) return { blockRows: red, warnings: [] };
+  return { blockRows: red.filter((k) => req.has(k.name)), warnings: [...new Set(red.filter((k) => !req.has(k.name)).map((k) => String(k.name)))] };
+}
+
+/** Blocking checks whose only results are `cancel` (no pass, no fail): infrastructure, worth one rerun. @returns [{name, link}] */
+export function cancelOnlyChecks(checks, required = []) {
+  const { blockRows } = redChecks(checks, required);
+  const failed = new Set(blockRows.filter((k) => k.bucket === "fail").map((k) => k.name));
+  const seen = new Map();
+  for (const k of blockRows) if (k.bucket === "cancel" && !failed.has(k.name) && !seen.has(k.name)) seen.set(k.name, { name: k.name, link: k.link ?? "" });
+  return [...seen.values()];
+}
+
+const CI_POLL_MS = 20_000, CI_POLL_MAX = 45;
+
+/** One `gh run rerun` per cancelled run of the cancel-only required checks, then wait until none of them is pending. @returns the re-read checks, or `checks` when nothing could be rerun. */
+async function rerunCancelled(io, c, pr, env, checks, only) {
+  const ids = [...new Set(only.map((k) => /\/actions\/runs\/(\d+)/.exec(k.link)?.[1]).filter(Boolean))];
+  if (!ids.length) return checks;
+  for (const id of ids) await io.run("gh", ["run", "rerun", id, "-R", c.ghRepo], { env, cwd: io.cwd });
+  const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const names = new Set(only.map((k) => k.name));
+  let cur = checks;
+  for (let i = 0; i < CI_POLL_MAX; i++) {
+    await sleep(CI_POLL_MS);
+    const r = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket,link"], { env, cwd: io.cwd });
+    const next = r.code === 0 ? parseChecks(r.stdout) : null;
+    if (!next) continue;
+    cur = next;
+    if (!cur.some((k) => names.has(k.name) && k.bucket === "pending")) break;
+  }
+  return cur;
 }
 
 /** Failing (fail/cancel) checks outside CI_EXCLUDED_CHECKS. */
@@ -591,13 +630,16 @@ async function summary(a, io) {
   // Phase 1E read: forgedock/verify is excluded; an unreadable result counts as failing (fail closed). forge/deploy-gate
   // and the gate-marker check are excluded too: they report this review's own marker, so an earlier GATE_FAILURE must not block the re-run that clears it.
   let ciFailing = 1;
-  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket"], { env, cwd: io.cwd });
-  const checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
-  let warnings = [];
+  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket,link"], { env, cwd: io.cwd });
+  let checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
+  let warnings = [], ciCancelOnly = false;
   if (checks) {
     const read = await requiredChecksRead({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch });
     const required = requiredSet(read, c.extraRequiredChecks);
+    const only = cancelOnlyChecks(checks, required);
+    if (only.length) checks = await rerunCancelled(io, c, pr, env, checks, only);
     ({ blocking: ciFailing, warnings } = classifyChecks(checks, required));
+    ciCancelOnly = ciFailing > 0 && redChecks(checks, required).blockRows.every((k) => k.bucket === "cancel");
   }
 
   const acceptanceBlocked = await acceptanceBlock(io, c, pr, tg);
@@ -654,7 +696,7 @@ async function summary(a, io) {
   } catch (e) {
     throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not post the Phase 8 summary and gate marker (${e.message})`, BLOCK_DEPLOY]);
   }
-  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, warnings, testGate: tg.verdict, filed: a.filed }));
+  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, ciCancelOnly, warnings, testGate: tg.verdict, filed: a.filed }));
   else io.out([`VERDICT: ${v.verdict} (${v.why})`, ...(warnings.length ? [`WARNING: ${warnings.length} non-required check(s) red, non-blocking: ${warnings.join(", ")}`] : []), `GATE: ${marker} posted on PR #${pr}`, ...(pass ? [] : [BLOCK_DEPLOY])].join("\n"));
   return pass ? 0 : 1;
 }
