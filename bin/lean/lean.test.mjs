@@ -2284,6 +2284,16 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
   });
 
+  it("#5487: the sign-off hook env reaches the builder only, never the engine's repro/validate commands", async () => {
+    const w = rworld([RED_GREEN]);
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/rt/${id}`, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    w.io.fs.list = async () => ["pre-commit"];
+    const base = w.io.runCommand; w.io.runCommand = async (a) => (/^chmod /.test(a.command) ? { r: { exit: 0 } } : base ? base(a) : { rc: 0, output: "" });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(w.envs.some((e) => e?.GIT_CONFIG_KEY_0 === "core.hooksPath"), "builder env carries the hook");
+    assert.ok(w.rgCalls.length > 0);
+    assert.ok(w.rgCalls.every((c) => c.env.GIT_CONFIG_KEY_0 === undefined && c.env.GIT_CONFIG_COUNT === undefined), "engine commands do not");
+  });
   it("the repro harness runs with the lane env: toolchain PATH and the per-run TMPDIR (#4334)", async () => {
     const w = rworld([RED_GREEN]);
     w.io.runTmp = { prune: async () => {}, path: (id) => `/rt/${id}`, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
