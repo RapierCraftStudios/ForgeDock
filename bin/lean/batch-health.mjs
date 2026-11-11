@@ -48,7 +48,7 @@ export function rootsOf(state) {
  * stall); `refused`: a refusal record (the launch never started); `resolved` (#5243): issues already
  * resolved on GitHub (merged by hand), counted as good ends. Pure.
  */
-export function evaluateHealth(state, { held = [], refused = null, config = DEFAULT_HEALTH, batchId = "<id>", repo = null, resolved = [] } = {}) {
+export function evaluateHealth(state, { held = [], refused = null, config = DEFAULT_HEALTH, batchId = "<id>", repo = null, resolved = [], stateless = [] } = {}) {
   const causes = [], recovery = [];
   if (refused) {
     causes.push({ code: "refused", issues: refused.issues ?? [], detail: refused.message ?? "launch refused" });
@@ -78,8 +78,10 @@ export function evaluateHealth(state, { held = [], refused = null, config = DEFA
   if (config.stalled && !running.size && waiting.length && state?.phase !== "setup" && !state?.cancelled) {
     causes.push({ code: "stalled", issues: waiting, detail: `0 lanes running while ${waiting.length} issue${waiting.length === 1 ? "" : "s"} pending${state?.breaker ? " (breaker tripped)" : ""}` });
   }
+  // #5466: a finished lane with a needs-human comment but no state label looks untouched to a person and to issue-watch.
+  if (stateless.length) causes.push({ code: "stateless", issues: stateless, detail: `${stateless.map((n) => `#${n}`).join(", ")}: needs-human comment but no state label; re-add needs-human (or /recover-orphans)` });
   if (!causes.length) return { healthy: true, causes, recovery };
-  const failed = [...new Set(causes.filter((c) => c.code !== "stalled").flatMap((c) => c.issues))];
+  const failed = [...new Set(causes.filter((c) => c.code !== "stalled" && c.code !== "stateless").flatMap((c) => c.issues))];
   const requeue = failed.filter((n) => REQUEUABLE(outcomeOf(n))), relaunch = failed.filter((n) => !REQUEUABLE(outcomeOf(n)));
   if (requeue.length) recovery.push(`forgedock orchestrate --requeue ${batchId} ${requeue.join(" ")} --reason "batch unhealthy"`);
   if (relaunch.length) recovery.push(`forgedock orchestrate ${relaunch.join(" ")}${repo ? ` --repo ${repo}` : ""}   # after fixing the cause (see lanes/<n>.log)`);
@@ -111,7 +113,7 @@ export function scheduleLine(batchId, created, checksMin = DEFAULT_HEALTH.checks
  * One checkpoint: evaluate the batch, persist it, and call `alert(text, health)` on the first unhealthy result only.
  * @returns the evaluation, plus `alerted` when this call raised the alert
  */
-export async function runCheck({ batch, checkpoint, config = DEFAULT_HEALTH, repo = null, now = () => Date.now(), alert = async () => {}, resolve = null }) {
+export async function runCheck({ batch, checkpoint, config = DEFAULT_HEALTH, repo = null, now = () => Date.now(), alert = async () => {}, resolve = null, statelessOf = null }) {
   const state = batch.store.load() ?? {};
   let held = [];
   try { held = batch.readHeld?.() ?? []; } catch { held = []; }
@@ -122,7 +124,9 @@ export async function runCheck({ batch, checkpoint, config = DEFAULT_HEALTH, rep
     const cand = (state.order ?? []).map(Number).filter((n) => res[n]?.outcome !== undefined && !GOOD_END.has(res[n].outcome) && !run.has(n)).map((n) => ({ issue: n, outcome: res[n].outcome }));
     try { if (cand.length) resolved = (await resolve(cand) ?? []).map(Number); } catch { resolved = []; }
   }
-  const health = evaluateHealth(state, { held, config, batchId: batch.id, repo, resolved });
+  let stateless = [];
+  try { if (statelessOf) stateless = (await statelessOf(state) ?? []).map(Number); } catch { stateless = []; }
+  const health = evaluateHealth(state, { held, config, batchId: batch.id, repo, resolved, stateless });
   const prev = readHealth(batch.dir) ?? {};
   const at = new Date(now()).toISOString();
   const next = { ...prev, checks: { ...(prev.checks ?? {}), [checkpoint]: at }, last: { at, checkpoint, healthy: health.healthy, ...(resolved.length ? { resolved } : {}), causes: health.causes, recovery: health.recovery } };
@@ -237,6 +241,19 @@ export function statelessNeedsHuman(issues) {
   return (issues ?? []).filter((i) => String(i?.state ?? "OPEN").toUpperCase() === "OPEN"
     && (i.comments ?? []).some((c) => String(c).includes("<!-- FORGE:NEEDS_HUMAN"))
     && !(i.labels ?? []).some((l) => stateLabel(String(l)))).map((i) => i.number);
+}
+
+/** #5466: the batch's open issues that GitHub shows stateless (see `statelessNeedsHuman`). A read failure skips the issue. */
+export async function statelessOnGithub(state, gh, repo) {
+  const run = new Set(Object.keys(state?.running ?? {}).map(Number));
+  const rows = [];
+  for (const n of (state?.order ?? []).map(Number).filter((x) => !run.has(x))) {
+    try {
+      const v = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,state,labels,comments"]));
+      rows.push({ number: n, state: v.state, labels: (v.labels ?? []).map((l) => l.name), comments: (v.comments ?? []).map((c) => c.body) });
+    } catch { /* unreadable: not flagged */ }
+  }
+  return statelessNeedsHuman(rows);
 }
 
 /**
