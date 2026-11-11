@@ -37,3 +37,5 @@ Off for repos without Next page files. GSC baseline capture/measurement is owner
 
 ### Enumerating-test follow-up
 Seven tests flagged as listing siblings of `pagegate` (telemetry-seam, batch-health, batch, checks, ci-budget, conformance.e2e, drift). None contains a list of gate modules; `pagegate` is not a member of any. Recorded under `not_members` in result.json.
+
+Reverted stray 'pagegate' edits to bin/auth/app-token.test.mjs and bin/lean/context.test.mjs (no such symbol/source).
