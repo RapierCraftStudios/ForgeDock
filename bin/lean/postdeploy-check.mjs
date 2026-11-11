@@ -265,3 +265,30 @@ export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, 
   await io.gh(["issue", "close", String(iss.number), "-R", repo, "--reason", "completed"]);
   return { state: "pass", detail: `checks ${[...new Set(ids)].join(", ")} passed` };
 }
+
+/**
+ * #5468: the generated check for a production-only e2e/manual requirement quote: `{id, entry}` or null when the quote names no
+ * URL to probe. A concrete URL is fetched; a templated one (`{slug}`, `<id>`) probes its origin, the most the engine can assert
+ * without the builder's data. The entry parses under `parseChecks`.
+ */
+export function e2eCheckFor(reqId, quote) {
+  const m = /https?:\/\/[^\s`'")>\]]+/.exec(String(quote ?? ""));
+  if (!m) return null;
+  const url = m[0].replace(/[.,;:]+$/, "");
+  const templated = /[{}<>$]/.test(url);
+  let target = url;
+  if (templated) { try { target = new URL(url.replace(/[{}<>$]/g, "x")).origin + "/"; } catch { return null; } }
+  if (!/^https?:\/\/[A-Za-z0-9._~:/?#@!&=+%-]+$/.test(target)) return null;
+  let h = 0;
+  for (const ch of String(quote)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const id = `e2e-${String(reqId).toLowerCase().replace(/[^a-z0-9]/g, "")}-${h.toString(16).slice(0, 8)}`;
+  return { id, entry: { run: `curl -fsS -o /dev/null --max-time 30 '${target}'`, pass: "exit 0", timeout: 60, for: "7d" } };
+}
+
+/** #5468: merge generated entries into the checks file text; existing entries win. Returns the new JSON text. */
+export function mergeCheckEntries(text, entries) {
+  let cur = {};
+  try { const j = JSON.parse(String(text ?? "")); if (j && typeof j === "object" && !Array.isArray(j)) cur = j; } catch { /* absent or malformed: start fresh */ }
+  for (const [id, e] of Object.entries(entries ?? {})) if (!(id in cur)) cur[id] = e;
+  return `${JSON.stringify(cur, null, 2)}\n`;
+}

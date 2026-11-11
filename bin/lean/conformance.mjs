@@ -32,7 +32,7 @@ const INCIDENTAL_RE = /(^|\/)(CHANGELOG|CHANGES|HISTORY)(\.[a-z]+)?$|(^|\/)(pack
 export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
-import { CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { CHECK_ID_RE, e2eCheckFor } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
@@ -1382,6 +1382,34 @@ export function isE2eCommand(command, e2e = null) {
   if ((e2e?.faked ?? []).some((f) => f && cmd.includes(f))) return false; // #5339: names a test that fakes the real path
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
+}
+/** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
+export function prodOnlyE2e(quote) {
+  const q = String(quote ?? "");
+  if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q);
+}
+/**
+ * #5468: rewrite production-only e2e/manual rows (deliver or defer; only `only` ids when given) to `post-deploy` with a generated
+ * check id. Pure; returns {contract, converted:[{id, check, entry}]}. A row whose quote names no probeable URL is left alone.
+ */
+export function autoPostDeployE2e(contract, only = null) {
+  const converted = [];
+  const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
+    if (!["deliver", "defer"].includes(r?.disposition) || !wantsE2e(r) || (only && !only.includes(r.id)) || isOutOfBand(r) || !prodOnlyE2e(r.quote)) return r;
+    const g = e2eCheckFor(r.id, r.quote);
+    if (!g) return r;
+    converted.push({ id: r.id, check: g.id, entry: g.entry });
+    return { ...r, disposition: "post-deploy", bucket: "post-deploy", check: g.id, local_infeasible_why: "the observable exists only in production (live domain or deploy), so no local fixture can check it", why: "production-only e2e/manual criterion: converted by the engine to a post-deploy check (#5468)" };
+  });
+  return { contract: converted.length ? { ...contract, requirements } : contract, converted };
+}
+/** #5468: the row ids named by `e2e_row` failures when every failure is one; null otherwise (anything else blocks as before). */
+export function loneE2eRows(failures) {
+  const fs = failures ?? [];
+  if (!fs.length || !fs.every((f) => f?.code === C.CONFORMANCE_E2E_UNVERIFIED && f.kind === "e2e_row")) return null;
+  const ids = fs.map((f) => /^(\S+) is a /.exec(String(f.detail ?? ""))?.[1]);
+  return ids.every(Boolean) ? [...new Set(ids)] : null;
 }
 /** #4726: true when a V-ref named in the row's `validated_by` resolves to a contract validate command that is a real e2e check. */
 export function e2eVerified(row, contract, e2e = null) {

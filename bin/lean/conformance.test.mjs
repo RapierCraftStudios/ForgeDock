@@ -1861,3 +1861,51 @@ describe("#5449 test adequacy kinds are enforced by default", () => {
     assert.deepEqual(r.block.map((x) => x.code), ["x.a", "x.b"]); assert.deepEqual(r.record.map((x) => x.code), ["x.c"]);
   });
 });
+
+import { prodOnlyE2e, autoPostDeployE2e, loneE2eRows } from "./conformance.mjs";
+import { e2eCheckFor, mergeCheckEntries, parseChecks } from "./postdeploy-check.mjs";
+
+describe("#5468 production-only e2e/manual criteria become post-deploy checks", () => {
+  const PQ = "`https://store.alterlab.io/{slug}/agent.md` returns 200 for every published listing [type:e2e]";
+  const LQ = "The signup page works against the local stack in a browser [type:e2e]";
+  const mk = (quote) => {
+    const contract = { ...C, requirements: [{ id: "R1", quote, disposition: "deliver" }, C.requirements[1]], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] };
+    return { contract, ctx: { ...ctx, contract, issueText: `${ISSUE}\n${quote}` } };
+  };
+  const decideRow = (quote) => { const m = mk(quote); const r = { ...good, issue_coverage: [{ quote, status: "covered" }, ...good.issue_coverage.slice(1)] }; return { m, d: decide(r, m.ctx) }; };
+  it("classifies production-only versus pre-merge-runnable quotes", () => {
+    assert.equal(prodOnlyE2e(PQ), true);
+    assert.equal(prodOnlyE2e("Re-run the probe after deploy [type:manual]"), true);
+    assert.equal(prodOnlyE2e(LQ), false);
+  });
+  it("freeze converts a prod-only row to post-deploy with a generated check that parses", () => {
+    const { contract } = mk(PQ);
+    const out = autoPostDeployE2e(contract);
+    const r = out.contract.requirements[0];
+    assert.equal(r.disposition, "post-deploy");
+    assert.match(r.check, /^e2e-r1-[0-9a-f]+$/);
+    assert.equal(out.contract.requirements[1].disposition, "deliver");
+    assert.ok(parseChecks(mergeCheckEntries("", { [r.check]: out.converted[0].entry }))[r.check]);
+    assert.equal(autoPostDeployE2e(mk(LQ).contract).converted.length, 0);
+  });
+  it("prod-only e2e_unverified converts instead of blocking", () => {
+    const { m, d } = decideRow(PQ);
+    assert.equal(d.state, "nonconforming");
+    const ids = loneE2eRows(d.failures);
+    assert.deepEqual(ids, ["R1"]);
+    const cv = autoPostDeployE2e(m.contract, ids);
+    assert.equal(cv.converted.length, ids.length);
+    assert.equal(cv.contract.requirements[0].disposition, "post-deploy");
+  });
+  it("mixed failures, rows without a probeable URL and pre-merge rows still block", () => {
+    assert.equal(loneE2eRows([{ code: "conformance.e2e_unverified", kind: "e2e_row", detail: "R1 is a x" }, { code: "conformance.unimplemented", detail: "R2 x" }]), null);
+    assert.equal(loneE2eRows([{ code: "conformance.e2e_unverified", kind: "ui_browser_unverified", detail: "x" }]), null);
+    assert.equal(e2eCheckFor("R1", "Operators restore after deploy [type:manual]"), null);
+    const { m, d } = decideRow(LQ);
+    assert.equal(autoPostDeployE2e(m.contract, loneE2eRows(d.failures)).converted.length, 0);
+  });
+  it("mergeCheckEntries keeps existing entries", () => {
+    const o = JSON.parse(mergeCheckEntries(JSON.stringify({ a: { run: "x" } }), { a: { run: "y" }, b: { run: "z" } }));
+    assert.equal(o.a.run, "x"); assert.equal(o.b.run, "z");
+  });
+});

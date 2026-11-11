@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE, tickItems } from "./postdeploy-check.mjs";
+import { e2eCheckFor, mergeCheckEntries, parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE, tickItems } from "./postdeploy-check.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
@@ -321,5 +321,17 @@ console.log(cs.filter((c) => c.body.startsWith(start) && c.body.includes(has)).l
   });
   it("ignores prose that quotes the token", () => {
     assert.equal(runCheck([{ id: 2, body: "Release notes: the `hotspot_config_missing` anomaly is recorded" }, traj("- none")]).code, 0);
+  });
+});
+
+describe("generated e2e checks (#5468)", () => {
+  it("a concrete URL is probed, a templated one probes its origin, no URL generates nothing; entries parse and merge", () => {
+    const a = e2eCheckFor("R4", "https://x.example.io/health returns 200 [type:e2e]");
+    assert.match(a.entry.run, /'https:\/\/x\.example\.io\/health'/);
+    assert.match(e2eCheckFor("R4", "https://x.example.io/{slug}/a.md is 200").entry.run, /'https:\/\/x\.example\.io\/'/);
+    assert.equal(e2eCheckFor("R4", "after deploy it works"), null);
+    assert.ok(CHECK_ID_RE.test(a.id));
+    const merged = parseChecks(mergeCheckEntries(JSON.stringify({ smoke: "echo ok" }), { [a.id]: a.entry }));
+    assert.ok(merged.smoke && merged[a.id]);
   });
 });
