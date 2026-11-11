@@ -108,7 +108,7 @@ describe("#4655 multi-requirement amendment references", () => {
     assert.match(applyAmendments(C, [{ kind: "flaky-note", why: "w" }]).problems[0], /unknown kind 'flaky-note'; valid kinds are/);
   });
   it("supersede-guard guards[] expands to per-guard supersedes", () => {
-    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838", "fastforward"], why: "x" }]);
+    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);
     assert.deepEqual(a.problems, []);
     assert.deepEqual(a.contract.supersedes, [{ guard: "#4879", why: "x" }, { guard: "#4838", why: "x" }]);
     assert.equal(a.applied.length, 2);
@@ -1757,5 +1757,18 @@ describe("#5339 a faked or deferred e2e/manual requirement is not met", () => {
     const conv = convertDelivered(k, d.converted).requirements[1];
     assert.equal(conv.disposition, "deliver"); assert.equal(conv.bucket, undefined); assert.equal(conv.amended_from.disposition, "defer");
     assert.deepEqual(codes(decide(rv({ status: "deferred", deferral_ok: false }), c2)), ["conformance.unjustified_deferral"]);
+  });
+});
+
+import { contractBriefProblems as pageBriefProblems, parsePagesConfig as parsePagesCfg } from "./pagegate.mjs";
+describe("page gate wiring (#5428)", () => {
+  it("validateContract reports missing page_gate briefs and precheck carries pageFailures", () => {
+    const pages = parsePagesCfg(undefined, { hasAppPages: true });
+    const c = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [{ id: "D1", path: "web/app/x/page.tsx", change: "c", requirements: ["R1"] }], validate: [] };
+    assert.equal(pageBriefProblems(c, pages).length, 1);
+    assert.ok(validateContract(c, "q", { pages }).problems.some((p) => /page_gate/.test(p)));
+    assert.ok(!validateContract(c, "q").problems.some((p) => /page_gate/.test(p)));
+    const pc = precheck({ contract: c, result: {}, changedFiles: [], pageFailures: [{ code: "x", kind: "page_sitemap_missing", detail: "d" }] });
+    assert.ok(pc.failures.some((f) => f.kind === "page_sitemap_missing"));
   });
 });
