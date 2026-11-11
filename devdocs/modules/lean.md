@@ -79,6 +79,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    forge.yaml `env.toolchain`) become a shim dir first on every runner PATH;
    an unsatisfied node pin is a trajectory anomaly; `env.setup` runs once
    before the builder, failure → `needs-human` / `env.setup_failed`.
+   Dependency prep (`depcache.mjs`) also installs JS lockfiles one level down
+   (`web/`, `frontend/`, `client/`, `ui/`, `services|packages|apps/<n>/`) in their own dir (#5423). A remote lane
+   whose preflight finds a missing tool provisions once (prepare + `pip install pytest`) and re-probes before
+   ending `env.tool_missing`; a first lane ending an engine-owned env code (`ENV_ENGINE_OWNED_CODES`) posts its
+   comment but does not label `needs-human`, and the first `env.tool_missing` recovery of a remote run retries
+   remotely (a repeat goes to the host).
 4a. **`refactor:split` lane** (#4211, `refactor.mjs`) — an issue labelled
    `refactor:split` (labels come from the issue read `runCore` already makes)
    skips steps 5–7: `runSplitStep` indexes the target (`symbol-index.py`), makes
