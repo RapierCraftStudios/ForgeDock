@@ -935,6 +935,7 @@ export async function runFromCli(argv, deps = {}) {
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
   const laneOverride = argv.includes("--lane-override");
+  const adopt = argv.includes("--adopt"); // #5469: take over an open PR the pipeline did not author (lean.mjs adoptPr)
   const repo = flag(argv, "--repo");
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
@@ -1030,7 +1031,7 @@ export async function runFromCli(argv, deps = {}) {
     const env = deps.env ?? process.env;
     let lres;
     try {
-      lres = await runCore({ issue, repo: leanRepo, deferPostRun: true, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
+      lres = await runCore({ issue, repo: leanRepo, deferPostRun: true, ...(adopt ? { adopt: true } : {}), ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
@@ -1240,6 +1241,11 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
+  if (argv.includes("--adopt")) { // #5469: review, base-sync and merge a hand-built open PR of one issue: the single-issue lane in adopt mode
+    const issue = argv[argv.indexOf("--adopt") + 1];
+    if (!/^#?\d+$/.test(String(issue))) throw new Error(ORCH_USAGE);
+    return runFromCli([String(issue).replace("#", ""), "--adopt", ...argv.filter((a, i) => ["--repo", "--lane"].includes(argv[i - 1]) || ["--repo", "--lane"].includes(a))], deps);
+  }
   const inProcess = deps.inProcess || deps.leanModule || deps.laneScript || deps.batchRoot || deps.leanIo
     || argv.includes("--foreground") || process.env.FORGEDOCK_SCHEDD === "0";
   if (inProcess) return runBatch({ argv: argv.filter((a) => a !== "--foreground"), cwd: process.cwd(), env: process.env, sink: consoleSink(), deps });
@@ -1288,8 +1294,8 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1413,19 +1419,45 @@ function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
   };
 }
 
+/** #5469: `--for 4h` / `30m` / `2d` / `90s` as ms; null when absent. Throws on a malformed value. */
+function parseHoldFor(v) {
+  if (v === null || v === undefined) return null;
+  const m = /^(\d+(?:\.\d+)?)([smhd])$/.exec(String(v).trim());
+  if (!m || !(Number(m[1]) > 0)) throw new Error(`--for expects a duration like 4h, 30m, 2d or 90s, got "${v}"`);
+  return Math.round(Number(m[1]) * { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2]]);
+}
+/** #5469: the hold's owner (the operator session: the CLI's parent pid on this host), expiry (`--for`) and `--reason`. */
+function holdMeta(argv) {
+  const forLabel = flag(argv, "--for"), reason = flag(argv, "--reason");
+  return { owner: process.env.FORGE_HOLD_OWNER || `${process.env.USER || process.env.USERNAME || "operator"}@${hostname()}`, ownerPid: process.ppid, ownerHost: hostname(), forMs: parseHoldFor(forLabel), forLabel, reason: reason && !reason.startsWith("--") ? reason : null };
+}
+
+/** #5469: `--gc-orphans`: cancel every orphaned batch (unhosted, pending issues, idle for a week) through the daemon or the batch files. */
+async function gcOrphans({ root, viaDaemon = null, print = (l) => console.log(l) }) {
+  let res = viaDaemon ? await viaDaemon() : null;
+  if (!res) {
+    const schedd = await import("./lean/schedd.mjs"), batchMod = await import("./lean/batch.mjs");
+    const { orphaned } = schedd.findUnhosted(root);
+    for (const o of orphaned) batchMod.openBatch(root, o.id).requestCancel({ reason: "gc-orphans" });
+    res = { cancelled: orphaned.map((o) => o.id) };
+  }
+  print(res.cancelled?.length ? `cancelled ${res.cancelled.length} orphaned batch(es): ${res.cancelled.join(" ")}` : "no orphaned batches");
+  return { ok: true, cancelled: res.cancelled ?? [] };
+}
+
 /**
  * `--hold <id> N...` / `--release <id> N...` (#4592): the batch's `hold` file, through the daemon (`viaDaemon(op, issues)`, null
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
  */
-async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, print = (l) => console.log(l) }) {
+async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, meta = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
-  let res = viaDaemon ? await viaDaemon(op, issues) : null;
+  let res = viaDaemon ? await viaDaemon(op, issues, meta) : null;
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
-    res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
+    res = { changed: op === "hold" ? b.holdIssues(issues, meta) : b.releaseIssues(issues) };
   }
   if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
     const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;
@@ -1433,7 +1465,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
     if (dead.length) await takeover(dead);
   }
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
-  print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
+  print(op === "hold" ? `batch ${id}: held ${list}${meta?.forMs ? ` for ${meta.forLabel}` : ""}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
     : `batch ${id}: released ${list}`);
   return { ok: true, batch: id, changed: res.changed ?? [] };
 }
@@ -1546,10 +1578,10 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
-  const holdVia = (id) => async (op, issues) => {
+  const holdVia = (id) => async (op, issues, meta = null) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op, id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
+    return sock ? schedd.request(sock, { op, id, issues, ...(meta ? { meta } : {}) }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
@@ -1566,10 +1598,15 @@ async function orchestrateClient(argv, deps = {}) {
     const i = argv.indexOf("--requeue"), id = argv[i + 1];
     return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true, force: forceOf(argv) });
   }
+  if (argv.includes("--gc-orphans")) return gcOrphans({ root: await batchRootOf(), viaDaemon: async () => {
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    return sock ? schedd.request(sock, { op: "gc-orphans" }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
+  } });
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
     const root = await batchRootOf(), io = deps.io ?? makeIo();
-    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id),
+    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id), meta: op === "hold" ? holdMeta(argv) : null,
       takeover: (ns) => requeueBatch({ id, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io, viaDaemon: requeueVia(id) }) });
   }
   if (argv.includes("--add")) {
@@ -1672,9 +1709,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const i = argv.indexOf("--requeue");
     return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
+  if (argv.includes("--gc-orphans")) return gcOrphans({ root, print: (l) => sink.line(l) });
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const hid = flag(argv, `--${op}`);
-    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l),
+    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, meta: op === "hold" ? holdMeta(argv) : null, print: (l) => sink.line(l),
       takeover: (ns) => requeueBatch({ id: hid, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) }) });
   }
   if (argv.includes("--add")) {
@@ -2088,7 +2126,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
@@ -2372,6 +2410,7 @@ export async function scheddFromCli(argv, deps = {}) {
     }
     for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
+    if (st.orphaned?.length) console.log(`schedd: ${st.orphaned.length} orphaned batch(es) (not hosted, pending issues, idle over 7 days): ${st.orphaned.slice(0, 3).map((o) => o.id).join(" ")}${st.orphaned.length > 3 ? " …" : ""} (forgedock orchestrate --gc-orphans cancels them)`);
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }

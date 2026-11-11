@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
@@ -1759,3 +1759,92 @@ describe("#5168: --requeue accepts engine-error; a claude login failure is held,
 });
 
 function readdirSyncSafe(d) { try { return readdirSync(d).filter((n) => !n.endsWith(".json")); } catch { return []; } }
+
+describe("#5469: holds carry an owner and an expiry", () => {
+  it("#5469: an expired hold is re-admitted", async () => {
+    let saved = null, held = [2], free, expired = false;
+    const gate = new Promise((r) => { free = r; });
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], log = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held, onUpdate: (r) => log.push(r),
+      expireHolds: () => { if (!expired) return []; expired = false; held = []; return [{ issue: 2, owner: "op@h", since: "2026-11-11T00:00:00.000Z", reason: "hand-build", ownerGone: true }]; },
+      runOne: async (n) => { started.push(n); if (n === 1) await gate; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(started, [1], "held until it expires");
+    expired = true;
+    try { await until(() => started.includes(2), 3000); } finally { free(); } // a failure frees the gate so the run ends instead of hanging
+    assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+    assert.ok(log.some((r) => r.outcome === "hold-expired" && /#2 \(op@h/.test(r.detail)));
+    assert.ok(log.some((r) => r.outcome === "hold-alert" && /owner session \(op@h\) is gone/.test(r.detail)), "a dead owner session raises an alert row");
+  });
+
+  it("#5469: a finished batch with only a held issue waits for the expiry, re-admits it, and alerts when the owner is gone", async () => {
+    let saved = null, held = [2], due = false;
+    const store = { load: () => saved, save: (st) => { saved = st; }, log: () => {} };
+    const started = [], log = [];
+    const info = { 2: { owner: "op@h", since: "2026-11-11T00:00:00.000Z", expiresAt: "2026-11-11T04:00:00.000Z" } };
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held, getHoldInfo: () => (held.length ? info : {}), onUpdate: (r) => log.push(r),
+      expireHolds: () => { if (!due) return []; due = false; held = []; return [{ issue: 2, owner: "op@h", since: info[2].since, reason: null, ownerGone: true }]; },
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    try {
+      await until(() => started.includes(1), 3000);
+      await new Promise((r) => setTimeout(r, 60));
+      assert.deepEqual(started, [1], "the batch stays open while the hold has not expired");
+      due = true;
+      await until(() => started.includes(2), 3000);
+    } finally { due = true; held = []; }
+    assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+    assert.ok(log.some((r) => r.outcome === "hold-alert"));
+  });
+
+  it("a batch that ends with a held issue names its owner and since; a legacy hold keeps the plain detail", async () => {
+    let saved = null;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const run = (info) => orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store: { ...store, load: () => null }, getHeld: () => [2], getHoldInfo: () => info,
+      runOne: async () => ({ terminalReason: "merged" }) });
+    const rows = await run({ 2: { owner: "op@h", since: "2026-11-11T00:00:00.000Z" } });
+    assert.equal(rows.find((r) => r.issue === 2).detail, "held by operator (op@h, since 2026-11-11T00:00:00.000Z)");
+    assert.equal((await run({})).find((r) => r.issue === 2).detail, "held by operator");
+  });
+
+  it("the batch API: hold metadata, expireHolds releases only the due ones, release drops the metadata", () => {
+    const b = openBatch(tmpDir("batch-hold5469-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.holdIssues([2, 3], { owner: "op@h", forMs: 3600000, reason: "hand-build", ownerPid: 2147483646, ownerHost: null });
+    b.holdIssues([4]);
+    const info = b.readHoldInfo();
+    assert.deepEqual(Object.keys(info), ["2", "3"]);
+    assert.equal(info[2].reason, "hand-build");
+    assert.deepEqual(b.expireHolds(Date.now()), []);
+    const due = b.expireHolds(Date.now() + 2 * 3600000);
+    assert.deepEqual(due.map((d) => [d.issue, d.owner, d.ownerGone]), [[2, "op@h", true], [3, "op@h", true]], "a pid that does not exist is a gone owner");
+    assert.deepEqual(b.readHeld(), [4], "a legacy hold has no expiry");
+    b.holdIssues([5], { owner: "x", forMs: 0 });
+    b.releaseIssues([5]);
+    assert.deepEqual(b.readHoldInfo(), {});
+  });
+
+  it("through the CLI: --hold --for --reason records owner and expiry; a malformed --for rejects", async () => {
+    const root = tmpDir("batch-hold5469-cli-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    const res = await quiet(() => orchestrateFromCli(["--hold", "b1", "1", "--for", "4h", "--reason", "hand build"], { batchRoot: root, io }));
+    assert.deepEqual(res.changed, [1]);
+    const e = b.readHoldInfo()[1];
+    assert.equal(e.reason, "hand build");
+    assert.ok(Date.parse(e.expiresAt) - Date.parse(e.since) === 4 * 3600000);
+    await assert.rejects(orchestrateFromCli(["--hold", "b1", "2", "--for", "soon"], { batchRoot: root, io }), /--for expects/);
+  });
+
+  it("--gc-orphans cancels unhosted batches idle past the threshold and leaves recent ones", async () => {
+    const root = tmpDir("batch-gc5469-");
+    const mk = (id, ageMs) => { const b = openBatch(root, id); b.writePlan({ argv: [], repo: "o/r" }); b.store.save({ order: [1], pending: [1], results: {} }); const t = new Date(Date.now() - ageMs); utimesSync(join(b.dir, "state.json"), t, t); return b; };
+    const old = mk("old", 9 * 86400000), fresh = mk("fresh", 60000);
+    const res = await quiet(() => orchestrateFromCli(["--gc-orphans"], { batchRoot: root, io: { gh: async () => "" } }));
+    assert.deepEqual(res.cancelled, ["old"]);
+    assert.ok(old.readCancel()); assert.equal(fresh.readCancel(), null);
+  });
+});

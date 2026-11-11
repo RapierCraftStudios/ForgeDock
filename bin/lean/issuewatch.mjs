@@ -151,6 +151,19 @@ export function selectorMiss(issue, sel) {
   return null;
 }
 
+/**
+ * #5469: `Map<issue, PR number>` of open PRs to `repo` that close an issue from a head branch the pipeline did not use
+ * (anything but `feat/issue-<n>-lean`): the hand-built PRs `orchestrate --adopt` takes over. A failed read is an empty map.
+ */
+export async function foreignClosingPrs(gh, repo) {
+  const out = new Map();
+  try {
+    for (const pr of JSON.parse(String(await gh(["pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,headRefName,closingIssuesReferences"]))) ?? [])
+      for (const r of pr.closingIssuesReferences ?? []) if (pr.headRefName && pr.headRefName !== `feat/issue-${r.number}-lean` && !out.has(r.number)) out.set(r.number, pr.number);
+  } catch { /* no adoption without a clean read */ }
+  return out;
+}
+
 /** #5313: why the bash watcher's rules skip `issue` (a PR, a skip label, an open closing PR), or null. */
 export function parityMiss(issue, watch, closing = new Map()) {
   if (isPullRequest(issue)) return "pull request (a watch claims issues only)";
@@ -331,7 +344,7 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   for (const n of [...state.inflight]) {
     if (watch.mode === "batch") { if (await closed(n)) settle(n); continue; }
     const h = handles.get(n);
-    if (!h) { handles.set(n, io.launch(n, state.lanes[n])); continue; } // a restarted watch re-launches (run-issue resumes from GitHub)
+    if (!h) { handles.set(n, state.adopt?.[n] ? io.launch(n, state.lanes[n], { adopt: true }) : io.launch(n, state.lanes[n])); continue; } // a restarted watch re-launches (run-issue resumes from GitHub)
     const r = h.poll();
     if (!r) continue;
     handles.delete(n);
@@ -382,7 +395,10 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
         state.pendingStart = { issues: nums, at: now, before: e?.before ?? [], error: String(e?.message ?? e).slice(0, 200) };
       }
     }
-  } else for (const t of taken) handles.set(t.n, io.launch(t.n, t.lane));
+  } else for (const t of taken) {
+    if (plan.adopt?.has(t.n)) { (state.adopt ??= {})[t.n] = true; handles.set(t.n, io.launch(t.n, t.lane, { adopt: true })); } // #5469
+    else handles.set(t.n, io.launch(t.n, t.lane));
+  }
   return state;
 }
 
@@ -399,10 +415,14 @@ export async function planClaims({ watch, repo, io, state, branches = {}, defaul
   const found = [], folds = [], skip = [], why = new Map();
   const assoc = await listAssociations(io.gh, repo); // #4859: not a `gh issue list` field
   const closing = await closingPrIssues(io.gh, repo); // #5313
+  const foreign = watch.mode === "batch" || !closing.size ? new Map() : await foreignClosingPrs(io.gh, repo); // #5469: a hand-built PR is adopted, not skipped
+  const adopt = new Set();
   for (const raw of JSON.parse(String(await io.gh(args)))) {
     const i = { ...raw, authorAssociation: assoc.get(raw.number) };
-    const parity = parityMiss(i, watch, closing);
+    const adoptable = foreign.has(i.number) && closing.get(i.number) === foreign.get(i.number);
+    const parity = parityMiss(i, watch, adoptable ? new Map() : closing);
     if (parity) { skip.push({ number: i.number, reason: parity }); continue; }
+    if (adoptable) adopt.add(i.number);
     const miss = selectorMiss(i, watch);
     if (miss) { skip.push({ number: i.number, reason: miss }); continue; }
     const c = classifyWhy(i, watch);
@@ -420,9 +440,9 @@ export async function planClaims({ watch, repo, io, state, branches = {}, defaul
     let lane;
     try { lane = laneFor(i, watch, { branches, defaults }); } catch (e) { skip.push({ number: i.number, reason: String(e?.message ?? e) }); continue; }
     if (claim.length >= room) { skip.push({ number: i.number, reason: `over capacity (room ${Math.max(0, room)})` }); continue; }
-    claim.push({ number: i.number, lane, reason: why.get(i.number) });
+    claim.push({ number: i.number, lane, reason: why.get(i.number), ...(adopt.has(i.number) ? { adopt: true } : {}) });
   }
-  return { candidates, claim, fold: folds.map((i) => i.number), folds, skip };
+  return { candidates, claim, adopt, fold: folds.map((i) => i.number), folds, skip };
 }
 
 /** The per-issue/batch `--dry-run` lines of a planClaims result. */
@@ -577,9 +597,9 @@ function realIo(repo, env = process.env) {
       p.on("close", (c) => { res = { code: c ?? 1 }; }); p.on("error", () => { res = { code: 1 }; });
       return { poll: () => res };
     },
-    launch: (n, lane) => {
+    launch: (n, lane, opts = {}) => {
       let res = null;
-      const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env });
+      const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane, ...(opts.adopt ? ["--adopt"] : [])], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env });
       p.on("close", (code) => { res = { code: code ?? 1 }; }); p.on("error", () => { res = { code: 1 }; });
       return { poll: () => res };
     },

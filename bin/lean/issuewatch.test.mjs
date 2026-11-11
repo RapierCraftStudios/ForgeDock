@@ -643,6 +643,25 @@ test("#5088 ghRunner names the failing call; 401/403 also warn with the effect o
   assert.deepEqual(seen.opts.stdio, ["ignore", "pipe", "pipe"]);
 });
 
+test("#5469 planClaims: an open closing PR from a foreign branch is adopted; the pipeline's own PR is still skipped", async () => {
+  const io = fakeIo(tmp(), [iss(3), iss(4)]);
+  io.openPrs = [{ number: 50, headRefName: "hand/fix-3", closingIssuesReferences: [{ number: 3 }] }, { number: 51, headRefName: "feat/issue-4-lean", closingIssuesReferences: [{ number: 4 }] }];
+  const p = await planClaims({ watch: W(), repo: "o/r", io, state: { claimed: [], inflight: [] }, room: 5 });
+  assert.deepEqual(p.claim.map((c) => [c.number, c.adopt === true]), [[3, true]]);
+  assert.deepEqual(p.skip, [{ number: 4, reason: "open closing PR #51" }]);
+  assert.deepEqual([...p.adopt], [3]);
+});
+
+test("#5469 tick: an adopted issue is launched with the adopt option", async () => {
+  const io = fakeIo(tmp(), [iss(3)]);
+  io.openPrs = [{ number: 50, headRefName: "hand/fix-3", closingIssuesReferences: [{ number: 3 }] }];
+  const opts = [];
+  io.launch = (n, lane, o) => { opts.push([n, o]); return { poll: () => null }; };
+  const state = { claimed: [], inflight: [], lanes: {}, retries: {}, phase: "running" };
+  await tick({ watch: W({ max_inflight: 2 }), repo: "o/r", io, state, dir: io.env.FORGEDOCK_WATCH_DIR, handles: new Map() });
+  assert.deepEqual(opts, [[3, { adopt: true }]]);
+});
+
 const TLS = Object.assign(new Error("gh failed"), { status: 1, stderr: 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout\n' });
 
 test("#5465 fault injection: ghRunner retries a transient TLS timeout with backoff, never a 4xx", () => {

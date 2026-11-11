@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { listBatches, openBatch, REQUEUABLE, writeAtomic } from "./batch.mjs";
 
 export const DEFAULT_HEALTH = Object.freeze({ rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: Object.freeze([15, 60]), issue: null, notifyCommand: null });
+/** #5469: a hold older than this many hours is flagged (`config.holdHours` overrides). */
+export const DEFAULT_HOLD_HOURS = 4;
 /** Outcomes that end a row well: never counted against the batch. */
 export const GOOD_END = new Set(["merged", "invalid", "decomposed"]);
 export const REFUSALS_FILE = "refusals.json";
@@ -48,7 +50,7 @@ export function rootsOf(state) {
  * stall); `refused`: a refusal record (the launch never started); `resolved` (#5243): issues already
  * resolved on GitHub (merged by hand), counted as good ends. Pure.
  */
-export function evaluateHealth(state, { held = [], refused = null, config = DEFAULT_HEALTH, batchId = "<id>", repo = null, resolved = [], stateless = [] } = {}) {
+export function evaluateHealth(state, { held = [], refused = null, config = DEFAULT_HEALTH, batchId = "<id>", repo = null, resolved = [], stateless = [], holdInfo = null, now = Date.now() } = {}) {
   const causes = [], recovery = [];
   if (refused) {
     causes.push({ code: "refused", issues: refused.issues ?? [], detail: refused.message ?? "launch refused" });
@@ -80,8 +82,12 @@ export function evaluateHealth(state, { held = [], refused = null, config = DEFA
   }
   // #5466: a finished lane with a needs-human comment but no state label looks untouched to a person and to issue-watch.
   if (stateless.length) causes.push({ code: "stateless", issues: stateless, detail: `${stateless.map((n) => `#${n}`).join(", ")}: needs-human comment but no state label; re-add needs-human (or /recover-orphans)` });
+  // #5469: a hold older than `holdHours` is flagged (hold-info records its owner and since); the legacy plain hold has no age
+  const holdHours = Number(config.holdHours) > 0 ? Number(config.holdHours) : DEFAULT_HOLD_HOURS, holdMs = holdHours * 3600000;
+  const stale = Object.entries(holdInfo ?? {}).filter(([n, e]) => heldSet.has(Number(n)) && Date.parse(e?.since) <= now - holdMs);
+  if (stale.length) causes.push({ code: "stale-hold", issues: stale.map(([n]) => Number(n)), detail: `held by operator for over ${holdHours}h: ${stale.slice(0, 6).map(([n, e]) => `#${n} (${e.owner}, since ${e.since})`).join(", ")}; forgedock orchestrate --release ${batchId} <issue...>` });
   if (!causes.length) return { healthy: true, causes, recovery };
-  const failed = [...new Set(causes.filter((c) => c.code !== "stalled" && c.code !== "stateless").flatMap((c) => c.issues))];
+  const failed = [...new Set(causes.filter((c) => c.code !== "stalled" && c.code !== "stale-hold" && c.code !== "stateless").flatMap((c) => c.issues))];
   const requeue = failed.filter((n) => REQUEUABLE(outcomeOf(n))), relaunch = failed.filter((n) => !REQUEUABLE(outcomeOf(n)));
   if (requeue.length) recovery.push(`forgedock orchestrate --requeue ${batchId} ${requeue.join(" ")} --reason "batch unhealthy"`);
   if (relaunch.length) recovery.push(`forgedock orchestrate ${relaunch.join(" ")}${repo ? ` --repo ${repo}` : ""}   # after fixing the cause (see lanes/<n>.log)`);
@@ -126,7 +132,9 @@ export async function runCheck({ batch, checkpoint, config = DEFAULT_HEALTH, rep
   }
   let stateless = [];
   try { if (statelessOf) stateless = (await statelessOf(state) ?? []).map(Number); } catch { stateless = []; }
-  const health = evaluateHealth(state, { held, config, batchId: batch.id, repo, resolved, stateless });
+  let holdInfo = null;
+  try { holdInfo = batch.readHoldInfo?.() ?? null; } catch { holdInfo = null; }
+  const health = evaluateHealth(state, { held, config, batchId: batch.id, repo, resolved, stateless, holdInfo, now: now() });
   const prev = readHealth(batch.dir) ?? {};
   const at = new Date(now()).toISOString();
   const next = { ...prev, checks: { ...(prev.checks ?? {}), [checkpoint]: at }, last: { at, checkpoint, healthy: health.healthy, ...(resolved.length ? { resolved } : {}), causes: health.causes, recovery: health.recovery } };
@@ -308,11 +316,11 @@ export const readFirstHour = (dir) => readJson(join(dir, FIRST_HOUR_FILE));
 export const appendBatchLog = (dir, text) => { try { appendFileSync(join(dir, BATCH_LOG_FILE), `${text}\n`, { mode: 0o600 }); } catch { /* advisory */ } };
 
 /** The first-hour report of one batch: dispatched / running / merged / stuck, and why. Pure. */
-export function firstHourReport(state, { batchId, now = Date.now(), held = [], stall = null } = {}) {
+export function firstHourReport(state, { batchId, now = Date.now(), held = [], stall = null, holdInfo = null } = {}) {
   const order = (state?.order ?? []).map(Number), results = state?.results ?? {}, running = Object.keys(state?.running ?? {}).map(Number);
   const merged = order.filter((n) => GOOD_END.has(results[n]?.outcome)), heldSet = new Set(held.map(Number));
   const stuck = order.filter((n) => !running.includes(n) && !GOOD_END.has(results[n]?.outcome) && (results[n] !== undefined || (state?.pending ?? []).map(Number).includes(n)));
-  const why = (n) => results[n]?.outcome ? `#${n} ${results[n].outcome}` : heldSet.has(n) ? `#${n} held` : Number(state?.notBefore?.[n]) > now ? `#${n} waiting on a retry` : `#${n} pending`;
+  const why = (n) => results[n]?.outcome ? `#${n} ${results[n].outcome}` : heldSet.has(n) ? `#${n} held${holdInfo?.[n] ? ` (${holdInfo[n].owner}, since ${holdInfo[n].since})` : ""}` : Number(state?.notBefore?.[n]) > now ? `#${n} waiting on a retry` : `#${n} pending`;
   const dispatched = order.filter((n) => results[n] !== undefined || running.includes(n)).length;
   const counts = { total: order.length, dispatched, running: running.length, merged: merged.length, stuck: stuck.length };
   const reasons = [...stuck.map(why), ...(stall ? [stall.detail] : [])];
