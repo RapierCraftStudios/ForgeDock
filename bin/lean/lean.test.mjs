@@ -7694,7 +7694,7 @@ describe("#4395 lane profile", () => {
 describe("#4450 light lane: one builder session, derived contract, upgrade to the full lane", () => {
   const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
   const BODY = "foo crashes on null input in src/foo.js.\n\nExpected behaviour: foo returns null.\n\n- foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
-  const RESULT = { status: "fixed", summary: "fixed foo", requirement: "foo must handle a null argument without throwing.", repro_test: RT, tests: [{ command: RT.command, result: "pass", fails_without_fix: true }] };
+  const RESULT = { status: "fixed", summary: "fixed foo", requirement: "foo must handle a null argument without throwing.", repro_test: RT, test_plan: TEST_PLAN, tests: [{ command: RT.command, result: "pass", fails_without_fix: true }] };
   const lworld = (o = {}) => {
     const w = world({ labels: [{ name: "bug" }], body: BODY, result: RESULT, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT }, ...o });
     w.numstat = o.numstat ?? "5\t1\tsrc/foo.js\n20\t0\ttest/foo.test.js\n";
