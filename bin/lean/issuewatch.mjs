@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { writeAtomic, batchRoot, openBatch, listBatches } from "./batch.mjs";
 import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_STAGING_BRANCH, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
+import { designHold } from "./pagegate.mjs"; // #5442
 import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
 import { releaseRoot } from "./release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
@@ -151,6 +152,8 @@ export function selectorMiss(issue, sel) {
 /** #5313: why the bash watcher's rules skip `issue` (a PR, a skip label, an open closing PR), or null. */
 export function parityMiss(issue, watch, closing = new Map()) {
   if (isPullRequest(issue)) return "pull request (a watch claims issues only)";
+  const dh = designHold(issue.labels); // #5442: page work waits for an approved design, whatever skip_labels says
+  if (dh) return `design_pending: ${dh} (run /design; design:approved lifts the hold)`;
   const l = skipLabelHit(issue, watch.skip_labels);
   if (l) return `skip label ${l}`;
   return closing.has(issue.number) ? `open closing PR #${closing.get(issue.number)}` : null;
