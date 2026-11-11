@@ -55,6 +55,11 @@
     "description": "Pipeline: PR merged, issue closed. Managed by ForgeDock."
   },
   {
+    "name": "workflow:merged-unverified",
+    "color": "FBCA04",
+    "description": "Pipeline: PR merged but verification failed, needs a human decision. Managed by ForgeDock."
+  },
+  {
     "name": "workflow:decomposed",
     "color": "BFD4F2",
     "description": "Pipeline: decomposed into sub-issues. Managed by ForgeDock."

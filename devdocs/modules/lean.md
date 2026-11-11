@@ -3051,3 +3051,7 @@ path is authorized (#5380).
 ## Entry 2026-11-11 — cancelled post-merge checks are superseded, not red (#5441)
 
 `issuewatch-verify.mjs` `verifyMerge`: a `cancelled`/`stale` check on the merge commit (a concurrency group cancelled it for a newer commit) is no longer red. `resolveSuperseded` reads `compare/<sha>...<lane>` (newest first, cap 10) and the newest descendant that ran the same check decides: success/neutral/skipped passes (evidence line), a failure fails (`CI red: a cancelled check on the merge commit was superseded by a failing run`), no finished run yet is `pending`. Required checks cancelled on the merged head resolve the same way (a manual cancel is indistinguishable). A genuinely failed check still fails `<lane> CI red on the merge commit`; `forgedock/verify` stays report-only.
+
+## Entry 2026-11-11 — reopened issues drop workflow:merged (#5443)
+
+`issuewatch.mjs` `verifyClosed`: the failed-verify `gh issue edit` (still one call, one `done.label` step) now also adds `workflow:merged-unverified` and removes `workflow:merged`. `bin/labels.json` defines the new label. `templates/workflows/forgedock-reopen-clean.yml` (scaffoldable, `issues: write` only) removes both labels on any `reopened` event, covering human reopens. `commands/cleanup.md` Phase 1E reports open issues carrying either label. `DEFAULT_SKIP_LABELS` is unchanged. Tests: `issuewatch.test.mjs` "swaps workflow:merged".

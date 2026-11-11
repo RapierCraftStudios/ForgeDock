@@ -363,7 +363,7 @@ async function settleOne(opts = {}, { ticks = 1, gap = 0 } = {}) {
   await tick({ watch, repo: "o/r", io, state, handles }); // claim + launch
   for (let i = 0; i < ticks; i++) { await tick({ watch, repo: "o/r", io, state, handles }); io.tickClock(gap); }
   const posted = io.calls.filter((a) => a[1] === "comment").map((a) => a[a.indexOf("--body") + 1]);
-  return { state, io, posted, reopened: io.calls.some((a) => a[1] === "reopen"), escalated: io.calls.some((a) => a[1] === "edit" && a.includes("needs-human")) };
+  return { state, io, posted, reopened: io.calls.some((a) => a[1] === "reopen"), escalated: io.calls.some((a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))) };
 }
 
 test("verify: a merged, reviewed, green lane PR is verified and the evidence is posted", async () => {
@@ -461,7 +461,15 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
   assert.equal(r.posted.length, 0);
 });
 
-for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
+test("verify: failed verify swaps workflow:merged for workflow:merged-unverified", async () => {
+  const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+  const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
+  const edits = r.io.calls.filter((a) => a[1] === "edit" && a.includes("needs-human,workflow:merged-unverified"));
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0][edits[0].indexOf("--remove-label") + 1], "workflow:merged");
+});
+
+for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))], ["comment", (a) => a[1] === "comment"]]) {
   test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
     const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
     let failing = true;
@@ -478,7 +486,7 @@ for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs
     await tick({ watch, repo: "o/r", io, state, handles });
     const n = (f) => io.calls.filter(f).length;
     assert.equal(n((a) => a[1] === "comment"), what === "comment" ? 2 : 1); // the failed attempt is recorded too
-    assert.equal(n((a) => a[1] === "edit" && a.includes("needs-human")), what === "label" ? 2 : 1);
+    assert.equal(n((a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))), what === "label" ? 2 : 1);
     assert.equal(n((a) => a[1] === "reopen"), 1);
     assert.deepEqual(state.unverified, [1]);
     assert.deepEqual(state.pendingVerify, []);

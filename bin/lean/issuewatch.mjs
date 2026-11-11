@@ -286,7 +286,7 @@ async function verifyClosed({ n, repo, io, state, now, lane }) {
   state.escalation = { ...(state.escalation ?? {}) };
   const done = (state.escalation[n] ??= {});
   if (!done.comment) { await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]); done.comment = true; }
-  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human"]); done.label = true; }
+  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human,workflow:merged-unverified", "--remove-label", "workflow:merged"]); done.label = true; }
   await io.gh(["issue", "reopen", String(n), "-R", repo]);
   delete state.escalation[n];
   settled(); state.merged.push(n); state.unverified.push(n);
