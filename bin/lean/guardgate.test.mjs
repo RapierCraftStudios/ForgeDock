@@ -326,3 +326,11 @@ test("a template that does not end in the path is never batched", async () => {
   await runGuards({ selected: [{ guard: guard(1, "a.test.mjs"), reason: "r" }, { guard: guard(2, "b.test.mjs"), reason: "r" }], mergeBase: "b", contract: {}, guardCommand: { ".mjs": "run {path} --quiet" }, git: async () => "x", fs, cwd: "/w", env: {}, runCommand: async (a) => { calls.push(a.command); return { rc: 0, output: "" }; } });
   assert.deepEqual(calls.sort(), ["run a.test__guardbase.mjs --quiet", "run b.test__guardbase.mjs --quiet"]);
 });
+
+test("a template that repeats the path is never batched", async () => {
+  const guard = (issue, path) => ({ v: 1, issue, pr: issue, merge_sha: "a".repeat(40), tests: [{ path, ids: [] }], hunks: [], why: "w" });
+  const fs = { ...nodeFs, mkdirSync() {}, writeFileSync() {}, rmSync() {} };
+  const calls = [];
+  await runGuards({ selected: [{ guard: guard(1, "a.test.mjs"), reason: "r" }, { guard: guard(2, "b.test.mjs"), reason: "r" }], mergeBase: "b", contract: {}, guardCommand: { ".mjs": "run {path} {path}" }, git: async () => "x", fs, cwd: "/w", env: {}, runCommand: async (a) => { calls.push(a.command); return { rc: 0, output: "" }; } });
+  assert.ok(calls.every((c) => !c.includes("a.test__guardbase.mjs") || !c.includes("b.test__guardbase.mjs")), "no single invocation spans both files");
+});
