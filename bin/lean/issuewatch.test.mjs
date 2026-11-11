@@ -20,7 +20,7 @@ const REVIEW_PASS = { author: { login: "rapiercraft-forgedock" }, authorAssociat
  * issue has a merged `feat/issue-N-lean` PR into staging with a passing review and green CI unless `prs[n]` / `comments[n]` /
  * `checks[sha]` / `compare` say otherwise.
  */
-function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", failGh = () => false } = {}) {
+function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", descendants = {}, failGh = () => false } = {}) {
   const calls = [], launched = [], batchOps = [];
   let clock = Date.parse("2026-10-30T00:00:00Z"), nb = 0;
   const io = { env: { FORGEDOCK_WATCH_DIR: env }, calls, launched, batchOps, closed, bodies, prs, comments, checks, tickClock: (ms) => { clock += ms; }, now: () => clock, sleep: async () => {},
@@ -28,6 +28,8 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, 
     gh: async (a) => {
       calls.push(a);
       if (failGh(a)) throw new Error("gh transient");
+      const desc = a[0] === "api" && /\/compare\/([0-9a-f]+)\.\.\.staging/.exec(a[1]); // descendants of a commit, oldest first
+      if (desc) return (descendants[desc[1]] ?? []).join("\n");
       if (a[0] === "api" && /\/compare\//.test(a[1])) return compare;
       if (a[0] === "api" && /\/commits\/([0-9a-f]+)\/check-runs/.test(a.join(" "))) { const sha = /commits\/([0-9a-f]+)/.exec(a.join(" "))[1]; return (checks[sha] ?? []).map(([n, st, c], i) => `${i + 1}\t${n}\t${st}\t${c ?? ""}`).join("\n"); }
       if (a[0] === "api" && /\/commits\/[0-9a-f]+\/status/.test(a[1])) return "";
@@ -372,10 +374,18 @@ test("verify: a merged, reviewed, green lane PR is verified and the evidence is 
   assert.match(r.posted[0], /FORGE:WATCH_VERIFY[\s\S]*merge verified[\s\S]*PR #1001[\s\S]*CI green on the merge commit \(1 check/); // forgedock/verify is report-only
 });
 
-test("verify: a shadow `would BLOCK` review merged anyway is NOT verified: reopened, needs-human, evidence", async () => {
+test("verify: a shadow `would BLOCK` review merged anyway is advisory: verified, not reopened, no needs-human", async () => {
   const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
   const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
-  assert.deepEqual(r.state.verified, []);
+  assert.deepEqual(r.state.verified, [1]);
+  assert.deepEqual(r.state.unverified ?? [], []);
+  assert.equal(r.reopened || r.escalated, false);
+  assert.match(r.posted[0], /merge verified[\s\S]*shadow `would BLOCK` \(advisory/);
+});
+
+test("verify: an enforced NONCONFORMING review is still NOT verified: reopened, needs-human, evidence", async () => {
+  const bad = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
+  const r = await settleOne({ comments: { 1: [REVIEW_PASS, bad] } });
   assert.deepEqual(r.state.unverified, [1]);
   assert.ok(r.reopened && r.escalated);
   assert.match(r.posted[0], /merge NOT verified[\s\S]*FAIL: the latest FORGE:REVIEW did not pass/);
@@ -412,6 +422,31 @@ test("verify: review-degraded, wrong base, missing required check, merge commit 
   assert.match(io.calls.filter((a) => a[1] === "comment").at(-1).at(-1), /required check\(s\) not green on the merged head aa1: build=missing/);
 });
 
+test("verify: a cancelled merge-commit check resolved by a later descendant success is verified", async () => {
+  const r = await settleOne({ checks: { bb1: [["Regenerate", "completed", "cancelled"], ["test", "completed", "success"]], dd1: [["Regenerate", "completed", "cancelled"]], dd2: [["Regenerate", "completed", "success"]] }, descendants: { bb1: ["dd1", "dd2"] } });
+  assert.deepEqual(r.state.verified, [1]);
+  assert.match(r.posted[0], /Regenerate superseded by a success run on dd2/);
+});
+
+test("verify: a cancelled merge-commit check whose newest descendant run failed is red; none finished is pending", async () => {
+  const red = await settleOne({ checks: { bb1: [["Regenerate", "completed", "cancelled"]], dd1: [["Regenerate", "completed", "success"]], dd2: [["Regenerate", "completed", "failure"]] }, descendants: { bb1: ["dd1", "dd2"] } });
+  assert.deepEqual(red.state.unverified, [1]);
+  assert.match(red.posted[0], /superseded by a failing run: Regenerate=failure on dd2/);
+  const none = await settleOne({ checks: { bb1: [["Regenerate", "completed", "stale"]] } });
+  assert.deepEqual(none.state.pendingVerify, [1]);
+});
+
+test("verify: a required check cancelled on the head resolves against a later run like a post-merge one", async () => {
+  const dir = tmp();
+  const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), checks: { aa1: [["build", "completed", "cancelled"]], bb1: [["build", "completed", "success"]], dd1: [["build", "completed", "success"]] }, descendants: { bb1: ["dd1"] } });
+  io.requiredChecks = async () => ["build"];
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map();
+  await tick({ watch: W(), repo: "o/r", io, state, handles });
+  await tick({ watch: W(), repo: "o/r", io, state, handles });
+  assert.deepEqual(state.verified, [1]);
+});
+
 test("verify: pending merge-commit CI waits, holds the drain, then fails after 60 minutes", async () => {
   const r = await settleOne({ checks: { bb1: [["test", "in_progress"]] } }, { ticks: 2, gap: 30 * 60000 });
   assert.deepEqual(r.state.pendingVerify, [1]);
@@ -436,7 +471,7 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
 
 for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
   test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
-    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
     let failing = true;
     const dir = tmp();
     const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), comments: { 1: [block] }, failGh: (a) => failing && bad(a) });

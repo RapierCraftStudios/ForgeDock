@@ -6,7 +6,7 @@
  */
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { parseDocsConfig } from "./lean/docsgate.mjs";
-import { parsePagesConfig, PAGE_RE } from "./lean/pagegate.mjs";
+import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
 import { execFileSync } from "node:child_process";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -1708,6 +1708,26 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4659: a milestone start is refused unless every dependency of its issues is merged into its lane, or --force <reason>
     const force = flag(argv, "--force");
     if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
+    { // #5442: page work waits for an approved design: a design:* issue is never dispatched (--force does not lift it)
+      const held = new Map();
+      for (const n of issues) {
+        let v = null;
+        try { v = JSON.parse(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])); } catch { v = null; }
+        const h = designHold(v?.labels);
+        if (h) held.set(n, h);
+      }
+      for (const [n, h] of held) sink.line(`skipped: #${n} design_pending (${h}); run /design, design:approved lifts the hold`);
+      if (held.size) {
+        if (held.size === issues.length) throw new Error(`every issue is design_pending (${[...held.values()].join(", ")}); run /design first`);
+        const out = [];
+        for (let i = 0; i < argv.length; i++) {
+          if (ORCH_VALUED.includes(argv[i])) { out.push(argv[i], argv[++i]); continue; }
+          if (/^#?\d+$/.test(argv[i]) && held.has(parseInt(argv[i].replace("#", ""), 10))) continue;
+          out.push(argv[i]);
+        }
+        argv = out; issues = issuesOf(argv);
+      }
+    }
     if (!force) {
       const { unmetDependencies } = await import("../scripts/plan-validate-live.mjs");
       const gateBranches = readBranches(cwd);
