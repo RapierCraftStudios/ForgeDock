@@ -1817,3 +1817,12 @@ describe("#5440 pathCovers: directory without slash, renumbered sequence file", 
     assert.ok(!cover5440("src/a.js", "src/b.js"));
   });
 });
+
+describe("#5449 test adequacy kinds are enforced by default", () => {
+  it("test_missing and test_weak block in a shadow lane; other kinds still follow the lane", async () => {
+    const { blockingFailures } = await import("./conformance.mjs");
+    const f = [{ code: "x.a", kind: "test_missing" }, { code: "x.b", kind: "test_weak" }, { code: "x.c", kind: "other" }];
+    const r = blockingFailures(f, { shadow: true });
+    assert.deepEqual(r.block.map((x) => x.code), ["x.a", "x.b"]); assert.deepEqual(r.record.map((x) => x.code), ["x.c"]);
+  });
+});

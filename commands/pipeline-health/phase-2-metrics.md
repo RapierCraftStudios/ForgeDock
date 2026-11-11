@@ -20,6 +20,10 @@ git log --oneline --since="$SINCE" -- commands/ docs/
 
 Record each commit — these are the independent variables. Each prompt change is a hypothesis: "this change should improve X."
 
+### 2A2: Test quality (FORGE:TELEMETRY, #5449)
+
+The lean engine writes per-lane `tests_declared`, `tests_ran`, `repro_quality`, `mutation_killed`, `regression_suite_ran` and `post_deploy_check_ids` on the run's telemetry record, and the batch report prints a `test adequacy:` line (adequate/weak/missing share). Trend them per window: `tests_ran / tests_declared`, share of `repro_quality = red_green`, `mutation_killed` per lane, and how many lanes ran their regression suite. For the outcome check run `forgedock stats --conformance-outcomes`: it splits issues reopened within 14 days by test-adequacy class. A field absent on a lane means the input did not exist for it; do not count it as a failure.
+
 ### 2B: Review finding metrics (the primary quality signal)
 
 ```bash
