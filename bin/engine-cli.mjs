@@ -2002,7 +2002,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     try {
       const { nearCeiling } = await import("./lean/admission.mjs");
       const host = deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe();
-      near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio });
+      near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio, minFreeGb: hygiene.min_free_gb }); // #5421: disk pressure triggers GC too
     } catch { near = false; }
     if (near || gcPending) await runGcPhase("admission");
   };

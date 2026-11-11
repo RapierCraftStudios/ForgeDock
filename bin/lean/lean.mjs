@@ -424,7 +424,7 @@ export async function runCore(o) {
   /** A host heavy-step slot for an engine-side step, or null (no io.heavy, disabled, or the registry failed: ungated). */
   async function heavyAcquire(phase) {
     if (!heavyOn) return null;
-    try { const g = await io.heavy.acquire({ issue, phase, priority: lanePriority() }, heavyCfg); addWait(phase, g?.waitMs, g?.queued); return g; } catch { return null; }
+    try { const g = await io.heavy.acquire({ issue, phase, priority: lanePriority() }, heavyCfg); addWait(phase, g?.waitMs, g?.queued); return g; } catch (e) { if (e?.code === "DISK_LOW") throw e; return null; } // #5421: a low disk refuses the step, any other failure is fail-open
   }
   async function heavyStep(phase, fn) { const g = await heavyAcquire(phase); try { return await fn(); } finally { try { g?.release?.(); } catch { /* fail-open */ } } }
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
@@ -741,7 +741,7 @@ export async function runCore(o) {
       let watch = null; // #5268: the shim execs claude (same pid) after spawn, so keep reading until the account shows
       const spawnHook = smartRotator ? { onSpawn: (child, ...rest) => { if (account === null && !watch) { const pid = child?.pid ?? child; watch = watchAccount(() => rotator.accountOfPid(pid), { onFound: (a) => { account = a; } }); } return args.onSpawn?.(child, ...rest); } } : {};
       const pin = pinned ? { ...(pinned.bin ? { bin: pinned.bin } : {}) } : {};
-      try { const res = await io.runner({ ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); watch?.stop(); return res; }
+      try { const res = await io.runner({ ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, COMPOSE_PROJECT_NAME: `forgedock-lane-${issue}`, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); watch?.stop(); return res; }
       catch (e) {
         watch?.stop(); watch?.refresh(); // #5268: the account the shim exec'd, read before the limited child is gone or now
         let epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;

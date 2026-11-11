@@ -1084,6 +1084,18 @@ function ensureToolStateIgnored(c) {
   } catch { /* .gitignore is best effort */ }
 }
 
+/** #5421: install (or remove) the scheduled `gc --apply` timer from forge.yaml hygiene.schedule; silent when nothing is set. */
+async function installHygieneSchedule(cwd, write = () => {}) {
+  try {
+    const gc = await import("./gc.mjs");
+    const h = gc.readHygiene(cwd);
+    const { installGcSchedule } = await import("./gc-schedule.mjs");
+    const r = await installGcSchedule({ schedule: h.schedule, enabled: h.auto_gc, cwd });
+    if (r.status !== "off") write(`  Hygiene schedule: ${r.status} (${r.kind}) ${r.detail}\n`);
+    return r;
+  } catch { return null; }
+}
+
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
   if (flags.includes("--refresh-context")) {
@@ -1145,6 +1157,7 @@ async function initFlow(c) {
     });
     atomicWriteFile(outputPath, content);
     ensureToolStateIgnored(c);
+    await installHygieneSchedule(c.cwd, (m) => c.stdout.write(m));
     celebrate(c, { written: true, todoCount: 0, isMinimal: true });
     await maybeOfferDemo(c);
     return 0;
@@ -3328,7 +3341,16 @@ async function doctor(fix = false, verbose = false) {
       const plan = await gc.planGc({ probes, ttlMs: gc.hygieneTtls(h), deleteMergedBranches: h.delete_merged_branches });
       const applied = fix ? await gc.applyGc(plan, probes) : null;
       if (applied && applied.reclaimed.length > 0) fixesApplied++;
-      const r = gc.hygieneCheck(plan, { applied });
+      // #5421: free disk on the worktree root and ~/.forge against hygiene.min_free_gb; --fix also installs the timer.
+      let disk = null;
+      try {
+        const host = (await import("./lean/effects.mjs")).makeHostProbe();
+        const mbs = [];
+        for (const p of host.hygienePaths(process.cwd())) { try { mbs.push(await host.freeMb(p)); } catch { /* unreadable path */ } }
+        if (mbs.length) disk = { freeGb: Math.min(...mbs) / 1024, minFreeGb: h.min_free_gb };
+      } catch { disk = null; }
+      let r = gc.hygieneCheck(plan, { applied, disk });
+      if (fix && h.schedule) { const sr = await installHygieneSchedule(process.cwd()); if (sr?.status === "installed") fixesApplied++; if (sr?.status === "failed") r = { ...r, detail: `${r.detail}; schedule: ${sr.detail}` }; }
       if (r.status === "pass") pass("Resource hygiene", r.detail);
       else warn("Resource hygiene", r.detail);
     } catch (e) {

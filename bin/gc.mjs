@@ -57,7 +57,9 @@ export function parseGcArgs(argv = []) {
 }
 
 /** forge.yaml `hygiene:` defaults (#4183). TTLs in hours; `max_host_load_ratio` is the near-ceiling trigger for orchestrate GC. */
-export const HYGIENE_DEFAULTS = Object.freeze({ container_ttl_hours: 6, worktree_ttl_hours: 24, tmp_ttl_hours: 6, delete_merged_branches: true, max_host_load_ratio: 0.8, auto_gc: true });
+export const HYGIENE_DEFAULTS = Object.freeze({ container_ttl_hours: 6, worktree_ttl_hours: 24, tmp_ttl_hours: 6, delete_merged_branches: true, max_host_load_ratio: 0.8, auto_gc: true, schedule: "", min_free_gb: 5 });
+/** Compose projects a lane starts are named `forgedock-lane-<issue>` (#5421); their containers and volumes are owned by that name. */
+export const LANE_COMPOSE_RE = /^forgedock-lane-\d+/;
 
 /** Top-level forge.yaml `hygiene:` block (block form only); each missing or invalid value falls back to its default. */
 export function readHygiene(cwd = process.cwd(), { fs = nodeFs } = {}) {
@@ -67,7 +69,13 @@ export function readHygiene(cwd = process.cwd(), { fs = nodeFs } = {}) {
   const hours = (k) => { const v = h[k], n = Number(v); return v !== undefined && v !== "" && Number.isFinite(n) && n >= 0 ? n : HYGIENE_DEFAULTS[k]; };
   const bool = (k) => { const v = String(h[k] ?? "").trim().toLowerCase(); return v === "true" ? true : v === "false" ? false : HYGIENE_DEFAULTS[k]; };
   const ratio = Number(h.max_host_load_ratio);
+  // #5421: `schedule` ("6h", "30m", "2d"; empty/off/invalid = no timer) and the free-disk threshold in GB (0 = off).
+  const sched = String(h.schedule ?? "").trim().toLowerCase();
+  let schedule = "";
+  if (sched && sched !== "off" && sched !== "false") { try { parseDuration(sched); schedule = sched; } catch { schedule = ""; } }
+  const gb = Number(h.min_free_gb);
   return {
+    schedule, min_free_gb: h.min_free_gb !== undefined && h.min_free_gb !== "" && Number.isFinite(gb) && gb >= 0 ? gb : HYGIENE_DEFAULTS.min_free_gb,
     container_ttl_hours: hours("container_ttl_hours"), worktree_ttl_hours: hours("worktree_ttl_hours"), tmp_ttl_hours: hours("tmp_ttl_hours"),
     delete_merged_branches: bool("delete_merged_branches"), auto_gc: bool("auto_gc"),
     max_host_load_ratio: h.max_host_load_ratio !== undefined && h.max_host_load_ratio !== "" && ratio > 0 && ratio <= 1 ? ratio : HYGIENE_DEFAULTS.max_host_load_ratio,
@@ -108,6 +116,7 @@ export function makeGcProbes({ cwd = process.cwd(), home = homedir() } = {}) {
     ledgerRoot: home === homedir() ? defaultLedgerRoot() : join(home, ".forge", "ledger"),
     forgeTmpRoot: join(home, ".forge", "tmp"),
     worktreeRoot: join(cwd, ".claude", "worktrees"),
+    legacyWorktreeRoot: join(cwd, ".forge", "worktrees"),
     protectedBranches: ["main", "master", "staging", b.default, b.staging].filter(Boolean),
     alive: pidAlive, ppid: (pid) => ppidFromProc(pid), procsInDir: (d) => procsInDir(d),
     killPid: async (pid, marker) => killLedgerPid(pid, marker),
@@ -272,7 +281,8 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
   // ---- 2. docker: labelled forgedock.owner=1 is owned; everything else is "not owned" ----
   if (want("container") || want("volume")) {
     const ownedBy = (labels, createdMs, type) => {
-      if (labels["forgedock.owner"] !== "1") return { owned: false, action: "report", reason: "not owned" };
+      const lane = LANE_COMPOSE_RE.test(String(labels["com.docker.compose.project"] ?? "")); // #5421: lane compose project by name
+      if (labels["forgedock.owner"] !== "1" && !lane) return { owned: false, action: "report", reason: "not owned" };
       let exp = Number(labels["forgedock.expires"]);
       if (Number.isFinite(exp) && exp > 0 && exp < 1e12) exp *= 1000;
       if (Number.isFinite(exp) && exp > 0 && exp < now) return { owned: true, action: "reclaim", reason: "forgedock label, expired" };
@@ -294,7 +304,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       try {
         const vols = jsonLines(await P.docker(["volume", "ls", "--format", "{{json .}}"]));
         const created = new Map();
-        const labelled = vols.filter((v) => parseLabels(v.Labels)["forgedock.owner"] === "1").map((v) => v.Name);
+        const labelled = vols.filter((v) => { const l = parseLabels(v.Labels); return l["forgedock.owner"] === "1" || LANE_COMPOSE_RE.test(String(l["com.docker.compose.project"] ?? "")); }).map((v) => v.Name);
         if (labelled.length) {
           try { for (const l of String(await P.docker(["volume", "inspect", "--format", "{{.Name}}\t{{.CreatedAt}}", ...labelled])).split("\n")) { const [n, t] = l.split("\t"); if (n) created.set(n, Date.parse(t)); } }
           catch { /* age unknown: kept unless expired */ }
@@ -325,6 +335,27 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       else if (w) it.reason = w;
       else if (w === null && (reg || nonEmpty(dir))) it.reason = reg ? "cannot inspect worktree" : "unpushed work (cannot inspect)";
       else { it.action = "reclaim"; it.reason = reg ? "stale worktree, clean and pushed" : "unregistered leftover dir"; }
+      add(it);
+    }
+  }
+
+  // ---- 3b. legacy <repo>/.forge/worktrees/* (#5421): reported; reclaimed only when clean, HEAD on a remote, no live process ----
+  if (want("worktree") && worktreeListOk && P.legacyWorktreeRoot) {
+    let names = [];
+    try { names = fs.readdirSync(P.legacyWorktreeRoot); } catch { /* no legacy root */ }
+    for (const n of names) {
+      const dir = resolve(join(P.legacyWorktreeRoot, n));
+      if (seen.has(`worktree:${dir}`) || liveIds.has(`worktree:${dir}`)) continue;
+      try { if (!fs.lstatSync(dir).isDirectory()) continue; } catch { continue; }
+      const reg = registered.has(dir);
+      const it = { type: "worktree", id: dir, sizeBytes: P.dirSize?.(dir) ?? null, ageMs: age(mtime(dir)), owned: false, action: "report", reason: "", registered: reg, legacy: true };
+      const procs = P.procsInDir?.(dir) ?? [];
+      const w = await workIn(dir);
+      if (procs.length) it.reason = "legacy orchestrator dir, live process inside";
+      else if (w) it.reason = `legacy orchestrator dir, ${w}`;
+      else if (w === null) it.reason = "legacy orchestrator dir, cannot inspect";
+      else if (!(it.ageMs >= ttl("worktree"))) it.reason = "legacy orchestrator dir, younger than TTL";
+      else { it.owned = true; it.action = "reclaim"; it.reason = "legacy orchestrator dir, clean and on a remote"; }
       add(it);
     }
   }
@@ -398,7 +429,20 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       if (!st.isDirectory()) { add({ type: "tmp", id: resolve(p), sizeBytes: st.size, ageMs: age(st.mtimeMs), owned: false, action: "report", reason: "unrecognised entry" }); continue; }
       let kids = []; try { kids = fs.readdirSync(p); } catch { /* unreadable */ }
       const scratch = kids.length > 0 && kids.every((k) => /^\d+$/.test(k));
-      if (!scratch) { add({ type: "tmp", id: resolve(p), sizeBytes: P.dirSize?.(p) ?? null, ageMs: age(st.mtimeMs), owned: false, action: "report", reason: "unrecognised entry" }); continue; }
+      if (!scratch) {
+        // #5421: a top-level scratch dir with a run-owner marker follows the run-dir rule (stale, owner dead on this host).
+        let own = null; try { own = JSON.parse(fs.readFileSync(join(p, RUN_OWNER), "utf8")); } catch { /* unmarked */ }
+        if (own) {
+          const dir = resolve(p), it = { type: "tmp", id: dir, sizeBytes: P.dirSize?.(dir) ?? null, ageMs: age(Number(own.created)), owned: true, action: "report", reason: "", runDir: true };
+          if (!(it.ageMs >= ttl("tmp"))) it.reason = "younger than TTL";
+          else if (own.host !== P.host) it.reason = "owner on another host";
+          else if (Number.isSafeInteger(own.pid) && P.alive(own.pid)) it.reason = "owner alive";
+          else { it.action = "reclaim"; it.reason = "stale marked scratch, owner dead"; }
+          add(it);
+          continue;
+        }
+        add({ type: "tmp", id: resolve(p), sizeBytes: P.dirSize?.(p) ?? null, ageMs: age(st.mtimeMs), owned: false, action: "report", reason: "unrecognised entry" }); continue;
+      }
       for (const k of kids) {
         const dir = resolve(join(p, k));
         if (seen.has(`tmp:${dir}`) || liveIds.has(`tmp:${dir}`)) continue;
@@ -492,7 +536,7 @@ export async function applyGc(plan, probes, { deadline = null, now = () => Date.
         case "worktree":
           if (it.registered) await git(["worktree", "remove", "--force", it.id]);
           else if (fs.existsSync(it.id)) {
-            if (!isDirectChild(P.worktreeRoot, it.id)) throw new Error("not a direct child of the worktree root");
+            if (!isDirectChild(P.worktreeRoot, it.id) && !(it.legacy && P.legacyWorktreeRoot && isDirectChild(P.legacyWorktreeRoot, it.id))) throw new Error("not a direct child of the worktree root");
             fs.rmSync(it.id, { recursive: true, force: true });
           }
           prune = true;
@@ -592,7 +636,7 @@ export async function runOwnedGc({ probes, hygiene = HYGIENE_DEFAULTS, scopes = 
  * doctor's "Resource hygiene" line (#4183): owned counts/sizes per type, reclaimable count, and unowned items older than
  * their type TTL (reported only, never touched). warn when something is reclaimable (and not applied) or unowned-stale.
  */
-export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygieneTtls() } = {}) {
+export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygieneTtls(), disk = null } = {}) {
   const items = plan?.items ?? [];
   const parts = [];
   for (const t of GC_TYPES) {
@@ -608,8 +652,12 @@ export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygi
   else bits.push(`${reclaimable} reclaimable`);
   if (stale) bits.push(`${stale} unowned stale (report only)`);
   const pending = applied ? applied.failed.length + (applied.deferred?.length ?? 0) : reclaimable;
-  const status = pending > 0 || stale > 0 ? "warn" : "pass";
+  // #5421: free disk below hygiene.min_free_gb warns, with the owned bytes a reclaim would free.
+  const ownedBytes = items.filter((i) => i.owned && i.action === "reclaim").reduce((s, i) => s + (i.sizeBytes ?? 0), 0);
+  const low = !!disk && Number.isFinite(disk.freeGb) && Number.isFinite(disk.minFreeGb) && disk.minFreeGb > 0 && disk.freeGb < disk.minFreeGb;
+  if (low) bits.push(`free disk ${disk.freeGb.toFixed(1)} GB < ${disk.minFreeGb} GB (hygiene.min_free_gb); ${fmtSize(ownedBytes)} owned reclaimable`);
+  const status = pending > 0 || stale > 0 || low ? "warn" : "pass";
   let detail = bits.join("; ");
   if (!applied && reclaimable > 0) detail += ". Run: npx forgedock doctor --fix  (or: npx forgedock gc --apply)";
-  return { status, detail, reclaimable, stale };
+  return { status, detail, reclaimable, stale, lowDisk: low, ownedBytes };
 }
