@@ -1934,7 +1934,7 @@ Cost: no LLM calls; one extra issue comment per light lane.
 ## Entry 2026-11-11 — Investigation decides pipeline depth (#5426)
 
 `fastforward.mjs` (pure helpers and prompts, #5426) decides the pipeline depth from the investigation. forge.yaml
-`lean.light.source` (`parseLightConfig` adds `source` only for `investigation`; default `text` changes nothing):
+`lean.light.source` (default `investigation`: investigate always, the verdict picks the depth; `source: text` is the kill-switch and keeps the text heuristic path):
 - `source: investigation` and `mode: on` (fresh lane): `lean.mjs` runs `investigationOnlyPrompt` first (step 1 of the plan
   prompt plus `.forge-lean/triage.json` {files, size, risk, decision_needed}; no contract). invalid/already-fixed/blocked
   take the existing close handling. Else `parseTriage` (triage.json, fallback: the `### Affected Files` bullets) feeds

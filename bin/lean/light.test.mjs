@@ -226,8 +226,9 @@ describe("lightEligibility source/size/pre_text (#5426)", () => {
     assert.equal(p.light, true);
     assert.equal(p.signals.some((s) => s.code === "pre_text_ineligible"), true);
   });
-  it("parseLightConfig accepts source investigation only", () => {
+  it("parseLightConfig accepts source text|investigation only", () => {
     assert.equal(parseLightConfig({ source: "investigation" }).source, "investigation");
-    assert.equal("source" in parseLightConfig({ source: "text" }), false);
+    assert.equal(parseLightConfig({ source: "text" }).source, "text");
+    assert.equal("source" in parseLightConfig({ source: "bogus" }), false);
   });
 });

@@ -1978,7 +1978,7 @@ export async function runCore(o) {
         }
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
-        if (ffFresh && elig.mode === "shadow") { const tri = await ffTriageOf(null); ev(fastForwardEvent(fastForwardEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], triage: tri, textFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: (await hotspotsOf({ paths: tri.files }))?.files ?? [], cfg: o.light ?? {} }), tri, { shadow: true })); } // #5426: zero extra cost
+        if (ffFresh && elig.mode === "shadow") { const tri = await ffTriageOf(null); ev(fastForwardEvent(fastForwardEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], triage: tri, textFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: (hotFacts?.files ?? []).filter((f) => tri.files.includes(f?.path ?? f)), cfg: o.light ?? {} }), tri, { shadow: true })); } // #5426: zero extra cost, no extra runner call
         // #4353: the engine's scope gate is the only scope authority; a pure file-scope validate is dropped before it is checked or frozen
         const dropScope = (c) => {
           const d = dropScopeValidates(c);

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
- * Investigation decides pipeline depth (#5426, builds on the light lane #4450). With forge.yaml `lean.light.source:
- * investigation` the first builder call is investigation-only: it writes investigation.md and `.forge-lean/triage.json`
+ * Investigation decides pipeline depth (#5426, builds on the light lane #4450). By default (forge.yaml `lean.light.source:
+ * investigation`; `text` is the kill-switch) the first builder call is investigation-only: it writes investigation.md and `.forge-lean/triage.json`
  * ({files, size, risk, decision_needed}). Eligibility for the light lane is then computed from those grounded findings
  * (predicted non-test files, size, risk, hotspot) by the same `lightEligibility` rules; the text heuristic over the issue body
  * stays only as a `pre_text_*` shadow signal. An eligible issue fast-forwards: one implement session, deterministic gates
@@ -15,8 +15,8 @@ import { builderPlanPrompt, LEAN_DIR, CONTRACT_FILE } from "./prompts.mjs";
 
 export const TRIAGE_FILE = `${LEAN_DIR}/triage.json`;
 
-/** `lean.light.source` of a parsed light config: text (default) or investigation. */
-export const fastForwardSource = (cfg) => (LIGHT_SOURCES.includes(cfg?.source) ? cfg.source : "text");
+/** `lean.light.source` of a parsed light config: investigation (default; investigate always, the verdict picks the depth) or text (the kill-switch). */
+export const fastForwardSource = (cfg) => (LIGHT_SOURCES.includes(cfg?.source) ? cfg.source : "investigation");
 
 const PATH_RE = /[A-Za-z0-9_@.][A-Za-z0-9_@.\-]*(?:\/[A-Za-z0-9_@.\-]+)*\.[A-Za-z0-9]{1,8}\b/g;
 const SECTION_RE = /^###\s+Affected Files\s*$([\s\S]*?)(?=^###\s|(?![\s\S]))/m;

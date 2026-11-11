@@ -700,7 +700,7 @@ branches:
 #   explore_model: haiku    # model of the explorer subagent (haiku, sonnet or a model id)
 #   light:
 #     mode: shadow        # off | shadow (default) | on
-#     source: text        # text (default) | investigation: the investigation's predicted files and size decide the light lane (#5426)
+#     source: investigation   # investigation (default) | text (kill-switch): the investigation's predicted files and size decide the light lane (#5426)
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)

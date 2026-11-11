@@ -41,7 +41,7 @@ export function parseLightConfig(lean = {}) {
     mode: LIGHT_MODES.includes(m) ? m : LIGHT_DEFAULTS.mode,
     maxLines: posInt(l.light_max_lines) ?? posInt(l.max_lines) ?? LIGHT_DEFAULTS.maxLines,
     maxFiles: posInt(l.light_max_files) ?? posInt(l.max_files) ?? LIGHT_DEFAULTS.maxFiles,
-    ...(src === "investigation" ? { source: src } : {}), // #5426: the default (text) adds no key
+    ...(LIGHT_SOURCES.includes(src) ? { source: src } : {}), // #5426: unset = investigation (see fastforward.mjs); `text` is the kill-switch
   };
 }
 

@@ -7696,7 +7696,7 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     return w;
   };
   const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
-  const ON = { light: { mode: "on" } };
+  const ON = { light: { mode: "on", source: "text" } };
 
   it("nothing triggers: exactly one builder session (no plan) plus the review; the derived contract is frozen and posted", async () => {
     const w = lworld(), dir = tmpDir("light-");
@@ -8246,9 +8246,9 @@ describe("#5426 investigation decides pipeline depth (lean.light.source: investi
     assert.equal(ev(dir, "LIGHT_DONE").length, 0);
   });
 
-  it("the default source (text) is unchanged: no fast-forward event, no investigation-only call", async () => {
+  it("source: text (the kill-switch) is unchanged: no fast-forward event, no investigation-only call", async () => {
     const w = fworld(), dir = tmpDir("ff-text-");
-    await run(w, { dir, light: { mode: "on" } });
+    await run(w, { dir, light: { mode: "on", source: "text" } });
     assert.equal(ev(dir, "FASTFORWARD_ELIGIBILITY").length, 0);
     assert.ok(builders(w).every((x) => !/triage\.json/.test(x[4])));
   });

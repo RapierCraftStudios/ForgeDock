@@ -21,10 +21,10 @@ describe("triage parsing (#5426)", () => {
     assert.equal(f.source, "affected_files"); assert.equal(f.size, null); assert.equal(f.files.length, 3);
     assert.equal(parseTriage('{"files":[],"size":"XL"}', "").size, null);
   });
-  it("lean.light.source: text by default, investigation when set", () => {
-    assert.equal(fastForwardSource(parseLightConfig({})), "text");
-    assert.equal(fastForwardSource(parseLightConfig({ source: "Investigation" })), "investigation");
-    assert.equal(fastForwardSource(parseLightConfig({ light_source: "bogus" })), "text");
+  it("lean.light.source: investigation by default, text is the kill-switch", () => {
+    assert.equal(fastForwardSource(parseLightConfig({})), "investigation");
+    assert.equal(fastForwardSource(parseLightConfig({ source: "Text" })), "text");
+    assert.equal(fastForwardSource(parseLightConfig({ light_source: "bogus" })), "investigation");
     assert.equal("source" in parseLightConfig({}), false);
   });
 });
