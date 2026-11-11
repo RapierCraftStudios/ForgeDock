@@ -842,7 +842,7 @@ issue_watch:
 | `version` | `x.y` | No | Target version from the milestone title or a `version:x.y` label. |
 | `lane` | string | No | Pin the lane; never a default branch. Default: the issue's own lane. |
 | `max_issues` | integer | No | Total claims; at N the watch drains and exits. Default: none (forever). |
-| `max_inflight` | integer | No | Claims in flight at once. Default 4. |
+| `max_inflight` | integer | No | Claims in flight at once. Default 4; in `batch` mode, `parallel`. |
 | `until` | ISO time | No | Stop claiming at this time, drain and exit. |
 | `mode` | string | No | `per-issue` (default), `batch` or `release` (pool, then cut themed releases). |
 | `parallel` | integer | No | K of the batch in `batch` mode. Default 4. |
