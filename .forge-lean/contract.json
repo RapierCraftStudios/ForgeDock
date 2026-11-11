@@ -1,0 +1,259 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "every new or changed public page must go through design, intent/ICP SEO and GEO. It should be impossible to ship otherwise.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R2",
+   "quote": "a FORGE:DESIGN_SPEC approved via /design before build (the #5330 routing becomes blocking)",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R3",
+   "quote": "and a visual check at 390/1440 attached to the PR.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "SEO intent/ICP brief in the contract, required before build: target query or intent and a named ICP (from the repo's ICP doc, configurable in forge.yaml);",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R5",
+   "quote": "title/H1/meta, structured data type, internal links in/out;",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R6",
+   "quote": "a GSC baseline plus a measure-by date for changed metadata.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "GEO brief: how an agent finds and recommends the page. Cover the llms.txt / llms-full / markdown mirror / ai-catalog entries, MCP tool descriptions where relevant, and a natural-language \"agent question\" that must resolve to the page (a findability test).",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R8",
+   "quote": "a new route requires a sitemap entry, metadata, canonical and structured data;",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R9",
+   "quote": "every internal link resolves (#5419);",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R10",
+   "quote": "no raw-JSON-first or null-sample rendering on public pages (repo-configurable lint).",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R11",
+   "quote": "Review domains `design` and `seo-geo` join /review-pr for any route diff; /review-pr-staging blocks on unmet page-gate items.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R12",
+   "quote": "`forge.yaml` keys, e.g.: `pages: { routes: [...], icp_doc: ..., require: [design, seo_intent, geo] }`, enabled by default for app repos.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R13",
+   "quote": "Replaying the Store PRs fails the gate at contract time (no design spec, no intent/ICP, no GEO brief) and at CI (missing structured data / sitemap / null samples).",
+   "disposition": "deliver"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/pagegate.mjs",
+   "change": "New, modelled on bin/lean/docsgate.mjs: parseDocsConfig-style parsePagesConfig(raw, {hasAppPages}) for forge.yaml pages {routes, icp_doc, require, sitemap, metadata_patterns, canonical_patterns, structured_data_patterns, forbid_patterns, lint, enabled}; pageFiles(files,cfg) (default app/**/page.* + routes globs, excluding tests); contractBriefProblems(contract,cfg,deliverablePaths) checking contract.page_gate {design_spec, seo{intent,icp,title,h1,meta,structured_data,links_in,links_out,gsc_baseline,measure_by}, geo{surfaces,agent_question}, screenshots}; pageFailures({cfg,files,diff,readFile,result,run,designSpecApproved}) returning conformance.unimplemented rows page_design_missing, page_seo_missing, page_geo_missing, page_sitemap_missing, page_metadata_missing, page_canonical_missing, page_structured_data_missing, page_forbidden_pattern, page_link_broken, page_visual_missing; designSpecApproved(comments) reading FORGE:DESIGN_SPEC. 0 LLM calls.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5",
+    "R6",
+    "R7",
+    "R8",
+    "R9",
+    "R10",
+    "R12",
+    "R13"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/pagegate.test.mjs",
+   "change": "Regression tests (node:test): config parse/default-on for app repos; Store-like replay (page with no design spec, no ICP, no GEO brief fails at contract time; page with null sample, no sitemap, no ld+json fails at precheck); passing case; repo without pages stays ungated.",
+   "requirements": [
+    "R13",
+    "R8",
+    "R10"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/conformance.mjs",
+   "change": "validateContract accepts {pages} option and appends contractBriefProblems; precheck accepts pageFailures and pushes them next to docsFailures.",
+   "requirements": [
+    "R2",
+    "R4",
+    "R5",
+    "R7",
+    "R13"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/lean.mjs",
+   "change": "Destructure pagesConfig option; pass it to validateContract at the three call sites; compute pageFailures beside docsFail (read added files from worktree, diff -U0, design-spec approval from issue comments via io) and pass to precheck; add pagePlanNote to planPrompt; pass pages to pathDomains.",
+   "requirements": [
+    "R2",
+    "R3",
+    "R9",
+    "R11",
+    "R13"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/engine-cli.mjs",
+   "change": "readEnvConfig: parsePagesConfig(y?.pages, {hasAppPages}) -> pagesConfig option, next to docsConfig (line ~568).",
+   "requirements": [
+    "R12"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/lean/prompts.mjs",
+   "change": "pagePlanNote(cfg) telling the planner to add the page_gate object and R-page requirement; DOMAIN_CHECKS.design and DOMAIN_CHECKS['seo-geo'] lines.",
+   "requirements": [
+    "R1",
+    "R4",
+    "R7",
+    "R11"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/review-trigger.mjs",
+   "change": "Add design and seo-geo to DOMAINS; pathDomains({pages}) adds both when pageFiles(files,cfg) is non-empty.",
+   "requirements": [
+    "R11"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "commands/review-pr-staging.md",
+   "change": "Phase 1H Page Gate (BLOCKING when pages gate is on): list added/changed pages lacking design spec, SEO/GEO brief, sitemap/metadata/canonical/structured data; FORGE:GATE_FAILURE.",
+   "requirements": [
+    "R11"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "commands/review-pr.md",
+   "change": "Name the design and seo-geo review domains for any page/route diff.",
+   "requirements": [
+    "R11"
+   ]
+  },
+  {
+   "id": "D10",
+   "path": "docs/CONFIG.md",
+   "change": "Document pages.routes, icp_doc, require, sitemap, *_patterns, forbid_patterns, lint, enabled and the default-on rule for app repos.",
+   "requirements": [
+    "R12"
+   ]
+  },
+  {
+   "id": "D11",
+   "path": "forge.yaml.example",
+   "change": "Commented pages: example block.",
+   "requirements": [
+    "R12"
+   ]
+  },
+  {
+   "id": "D12",
+   "path": "devdocs/modules/lean.md",
+   "change": "Dated entry for the page gate (config, contract-time check, precheck rows, review domains, staging 1H).",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D13",
+   "path": "bin/lean/conformance.test.mjs",
+   "change": "Add a validateContract/precheck case showing page_gate problems and pageFailures reach precheck failures.",
+   "requirements": [
+    "R13"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "Repos with no pages config and no app/**/page.* files get identical behaviour (parsePagesConfig returns null): bin/lean/conformance.mjs validateContract/precheck outputs unchanged."
+  },
+  {
+   "id": "P2",
+   "what": "The docs gate and its tests: bin/lean/docsgate.mjs, bin/lean/docsgate.test.mjs (docs `dashboard` pages keep requiring docs, independent of the page gate)."
+  },
+  {
+   "id": "P3",
+   "what": "pathDomains signature/return for existing callers: bin/lean/review-trigger.mjs (new options are optional)."
+  },
+  {
+   "id": "P4",
+   "what": "Route reachability gate for route handlers: bin/lean/routecheck.mjs unchanged."
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/pagegate.test.mjs bin/lean/docsgate.test.mjs bin/lean/conformance.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/review-trigger.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --check bin/lean/pagegate.mjs && node --check bin/lean/lean.mjs && node --check bin/engine-cli.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Mirror the #5419 docsgate architecture (pure module, config parsed in readEnvConfig, failures into precheck as conformance.unimplemented) rather than a new LLM reviewer or agent.",
+   "justification": "bin/lean/docsgate.mjs:1-8 and lean.mjs docsFailures wiring; NORTHSTAR non-negotiable 1-2 (deterministic first, no added LLM calls).",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Core stays repo-agnostic: sitemap/metadata/canonical/structured-data/forbidden patterns are forge.yaml-configurable with Next defaults; no AlterLab specifics.",
+   "justification": "bin/lean/routecheck.mjs:6-7 (#1347 repo-agnostic core); NORTHSTAR non-negotiable 6.",
+   "source": "doc"
+  },
+  {
+   "id": "K3",
+   "choice": "Default-on only for repos with Next app/**/page.* files; others stay off unless pages.routes is set.",
+   "justification": "Issue says 'enabled by default for app repos'; library/CLI repos must not change (docsgate.mjs parseDocsConfig returns null when off).",
+   "source": "spec"
+  },
+  {
+   "id": "K4",
+   "choice": "Visual check at 390/1440 is verified as present (screenshot refs in result/PR body), not rendered by the gate; GSC baseline capture deferred to owner.",
+   "justification": "Rendering needs browsers (not installable on host) and Search Console credentials; rendering lives in /design critique loop (commands/design-render-critique-loop.md).",
+   "source": "doc"
+  }
+ ]
+}
