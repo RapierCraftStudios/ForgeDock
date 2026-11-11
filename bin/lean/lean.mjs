@@ -66,7 +66,7 @@ import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
-import { applyEnumerating, renameDuplicates } from "./mechfix.mjs"; // #5348
+import { applyEnumerating, renameDuplicates, verifyApplied } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
@@ -1969,6 +1969,17 @@ export async function runCore(o) {
       return applied.length;
     }
     const mech = io.mechFix ?? { applyEnumerating, renameDuplicates }; // #5348: a test seam; the engine uses mechfix.mjs
+    /** #5480: apply the enumerating edits, then run each edited test; a red or unrunnable one is restored and left to a session. */
+    async function enumeratingMech(missing) {
+      const r = await mech.applyEnumerating({ missing, cwd: wt });
+      if (!r.applied.length) return r;
+      const runTest = async (t) => {
+        if (!io.runCommand || !/\.[cm]?js$/.test(t)) return false;
+        const x = await io.runCommand({ command: `node --test ${/^[\w./@-]+$/.test(t) ? t : `'${t.replace(/'/g, "'\\''")}'`}`, cwd: wt, timeoutMs: 120000, env: laneEnv() }).then((y) => y?.r ?? y).catch(() => null);
+        return x?.rc === 0;
+      };
+      return io.mechFix ? r : await verifyApplied({ result: r, cwd: wt, runTest });
+    }
     let dupMech = 0; // #5348: duplicate renames the last dupsResidual() applied
     /** Duplicate-export findings that still need a model: the detector, then the deterministic rename, then the detector again. */
     async function dupsResidual() {
@@ -2404,8 +2415,8 @@ export async function runCore(o) {
     if (io.enumeratingMissing && !isSplit) {
       const missingNow = async () => unjustified((await io.enumeratingMissing({ cwd: wt, base }).catch(() => null)) ?? [], result?.not_members);
       let missing = await missingNow();
-      if (missing.length) { // #5348: the detector names the list entry: write it, then re-check; a session only for the rest
-        const m = await mech.applyEnumerating({ missing, cwd: wt });
+      if (missing.length && vcfg.enumeratingMechanical !== false) { // #5348: the detector names the list entry: write it, then re-check; a session only for the rest (#5480: forge.yaml lean.enumerating.mechanical false skips it)
+        const m = await enumeratingMech(missing);
         if (await mechCommit("enumerating", m.applied, m.applied.map((x) => x.test))) missing = await missingNow();
       }
       if (missing.length && sessionId) {

@@ -5227,7 +5227,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
     const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, enumeratingMechanical: true, invariants: [], e2e });
   });
 
   describe("#4387 a no-commit CI fix round reruns the failed jobs once", () => {
@@ -6575,6 +6575,14 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(fix.length, 1, "one narrow session for both findings");
     assert.match(fix[0].prompt, /fooNew[\s\S]*undoActivityAction/);
     assert.doesNotMatch(fix[0].prompt, /## Diff/);
+  });
+
+  it("#5480 enumeratingMechanical false (forge.yaml lean.enumerating.mechanical) skips the engine edit and leaves it to a session", async () => {
+    const w = hworld({ missing: [MISS, []] }); w.mech = [];
+    w.io.mechFix = { applyEnumerating: async ({ missing }) => { w.mech.push("enum"); return { applied: missing, remaining: [] }; }, renameDuplicates: async () => ({ applied: [], remaining: [] }) };
+    assert.equal((await run(w, { verify: { enumeratingMechanical: false } })).terminalReason, "merged");
+    assert.deepEqual(w.mech, []);
+    assert.equal(builders(w).length, 3, "plan, build and one narrow session");
   });
 
   it("#4596 English copies in a locale catalog resume the builder once to translate; a leftover is an anomaly", async () => {

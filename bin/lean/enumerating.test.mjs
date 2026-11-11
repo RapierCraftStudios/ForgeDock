@@ -95,3 +95,23 @@ describe("enumerating tests (#4322)", () => {
     assert.deepEqual(await enumeratingTests({ git: bad, cwd: d, paths: ["x"] }), []);
   });
 });
+
+describe("#5480 bare words that equal sibling stems are not a directory enumeration", () => {
+  const SRC = { "bin/lean/run.mjs": "", "bin/lean/watch.mjs": "", "bin/lean/release.mjs": "", "bin/lean/fresh.mjs": "export const fresh = 1;\n" };
+  const base = (extra) => repo({ ...Object.fromEntries(Object.entries(SRC).filter(([k]) => !k.endsWith("fresh.mjs"))), ...extra });
+  const add = async (d) => { put(d, { "bin/lean/fresh.mjs": SRC["bin/lean/fresh.mjs"] }); sh(d, "checkout", "-qb", "lane"); sh(d, "add", "-A"); sh(d, "commit", "-qm", "lane"); return missingEntries({ git: gitIn(d), cwd: d, base: "main" }); };
+  it("bare-word stems are not an enumeration (unrelated lists, imported Set membership)", async () => {
+    const d = base({
+      "bin/auth/a.test.mjs": "import { CMDS } from './x.mjs';\nfor (const c of [\"run\", \"watch\", \"release\"]) assert.ok(CMDS.has(c), c);\n",
+      "bin/lean/guards.test.mjs": "const guards = [\"run\", \"watch\", \"release\"];\n",
+    });
+    assert.deepEqual(await add(d), []);
+  });
+  it("a literal list of file names, with a suffix or readdir, still is one", async () => {
+    const d = base({
+      "bin/lean/a.test.mjs": "const FILES = [\"run.mjs\", \"watch.mjs\", \"release.mjs\"];\n",
+      "bin/lean/b.test.mjs": "const got = readdirSync(dir);\nassert.deepEqual(got, [\"run\", \"watch\", \"release\"]);\n",
+    });
+    assert.deepEqual((await add(d)).map((m) => m.test).sort(), ["bin/lean/a.test.mjs", "bin/lean/b.test.mjs"]);
+  });
+});

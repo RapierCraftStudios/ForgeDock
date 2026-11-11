@@ -33,9 +33,9 @@ describe("verify-by-CI config (#4167)", () => {
     assert.equal("guardCommand" in parseVerify({ guard_command: "nope" }), false);
   });
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e: parseE2e({}) });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, enumeratingMechanical: true, invariants: [], e2e: parseE2e({}) });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e: parseE2e({}) });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, enumeratingMechanical: true, invariants: [], e2e: parseE2e({}) });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
@@ -308,4 +308,12 @@ it("parseVerify reads verify.sandboxes (#5450), drops invalid entries and omits 
   assert.equal(v.sandboxes.postgres.image, "postgres:16");
   assert.equal("sandboxes" in parseVerify({}), false);
   assert.equal("sandboxes" in parseVerify({ sandboxes: { bad: "{ ttl: 1m }" } }), false);
+});
+
+describe("#5480 enumerating_mechanical", () => {
+  it("is off only for the literal false", () => {
+    assert.equal(parseVerify({ enumerating_mechanical: "false" }).enumeratingMechanical, false);
+    assert.equal(parseVerify({}).enumeratingMechanical, true);
+    assert.equal(parseVerify({ enumerating_mechanical: "no" }).enumeratingMechanical, true);
+  });
 });

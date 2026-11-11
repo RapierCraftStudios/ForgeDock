@@ -450,8 +450,12 @@ export function readMergeWait(cwd = process.cwd()) {
  */
 export function readVerify(cwd = process.cwd()) {
   try {
-    const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
-    if (!sec || typeof sec !== "object") return undefined;
+    const yml = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"));
+    // #5480: `lean: enumerating: mechanical: false` turns off the engine's own enumerating-test edits (the one-level reader flattens it to lean.mechanical)
+    const enumOff = String(yml?.lean?.enumerating?.mechanical ?? yml?.lean?.mechanical ?? "").trim().toLowerCase() === "false";
+    const base = yml?.verify && typeof yml.verify === "object" ? yml.verify : enumOff ? {} : null;
+    if (!base) return undefined;
+    const sec = enumOff ? { ...base, enumerating_mechanical: "false" } : base;
     const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command"), baselines = readYamlMap(cwd, "verify", "baselines"), sandboxes = readYamlMap(cwd, "verify", "sandboxes"); // #5448: {when glob: command}
     return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}), ...(baselines ? { baselines } : {}), ...(sandboxes ? { sandboxes } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
