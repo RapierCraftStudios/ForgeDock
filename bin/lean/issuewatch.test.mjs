@@ -474,9 +474,30 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
 test("verify: failed verify swaps workflow:merged for workflow:merged-unverified", async () => {
   const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
   const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
-  const edits = r.io.calls.filter((a) => a[1] === "edit" && a.includes("needs-human,workflow:merged-unverified"));
-  assert.equal(edits.length, 1);
-  assert.equal(edits[0][edits[0].indexOf("--remove-label") + 1], "workflow:merged");
+  const at = (f) => r.io.calls.findIndex(f);
+  const human = at((a) => a[1] === "edit" && a[a.indexOf("--add-label") + 1] === "needs-human");
+  const create = at((a) => a[0] === "label" && a[1] === "create" && a[2] === "workflow:merged-unverified" && a.includes("--force"));
+  const swap = at((a) => a[1] === "edit" && a[a.indexOf("--add-label") + 1] === "workflow:merged-unverified");
+  assert.ok(human >= 0 && create > human && swap > create, "needs-human edit, then label create, then swap edit");
+  assert.equal(r.io.calls[swap][r.io.calls[swap].indexOf("--remove-label") + 1], "workflow:merged");
+  assert.ok(at((a) => a[1] === "reopen") > swap);
+});
+
+test("verify: a missing workflow:merged-unverified label still reopens and flags needs-human (#5484)", async () => {
+  const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
+  const dir = tmp();
+  const missing = (a) => (a[1] === "edit" && a.some((x) => String(x).includes("workflow:merged-unverified"))) || (a[0] === "label" && a[1] === "create");
+  const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), comments: { 1: [block] }, failGh: missing });
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map(), watch = W({ max_issues: "1" });
+  await tick({ watch, repo: "o/r", io, state, handles });
+  await tick({ watch, repo: "o/r", io, state, handles }); // on base this rejects: the combined edit names the missing label
+  const n = (f) => io.calls.filter(f).length;
+  assert.equal(n((a) => a[1] === "edit" && a[a.indexOf("--add-label") + 1] === "needs-human"), 1);
+  assert.equal(n((a) => a[1] === "reopen"), 1);
+  assert.deepEqual(state.unverified, [1]);
+  assert.deepEqual(state.pendingVerify, []);
+  assert.deepEqual(state.escalation ?? {}, {});
 });
 
 for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.some((x) => String(x).startsWith("needs-human"))], ["comment", (a) => a[1] === "comment"]]) {

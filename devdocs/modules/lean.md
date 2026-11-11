@@ -3104,9 +3104,13 @@ path is authorized (#5380).
 
 ## Entry 2026-11-11 — reopened issues drop workflow:merged (#5443)
 
-`issuewatch.mjs` `verifyClosed`: the failed-verify `gh issue edit` (still one call, one `done.label` step) now also adds `workflow:merged-unverified` and removes `workflow:merged`. `bin/labels.json` defines the new label. `templates/workflows/forgedock-reopen-clean.yml` (scaffoldable, `issues: write` only) removes both labels on any `reopened` event, covering human reopens. `commands/cleanup.md` Phase 1E reports open issues carrying either label. `DEFAULT_SKIP_LABELS` is unchanged. Tests: `issuewatch.test.mjs` "swaps workflow:merged".
+`issuewatch.mjs` `verifyClosed`: the failed-verify `gh issue edit` (since #5484 a separate best-effort `done.swap` step, see below) now also adds `workflow:merged-unverified` and removes `workflow:merged`. `bin/labels.json` defines the new label. `templates/workflows/forgedock-reopen-clean.yml` (scaffoldable, `issues: write` only) removes both labels on any `reopened` event, covering human reopens. `commands/cleanup.md` Phase 1E reports open issues carrying either label. `DEFAULT_SKIP_LABELS` is unchanged. Tests: `issuewatch.test.mjs` "swaps workflow:merged".
 
 `scripts/transition-label.sh` knows the new state too: `merged-unverified` is in `VALID_STATES` and `ensure_label` creates it (yellow `FBCA04`). The `LABEL_TRANSITIONS` table in `bin/hooks/pre-tool-use.mjs` lists it as terminal (no successors), so a human removes it by hand.
+
+## Entry 2026-11-11 — a missing merged-unverified label no longer blocks escalation (#5484)
+
+`issuewatch.mjs` `verifyClosed`: the mandatory `done.label` step adds `needs-human` alone again (it throws and resumes on a gh failure, as before #5443). The swap is a separate best-effort `done.swap` step: `gh label create workflow:merged-unverified --force` (color and description from `bin/labels.json`), then `--add-label workflow:merged-unverified --remove-label workflow:merged`, both with errors swallowed. Before this, `gh` rejected the combined edit in repos without the label, so the issue was never flagged or reopened and every tick retried the same failing edit. `issue reopen` is still last. Tests: `issuewatch.test.mjs` "swaps workflow:merged", "a missing workflow:merged-unverified label still reopens".
 
 ## Entry 2026-11-11 — Test plan frozen with the contract (#5445)
 

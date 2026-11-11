@@ -122,7 +122,7 @@ A closed issue is not taken on trust. When a claimed issue closes (in `per-issue
 5. the merge commit is on the lane (`compare` reports `behind` or `identical`);
 6. no check on the merge commit failed (report-only `forgedock/verify` is ignored). While those checks run, verification waits up to 60 minutes and then fails.
 
-All pass: the issue counts as **verified**, and a `FORGE:WATCH_VERIFY` comment records the evidence. Any fails: the issue is **unverified**. It is reopened with `needs-human`, `workflow:merged` is replaced by `workflow:merged-unverified` (so the open issue does not look merged), and a "merge NOT verified" comment that lists the evidence and the failed check. Nothing is reverted; a human decides between a revert, a follow-up fix and accepting the merge. An issue that closed with no merged lane PR (invalid, already fixed, decomposed) counts as **closed unmerged**, never as verified.
+All pass: the issue counts as **verified**, and a `FORGE:WATCH_VERIFY` comment records the evidence. Any fails: the issue is **unverified**. It is reopened with `needs-human`, `workflow:merged` is replaced by `workflow:merged-unverified` (so the open issue does not look merged; best effort: the label is created if missing, and a failed swap never stops the reopen or `needs-human`), and a "merge NOT verified" comment that lists the evidence and the failed check. Nothing is reverted; a human decides between a revert, a follow-up fix and accepting the merge. An issue that closed with no merged lane PR (invalid, already fixed, decomposed) counts as **closed unmerged**, never as verified.
 
 ## Status
 
