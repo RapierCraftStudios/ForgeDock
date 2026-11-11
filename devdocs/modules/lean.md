@@ -3043,3 +3043,7 @@ path is authorized (#5380).
 ## Entry 2026-11-11 — issue-watch batch intake cap, slow batch start and pass errors (#5425)
 
 `issuewatch.mjs`: in `mode: batch` `max_inflight` defaults to `parallel` (others 4). `tick` first `--add`s claims to a running batch of the same repo and lane (`io.batch.running`: plan.json repo and `--lane`, state.json present, no report.json or cancel), else `io.batch.start`; a throwing start (real io attaches `before`, the batch ids seen) no longer escapes: claims stay and `state.pendingStart {issues, at, before, error}` holds new claims while later passes adopt the batch via `io.batch.find(before)`, or after `PENDING_START_MS` (10 min) `releaseClaims` drops them from the registry. `runWatch` wraps each pass in try/catch: `state.passError` is saved to `status.json`, logged, shown by `formatStatus`, and the loop continues (`--once` rethrows after saving). Tests: `issuewatch.test.mjs` "#5425" (6). Cost: 0 LLM calls.
+
+## Entry 2026-11-11 — duplicate feature requests are INVALID, not CONFIRMED (#5432)
+
+`prompts.mjs` `builderPlanPrompt` and `PREFILTER_SYSTEM`: a feature request whose behaviour is already reachable (same semantics under another name, or a stdlib or dependency function the project wraps or re-exports) is a duplicate. The verdict is INVALID (result status `invalid`, no new verdict value), with the equivalent and its path as evidence; the project deprecating that capability counts against adding an alias.
