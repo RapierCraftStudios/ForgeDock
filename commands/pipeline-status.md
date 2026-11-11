@@ -154,6 +154,19 @@ gh pr list $GH_FLAG \
     2>/dev/null || echo "  (none)"
 
 echo ""
+
+# Orphan PRs (#5505): lane PRs (feat/issue-N-lean) whose issue is closed; alert when the oldest is over 24h
+ORPHANS=0; OLDEST=0
+for ROW in $(gh pr list $GH_FLAG --state open --limit 100 --json number,headRefName,createdAt \
+    --jq '.[] | select(.headRefName | test("^feat/issue-[0-9]+-lean$")) | "\(.headRefName|capture("issue-(?<n>[0-9]+)").n):\(.createdAt)"' 2>/dev/null); do
+    N=${ROW%%:*}; AGE=$(( $(date +%s) - $(date -d "${ROW#*:}" +%s 2>/dev/null || echo 0) ))
+    [ "$(gh issue view "$N" $GH_FLAG --json state --jq .state 2>/dev/null)" = "CLOSED" ] || continue
+    gh issue view "$N" $GH_FLAG --json labels --jq '.labels[].name' | grep -qx backport-pending && continue
+    ORPHANS=$((ORPHANS+1)); [ "$AGE" -gt "$OLDEST" ] && OLDEST=$AGE
+done
+echo "Orphan PRs (open, issue closed): $ORPHANS"
+[ "$ORPHANS" -gt 0 ] && [ "$OLDEST" -gt 86400 ] && echo "ALERT: orphan PR open for $((OLDEST/3600))h; run: forgedock probe --due"
+echo ""
 ```
 
 ---
