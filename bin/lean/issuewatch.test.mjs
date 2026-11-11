@@ -372,10 +372,18 @@ test("verify: a merged, reviewed, green lane PR is verified and the evidence is 
   assert.match(r.posted[0], /FORGE:WATCH_VERIFY[\s\S]*merge verified[\s\S]*PR #1001[\s\S]*CI green on the merge commit \(1 check/); // forgedock/verify is report-only
 });
 
-test("verify: a shadow `would BLOCK` review merged anyway is NOT verified: reopened, needs-human, evidence", async () => {
+test("verify: a shadow `would BLOCK` review merged anyway is advisory: verified, not reopened, no needs-human", async () => {
   const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
   const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
-  assert.deepEqual(r.state.verified, []);
+  assert.deepEqual(r.state.verified, [1]);
+  assert.deepEqual(r.state.unverified ?? [], []);
+  assert.equal(r.reopened || r.escalated, false);
+  assert.match(r.posted[0], /merge verified[\s\S]*shadow `would BLOCK` \(advisory/);
+});
+
+test("verify: an enforced NONCONFORMING review is still NOT verified: reopened, needs-human, evidence", async () => {
+  const bad = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
+  const r = await settleOne({ comments: { 1: [REVIEW_PASS, bad] } });
   assert.deepEqual(r.state.unverified, [1]);
   assert.ok(r.reopened && r.escalated);
   assert.match(r.posted[0], /merge NOT verified[\s\S]*FAIL: the latest FORGE:REVIEW did not pass/);
@@ -436,7 +444,7 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
 
 for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
   test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
-    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
     let failing = true;
     const dir = tmp();
     const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), comments: { 1: [block] }, failGh: (a) => failing && bad(a) });
