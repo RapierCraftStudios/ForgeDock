@@ -206,6 +206,16 @@ describe("fixStep", () => {
     assert.ok(!s2.log.some((e) => e[0] === "ci-issue" || e[0] === "lane"));
   });
 
+  it("only pending CI (#5519): blocks without a CI issue or lane; a real failure alongside still files", async () => {
+    const s = fakeSeam();
+    const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 1, ciPendingOnly: true } } }));
+    assert.match(r.reason, /still pending/);
+    assert.deepEqual(s.log, []);
+    const s2 = fakeSeam();
+    await fixStep(ctx(s2, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 2, ciPendingOnly: false } } }));
+    assert.ok(s2.log.some((e) => e[0] === "ci-issue"));
+  });
+
   it("blocks when the verdict is not a pass but there is nothing to fix", async () => {
     assert.match((await fixStep(ctx(fakeSeam(), { review: { result: { ...failed, blocking: [], ciFailing: 0 } } }))).reason, /nothing to fix|neither/);
   });
