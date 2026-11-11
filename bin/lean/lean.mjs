@@ -20,7 +20,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
@@ -46,6 +46,7 @@ const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or dir
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
+import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
@@ -56,6 +57,7 @@ import { docsFailures } from "./docsgate.mjs";
 import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
+import { startSpeculative } from "./overlap.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
@@ -266,7 +268,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -395,6 +397,7 @@ export async function runCore(o) {
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   const kinds = normalizeKindModes(conformanceKinds); // engine.conformance_kinds: a failure code's own mode
   let domains = [], domainsLogged = null; // #5099: review domains the diff touches (review-roster.sh path triggers)
+  let reproQ = null; // #5446: repro_quality of the frozen repro_test, carried on RUN_TERMINAL
   let firstReview = null; // #5345: the first gate judgement and review.incomplete of the first reply, on RUN_TERMINAL
   let adequacy = null, adequacyIn = {}, adequacyTel = null; // #5449: the Test adequacy rows of the last gate and the facts they were computed from
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
@@ -527,12 +530,13 @@ export async function runCore(o) {
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { const sw = sumWaits(await io.fs.read(heavyWaitsFile)); heavyQueueMax = Math.max(heavyQueueMax, sw.queueMax); for (const [ph, ms] of Object.entries(sw.waits)) addWait(ph, ms); } catch { /* no heavy step ran */ }
     }
+    if (setupWait) await setupWait.catch(() => {}); // #5434: never remove the worktree under a running install
     await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
-      conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
+      ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
@@ -729,8 +733,10 @@ export async function runCore(o) {
   /** #5236: no account has room: the lane ends deferred `quota.exhausted` (earliest reset) and emits QUOTA_EXHAUSTED, never a spawn or a far pause. */
   const exhaustedStop = (e, x, role) => { ev({ event: "QUOTA_EXHAUSTED", phase: role, earliestReset: x.earliestReset }); return exhaustedDeferral(e, { earliestReset: x.earliestReset, backendId: laneBackendId(process.env, rotator), now: now() }); };
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
+  let firstSession = false, setupWait = null, firstCallAt = null, packDoneAt = null, spawnLogged = false; // #5434
   async function callRunner(args) {
     let pauses = 0, rotations = 0, pinned = null, credTries = 0;
+    if (!firstSession) { firstSession = true; firstCallAt = now(); ev({ event: "FIRST_SESSION", ms: firstCallAt - t0, role: args.role ?? null, ...(packDoneAt != null ? { since_context_pack_ms: firstCallAt - packDoneAt } : {}) }); } // #5434: lane start to the first model session
     for (;;) {
       if (smartRotator && !pinned) { const x = poolExhausted(rotator, laneLimited); if (x) throw exhaustedStop(new Error("no account has capacity"), x, args.role); } // #5236: the shim would fall back to the default profile
       // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
@@ -970,7 +976,8 @@ export async function runCore(o) {
     const control = {};
     const governor = startGovernor(control);
     let spawned = null;
-    const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
+    const onSpawn = (child) => { if (!spawnLogged && firstCallAt != null) { spawnLogged = true; ev({ event: "LANE_SETUP_TIMING", step: "cli_init", ms: now() - firstCallAt }); } // #5434: runner call to process spawn
+      if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
     const session = {}, cur = inflight = { n, session, at: now(), flushed: false, opts: { model, mode, trigger, restartOf } };
     const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? laneModel(), resume, system: "", prompt, control, ...(profile ? { profile } : {}), onSpawn, session, agents: explorerAgents(exploreCfg), rereadNudge: true,
       idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}),
@@ -1433,18 +1440,24 @@ export async function runCore(o) {
       if (tc?.warning) { T.anomalies.push(tc.warning); ev({ event: "TOOLCHAIN_WARNING", warning: tc.warning }); }
       for (const n of tc?.notes ?? []) T.anomalies.push(n);
     } catch (e) { T.anomalies.push(`Toolchain detection failed (host toolchain used): ${String(e?.message ?? e).slice(0, 200)}`); }
+    // #5434: deps, heavy shims and env.setup overlap the plan session (read-only); gateSetup() awaits them before anything that builds or runs commands.
+    let setupSettled = false;
+    const setupStep = (step, t) => ev({ event: "LANE_SETUP_TIMING", step, ms: now() - t });
+    const setupP = (async () => {
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
     // After 2b (#4347): installs run with the toolchain env, so a pm only its shim provides resolves; no env is the host PATH.
     if (io.deps?.prepare) {
-      phaseLedger.enter("deps_install");
+      const tD = now();
       let res;
       try { res = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
+      setupStep("deps", tD);
       for (const r of Array.isArray(res) ? res : []) {
         ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
         if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
       }
     }
     // ---- 2c. heavy-step shims (#4169): after the toolchain, so a heavy shim's real binary is the pinned toolchain shim ----
+    const tH = now();
     if (heavyOn) {
       try {
         const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path = toolchain?.env?.PATH ?? process.env.PATH ?? "";
@@ -1458,18 +1471,32 @@ export async function runCore(o) {
         }
       } catch (e) { T.anomalies.push(`Heavy-step shims not written (builder steps ungated): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
+    setupStep("heavy_shims", tH);
     if (typeof envSetup === "string" && envSetup.trim()) {
+      const tE = now();
       let r;
       if (!io.runSetup) r = { exit: 1, stderr: "no setup effect is configured" };
       else { try { r = await heavyStep("setup", () => io.runSetup({ cwd: wt, command: envSetup, env: laneEnv() })); } catch (e) { r = { exit: 1, stderr: String(e?.message ?? e) }; } }
-      ev({ event: "ENV_SETUP", exit: r?.exit ?? 1 });
+      ev({ event: "ENV_SETUP", exit: r?.exit ?? 1 }); setupStep("env_setup", tE);
       if (r?.exit !== 0) {
         const tail = String(r?.stderr || r?.stdout || "").trim().slice(-800);
-        T.anomalies.push(`Environment error: forge.yaml env.setup exited ${r?.exit ?? "?"}; the builder did not run`);
-        return await needsHuman(`Environment error (not a build failure): forge.yaml \`env.setup\` (\`${envSetup.slice(0, 200)}\`) exited ${r?.exit ?? "?"} in the fresh worktree, so the builder was not started. Fix the setup command or the environment, then rerun.${tail ? `\n\n\`\`\`\n${tail}\n\`\`\`` : ""}`, OUTCOME_CODES.ENV_SETUP_FAILED);
+        T.anomalies.push(`Environment error: forge.yaml env.setup exited ${r?.exit ?? "?"}; the build did not run`);
+        return () => needsHuman(`Environment error (not a build failure): forge.yaml \`env.setup\` (\`${envSetup.slice(0, 200)}\`) exited ${r?.exit ?? "?"} in the fresh worktree, so the build was not started. Fix the setup command or the environment, then rerun.${tail ? `\n\n\`\`\`\n${tail}\n\`\`\`` : ""}`, OUTCOME_CODES.ENV_SETUP_FAILED);
       }
       T.decisions.push("forge.yaml env.setup ran once in the fresh worktree");
     }
+      return null;
+    })().finally(() => { setupSettled = true; });
+    setupWait = setupP;
+    const TIMED_OUT = Symbol("timed-out");
+    /** #5434: `p` or TIMED_OUT after `ms` (0 = no bound); a rejection is null. The work keeps running. */
+    const within = (p, ms) => new Promise((res) => { const t = ms > 0 ? setTimeout(() => res(TIMED_OUT), ms) : null; Promise.resolve(p).then((v) => { clearTimeout(t); res(v); }, () => { clearTimeout(t); res(null); }); });
+    /** #5434: the setup is awaited (the residual wait is the deps_install phase); a failed env.setup ends the lane needs-human. Returns the terminal or null. */
+    let setupFail;
+    const gateSetup = async () => {
+      if (setupFail === undefined) { const r = setupSettled ? await setupP : await phaseLedger.during("deps_install", () => setupP); setupFail = typeof r === "function" ? await r() : null; }
+      return setupFail;
+    };
     const names = (out) => String(out).split("\n").map((s) => s.trim()).filter(Boolean);
     // #4160: files the branch touched (three-dot) whose content still differs from the base tip (two-dot); a file merged
     // in from the base by a base-sync equals the base and drops out of the scope check.
@@ -1527,7 +1554,25 @@ export async function runCore(o) {
       }
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
+      if (reproQuality !== "off" && words.base === "FAILED" && words.head === "RAN") words = { ...words, ...(await reproQualityOf(t)) };
       return words;
+    };
+
+    /** #5446: patch-echo + targeted mutation of the fix; {quality, enforce}. Never throws (a dirty tree after a mutation is an anomaly). */
+    const reproQualityOf = async (t) => {
+      try {
+        const files = (await changedFiles()).filter((f) => !isTestPath(f));
+        const srcDiff = files.length ? String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...files])) : "";
+        const tests = (await changedFiles()).filter((f) => isTestPath(f));
+        const testDiff = tests.length ? String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...tests])) : "";
+        const echo = patchEcho({ testDiff, srcDiff });
+        const m = echo ? { results: [] } : await runReproMutations({ mutations: mutationsOf(srcDiff), command: String(t.command), git, runCommand: async (a) => io.runCommand(a).then((x) => x?.r ?? x), cwd: wt, env: laneEnv(), readFile: io.fs.read, writeFile: io.fs.write });
+        const quality = classifyRepro({ repro_test: t, echo, mutations: m.results });
+        reproQ = quality;
+        ev({ event: "REPRO_QUALITY", quality, mutations: m.results.map((x) => `${x.kind}:${x.file}:${x.line}:${x.status}`), ...(m.skipped ? { skipped: m.skipped } : {}) });
+        T.decisions.push(`repro_quality: ${quality}`);
+        return { quality, enforce: reproQuality === "enforce" };
+      } catch (e) { T.anomalies.push(`repro_quality: ${String(e?.message ?? e).slice(0, 200)}`); return {}; }
     };
 
     // ---- 3. builder: plan call -> frozen contract -> implement call in the same session ----
@@ -1552,14 +1597,19 @@ export async function runCore(o) {
      * io.contextFacts or any failure gives null: never fails a run. The pack never enters issueText (contract quotes).
      */
     async function contextPackStep() {
-      const pits = await lanePitfalls();
+      const tPits = now(), pits = await lanePitfalls();
+      setupStep("pack_pitfalls", tPits);
       if (ctxCfg.mode === "off" || !io.contextFacts) return null;
       try {
+        const tGh = now();
         const headSha = String(await git(["rev-parse", base])).trim();
         // #4316: linked-issue states are part of the key; a failed lookup only drops them from it
         const links = await linkStateStamp({ gh: ghc, repo, issue, body: iss.body }).catch(() => "");
+        setupStep("pack_gh_reads", tGh);
+        const tCp = now();
         const r = await contextPackFor({ cfg: ctxCfg, issue, repo, headSha, cacheDir: dir, fs: io.fs, stamp: { scope: scopeHash, attempts: priorAttempts(iss.body, trustedComments), links, pitfalls: pits.map((x) => x.sig) },
           gather: () => io.contextFacts({ milestone, repo, issue, iss, comments: trustedComments, cwd: wt, checkout: cwd, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now(), pitfalls: pits }) });
+        setupStep("pack_compile", tCp); packDoneAt = now();
         const p = r.pack;
         const inPack = Array.isArray(p.pitfalls) ? p.pitfalls : [];
         pitMatched = inPack.filter((x) => x.match === "files").length;
@@ -1860,6 +1910,7 @@ export async function runCore(o) {
     }
     if (isSplit) {
       // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
+      { const f = await gateSetup(); if (f) return f; } // #5434
       split = await splitStep();
       if (split.done) return split.done;
       frozen = split.contract; hash = contractHash(contractJson(frozen));
@@ -1892,20 +1943,30 @@ export async function runCore(o) {
       if (decisionsNote) T.decisions.push("Trusted FORGE:DECISION comment(s) posted after the contract froze are binding notes for the builder");
       await label("building");
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
-      const namedHot = await hotspotsOf({ paths: namedPaths(iss.body ?? "") }); // #5209: churn and hotspot signals for eligibility
+      const waitMs = Math.max(0, Number(contextWaitSeconds) || 0) * 1000, tHot = now();
+      const hotR = await within(hotspotsOf({ paths: namedPaths(iss.body ?? "") }), waitMs); // #5209: churn and hotspot signals for eligibility; #5434: bounded, overlaps the install
+      const hotLate = hotR === TIMED_OUT, namedHot = hotLate ? null : hotR;
+      setupStep("hotspots", tHot);
+      if (hotLate) T.decisions.push(`Hotspots not ready in ${waitMs / 1000}s: light lane skipped, plan starts without hotspot facts`);
       const elig = lightEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], predictedFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: namedHot?.files ?? [], cfg: o.light ?? {} });
       ev({ event: "LIGHT_ELIGIBILITY", mode: elig.mode, verdict: elig.verdict, light: elig.light, reasons: elig.reasons, signals: elig.signals });
       lightVerdict = elig.verdict;
       if (elig.mode !== "off") T.decisions.push(`Light lane ${elig.mode}: ${elig.verdict}${elig.reasons.length ? ` (${elig.reasons.map((x) => x.code).join(", ")})` : ""}`);
       // #4451: a light try skips the hotspots and the context pack; an upgrade computes them before the plan call
-      const lightTry = elig.light && !frozen && !resumed && !salvagedRef && !recover;
+      const lightTry = elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover;
       if (!lightTry) hotFacts = namedHot; // #4451: a light try still gives its builder no hotspot facts
-      enumList = io.enumeratingTests ? ((await io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }).catch(() => null)) ?? []) : [];
+      enumList = io.enumeratingTests ? ((await within(io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }), waitMs)) ?? []) : [];
+      if (enumList === TIMED_OUT) enumList = [];
       facts = await factsPath([wt, cwd], io.fs?.exists);
-      let ctxPack = frozen || lightTry ? null : await contextPackStep();
+      let ctxPack = null, packP = null;
+      if (!(frozen || lightTry)) { // #5434: the plan waits for the pack at most waitMs; a late pack still posts and is read before implement
+        const tPack = now(); packP = contextPackStep(); ctxPack = await within(packP, waitMs); setupStep("context_pack", tPack);
+        if (ctxPack === TIMED_OUT) { ctxPack = null; T.decisions.push(`Context pack not ready in ${waitMs / 1000}s: the plan starts without it`); }
+      }
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
       if (lightTry) {
+        { const f = await gateSetup(); if (f) return f; } // #5434: the light build is an implement-class session
         liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
         const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn(), pages: pagesConfig }),
@@ -1942,7 +2003,8 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" });
+        const tPrompt = now(), planText = planPrompt(); setupStep("prompt_assembly", tPrompt); // #5434
+        await builder(++attemptN, planText + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1961,6 +2023,7 @@ export async function runCore(o) {
         }
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
+        { const f = await gateSetup(); if (f) return f; } // #5434: the contract checks below run commands with the lane env
         // #4353: the engine's scope gate is the only scope authority; a pure file-scope validate is dropped before it is checked or frozen
         const dropScope = (c) => {
           const d = dropScopeValidates(c);
@@ -2065,10 +2128,12 @@ export async function runCore(o) {
       }
       stampHash = hash; // #5333
       await claimSurfaceSlots(frozen); // #5340: the full and recovered paths reach the builder here with the contract settled
+      if (!ctxPack && packP) ctxPack = await packP.catch(() => null); // #5434: a pack that missed the plan wait still reaches the build
       const openPaths = (frozen?.deliverables ?? []).map((d) => d?.path); // #5347: facts for the build's opening batch
       const openMap = io.runCommand ? await readTestMapAtRef(git, base).catch(() => null) : null;
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
+      { const f = await gateSetup(); if (f) return f; } // #5434: resumed or frozen lanes skip the plan
       stage = "implement"; phaseLedger.enter("implement");
       let buildPrompt = implementPrompt, noCeiling = false;
       if (!lightDone) { // #5346: a session certain to restart is narrowed (or, when the named files alone exceed the ceiling, left uncapped) before it starts
@@ -2572,13 +2637,23 @@ export async function runCore(o) {
     const IGNORE = [`${LEAN_DIR}/`];
     /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
     function reviewOnce() { return phaseLedger.during("review", reviewOnceRaw); }
-    async function reviewOnceRaw() {
+    /** The reviewer's inputs and full prompt for the current head: no lane state is touched, so it can run before precheck finishes (#5436). */
+    async function reviewPrep() {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
       // #5339: validate-command paths that fake the real path (mocks, fakes, stubs): they cannot verify an e2e/manual requirement
       const cmdPaths = [...new Set((effective.validate ?? []).flatMap((v) => String(v.command ?? "").split(/\s+/)).map((t) => t.replace(/^["']+|["']+$/g, "")).filter((t) => listed.has(t)))];
       const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE, e2e: { faked: fakedPaths(cmdPaths, (x) => readFileSync(join(wt, x), "utf8")), checks: vcfg.e2e?.checks ?? [], isSpec: (x) => e2eSpecs([x], vcfg.e2e).length > 0 } };
+      const prompt = reviewerPrompt({ reproFlag: reproQ, issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) });
+      return { ctx, prompt };
+    }
+    const reviewerCall = (prompt) => callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true, prompt });
+    /** #5436: the first reviewer call, started beside guard+precheck by gate(); null when none is pending. */
+    let specReview = null;
+    async function reviewOnceRaw() {
+      const spec = specReview; specReview = null;
+      const { ctx, prompt } = await reviewPrep();
       let d = null, first = null;
       for (let t = 0; t < 3; t++) {
         // #4327/#5164: a third run only when the repaired reply is incomplete solely by reviewer slips (unresolved evidence paths, coverage misquotes).
@@ -2589,9 +2664,9 @@ export async function runCore(o) {
         // #4160: a reply with rows missing is re-asked for those ids only; an unparseable one gets the full prompt again.
         const repair = first && (d.state === "review.incomplete" || d.state === "review.inconsistent");
         await renew();
-        const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) }) });
+        let rr, got = false;
+        if (t === 0 && spec) { try { rr = await spec.adopt(); got = true; T.decisions.push("Review started beside guard+precheck and adopted (#5436)"); } catch { got = false; } }
+        if (!got) rr = await reviewerCall(repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first, criteria: (d.missing ?? []).includes("issue_coverage") ? criterionLines(issueText) : [] }) : prompt);
         await renew();
         await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
@@ -2701,7 +2776,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: 0, broken: 0, skipped: 0, wall_ms: 0, error: true }; return []; }
       const note = `Guard gate selected ${sel.map((x) => `#${x.guard.issue} (${x.reason})`).join("; ")}${r.skipped.length ? `; skipped: ${r.skipped.join("; ")}` : ""}${r.failures.length && shadow ? "; shadow: would block" : ""}`;
       if (note !== guardNoted) { guardNoted = note; T.decisions.push(note); }
-      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
+      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), reasons: Object.fromEntries(sel.map((x) => [x.guard.issue, x.reason])), batches: r.batches, ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
       for (const f of r.failures) ev({ event: "guard_broken", guard: f.guard, test: f.test });
       return r.failures;
     }
@@ -2720,7 +2795,11 @@ export async function runCore(o) {
       return { files: ui, ran: want.run, reason: want.reason, highRisk: riskPathHits(ui, riskPaths).length > 0 };
     }
     let amendFixed = false;
+    /** #5436: a review started beside guard+precheck is dropped on every return that does not reach the reviewer. */
     async function gate() {
+      try { return await gateRun(); } finally { specReview?.discard(); specReview = null; }
+    }
+    async function gateRun() {
       await refreshIssue("conformance");
       result = (await readResult()) ?? result;
       files = await changedFiles();
@@ -2758,6 +2837,18 @@ export async function runCore(o) {
       const gateHead = String(await git(["rev-parse", "HEAD"])).trim();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
+      const rx = await relaxationsOf(files); // #5237
+      relaxations = rx.relaxations;
+      if (relaxations.length) {
+        ev({ event: "RELAXATION_DETECTED", files: [...new Set(relaxations.map((r) => r.file))], count: relaxations.length, negatives: rx.negatives });
+        const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
+        if (!T.decisions.includes(note)) T.decisions.push(note);
+      }
+      // #5436: the review reads the same committed diff as guard+precheck, so its session starts now; reviewOnce adopts it, any earlier return discards it
+      const repro = await reproOf(effective);
+      // a precheck that already fails on facts at hand (no engine rerun) would discard the review, so it is not started then
+      const early = triggerMode === "enforce" || amendProblems.length ? null : precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, frozen, repro, repoHas: repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) });
+      specReview = !early || early.failures.length ? null : startSpeculative(async () => reviewerCall((await reviewPrep()).prompt));
       const gateT0 = now(); let validateMs = 0;
       // #4693: guards run beside the validate rerun; SPEC-11: the substituted-original rerun shares the one validate phase
       const validatePhase = phaseLedger.during("validate", async () => ({ runs: await rerunFailedValidatesRaw(effective), subs: await rerunSubstitutedOriginals(effective) })).finally(() => { validateMs = now() - gateT0; });
@@ -2780,14 +2871,7 @@ export async function runCore(o) {
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
       const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
       const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
-      const rx = await relaxationsOf(files); // #5237
-      relaxations = rx.relaxations;
-      if (relaxations.length) {
-        ev({ event: "RELAXATION_DETECTED", files: [...new Set(relaxations.map((r) => r.file))], count: relaxations.length, negatives: rx.negatives });
-        const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
-        if (!T.decisions.includes(note)) T.decisions.push(note);
-      }
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = await reproOf(effective)), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
