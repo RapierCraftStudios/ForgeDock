@@ -7,6 +7,8 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
+import { stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
+const require_stuck = (s, now) => formatStuck(stuckClaims(s, now));
 
 const tmp = () => tmpDir("iw-");
 const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, authorAssociation: "OWNER", author: { login: "me" }, createdAt: "2026-10-01T00:00:00Z", ...o });
@@ -45,7 +47,7 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, 
       return "";
     },
     launch: (n, lane) => { launched.push([n, lane]); return { poll: () => ({ code: exit(n) }) }; },
-    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false } };
+    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false, results: (id) => io.results?.[id] ?? null }, remediated: [], remediate: (n, lane, code) => { io.remediated.push([n, lane, code]); return { poll: () => (io.remediateExit === undefined ? null : { code: io.remediateExit }) }; } };
   return io;
 }
 
@@ -631,4 +633,45 @@ test("#5088 ghRunner names the failing call; 401/403 also warn with the effect o
   assert.equal(ghRunner((cmd, args, opts) => { seen = { cmd, args, opts }; return "out"; })(["repo", "view"]), "out");
   assert.equal(seen.cmd, "gh");
   assert.deepEqual(seen.opts.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+const batchState = (o = {}) => ({ claimed: [1, 2, 3, 4], inflight: [1, 2, 3, 4], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: { 1: "staging", 2: "staging", 3: "staging", 4: "staging" }, phase: "running", batch: "b1", ...o });
+const parkedRow = (code) => ({ outcome: "needs-human", code });
+
+test("inflight drops issues whose batch result is final and parked lanes get remediation", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: parkedRow("conformance.e2e_unverified"), 2: parkedRow("conformance.unimplemented"), 3: parkedRow("maintenance.hotspot_growth"), 4: { outcome: "needs-human" } } };
+  const state = batchState();
+  await tick({ watch: W({ mode: "batch" }), repo: "o/r", io, state });
+  assert.deepEqual(state.inflight, []); // the batch has not reported, yet every result is final
+  assert.deepEqual(io.remediated.map((r) => r[0]), [1, 2, 3]);
+  assert.deepEqual(io.remediated[0], [1, "staging", "conformance.e2e_unverified"]);
+  assert.equal(state.outcomes[4].kind, "needs-human"); // no terminal code: not a mechanical park
+  const t = formatStatus(state, W({ mode: "batch" }), io.now());
+  assert.match(t, /parked 3/); assert.match(t, /needs-human 1/);
+});
+
+test("a failed remediation lane makes the parked issue needs-human with the reason; budget caps lanes", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: parkedRow("ci.red"), 2: parkedRow("ci.red") } };
+  io.remediateExit = 1;
+  const state = batchState({ claimed: [1, 2], inflight: [1, 2] });
+  await tick({ watch: W({ mode: "batch", max_remediations: "1" }), repo: "o/r", io, state });
+  assert.equal(io.remediated.length, 1);
+  assert.equal(state.outcomes[1].kind, "needs-human");
+  assert.match(state.outcomes[1].reason, /exited 1/);
+  assert.ok(io.calls.some((a) => a[1] === "edit" && a.includes("needs-human")));
+});
+
+test("a needs-human issue a person cleared with a new comment is re-claimed; stuck lists old claims", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: { outcome: "needs-human" } } };
+  const state = batchState({ claimed: [1], inflight: [1], started: io.now() - 30 * 3600_000 });
+  const w = W({ mode: "batch" });
+  await tick({ watch: w, repo: "o/r", io, state });
+  assert.match(require_stuck(state, io.now()), /#1 claimed 30h ago.*needs-human/);
+  const at = state.outcomes[1].at;
+  io.gh = ((orig) => async (a) => (a[1] === "view" && a.includes("state,labels,comments") ? JSON.stringify({ state: "OPEN", labels: [], comments: [{ authorAssociation: "OWNER", body: "fixed the cause", createdAt: new Date(at + 1000).toISOString() }] }) : orig(a)))(io.gh);
+  await tick({ watch: w, repo: "o/r", io, state });
+  assert.ok(!state.outcomes?.[1]); // released, then re-selected is up to planClaims
 });
