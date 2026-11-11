@@ -242,6 +242,9 @@ function classifyNeedsHumanBase(row) {
 /** forge#4725: mechanical/environment codes recover on their own budget (`recovery.mechanicalMaxAttempts`), apart from conformance failures. */
 export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
 
+/** #5423: environment gaps the engine recovers itself: a first lane ending on one never labels the issue needs-human. */
+export const ENV_ENGINE_OWNED_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]);
+
 /** `mechanical` | `conformance`: the recovery budget class of a lane result row (a conflicting `ci-pending` is a base conflict). */
 export function recoveryClassOf(row) {
   return MECHANICAL_CODES.includes(recoveryCodeOf(row)) ? "mechanical" : "conformance";

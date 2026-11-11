@@ -878,7 +878,7 @@ describe("host capabilities in placement (#4542)", () => {
     assert.deepEqual(detectNeeds(t, exec), ["promtool"]);
   });
 
-  it("#4785 orchestrate: a remote lane that ends env.tool_missing is relaunched locally", async () => {
+  it("#4785/#5423 orchestrate: a remote lane that ends env.tool_missing is retried remotely once (sandbox provisioned), see recovery.test.mjs for the host fallback", async () => {
     const calls = [];
     const rows = await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
       remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
@@ -886,8 +886,8 @@ describe("host capabilities in placement (#4542)", () => {
         calls.push({ placement: ctx.placement?.where, reason: ctx.placement?.reason, recover: ctx.recover?.code ?? null });
         return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code: "env.tool_missing", detail: "promtool: command not found" };
       } });
-    assert.deepEqual(calls.map((c) => [c.placement, c.recover]), [["remote", null], ["local", "env.tool_missing"]]);
-    assert.equal(calls[1].reason, "host capability: recovering env.tool_missing");
+    assert.deepEqual(calls.map((c) => [c.placement, c.recover]), [["remote", null], ["remote", "env.tool_missing"]]);
+    assert.equal(calls[1].reason, "retry remotely after sandbox provisioning");
     assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
   });
 
