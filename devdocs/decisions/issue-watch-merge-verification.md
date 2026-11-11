@@ -17,7 +17,7 @@ created: 2026-10-31
   - the latest trusted FORGE:REVIEW passed;
   - the lane's required checks are green on the merged head;
   - the merge commit is on the lane;
-  - no check on the merge commit is red.
+  - no check on the merge commit is red. A `cancelled`/`stale` check (a concurrency group cancelled it for a newer commit) is not red: it is resolved against the newest descendant lane commit that ran the same check. Green there passes, a failure there fails, and no finished run yet is `pending`. Required checks cancelled on the head resolve the same way (a manual cancel cannot be told apart).
 - The checks are the same as the standalone watcher prototype's. Trust uses the engine's `isTrustedIssueComment`, and required checks come from `requiredChecksFor`.
 - **Outcomes:**
   - `verified`: a FORGE:WATCH_VERIFY record with the evidence.
