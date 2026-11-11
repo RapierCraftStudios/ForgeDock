@@ -233,7 +233,7 @@ test("an inherited App token whose login was removed is dropped with its marker 
 
 // Long-running lane commands must refresh the App token they adopt, or lanes past expiry 401.
 test("AUTH_REFRESH_COMMANDS covers lane commands and the CLI uses it instead of an inline list", () => {
-  for (const c of ["orchestrate", "schedd", "watch", "issue-watch", "prod-watch", "run-issue", "resume-stalled", "run", "bootstrap", "release"]) assert.ok(AUTH_REFRESH_COMMANDS.has(c), c);
+  for (const c of ["orchestrate", "schedd", "watch", "issue-watch", "prod-watch", "run-issue", "resume-stalled", "run", "bootstrap", "release", "docsgate"]) assert.ok(AUTH_REFRESH_COMMANDS.has(c), c);
   for (const c of ["auth", "gc", "doctor"]) assert.ok(!AUTH_REFRESH_COMMANDS.has(c), c);
   const src = readFileSync(new URL("../forgedock.mjs", import.meta.url), "utf8");
   assert.match(src, /AUTH_REFRESH_COMMANDS\.has\(command\)\) startAuthRefresh\(\)/);
