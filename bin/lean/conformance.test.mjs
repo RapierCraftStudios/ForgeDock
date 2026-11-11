@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
+import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -1770,5 +1770,40 @@ describe("page gate wiring (#5428)", () => {
     assert.ok(!validateContract(c, "q").problems.some((p) => /page_gate/.test(p)));
     const pc = precheck({ contract: c, result: {}, changedFiles: [], pageFailures: [{ code: "x", kind: "page_sitemap_missing", detail: "d" }] });
     assert.ok(pc.failures.some((f) => f.kind === "page_sitemap_missing"));
+  });
+});
+
+describe("test plan frozen with the contract (#5445)", () => {
+  const D = [{ id: "D1", path: "src/scrape.js", change: "rewrite the listing .json URL to old.reddit.com", requirements: ["R1"] }, { id: "D2", path: "src/search.js", requirements: ["R2"] }];
+  const row = (r, o = {}) => ({ requirement: r, proof: "www.reddit.com listing .json returns 200 JSON instead of 403", level: "integration", level_reason: "a real HTTP fixture observes the status", repro: "test/x.test.js#403", regression: ["old.reddit.com listings"], env: ["http fixture"], command: "node --test test/x.test.js", ...o });
+  const K = (plan) => ({ ...C, deliverables: D, test_plan: plan });
+  const bug = (c) => validateContract(c, ISSUE, { testPlan: true }).problems.join("\n");
+  it("a complete plan is valid; without the option an old contract stays valid", () => {
+    assert.deepEqual(validateContract(K([row("R1"), row("R2")]), ISSUE, { testPlan: true }), { ok: true, problems: [] });
+    assert.deepEqual(validateContract(C, ISSUE), { ok: true, problems: [] });
+  });
+  it("a bug requirement without a row, or without a repro, is rejected", () => {
+    assert.match(bug(K([row("R1")])), /R2: test_plan needs a row/);
+    assert.match(bug(C), /R1: test_plan needs a row/);
+    assert.match(bug(K([row("R1", { repro: "" }), row("R2")])), /R1: test_plan repro must be a test id/);
+    assert.match(bug(K([row("R1", { repro: "no-repro" }), row("R2")])), /R1: test_plan no-repro needs a reason/);
+    assert.equal(bug(K([row("R1", { repro: "no-repro", reason: "spec-only change" }), row("R2")])), "");
+  });
+  it("a proof that echoes a deliverable is rejected; one about the 403 is accepted", () => {
+    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof only restates a deliverable/);
+    assert.equal(proofEchoesDeliverable("the listing json URL is rewritten", D.slice(0, 1)), true);
+    assert.equal(proofEchoesDeliverable("returns 200 JSON instead of 403", D.slice(0, 1)), false);
+  });
+  it("level, its reason and the command are checked; mocking the bug's component is rejected", () => {
+    assert.match(testPlanProblems(K([row("R1", { level: "manual" })])).join(), /level must be one of/);
+    assert.match(testPlanProblems(K([row("R1", { level_reason: "" })])).join(), /level_reason/);
+    assert.match(testPlanProblems(K([row("R1", { level_reason: "mock the fetcher" })])).join(), /mocking the component/);
+    assert.equal(testPlanProblems(K([row("R1", { level_reason: "no mocks needed, real fixture" })])).length, 0);
+    assert.match(testPlanProblems(K([row("R1", { command: "" })])).join(), /exact command/);
+    assert.match(testPlanProblems({ ...C, test_plan: "x" }).join(), /must be an array/);
+  });
+  it("applyValidateRecipes rewrites test_plan commands", () => {
+    const r = applyValidateRecipes(K([row("R1")]), [{ match: "^node --test", replace: "npx node --test" }]);
+    assert.equal(r.contract.test_plan[0].command, "npx node --test test/x.test.js");
   });
 });

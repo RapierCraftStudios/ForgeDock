@@ -16,7 +16,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, reproPlanNote } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -53,6 +53,8 @@ const CONTRACT = {
   preserve: [{ id: "P1", what: "Existing callers of foo keep working. (src/bar.js)" }],
   validate: [{ id: "V1", command: "node --test test/foo.test.js" }],
 };
+const OUTER_CONTRACT = CONTRACT;
+const TEST_PLAN = [{ requirement: "R1", proof: "foo returns a value for a null argument instead of throwing a TypeError", level: "unit", level_reason: "a pure function, a direct call observes the cause", repro: "foo handles null", regression: ["existing foo callers"], env: [], command: "node --test test/foo.test.js" }]; // #5445: bug lanes freeze a test plan
 const fence = (o) => "```json\n" + JSON.stringify(o) + "\n```";
 /** A complete conforming review for `contract` over `files`; `patch` overrides fields. */
 const conf = (patch = {}, contract = CONTRACT, files = ["src/foo.js", "test/foo.test.js"]) => fence({
@@ -2061,7 +2063,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2475, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2500, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1875, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2131,6 +2133,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
 });
 
 describe("bug lanes freeze a red-green repro_test (#4271)", () => {
+  const CONTRACT = { ...OUTER_CONTRACT, test_plan: TEST_PLAN };
   const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
   const BUG = [{ name: "bug" }];
   /** world labelled `labels` whose io.redGreen answers from `rg` in order (the last repeats). */
@@ -2236,7 +2239,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
   it("lean.repro_test off, or a lane that is not a bug, keeps today's prompts, contract check and precheck unchanged", async () => {
     const plain = world(); await run(plain);
     for (const [o, extra] of [[{}, { reproTest: "off" }], [{ labels: [{ name: "feature" }] }, {}]]) {
-      const w = rworld([{ base: "RAN", head: "RAN" }], { contract: CONTRACT, ...o });
+      const w = rworld([{ base: "RAN", head: "RAN" }], { contract: OUTER_CONTRACT, ...o });
       assert.equal((await run(w, extra)).terminalReason, "merged");
       assert.equal(builders(w)[0][4], builders(plain)[0][4], "plan prompt unchanged"); assert.equal(builders(w)[1][4], builders(plain)[1][4]);
       assert.equal(builders(w).length, 2, "no contract correction for a missing repro_test"); assert.equal(w.rgCalls.length, 0);
@@ -2521,9 +2524,9 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2375, `plan prompt is ${approxTokens(plan)} tokens`); // 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2400, `plan prompt is ${approxTokens(plan)} tokens`); // 2400: #5445 (Test plan heading); 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 1850, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp)
-    for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
+    for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
       "add-deliverable", "add-requirement", '"validation"', "Never report a deliver requirement"]) assert.ok(impl.includes(h), h);
@@ -7669,7 +7672,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 1850, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2375, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2400, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -7693,7 +7696,7 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
   const BODY = "foo crashes on null input in src/foo.js.\n\nExpected behaviour: foo returns null.\n\n- foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
   const RESULT = { status: "fixed", summary: "fixed foo", requirement: "foo must handle a null argument without throwing.", repro_test: RT, tests: [{ command: RT.command, result: "pass", fails_without_fix: true }] };
   const lworld = (o = {}) => {
-    const w = world({ labels: [{ name: "bug" }], body: BODY, result: RESULT, contract: { ...CONTRACT, repro_test: RT }, ...o });
+    const w = world({ labels: [{ name: "bug" }], body: BODY, result: RESULT, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT }, ...o });
     w.numstat = o.numstat ?? "5\t1\tsrc/foo.js\n20\t0\ttest/foo.test.js\n";
     w.rgCalls = []; w.ran = [];
     w.io.redGreen = async (x) => { w.rgCalls.push(x.command); return o.repro ?? { base: "FAILED", head: "RAN" }; };
@@ -8178,5 +8181,16 @@ describe("admission disk ceiling (#5421)", () => {
     assert.equal(await nearCeilingDisk({ host: host(2000), minFreeGb: 5 }), true);
     assert.equal(await nearCeilingDisk({ host: host(20000), minFreeGb: 5 }), false);
     assert.equal((await diskLowAdmission({ host: host(2000), minFreeGb: 5 })).reasons.length, 2);
+  });
+});
+
+describe("test plan rendered in the FORGE:CONTRACT comment (#5445)", () => {
+  it("renderContract carries a Test plan table; reproPlanNote asks for test_plan", () => {
+    const plan = [{ requirement: "R1", proof: "listing returns 200 not 403", level: "integration", repro: "no-repro", reason: "needs live site", regression: ["a", "b"], env: ["http"], command: "node --test x" }];
+    const body = renderContract({ ...CONTRACT, test_plan: plan }, "abc123abc123");
+    assert.match(body, /### Test plan\n\| Requirement \| Proof/);
+    assert.match(body, /\| R1 \| listing returns 200 not 403 \| integration \| no-repro: needs live site \| a; b \| http \| `node --test x` \|/);
+    assert.ok(!renderContract(CONTRACT, "abc123abc123").includes("### Test plan"));
+    assert.match(reproPlanNote(true), /"test_plan":/);
   });
 });

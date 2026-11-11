@@ -174,6 +174,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### History   (introducing commit, prior fixes)
 ### Recommendation
 ### Related Issues
+### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
 
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
@@ -303,7 +304,9 @@ export function pagePlanNote(cfg) {
 
 export function reproPlanNote(on) {
   if (!on) return "";
-  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
+  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.
+
+Also write a \`### Test plan\` section in ${INVESTIGATION_FILE} and "test_plan":[{"requirement":"R1","proof":"<the root-cause observable that was wrong and must now hold, e.g. 'www.reddit.com/*.json returns 200 JSON', never 'the URL is rewritten'>","level":"unit|integration|e2e|live","level_reason":"<why this is the cheapest level that observes the cause>","repro":"<test id, red on base and green on head> or no-repro","reason":"<no-repro only>","regression":["<neighbouring behaviours that must stay green>"],"env":["<services, fixtures, packages>"],"command":"<exact command>"}] in ${CONTRACT_FILE}, one row per deliver requirement. A proof that restates a deliverable is rejected; never mock the component the bug lives in.`;
 }
 
 /** forge#4519: the repo's generated, bot-owned globs (forge.yaml maintenance.generated_paths via hotspots.sh); "" when none. */
