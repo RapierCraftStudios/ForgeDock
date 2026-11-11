@@ -137,6 +137,7 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
       assert.equal(ra.status, "miss-installed", JSON.stringify(ra));
       assert.equal(ra.published, true);
       assert.equal(ra.eco, eco);
+      assert.equal(ra.dir, ".", "#5447: every result row carries its project dir");
       const [snap] = snapDirs(root, eco);
       assert.ok(snap && existsSync(join(snap, "manifest.json")));
       const fullInstalls = f.installs().length;
