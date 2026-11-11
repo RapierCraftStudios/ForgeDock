@@ -6,8 +6,8 @@ name: Deploy Gate Marker Check
 # review-pr-staging) is indistinguishable from a clean gate pass because both
 # previously left no comment.
 #
-# Trigger: pull_request targeting main (staging→main deploy PRs only).
-# Non-staging→main PRs are skipped immediately (the gate only applies to deploy PRs).
+# Trigger: pull_request targeting main (staging, feature and release/<id> snapshot heads only).
+# Other heads are skipped immediately (the gate only applies to deploy PRs).
 #
 # Gate logic: the gate is the `forge/deploy-gate` commit status on the PR head,
 # not this job's own check run. An issue_comment run reports against the default
@@ -151,16 +151,21 @@ jobs:
           BASE: ${{ steps.pr.outputs.base }}
           HEAD: ${{ steps.pr.outputs.head }}
         run: |
-          # Gate only applies to staging→main or feature→main deploy PRs
+          # Gate applies to staging, feature and release/<id> (snapshot release) heads into main
           if [ "$BASE" != "main" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "PR base is '$BASE' (not main) — gate-marker-check does not apply."
-          elif [ "$HEAD" != "staging" ] && [ "$HEAD" != "feature" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "PR head is '$HEAD' (not staging/feature) — gate-marker-check does not apply."
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Deploy PR detected: $HEAD → $BASE. Running gate-marker-check."
+            case "$HEAD" in
+              staging|feature|release/*)
+                echo "skip=false" >> "$GITHUB_OUTPUT"
+                echo "Deploy PR detected: $HEAD → $BASE. Running gate-marker-check."
+                ;;
+              *)
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "PR head is '$HEAD' (not staging/feature/release/*) — gate-marker-check does not apply."
+                ;;
+            esac
           fi
 
       - name: Check FORGE_TRUSTED_MARKER_AUTHORS configured

@@ -69,14 +69,16 @@ export function applyEnumerating({ missing = [], cwd, fsx = fs } = {}) {
     const groups = new Map();
     for (const m of rows) { const k = `${m.line}\0${m.module}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(m); }
     let changed = false;
+    const mine = []; // this test's applied rows: a failed write moves only these, never another test's
     // bottom-up: an insertion only shifts the lines below it, so the detector's line numbers stay valid
     for (const g of [...groups.values()].sort((a, b) => b[0].line - a[0].line)) {
       const r = insertIntoList(text, g[0].line, g.map((m) => m.symbol));
       const done = new Set(r.inserted);
-      for (const m of g) (done.has(m.symbol) ? applied : remaining).push(m);
+      for (const m of g) (done.has(m.symbol) ? mine : remaining).push(m);
       if (r.inserted.length) { text = r.text; changed = true; }
     }
-    if (changed) { try { fsx.writeFileSync(join(cwd, test), text); } catch { for (const m of applied.splice(applied.length - rows.length)) remaining.push(m); } }
+    if (changed) { try { fsx.writeFileSync(join(cwd, test), text); } catch { remaining.push(...mine); continue; } }
+    applied.push(...mine);
   }
   return { applied, remaining };
 }
@@ -96,6 +98,12 @@ export function renamedExport(symbol, path) {
 
 const word = (s) => new RegExp(`(?<![\\w$])${s.replace(/[\\$]/g, "\\$&")}(?![\\w$])`, "g");
 
+/** True when `text` binds `name` from another module (ES import / `export {..} from`, python from-import): such a file references the lane's export, it does not merely declare its own. */
+function importsName(text, name) {
+  const clauses = [...text.matchAll(/^\s*(?:import|export)\s+(?:type\s+)?([^;"'`]*?)\s*from\s*["'][^"']*["']/gm), ...text.matchAll(/^\s*from\s+\S+\s+import\s+(.*)$/gm)];
+  return clauses.some((m) => word(name).test(m[1]));
+}
+
 /**
  * Duplicate exports: rename the lane's new export to `<AppPrefix><Symbol>` when the name occurs only in its declaring file and the
  * other files that declare it themselves (`others`; so no importer, registry or test keyed by the name can be left behind) and never as a property, string or label.
@@ -110,7 +118,11 @@ export async function renameDuplicates({ dups = [], cwd, git, fsx = fs } = {}) {
       const next = renamedExport(d.symbol, d.path);
       if (!next || next === d.symbol || (await grep(next)).length) { remaining.push(d); continue; }
       const files = await grep(d.symbol);
-      const ours = new Set([d.path, ...(d.others ?? [])]); // the detector's others declare the name themselves, so they cannot import ours
+      const others = d.others ?? [];
+      const reads = (f) => { try { return fsx.readFileSync(join(cwd, f), "utf8"); } catch { return null; } };
+      // the detector's others declare the name themselves, so they cannot import ours; a barrel (import then export) is listed as a declarer but does import it
+      if (others.some((f) => { const t = reads(f); return t === null || importsName(t, d.symbol); })) { remaining.push(d); continue; }
+      const ours = new Set([d.path, ...others]);
       if (!files.includes(d.path) || files.some((f) => !ours.has(f))) { remaining.push(d); continue; }
       const text = fsx.readFileSync(join(cwd, d.path), "utf8");
       const re = word(d.symbol);

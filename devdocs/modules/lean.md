@@ -192,6 +192,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`mechfix.mjs` `applyEnumerating` writes the missing entry into the test's string list, `renameDuplicates` renames an
    export only its declaring file mentions to `<App><Name>`; the detector's `others`, which declare the name themselves, do not
    block the rename and are left untouched, any other mentioning file does), commit it (`MECHANICAL_FIX` event) and re-run the detector.
+   #5405: `applyEnumerating` collects each test's applied rows per test and adds them to `applied` only after that test's write
+   succeeds; a failed write moves only that test's rows to `remaining`, so earlier tests' written fixes stay applied and committed.
    What is left goes to one narrow session per stage: the enumerating round also carries the pending duplicate-export and
    English-copy findings (`mergeNarrowTasks`; their gates re-check). The session runs profile `narrow` (no lane text,
    CLAUDE.md off, `prompts.mjs` `narrowFixPrompt`: contract excerpt, failure output and named files, `NARROW_PROMPT_MAX`
@@ -2786,6 +2788,8 @@ Tests: `batch.test.mjs` "#5204", `execution.test.mjs` "#5204", `schedd.test.mjs`
 
 `fixStep` skips a fix issue already closed as merged (`seam.issueMerged`: CLOSED + `workflow:merged`), so a resume after an intake lane or an earlier round merged the fix goes straight to the recut/pick and the delta review instead of blocking on an `invalid` lane; `fileCiIssue` reuses the issue filed for the same release head (exact title) instead of filing a duplicate.
 
+`gateState` (promotion) reads `forge/deploy-gate` from the head's check runs and, when absent there, from its combined commit status: `gate-marker-check.yml` posts the gate as a commit status, so a check-runs-only read never saw it.
+
 ## Entry 2026-11-07 — Adaptive lane depth: eligibility signals and the depth report (#5209)
 
 - `light.mjs` `lightEligibility` takes `hotspots` (scripts/hotspots.sh `files` rows `{path, lines, commits_90d, over}`). A predicted non-test file with `over` (beyond `maintenance.hotspot.file_lines`) is a new hard reason `hotspot` (`<path> (<lines> lines)`).
@@ -3007,3 +3011,4 @@ path is authorized (#5380).
 
 - **Release skip.** `check-spec-size.sh` (and the `spec-size-budget` job `if:` in `check-commands.yml`) now skip same-repo PRs to `main` whose head is `staging` or `release/*`; forks, non-main bases and missing `PR_SAME_REPO` are still budgeted. CI runs the script from the base ref, so the job `if:` is what takes effect first.
 - **Backslash escape.** `mechfix.mjs` `word()` escapes `\` as well as `$` when building the symbol regex (CodeQL incomplete-escaping).
+- **Barrel others (#5406).** `renameDuplicates` reads each detector `others` file: one that imports the name (ES `import`/`export … from` clause incl. default/aliased, or python from-import) or cannot be read sends the dup to `remaining` with nothing rewritten, since a barrel (import then export) is listed as a declarer but breaks when only the declaring file is renamed. A genuine declaring other (no import) still permits the rename; the detector output is unchanged.
