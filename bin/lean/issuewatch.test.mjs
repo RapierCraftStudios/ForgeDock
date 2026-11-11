@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
-import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner } from "./issuewatch.mjs";
+import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner, isTransientGhError } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
 
 const tmp = () => tmpDir("iw-");
@@ -631,4 +631,44 @@ test("#5088 ghRunner names the failing call; 401/403 also warn with the effect o
   assert.equal(ghRunner((cmd, args, opts) => { seen = { cmd, args, opts }; return "out"; })(["repo", "view"]), "out");
   assert.equal(seen.cmd, "gh");
   assert.deepEqual(seen.opts.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+const TLS = Object.assign(new Error("gh failed"), { status: 1, stderr: 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout\n' });
+
+test("#5465 fault injection: ghRunner retries a transient TLS timeout with backoff, never a 4xx", () => {
+  const naps = []; let calls = 0;
+  const gh = ghRunner(() => { if (calls++ < 2) throw TLS; return "ok"; }, () => {}, { sleep: (ms) => naps.push(ms), delayMs: 10 });
+  assert.equal(gh(["issue", "view", "1"]), "ok");
+  assert.deepEqual(naps, [10, 20]);
+  let n = 0;
+  const hard = ghRunner(() => { n++; throw Object.assign(new Error("x"), { stderr: "gh: Not Found (HTTP 404)" }); }, () => {}, { sleep: () => {} });
+  assert.throws(() => hard(["issue", "view", "1"]), /failed: gh: Not Found/);
+  assert.equal(n, 1);
+  let m = 0;
+  assert.throws(() => ghRunner(() => { m++; throw TLS; }, () => {}, { sleep: () => {}, retries: 2 })(["api", "x"]), /TLS handshake timeout/);
+  assert.equal(m, 3);
+  for (const t of ["HTTP 502", "HTTP 429", "read: ECONNRESET", "You have exceeded a secondary rate limit"]) assert.ok(isTransientGhError(t), t);
+  assert.ok(!isTransientGhError("HTTP 403: Resource not accessible"));
+});
+
+test("#5465 fault injection: a TLS timeout on one gh call keeps the watch up and the next tick claims", async () => {
+  const dir = tmp(), watch = validateWatch("w", { until: "2026-10-30T00:10:00Z" }), io = fakeIo(dir, [iss(1)]);
+  let fail = true; const gh = io.gh;
+  io.gh = async (a) => { if (fail) { fail = false; throw TLS; } return gh(a); };
+  io.sleep = async () => { io.tickClock(300000); };
+  const errs = console.error; console.error = () => {};
+  let state; try { state = await runWatch({ watch, repo: "o/r", io, dir, intervalMs: 300000 }); } finally { console.error = errs; }
+  assert.deepEqual(state.claimed, [1]);
+  assert.notEqual(state.phase, "exited");
+});
+
+test("#5465 a crash or a single pass leaves phase exited with the reason, never running", async () => {
+  const dir = tmp(), io = fakeIo(dir, []);
+  io.sleep = async () => { throw new Error("disk gone"); };
+  const errs = console.error; console.error = () => {};
+  try { await assert.rejects(runWatch({ watch: W({}), repo: "o/r", io, dir, intervalMs: 1 }), /disk gone/); } finally { console.error = errs; }
+  const s = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
+  assert.equal(s.phase, "exited"); assert.match(s.exitReason, /crashed: disk gone/);
+  const text = formatStatus(s, W({}), io.now());
+  assert.match(text, /\[exited,/); assert.match(text, /state: exited \(crashed: disk gone\)/);
 });
