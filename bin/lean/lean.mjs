@@ -1283,6 +1283,9 @@ export async function runCore(o) {
 
   try {
     // ---- 1. claim ----
+    // #5435: the lane fetch is independent of the claim's GitHub writes; start it now and await it before the resume probe.
+    const fetchP = step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
+    await step("claim", async () => {
     await label("investigating");
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
     if (recover) {
@@ -1295,9 +1298,10 @@ export async function runCore(o) {
       T.decisions.push(`Recovery pass for ${recover.code} (attempt ${recover.attempt}): needs-human removed, PR resumed`);
       ev({ event: "RECOVERY_START", code: recover.code, attempt: recover.attempt });
     }
+    });
 
     // ---- 2. worktree (resume an open PR / remote branch) ----
-    await step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
+    await fetchP;
     let resumed = null, fromSalvage = false;
     await step("resume_probe", async () => { try {
       const [prsRaw, remoteRaw] = await Promise.all([ // #5435: independent network reads, in parallel
