@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
+import { seqNumber } from "./sequence.mjs";
 import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
@@ -182,13 +183,28 @@ export const isTestPath = (p) => TEST_RE.test(String(p));
 export const isIncidentalPath = (p) => INCIDENTAL_RE.test(String(p));
 const cleanPath = (p) => String(p ?? "").trim().replace(/^\.\//, "");
 const globRe = (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/?/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*")}$`);
-/** True when deliverable `d` (a file, a dir ending in "/", or a glob) covers changed file `f`. */
+const dirOf = (p) => p.slice(0, p.lastIndexOf("/") + 1);
+/**
+ * #5440: `file` with its sequence number replaced by the one in deliverable `p`, when both sit in one directory and both
+ * names start with a (different) sequence number: an in-lane renumber (0637_x -> 0639_x) is an add from the base, so git
+ * rename detection cannot see it. null otherwise.
+ */
+function renumberedAs(p, file) {
+  const was = seqNumber(p.slice(dirOf(p).length)), now = seqNumber(file.slice(dirOf(file).length));
+  if (!was || !now || was === now || dirOf(p) !== dirOf(file)) return null;
+  return `${dirOf(file)}${was}${file.slice(dirOf(file).length + now.length)}`;
+}
+/** True when deliverable `d` (a file, a directory with or without a trailing "/", or a glob) covers changed file `f`. */
 export function pathCovers(d, f) {
   const p = cleanPath(d), file = cleanPath(f);
   if (!p) return false;
   if (p.endsWith("/")) return file.startsWith(p);
-  if (/[*?]/.test(p)) return globRe(p).test(file);
-  return p === file;
+  const hit = (x) => (/[*?]/.test(p) ? globRe(p).test(x) : p === x);
+  // a file and a directory cannot share a path, so a slash-less deliverable that prefixes `file/` is a directory
+  if (!/[*?]/.test(p) && file.startsWith(`${p}/`)) return true;
+  if (hit(file)) return true;
+  const as = renumberedAs(p, file);
+  return as !== null && hit(as);
 }
 /** #5365: explicit coupling map: editing `when` (a deliverable) also puts `also` in scope (a test asserts parity between them). */
 const COUPLED_PATHS = [{ when: "bin/engine/outcome-codes.mjs", also: ["docs/OUTCOME-CODES.md"] }];
@@ -1027,7 +1043,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     }
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
-  if (repro) failures.push(...reproFailures(contract, repro));
+  if (repro) failures.push(...reproFailures(contract, repro), ...reproQualityFailures(repro));
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
@@ -1074,6 +1090,13 @@ export function reproFailures(contract, { base, head } = {}) {
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)` }];
   return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
+}
+
+/** #5446: a repro_test every targeted mutation of the fix survived. Only under lean.repro_quality: enforce; patch_echo is the reviewer's call. */
+export function reproQualityFailures({ quality, enforce } = {}) {
+  if (!enforce || quality !== "mutation_survivor") return [];
+  return [{ code: MUTATION_SURVIVED, kind: "repro_mutation_survivor",
+    detail: "repro_test still passes with the fix's changed lines mutated (flipped condition, early return, dropped call): it does not exercise the fix" }];
 }
 
 const DOC_ONLY_RE = /\.(?:md|mdx|txt|rst|adoc)$/i;
