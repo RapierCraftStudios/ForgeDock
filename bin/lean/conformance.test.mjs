@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
+import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -300,6 +300,11 @@ describe("precheck (deterministic, no reviewer)", () => {
     const carried = precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 0, carried: true }] }, changedFiles: files });
     assert.deepEqual(codes(carried), []);
     assert.deepEqual(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files }).failures.map((f) => f.kind), ["validate_missing"]);
+  });
+  it("#5446 reproQualityFailures: a mutation survivor fails only when enforced; patch_echo and behavioural never do", () => {
+    assert.equal(reproQualityFailures({ quality: "mutation_survivor", enforce: true })[0].kind, "repro_mutation_survivor");
+    assert.deepEqual(reproQualityFailures({ quality: "mutation_survivor", enforce: false }), []);
+    assert.deepEqual(reproQualityFailures({ quality: "patch_echo", enforce: true }), []);
   });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
@@ -784,6 +789,10 @@ describe("hotspot growth precheck (forge#4195)", () => {
     assert.equal(run(hs([big])).ok, false);
     assert.equal(run(hs([{ ...big, generated: true }])).ok, true);
     assert.equal(run(hs([{ ...big, generated: true, excluded: true }])).ok, true);
+    // #5470: a generated/ segment row (generated:true from hotspots.sh) grown by 6k lines passes; hand-written still flags
+    const seg = H({ path: "src/scrape.js", lines: 6607, base_lines: 0, growth: 6607 });
+    assert.equal(run(hs([{ ...seg, generated: true, excluded: true }])).ok, true);
+    assert.equal(run(hs([{ ...seg, generated: false }])).ok, false);
   });
 
   it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
@@ -1485,13 +1494,33 @@ describe("#5020 freeze-time environment defects", () => {
     assert.equal(reproEnvMiss({ rc: 0, output: "" }), null);
   });
   it("a post-deploy requirement with no check id is deferred to the orchestrator; one with a check is untouched", () => {
-    const c = { requirements: [{ id: "R1", quote: "q", disposition: "post-deploy", why: "needs prod creds" }, { id: "R2", quote: "q", disposition: "post-deploy", check: "login-smoke", why: "w" }] };
+    const c = { requirements: [{ id: "R1", quote: "q", disposition: "post-deploy", why: "needs prod credentials" }, { id: "R2", quote: "q", disposition: "post-deploy", check: "login-smoke", why: "w" }] };
     const { contract, converted } = deferChecklessPostDeploy(c);
     assert.deepEqual(converted, ["R1"]);
     assert.equal(contract.requirements[0].disposition, "defer");
     assert.equal(contract.requirements[0].bucket, ORCHESTRATOR_BUCKET);
     assert.equal(contract.requirements[1].disposition, "post-deploy");
     assert.deepEqual(bucketProblems(contract.requirements[0]), []);
+  });
+  it("#5448: a check-less prod-only claim is not converted and freeze rejects it; local_infeasible_why is required", () => {
+    const c = { requirements: [{ id: "R1", quote: "Listing returns results on prod.", disposition: "post-deploy", bucket: "post-deploy", why: "only measurable on prod after release" }], deliverables: [], validate: [{ id: "V1", command: "true" }] };
+    const d = deferChecklessPostDeploy(c);
+    assert.deepEqual(d.converted, []);
+    const v = validateContract(d.contract, "Listing returns results on prod.");
+    assert.ok(v.problems.some((p) => /needs a check id/.test(p)));
+    assert.ok(v.problems.some((p) => /local_infeasible_why/.test(p)));
+    const ok = validateContract({ ...c, requirements: [{ ...c.requirements[0], check: "listing-prod", local_infeasible_why: "needs live vendor traffic" }] }, "Listing returns results on prod.");
+    assert.deepEqual(ok.problems, []);
+  });
+  it("#5448 replay of #40539: development work cannot be deferred as prod-only", () => {
+    const q = "Find and fix the 403 signal for reddit listings.";
+    const r = { id: "R3", quote: q, disposition: "post-deploy", bucket: "post-deploy", check: "reddit-403", why: "w", local_infeasible_why: "live" };
+    const v = validateContract({ requirements: [r], deliverables: [], validate: [{ id: "V1", command: "true" }] }, q);
+    assert.ok(v.problems.some((p) => /development work/.test(p)));
+  });
+  it("#5448: a malformed regression set is a contract problem", () => {
+    const c = { requirements: [{ id: "R1", quote: "q q q q q q q q q q q q", disposition: "deliver" }], deliverables: [{ id: "D1", path: "a", change: "c" }], validate: [{ id: "V1", command: "true" }], regression: [{ id: "G1" }] };
+    assert.ok(validateContract(c, "q q q q q q q q q q q q").problems.some((p) => /regression entry/.test(p)));
   });
   it("a post-deploy amendment with no check becomes a tracked defer instead of a problem", () => {
     const c = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [], validate: [] };
@@ -1770,5 +1799,69 @@ describe("page gate wiring (#5428)", () => {
     assert.ok(!validateContract(c, "q").problems.some((p) => /page_gate/.test(p)));
     const pc = precheck({ contract: c, result: {}, changedFiles: [], pageFailures: [{ code: "x", kind: "page_sitemap_missing", detail: "d" }] });
     assert.ok(pc.failures.some((f) => f.kind === "page_sitemap_missing"));
+  });
+});
+
+describe("test plan frozen with the contract (#5445)", () => {
+  const D = [{ id: "D1", path: "src/scrape.js", change: "rewrite the listing .json URL to old.reddit.com", requirements: ["R1"] }, { id: "D2", path: "src/search.js", requirements: ["R2"] }];
+  const row = (r, o = {}) => ({ requirement: r, proof: "www.reddit.com listing .json returns 200 JSON instead of 403", level: "integration", level_reason: "a real HTTP fixture observes the status", repro: "test/x.test.js#403", regression: ["old.reddit.com listings"], env: ["http fixture"], command: "node --test test/x.test.js", ...o });
+  const K = (plan) => ({ ...C, deliverables: D, test_plan: plan });
+  const bug = (c) => validateContract(c, ISSUE, { testPlan: true }).problems.join("\n");
+  it("a complete plan is valid; without the option an old contract stays valid", () => {
+    assert.deepEqual(validateContract(K([row("R1"), row("R2")]), ISSUE, { testPlan: true }), { ok: true, problems: [] });
+    assert.deepEqual(validateContract(C, ISSUE), { ok: true, problems: [] });
+  });
+  it("a bug requirement without a row, or without a repro, is rejected", () => {
+    assert.match(bug(K([row("R1")])), /R2: test_plan needs a row/);
+    assert.match(bug(C), /R1: test_plan needs a row/);
+    assert.match(bug(K([row("R1", { repro: "" }), row("R2")])), /R1: test_plan repro must be a test id/);
+    assert.match(bug(K([row("R1", { repro: "no-repro" }), row("R2")])), /R1: test_plan no-repro needs a reason/);
+    assert.equal(bug(K([row("R1", { repro: "no-repro", reason: "spec-only change" }), row("R2")])), "");
+  });
+  it("a proof that echoes a deliverable is rejected; one about the 403 is accepted", () => {
+    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof only restates a deliverable/);
+    assert.equal(proofEchoesDeliverable("the listing json URL is rewritten", D.slice(0, 1)), true);
+    assert.equal(proofEchoesDeliverable("returns 200 JSON instead of 403", D.slice(0, 1)), false);
+  });
+  it("level, its reason and the command are checked; mocking the bug's component is rejected", () => {
+    assert.match(testPlanProblems(K([row("R1", { level: "manual" })])).join(), /level must be one of/);
+    assert.match(testPlanProblems(K([row("R1", { level_reason: "" })])).join(), /level_reason/);
+    assert.match(testPlanProblems(K([row("R1", { level_reason: "mock the fetcher" })])).join(), /mocking the component/);
+    assert.equal(testPlanProblems(K([row("R1", { level_reason: "no mocks needed, real fixture" })])).length, 0);
+    assert.match(testPlanProblems(K([row("R1", { command: "" })])).join(), /exact command/);
+    assert.match(testPlanProblems({ ...C, test_plan: "x" }).join(), /must be an array/);
+  });
+  it("applyValidateRecipes rewrites test_plan commands", () => {
+    const r = applyValidateRecipes(K([row("R1")]), [{ match: "^node --test", replace: "npx node --test" }]);
+    assert.equal(r.contract.test_plan[0].command, "npx node --test test/x.test.js");
+  });
+});
+
+import { pathCovers as cover5440 } from "./conformance.mjs";
+describe("#5440 pathCovers: directory without slash, renumbered sequence file", () => {
+  it("#5440 directory deliverable without slash covers files beneath it", () => {
+    assert.ok(cover5440("listings/official/travel", "listings/official/travel/agent.md"));
+    assert.ok(cover5440("listings/official/travel", "listings/official/travel/a/b/page.md"));
+    assert.ok(cover5440("listings/official/travel", "listings/official/travel"));
+  });
+  it("#5440 a sibling directory sharing the prefix is not covered", () => {
+    assert.ok(!cover5440("listings/official/travel", "listings/official/travel2/agent.md"));
+    assert.ok(!cover5440("listings/official/travel", "listings/official/jobs/agent.md"));
+  });
+  it("#5440 a renumbered migration is covered (exact and glob); other dirs and names are not", () => {
+    assert.ok(cover5440("db/migrations/0637_add_x.sql", "db/migrations/0639_add_x.sql"));
+    assert.ok(cover5440("db/migrations/0637_*", "db/migrations/0639_add_x.sql"));
+    assert.ok(!cover5440("db/migrations/0637_add_x.sql", "db/migrations/0639_other.sql"));
+    assert.ok(!cover5440("db/migrations/0637_*", "other/0639_add_x.sql"));
+    assert.ok(!cover5440("src/a.js", "src/b.js"));
+  });
+});
+
+describe("#5449 test adequacy kinds are enforced by default", () => {
+  it("test_missing and test_weak block in a shadow lane; other kinds still follow the lane", async () => {
+    const { blockingFailures } = await import("./conformance.mjs");
+    const f = [{ code: "x.a", kind: "test_missing" }, { code: "x.b", kind: "test_weak" }, { code: "x.c", kind: "other" }];
+    const r = blockingFailures(f, { shadow: true });
+    assert.deepEqual(r.block.map((x) => x.code), ["x.a", "x.b"]); assert.deepEqual(r.record.map((x) => x.code), ["x.c"]);
   });
 });
