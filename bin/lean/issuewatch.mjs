@@ -22,13 +22,14 @@ import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
 import { releaseRoot } from "./release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { decisionContext, decisionsActive, decisionStep, decisionCounts, formatDecisionDryRun, claimsUsed } from "./issuewatch-decisions.mjs";
+import { reconcileClaims, remediateStep, reclaimStep, claimCounts, stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
-import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness } from "./issuewatch-parity.mjs";
+import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness, alertDeadWatches } from "./issuewatch-parity.mjs";
 
-const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause"];
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause", "max_remediations"];
 export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
@@ -84,7 +85,8 @@ export function validateWatch(name, cfg = {}) {
   const w = { name, milestone: cfg.milestone || null, labels: list(cfg.labels), exclude_labels: list(cfg.exclude_labels), search: cfg.search || null, title_regex: cfg.title_regex || null,
     since: cfg.since || null, version: cfg.version ? String(cfg.version) : null, lane: cfg.lane || null, max_issues: int("max_issues", null), max_inflight: int("max_inflight", cfg.mode === "batch" ? parallel : 4), // #5425: a batch watch takes up to its K at once
     until: cfg.until || null, mode: cfg.mode || "per-issue", parallel, include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null,
-    max_launches: int("max_launches", null), sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true",
+    max_launches: int("max_launches", null), max_remediations: int("max_remediations", 10), // #5467: remediation lanes per watch
+ sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true",
     trust_app: cfg.trust_app === true || String(cfg.trust_app).toLowerCase() === "true", trust_app_labels: list(cfg.trust_app_labels),
     skip_labels: cfg.skip_labels === undefined ? (cfg.mode === "batch" ? DEFAULT_SKIP_LABELS : []) : list(cfg.skip_labels), // #5313: the bash watcher's skip list; batch watches take it by default
     release_pause: cfg.release_pause === undefined ? cfg.mode === "batch" : /^true$/i.test(String(cfg.release_pause)) };
@@ -299,7 +301,7 @@ async function verifyClosed({ n, repo, io, state, now, lane }) {
   state.escalation = { ...(state.escalation ?? {}) };
   const done = (state.escalation[n] ??= {});
   if (!done.comment) { await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]); done.comment = true; }
-  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human"]); done.label = true; }
+  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human,workflow:merged-unverified", "--remove-label", "workflow:merged"]); done.label = true; }
   await io.gh(["issue", "reopen", String(n), "-R", repo]);
   delete state.escalation[n];
   settled(); state.merged.push(n); state.unverified.push(n);
@@ -338,6 +340,7 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   for (const k of ["unverified", "closed"]) state[k] ??= [];
   const verify = (n) => verifyClosed({ n, repo, io, state, now, lane: state.lanes[n] ?? branches.staging ?? DEFAULT_STAGING_BRANCH });
 
+  if (watch.mode === "batch" && state.batch) reconcileClaims({ state, results: io.batch.results?.(state.batch), now, fail, settle }); // #5467: a final batch result leaves inflight now, not when the batch reports
   for (const n of [...state.inflight]) {
     if (watch.mode === "batch") { if (await closed(n)) settle(n); continue; }
     const h = handles.get(n);
@@ -348,6 +351,10 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
     if (r.code === 0) settle(n);
     else if (r.code === 75 && (state.retries[n] = (state.retries[n] ?? 0) + 1) <= RETRIES) handles.set(n, io.launch(n, state.lanes[n]));
     else fail(n);
+  }
+  if (watch.mode === "batch") {
+    await remediateStep({ watch, repo, io, state, handles, now, settle, fail });
+    await reclaimStep({ repo, io, state, trusted: (c) => TRUSTED.has(c?.authorAssociation), release: (n) => { releaseClaims(repoDir(repo, io.env), [n], watch.name); state.claimed = state.claimed.filter((x) => x !== n); delete state.lanes[n]; unsettle(state, n); } });
   }
   for (const n of [...(state.pendingVerify ?? [])]) if (await closed(n)) await verify(n);
   if (watch.mode === "batch" && state.batch && io.batch.reported(state.batch)) { state.inflight.forEach(fail); state.batch = null; }
@@ -366,7 +373,7 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   const used = claimsUsed(state); // the decision stage (#4793) draws on the same caps
   const capped = (watch.max_issues && used.issues >= watch.max_issues) || (watch.max_launches && used.launches >= watch.max_launches) || (watch.until && now >= Date.parse(watch.until));
   if (capped && state.phase === "running") state.phase = "draining";
-  if (state.phase === "draining") { if (!state.inflight.length && !Object.keys(state.verifyFrom ?? {}).length) state.phase = "done"; return state; } // a merge mid-verification holds the drain
+  if (state.phase === "draining") { if (!state.inflight.length && !Object.keys(state.verifyFrom ?? {}).length && !Object.values(state.remediated ?? {}).some((r) => r.status === "running")) state.phase = "done"; return state; } // a merge mid-verification holds the drain
 
   const room = state.pendingStart ? 0 : roomFor(watch, state); // a pending start holds new claims
   const plan = await planClaims({ watch, repo, io, state, branches, defaults, room });
@@ -376,7 +383,7 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
     if (taken.length >= room) break;
     const lane = laneFor(i, watch, { branches, defaults });
     if (!claimIssue(repoDir(repo, io.env), i.number, watch.name)) continue;
-    state.claimed.push(i.number); state.inflight.push(i.number); state.lanes[i.number] = lane; taken.push({ n: i.number, lane });
+    state.claimed.push(i.number); (state.claimedAt ??= {})[i.number] = now; state.inflight.push(i.number); state.lanes[i.number] = lane; taken.push({ n: i.number, lane });
   }
   if (taken.length && watch.mode === "batch") {
     const nums = taken.map((t) => t.n);
@@ -481,8 +488,9 @@ async function fold({ issue, watch, repo, io, state }) {
 export function formatStatus(s, watch, now = Date.now()) {
   const sel = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane"].filter((k) => (Array.isArray(watch[k]) ? watch[k].length : watch[k])).map((k) => `${k}=${[].concat(watch[k]).join(",")}`).join(" ") || "(all trusted issues)";
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
-  const live = s.heartbeat || s.paused ? watchLiveness(s, now) : null;
-  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, ...(live ? [`  state: ${live.state}${live.state === "paused" || live.state === "stale" ? ` (${live.reason})` : ""}  last heartbeat: ${s.heartbeat ?? "never"}${live.ageMs != null ? ` (${Math.round(live.ageMs / 1000)}s ago)` : ""}`] : []), `  selector: ${sel}`,
+  const live = s.heartbeat || s.paused || s.phase === "exited" ? watchLiveness(s, now) : null;
+  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, ...(live ? [`  state: ${live.state === "dead" ? "DEAD" : live.state}${["paused", "dead", "exited"].includes(live.state) ? ` (${live.reason})` : ""}  last heartbeat: ${s.heartbeat ?? "never"}${live.ageMs != null ? ` (${Math.round(live.ageMs / 1000)}s ago)` : ""}`] : []), `  selector: ${sel}`,
+    `  reconciled: ${Object.entries(claimCounts(s)).map(([k, v]) => `${k} ${v}`).join("  ")}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
     ...(s.passError ? [`  last pass failed: ${s.passError}`] : []), // #5425
@@ -521,16 +529,25 @@ export function decisionLaunch({ i, watch, repo, io, state, handles, branches, d
 }
 
 /** Run until done (capped) or `once`; writes status.json each pass. */
-export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {}, cwd }) {
+export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {}, cwd, signals = false }) {
   const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
+  if (state.phase === "exited") { state.phase = "running"; delete state.exitReason; delete state.exitedAt; } // a supervised restart resumes the watch
   const handles = new Map();
   const ctx = decisionContext({ loadPolicy, readFile, cwd: cwd ?? process.cwd() });
   const shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
   const launch = (i) => decisionLaunch({ i, watch, repo, io, state, handles, branches, defaults });
+  // #5465: whatever ends the process, status.json says so instead of staying `running` with a dying heartbeat
+  const markExit = (reason) => {
+    if (state.phase === "done") return;
+    state.phase = "exited"; state.exitReason = String(reason).slice(0, 200); state.exitedAt = new Date(io.now()).toISOString();
+    try { writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n"); } catch { /* the heartbeat goes stale and status shows DEAD */ }
+  };
+  const onSignal = (sig) => { markExit(`stopped by ${sig}`); release(); process.exit(0); };
+  if (signals) for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => onSignal(sig));
   try {
     do {
       state.heartbeat = new Date(io.now()).toISOString(); state.heartbeatEveryMs = intervalMs; // #5313: liveness lives in the state, not a process grep
-      const rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null;
+      let rel = null; try { rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null; } catch { /* unreadable release state: not paused */ }
       if (rel) { // a release job holds staging: no claims, retries or decisions until it ends; the next pass resumes by itself
         state.paused = { reason: `release ${rel.id} in flight${rel.step ? ` (${rel.step})` : ""}`, release: rel.id, since: state.paused?.since ?? state.heartbeat };
         writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
@@ -551,10 +568,11 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
       }
       writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
       if (passErr && once) throw passErr;
-      if (state.phase === "done" || once) break;
+      if (state.phase === "done") break;
+      if (once) { markExit("single pass (--once)"); break; }
       await io.sleep(intervalMs);
     } while (true);
-  } finally { release(); }
+  } catch (e) { markExit(`crashed: ${String(e?.message ?? e)}`); throw e; } finally { if (signals) for (const sig of ["SIGTERM", "SIGINT"]) process.removeAllListeners(sig); release(); }
   return state;
 }
 
@@ -572,6 +590,12 @@ function realIo(repo, env = process.env) {
     judge: ({ decision, options, policy, policyPath, precedent }) => { // #4793: the one LLM judgment of the decision stage
       const prompt = judgePrompt({ decision, options, policy, policyPath, precedent });
       return JSON.parse(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: CLAUDE_MAX_BUFFER, timeout: JUDGE_TIMEOUT_MS }))[0]);
+    },
+    remediate: (n, lane, code) => { // #5467: one recovery lane for a mechanical park
+      let res = null;
+      const p = spawn(process.execPath, [CLI, "run-issue", String(n), ...(lane ? ["--lane", lane] : []), "--recover", String(code), "--recover-attempt", "1"], { detached: true, windowsHide: true, stdio: "ignore", cwd: process.cwd(), env });
+      p.on("close", (c) => { res = { code: c ?? 1 }; }); p.on("error", () => { res = { code: 1 }; });
+      return { poll: () => res };
     },
     launch: (n, lane, opts = {}) => {
       let res = null;
@@ -592,6 +616,7 @@ function realIo(repo, env = process.env) {
       add: (id, issues) => openBatch(root, id).addIssues(issues),
       // release #5068 MAT-1: the CLI path checks the label, reopens a finished batch and hosts it on the schedd
       requeue: (id, n, reason) => (spawnSync(process.execPath, [CLI, "orchestrate", "--requeue", id, String(n), "--reason", reason], { cwd: process.cwd(), env, encoding: "utf8", timeout: 120000, windowsHide: true }).stdout ?? "").match(new RegExp(`requeued #${n}\\b`)) !== null,
+      results: (id) => openBatch(root, id).store.load()?.results ?? null, // #5467: the per-issue lane results, final as they land
       reported: (id) => existsSync(join(root, id, "report.json")),
       find: findNew,
       // #5425: a running (started, not reported, not cancelled) batch of this repo and lane
@@ -616,14 +641,20 @@ export function ghFailureEffect(args) {
   return "the error is raised to its caller (that step fails)";
 }
 
+export const GH_RETRIES = 3;
+export const GH_BACKOFF_MS = 2000;
+/** #5465: a network or server hiccup worth retrying (TLS/handshake timeout, reset, DNS, HTTP 5xx, 429, secondary rate limit), not a 4xx. */
+export const isTransientGhError = (text) => /TLS handshake timeout|i\/o timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|connection reset|connection refused|unexpected EOF|no such host|temporary failure|HTTP (5\d\d|429)\b|secondary rate limit|abuse detection|timeout awaiting/i.test(String(text ?? ""));
+
 /**
  * #5088: `gh(args)→stdout` over `exec` (execFileSync's signature) with gh's stderr captured instead of leaked. A failure
  * throws an Error naming the call (`.status`, `.stderr` kept); an HTTP 401/403 first `warn`s one line with the call and
  * its effect on the pass (ghFailureEffect).
  */
-export function ghRunner(exec, warn = () => {}) {
+export function ghRunner(exec, warn = () => {}, { retries = GH_RETRIES, sleep = sleepSync, delayMs = GH_BACKOFF_MS } = {}) {
   return (args) => {
-    try { return exec("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }); } catch (e) {
+    for (let attempt = 0; ; attempt++) try { return exec("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }); } catch (e) {
+      if (attempt < retries && isTransientGhError(`${e?.stderr ?? ""}\n${e?.message ?? ""}`)) { sleep(delayMs * 2 ** attempt); continue; } // #5465
       const call = args.slice(0, 3).join(" "), stderr = String(e?.stderr ?? "");
       const first = stderr.split("\n").map((l) => l.trim()).find(Boolean) ?? String(e?.message ?? e).split("\n")[0];
       const code = /HTTP (40[13])\b/.exec(stderr)?.[1];
@@ -638,20 +669,33 @@ const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 
 /** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`; `--dry-run` writes nothing: mode release prints the would-cut set, per-issue/batch the would-claim/fold/skip plan (#5088) and the needs-human classification. */
 export async function issueWatchFromCli(argv, deps = {}) {
   const [op] = argv;
-  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status [--name <w>] [--repo owner/repo]";
-  if (!["run", "status"].includes(op)) throw new Error(usage);
+  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status [--name <w>] [--repo owner/repo] [--stuck [--hours <n>]] | install [--name <w>] [--repo owner/repo] [--interval <s>] | watchdog";
+  if (!["run", "status", "install", "watchdog"].includes(op)) throw new Error(usage);
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env, print = deps.print ?? ((l) => console.log(l));
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: the default watch */ }
   const watches = loadWatches(raw);
+  if (op === "watchdog") { // #5465: alert (events.webhook_url) once for every watch whose heartbeat is dead; run by the install timer
+    const { makeEventEmitter } = await import("../engine/events.mjs"), { readEvents } = await import("../engine-cli.mjs");
+    const dead = await alertDeadWatches({ root: watchRoot(env), now: (deps.now ?? Date.now)(), emit: deps.emit ?? ((type, data, ctx) => makeEventEmitter({ repo: ctx.repo, config: readEvents(cwd) }).emitEvent(type, data, ctx)) });
+    for (const w of dead) print(`watch ${w.name} (${w.repo}) DEAD: ${w.live.reason}`);
+    return { ok: true, dead: dead.length };
+  }
   const name = flag(argv, "--name") ?? (Object.keys(watches).length === 1 ? Object.keys(watches)[0] : "default");
   const watch = watches[name] ?? (name === "default" ? validateWatch("default", {}) : null);
   if (!watch) throw new Error(`no watch ${name} in forge.yaml issue_watch.watches`);
+  if (op === "install") {
+    const { installWatchUnit } = await import("./issuewatch-install.mjs");
+    const r = installWatchUnit({ name, repo: flag(argv, "--repo"), interval: flag(argv, "--interval"), cwd, cli: CLI, ...(deps.install ?? {}) });
+    print(`issue-watch ${name}: installed ${r.files.join(", ")}`);
+    return { ok: true, ...r };
+  }
   const io = deps.io ?? realIo(null, env);
   const repo = flag(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
   const dir = watchDir(repo, name, env);
   if (op === "status") {
     const s = readJson(join(dir, "status.json"));
-    print(s ? formatStatus(s, watch, io.now()) : `watch ${name}: no status yet`);
+    if (s && argv.includes("--stuck")) print(formatStuck(stuckClaims(s, io.now(), Number(flag(argv, "--hours")) || undefined), Number(flag(argv, "--hours")) || undefined)); // #5467
+    else print(s ? formatStatus(s, watch, io.now()) : `watch ${name}: no status yet`);
     return { ok: true };
   }
   const ctx = decisionContext({ loadPolicy, readFile, cwd }), shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
@@ -679,7 +723,7 @@ export async function issueWatchFromCli(argv, deps = {}) {
   const real = deps.io ?? realIo(repo, env);
   const branches = readBranches(cwd);
   const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
-  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, cwd, once: argv.includes("--once"), intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
+  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, cwd, once: argv.includes("--once"), signals: true, intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
   print(formatStatus(state, watch, real.now()));
   return { ok: true, state };
 }

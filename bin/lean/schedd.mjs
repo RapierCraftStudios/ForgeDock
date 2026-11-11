@@ -55,6 +55,13 @@ import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { applySetExecution } from "./live-execution.mjs";
 import { liveOverload } from "./hostload.mjs";
 
+/** #5471: `schedd status` warning lines for issues pending in two or more hosted batches. */
+export function sharedPendingLines(batches) {
+  const shared = new Map();
+  for (const b of batches ?? []) if (b.running) for (const n of b.pending ?? []) shared.set(n, [...(shared.get(n) ?? []), b.id]);
+  return [...shared].filter(([, ids]) => ids.length > 1).map(([n, ids]) => `schedd: warning: #${n} is pending in ${ids.length} batches (${ids.join(", ")}); only one should run it`);
+}
+
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
@@ -282,10 +289,10 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     try { for (const id of listBatches(root)) if (!ids.has(id) && openBatch(root, id).readPlan()?.daemon) ids.add(id); } catch { /* unreadable root */ }
     for (const id of [...ids].sort()) {
       const isHosted = hosted.has(id) || starting.has(id);
-      let last = null, pending = [];
-      try { const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); } catch { /* a half-written batch */ }
+      let last = null, pending = [], pend = [];
+      try { const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); pend = b.pendingIssues(); } catch { /* a half-written batch */ }
       if (!isHosted && !pending.length) continue;
-      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), pendingAdds: pending });
+      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), pendingAdds: pending, pending: pend });
     }
     return out;
   };

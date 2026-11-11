@@ -138,7 +138,7 @@ export function batchesOwning(root, repo, issue, { exceptId = null, now = Date.n
     if (b.readCancel()) { out.push({ id, cancelled: true, running }); continue; }
     const last = b.lastProgressMs();
     const live = !b.readReport() && last !== null && now - last <= staleMs;
-    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue)))) out.push({ id, cancelled: false, running });
+    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue)) || b.readHeld().includes(issue))) out.push({ id, cancelled: false, running });
   }
   return out;
 }
@@ -149,6 +149,14 @@ export const cancelledOwners = (root, repo, issue, exceptId = null, opts = {}) =
 };
 /** #5241: the id of an active (uncancelled) batch of `repo` already holding `issue`, else null. */
 export const activeBatchOf = (root, repo, issue, opts = {}) => batchesOwning(root, repo, issue, opts).find((o) => !o.cancelled)?.id ?? null;
+
+/** #5471: the id of another live batch of `repo` that has `issue` pending, running or held (`exceptId` = the asking batch), else null. */
+export const ownerOf = (root, repo, issue, exceptId = null, opts = {}) => activeBatchOf(root, repo, issue, { ...opts, exceptId });
+/** #5471: the batch that wins `issue` at dispatch: one running it, else one holding it pending/held with a lower id (so two batches never both defer). */
+export const dispatchOwner = (root, repo, issue, exceptId, opts = {}) => {
+  const live = batchesOwning(root, repo, issue, { ...opts, exceptId }).filter((o) => !o.cancelled);
+  return (live.find((o) => o.running) ?? live.find((o) => o.id < exceptId))?.id ?? null;
+};
 
 /** Handle on one batch directory. */
 export function openBatch(root, id) {

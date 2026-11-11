@@ -15,7 +15,7 @@ const lines = (dir) => readFileSync(join(dir, "o_r.jsonl"), "utf8").trim().split
 
 describe("event contract (v1)", () => {
   it("documents exactly the named lifecycle types", () => {
-    assert.deepEqual(Object.keys(EVENT_TYPES), ["lane.picked_up", "contract.frozen", "pr.opened", "pr.merged", "release.promoted", "probe.passed", "probe.failed", "regression.detected", "experiment.verdict"]);
+    assert.deepEqual(Object.keys(EVENT_TYPES), ["lane.picked_up", "contract.frozen", "pr.opened", "pr.merged", "release.promoted", "probe.passed", "probe.failed", "regression.detected", "experiment.verdict", "watch.dead"]);
   });
 
   it("every envelope has the same top-level keys and only documented data keys", () => {
@@ -91,6 +91,10 @@ describe("regression, experiment and promoted builders (#4632)", () => {
     assert.deepEqual(promotedEvent({ fix: "abc", default_branch: "main" }).data, { fix: "abc", default_branch: "main" });
     assert.deepEqual(EVENT_TYPES["regression.detected"], ["subject", "metric", "detail"]);
     assert.deepEqual(EVENT_TYPES["experiment.verdict"], ["experiment", "verdict", "detail"]);
+  });
+  it("watch.dead carries the watch, repo, reason and age", () => {
+    const e = buildEvent("watch.dead", { watch: "w", repo: "o/r", reason: "no heartbeat", age_s: 4000, extra: "x" }, { repo: "o/r" });
+    assert.deepEqual(e.data, { watch: "w", repo: "o/r", reason: "no heartbeat", age_s: 4000 });
   });
   it("a regression row is written to the sink", async () => {
     const dir = tmp();

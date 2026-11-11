@@ -1304,6 +1304,8 @@ const issuesOf = (argv) => {
   }
   return issues;
 };
+/** #5471: the reason of `--force <reason>` (null when absent or valueless): lifts the cross-batch ownership skip. */
+const forceOf = (argv) => { const v = flag(argv, "--force"); return v && !String(v).startsWith("--") ? v : null; };
 /** #4469: the operands among `tokens` (`--add`/`--resume` extras): no flags, and no value of a valued flag (`--parallel 5` is not issue #5). */
 const operandsOf = (tokens) => {
   const out = [];
@@ -1355,7 +1357,7 @@ const unhostedFailure = (id, res, requireHost, result) => {
   if (requireHost && !res.hosted && !res.reopened) throw Object.assign(new Error(`batch ${id}: the issues are queued in the batch but NOTHING is scheduled: no schedd hosts it. Start the runner: forgedock orchestrate --resume ${id}`), { code: "batch.not-hosted", result });
 };
 
-async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
+async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost = false, force = null, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
   if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
@@ -1374,7 +1376,9 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost 
   const open = [];
   for (const n of ints) {
     const st = state.get(n);
-    if (st === "OPEN") open.push(n);
+    const owner = st === "OPEN" && !force ? batchMod.ownerOf(root, repo, n, id) : null; // #5471
+    if (owner) { if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: `owned by ${owner}` }); }
+    else if (st === "OPEN") open.push(n);
     else if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: st ? "closed" : "unreadable" });
   }
   let res = { added: [], skipped: [], requeued: [] };
@@ -1472,7 +1476,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
  * written. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
  * cleared so `--resume` runs it again). The runner applies the entries and posts the FORGE:DECISION.
  */
-async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
+async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, force = null, print = (l) => console.log(l) }) {
   if (!id || String(id).startsWith("--") || !tokens.length) throw new Error(ORCH_USAGE);
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1487,6 +1491,7 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, re
     try { v = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state,labels"])); } catch { v = null; }
     if (!v) refused.push({ issue: n, reason: "unreadable" });
     else if (v.state !== "OPEN") refused.push({ issue: n, reason: "closed" });
+    else if (!force && batchMod.ownerOf(root, repo, n, id)) refused.push({ issue: n, reason: `owned by ${batchMod.ownerOf(root, repo, n, id)}` }); // #5471
     else if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) refused.push({ issue: n, reason: "still labelled needs-human: record the decision and remove the label first" });
     else open.push(n);
   }
@@ -1591,7 +1596,7 @@ async function orchestrateClient(argv, deps = {}) {
   }
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue"), id = argv[i + 1];
-    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true });
+    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true, force: forceOf(argv) });
   }
   if (argv.includes("--gc-orphans")) return gcOrphans({ root: await batchRootOf(), viaDaemon: async () => {
     let sock = null;
@@ -1607,12 +1612,12 @@ async function orchestrateClient(argv, deps = {}) {
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id), requireHost: true });
+    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id), requireHost: true, force: forceOf(argv) });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
   if (resumeExtra.length) {
-    await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId), force: forceOf(argv) });
     await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root: await batchRootOf(), viaDaemon: holdVia(resumeId), print: (l) => onlyReleased(l) }); // #4592: a named, held issue is re-admitted
   }
   let msg;
@@ -1702,7 +1707,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue");
-    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
+    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
   if (argv.includes("--gc-orphans")) return gcOrphans({ root, print: (l) => sink.line(l) });
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
@@ -1713,12 +1718,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
+    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
   if (resumeExtra.length) {
-    await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), force: forceOf(argv), print: (l) => sink.line(l) });
     await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root, print: (l) => onlyReleased(l, (t) => sink.line(t)) }); // #4592
   }
   let batch, plan = null;
@@ -2136,7 +2141,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
-      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo }),
+      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
@@ -2258,7 +2263,7 @@ export async function closedScope({ gh, repo, issue, labels }) {
  * Release review #4500: an OPEN issue reopened after that PR merged (a failed acceptance probe, #4399, or an operator
  * reopening it for rework) is new work, so the lane runs; an unreadable reopen history also runs the lane.
  */
-export function makeDispatchCheck({ gh, repo }) {
+export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
   /** Latest `reopened` event time (ms) on the issue, 0 when never reopened, null when unreadable. */
   const lastReopen = async (n) => {
@@ -2291,6 +2296,9 @@ export function makeDispatchCheck({ gh, repo }) {
     // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
     // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
     // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.
+    // #5471: another live batch of the repo runs / holds the issue: no lane here (--force on the batch lifts it)
+    const other = state === "OPEN" && batchOwner ? batchOwner(n) : null;
+    if (other) return { outcome: "deferred", code: "batch.owned", detail: `owned by ${other}` };
     const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
@@ -2399,6 +2407,7 @@ export async function scheddFromCli(argv, deps = {}) {
       const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
       console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
     }
+    for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
     if (st.orphaned?.length) console.log(`schedd: ${st.orphaned.length} orphaned batch(es) (not hosted, pending issues, idle over 7 days): ${st.orphaned.slice(0, 3).map((o) => o.id).join(" ")}${st.orphaned.length > 3 ? " …" : ""} (forgedock orchestrate --gc-orphans cancels them)`);
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
