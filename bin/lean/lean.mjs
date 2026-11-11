@@ -5,6 +5,7 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
+import { issuePrMarker, supersedeOlderPrs, openPrBlockingClose } from "./orphan-pr.mjs";
 import { resolveFindingLabel } from "./findinglabel.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -300,6 +301,8 @@ export async function runCore(o) {
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
   const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1, final: o.recover.final !== false } : null;
+  const withLink = (body) => `${issuePrMarker(issue)}\n${body}`; // #5505: the issue → PR link GitHub does not record for a staging PR
+  const closeBlockers = (reason, exceptPr = null) => openPrBlockingClose({ repo, io: { gh: ghw }, issue, reason, exceptPr }).catch(() => []); // #5505: fail open
   let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -2139,7 +2142,7 @@ export async function runCore(o) {
           T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
           T.decisions.push(`Builder verdict: ${result.status}`);
           // #5152: already-fixed is delivered behaviour (`completed`); only invalid is dropped scope (`not planned`)
-          await Promise.all([ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]), label("invalid")]); // #5437: independent calls
+          await Promise.all([result.status === "already-fixed" && (await closeBlockers("completed")).length ? null : ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]), label("invalid")]); // #5437: independent calls
           if (result.status === "invalid") { const f = await resolveFindingLabel({ io, issue, labels: iss.labels, reason: "invalid" }); if (f.error) T.anomalies.push(`finding label not resolved: ${f.error}`); } // #5254
           return await finish("invalid", result.summary ?? result.status, result.status === "already-fixed" ? { close: "already-fixed" } : {});
         }
@@ -3215,7 +3218,7 @@ export async function runCore(o) {
           const sha = String(await git(["rev-parse", base]).catch(() => "")).trim().slice(0, 12) || base;
           const note = `Already fixed on the base: the repro test passes on \`${base}\` (${sha}) without this change, and the diff changes no source file. Closing as delivered.\n\n${list}`;
           T.decisions.push(`Already fixed on base ${sha} (repro BASE=RAN HEAD=RAN)`);
-          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed", "--comment", note]);
+          if (!(await closeBlockers("completed")).length) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed", "--comment", note]);
           return await finish("invalid", `already fixed on base ${sha}`, { close: "already-fixed" });
         }
         if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
@@ -3296,14 +3299,15 @@ export async function runCore(o) {
     await gitPush(["push", "-u", "origin", branch]);
     laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
-      "--title", `${iss.title} (#${issue})`, "--body", isSplit ? (o.refactorModule ?? (await import("./refactor.mjs"))).renderSplitPrBody({ issue, ...split })
-        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })])).trim();
+      "--title", `${iss.title} (#${issue})`, "--body", withLink(isSplit ? (o.refactorModule ?? (await import("./refactor.mjs"))).renderSplitPrBody({ issue, ...split })
+        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked }))])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
     await emit({ event: "PR_OPENED", pr });
+    if (!resumed?.pr && !adoptPr) { try { const old = await supersedeOlderPrs({ repo, io: { gh: ghw }, issue, newPr: pr }); if (old.length) T.decisions.push(`Superseded older open PR(s) ${old.map((n) => `#${n}`).join(", ")} (one live PR per issue)`); } catch { /* best effort: the orphan sweep closes it later */ } } // #5505
     if (resumed?.pr && closing.tracked.length) { // an existing PR still has to link the tracking issues visibly
-      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })]); }
+      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", withLink(renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked }))]); }
       catch (e) { e.deferCode = OUTCOME_CODES.FOLLOWUP_UNAVAILABLE; e.deferDetail = `could not link the tracking issues on PR #${pr}; nothing merged, rerun to retry`; throw e; }
     }
     if (degraded) {
@@ -3747,7 +3751,7 @@ export async function runCore(o) {
       try { await post("FORGE:TRACKED", `## Left open: live acceptance deferred on a default-on change\nMerged by PR #${pr}, but the rollout is live and these requirements still need live verification:\n${closing.blocks.map((b) => `- ${b.id} (flag ${b.flag})`).join("\n")}\n\nKeep the flag default-off until they are verified, or verify them and close.${closing.tracked.length ? ` Tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the trajectory decision records it too */ }
     }
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
-    if (!keepOpen) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
+    if (!keepOpen && !(await closeBlockers("completed", pr)).length) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {}); // #5505: not while another own PR is open
     if (closing.transferred) { // #5339: record what is transferred, not met
       try { await post("FORGE:TRACKED", `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${(closing.transfer ?? closing.open).map((r) => `- ${r.id}: ${r.transferred ? `transferred to epic #${r.transferred} (post-deploy journey)` : "no epic to take it"}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body carries them too */ }
     } else if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
