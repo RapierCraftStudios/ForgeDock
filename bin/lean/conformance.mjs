@@ -471,9 +471,49 @@ export function weakenedE2eDecisions(c) {
   }).map((k) => k.id).filter(Boolean);
 }
 
+const TEST_LEVELS = ["unit", "integration", "e2e", "live"];
+const planWords = (t) => new Set(String(t ?? "").toLowerCase().match(/[a-z0-9]{3,}/g)?.map((w) => w.slice(0, 5)) ?? []);
+const MOCK_RE = /\b(?:mock|stub|fake)\w*/i, NEG_MOCK_PLAN_RE = /\b(?:no|not|never|without|non|avoid\w*)[ -]+(?:\w+[ -]+)?(?:mock|stub|fake)\w*/gi;
+/** #5445: a proof whose words are (almost) all in the deliverable text of its requirement only restates the fix. Pure. */
+export function proofEchoesDeliverable(proof, deliverables) {
+  const pw = planWords(proof);
+  if (!pw.size) return false;
+  return deliverables.some((d) => { const dw = planWords(`${d?.change ?? ""} ${d?.path ?? ""}`); let n = 0; for (const w of pw) if (dw.has(w)) n++; return n / pw.size >= 0.7; });
+}
+/**
+ * #5445: problems with the frozen test plan `test_plan: [{requirement, proof, level, level_reason, repro, reason, regression, env, command}]`.
+ * Shape is checked whenever present; `required` (a bug lane with repro on) also needs one row per deliver requirement.
+ */
+export function testPlanProblems(c, { required = false } = {}) {
+  const plan = c?.test_plan, problems = [];
+  if (plan == null) { if (!required) return problems; }
+  else if (!Array.isArray(plan)) return ["test_plan must be an array of rows"];
+  const rows = Array.isArray(plan) ? plan : [], dels = Array.isArray(c?.deliverables) ? c.deliverables : [];
+  if (required) for (const r of (Array.isArray(c?.requirements) ? c.requirements : []).filter((x) => x?.disposition === "deliver")) if (!rows.some((t) => t?.requirement === r.id)) problems.push(`${r.id}: test_plan needs a row for this bug requirement (proof, level, level_reason, repro or no-repro with reason, command)`);
+  for (const t of rows) {
+    const id = t?.requirement ?? "test_plan row";
+    if (!t || typeof t !== "object" || !t.requirement) { problems.push("test_plan row without a requirement id"); continue; }
+    if (blank(t.proof)) problems.push(`${id}: test_plan proof must name the root-cause observable that shows the cause is fixed`);
+    else if (proofEchoesDeliverable(t.proof, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)))) problems.push(`${id}: test_plan proof only restates a deliverable; describe the observable that was wrong (the symptom or root cause), not the presence of the fix`);
+    if (!TEST_LEVELS.includes(t.level)) problems.push(`${id}: test_plan level must be one of ${TEST_LEVELS.join("|")}`);
+    if (blank(t.level_reason)) problems.push(`${id}: test_plan level needs a level_reason (why the cheapest level that observes the cause)`);
+    else if (MOCK_RE.test(String(t.level_reason).replace(NEG_MOCK_PLAN_RE, " "))) problems.push(`${id}: test_plan may not prove the cause fixed by mocking the component the bug lives in; pick a level that exercises it`);
+    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason`);
+    else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject`);
+    if (blank(t.command)) problems.push(`${id}: test_plan needs the exact command validate runs`);
+    else {
+      for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem(id, p));
+      if (vitestQuietFlag(t.command)) problems.push(`${id}: test_plan command: vitest 3 rejects -q/--quiet; use --reporter=dot`);
+      const syn = shellSyntaxError(t.command);
+      if (syn) problems.push(`${id}: test_plan command is not valid shell (bash -n: ${syn})`);
+    }
+  }
+  return problems;
+}
+
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -541,6 +581,7 @@ export function validateContract(c, issueText, { repro = false, pages = null } =
       if (syn) problems.push(`repro_test: the command is not valid shell (bash -n: ${syn})`);
     }
   }
+  problems.push(...testPlanProblems(c, { required: testPlan }));
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
   if (pages) problems.push(...contractBriefProblems(c, pages)); // #5428: page deliverables need page_gate briefs
   return { ok: problems.length === 0, problems };
@@ -823,6 +864,7 @@ export function applyValidateRecipes(contract, recipes) {
   if (Array.isArray(contract.validate)) out.validate = contract.validate.map((v) => (v && typeof v === "object" ? { ...v, command: rewrite(v.id, v.command) } : v));
   const t = contract.repro_test;
   if (t && typeof t === "object" && !Array.isArray(t)) out.repro_test = { ...t, command: rewrite("repro_test", t.command) };
+  if (Array.isArray(contract.test_plan)) out.test_plan = contract.test_plan.map((r) => (r && typeof r === "object" ? { ...r, command: rewrite(`test_plan ${r.requirement}`, r.command) } : r)); // #5445
   return { contract: applied.length ? out : contract, applied };
 }
 /** #5020: the env.* verdict for a repro command that failed on head because a tool is missing (e.g. an uninstalled Poetry env); null when the failure is the test's own. */
