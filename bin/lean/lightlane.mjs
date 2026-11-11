@@ -37,7 +37,7 @@ When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comment
 ### Changes   (file: what)
 ### Verification   (each test command, its result, and whether the new test fails without the fix)
 
-Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirement":"<one sentence of the issue, verbatim, that this fix delivers>","repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"},"tests":[{"command":"<targeted test command>","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}]}
+Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirement":"<one sentence of the issue, verbatim, that this fix delivers>","repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"},"test_plan":[{"requirement":"R1","proof":"<the root-cause observable that was wrong and must now hold, never 'the fix is present'>","level":"unit|integration|e2e|live","level_reason":"<why the cheapest level that observes the cause; never mock the component the bug lives in>","repro":"<test id> or no-repro","reason":"<no-repro only>","regression":[],"env":[],"command":"<exact command>"}],"tests":[{"command":"<targeted test command>","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}]}
 If the issue is invalid, already fixed, blocked, or bigger than a small fix (more than a couple of files, a design decision), do not grind: write {"status":"upgrade","summary":"<why>"} and stop. The engine then runs the full lane, keeping what you committed.`;
 }
 
@@ -92,10 +92,12 @@ export function deriveLightContract({ title = "", issueText = "", result = null,
   const repro = t && typeof t === "object" && !Array.isArray(t) && String(t.path ?? "").trim() && String(t.command ?? "").trim()
     ? { path: String(t.path).trim(), id: String(t.id ?? "").trim(), command: String(t.command).trim() } : null;
   const commands = [...new Set([repro?.command, ...(Array.isArray(r.tests) ? r.tests : []).map((x) => (x && typeof x === "object" ? String(x.command ?? "").trim() : ""))].filter(Boolean))];
+  const plan = Array.isArray(r.test_plan) ? r.test_plan.filter((x) => x && typeof x === "object").map((x) => ({ ...x, requirement: "R1" })).slice(0, 1) : []; // #5445: the single light requirement carries one plan row
   return {
     requirements: [{ id: "R1", quote, disposition: "deliver" }],
     deliverables: code.map((path, i) => ({ id: `D${i + 1}`, path, change: "light-lane fix (issue-named file)", requirements: ["R1"] })),
     validate: commands.map((command, i) => ({ id: `V${i + 1}`, command })),
+    ...(plan.length ? { test_plan: plan } : {}),
     ...(repro ? { repro_test: repro } : { repro_test: "none", repro_test_reason: "the light-lane builder named no repro test" }),
   };
 }
@@ -200,9 +202,10 @@ const bullets = (xs) => {
  * The FORGE:LITE receipt of a light lane (#4452, parent #4442), without the marker (pure): outcome, diff stat, red/green
  * repro, gates (targeted tests, API shape, derived contract), cost and eligibility, plus the upgrade reasons when the lane
  * moved to the full pipeline. `costUsd` is the lane's true cost so far: the sum of #4407 per-session deltas, never a
- * running session total. `lr` is runLightStep's return; `eligibility` is lightEligibility's.
+ * running session total. `lr` is runLightStep's return; `eligibility` is lightEligibility's. `skipped` (#5426) is
+ * fastforward.mjs skippedStages: listed only on a fast-forwarded lane that did not upgrade.
  */
-export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null, contractHash = null } = {}) {
+export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null, contractHash = null, skipped = [] } = {}) {
   const r = lr && typeof lr === "object" ? lr : {};
   const upgraded = !!r.upgrade;
   const rows = Array.isArray(r.diff?.files) ? r.diff.files : null;
@@ -236,6 +239,8 @@ export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null,
     `**Eligibility:** ${one(e.verdict ?? "unknown", 20)} (mode ${one(e.mode ?? "?", 10)})${e.verdict === "eligible" && !eReasons.length ? ": repro or expected behaviour, predicted files within limits, size S, no risk path" : ""}`,
     ...bullets(eReasons),
   ];
+  const skips = (Array.isArray(skipped) ? skipped : []).filter((x) => x && x.stage); // #5426: a fast-forwarded lane names what it skipped
+  if (skips.length && !upgraded) lines.push("**Fast-forward (investigation decided the depth):** skipped stages", ...bullets(skips.map((x) => `${one(x.stage, 40)}: ${one(x.why)}`)));
   if (upgraded) {
     const ups = (Array.isArray(r.reasons) ? r.reasons : []).filter((x) => x && x.code).map((x) => `${one(x.code, 40)}: ${one(x.detail)}`);
     lines.push("**Upgrade reasons:**", ...bullets(ups.length ? ups : ["unknown"]));

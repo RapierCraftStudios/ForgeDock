@@ -130,7 +130,9 @@ export function renderContract(c, hash, { compact = false, scope = null } = {}) 
   const del = (c.deliverables ?? []).map((d) => `| ${esc(d.id)} | \`${esc(d.path)}\` | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`).join("\n");
   const dec = Array.isArray(c.decisions) && c.decisions.length // forge#4165: decision provenance
     ? `\n\n### Decisions\n| Id | Choice | Justification | Source |\n| --- | --- | --- | --- |\n${c.decisions.map((k) => `| ${esc(k?.id)} | ${esc(k?.choice)} | ${esc(k?.justification)} | ${esc(k?.source)} |`).join("\n")}` : "";
-  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}${dec}\n\n${json}`;
+  const tp = Array.isArray(c.test_plan) && c.test_plan.length // #5445: the frozen test plan
+    ? `\n\n### Test plan\n| Requirement | Proof | Level | Repro | Regression | Env | Command |\n| --- | --- | --- | --- | --- | --- | --- |\n${c.test_plan.map((t) => `| ${esc(t?.requirement)} | ${esc(t?.proof)} | ${esc(t?.level)} | ${esc(/^no-repro$/i.test(String(t?.repro ?? "").trim()) ? `no-repro: ${t?.reason ?? ""}` : t?.repro)} | ${esc(Array.isArray(t?.regression) ? t.regression.join("; ") : t?.regression)} | ${esc(Array.isArray(t?.env) ? t.env.join("; ") : t?.env)} | \`${esc(t?.command).replace(/`/g, "'")}\` |`).join("\n")}` : "";
+  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}${tp}${dec}\n\n${json}`;
 }
 /** {contract, hash, scope, text} from a FORGE:CONTRACT comment body (scope null for a pre-#4265 comment), or null. */
 export function parseContractComment(body) {
@@ -153,20 +155,27 @@ export function parseAmendmentsComment(body) {
 }
 
 /** FORGE:REVIEW for a conforming change: the engine-computed verdict and the reviewer's rows. */
-export function renderReview(rv, contract) {
+/** #5449: the Test adequacy table (rows from testadequacy.mjs), or "" without rows. */
+export function renderTestAdequacy(rows) {
+  if (!rows?.length) return "";
+  const body = rows.map((r) => `| ${esc(r.id)} | ${esc(r.planned)} | ${esc(r.test)} | ${esc(r.level)} | ${esc(r.redgreen)} | ${esc(r.mutation)} | ${esc(r.regression)} | ${esc(r.verdict === "weak" ? `weak (${r.reason})` : r.verdict)} |`).join("\n");
+  return `\n\n**Test adequacy**\n| Requirement | Planned proof | Test written | Level | Red→green | Mutation | Regression set | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${body}`;
+}
+
+export function renderReview(rv, contract, adequacy = null) {
   const rows = contract.requirements.map((r) => {
     const x = (rv.requirements ?? []).find((y) => y.id === r.id) ?? {};
     const oob = r.verify === "out_of_band" ? ` (out of band${r.evidence ? `: ${r.evidence}` : ""})` : "";
     return `| ${esc(r.id)} | ${oob ? esc(`${x.status ?? ""}${oob}`) : esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
   }).join("\n");
   const cov = rv.issue_coverage ?? [];
-  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}`;
+  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none${renderTestAdequacy(adequacy)}\n\n**Notes:** ${escl(rv.summary)}`;
 }
 
 /** FORGE:REVIEW in shadow mode: what the enforced gate would have done, without enforcing it. */
-export function renderShadowReview({ would, failures = [], review, contract, degraded = null }) {
+export function renderShadowReview({ would, failures = [], review, contract, degraded = null, adequacy = null }) {
   const head = would === "conforms" ? "would PASS" : `would BLOCK (${escl(would)})`;
-  const rows = review ? `\n\n${renderReview(review, contract).split("\n").slice(2).join("\n")}` : "";
+  const rows = review ? `\n\n${renderReview(review, contract, adequacy).split("\n").slice(2).join("\n")}` : "";
   const fl = failures.length ? `\n\n**What the enforced gate would have flagged:**\n${failures.slice(0, 30).map((f) => `- \`${escl(f.code)}\`: ${escl(f.detail)}`).join("\n")}` : "";
   const dg = degraded ? `\n\n**Review degraded:** the review stayed incomplete after the targeted re-ask; merged with label \`review-degraded\`, follow-up ${escl(degraded)}.` : "";
   return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. In shadow mode a requirement not implemented (found by the review or the precheck), a regression, or a review without complete rows blocks; accepted deferrals are filed as follow-ups.${fl}${dg}${rows}`;
@@ -204,8 +213,10 @@ export function renderStructure(s) {
   ];
   return `**Structure**\n| Delta | Value |\n| --- | --- |\n${rows.map(([k, v]) => `| ${k} | ${esc(v)} |`).join("\n")}\n\n`;
 }
+/** #5447: `N declared, N ran, N red→green, N skipped(reason)`. */
+const testsCell = (t) => `${t.declared} declared, ${t.ran} ran, ${t.redGreen} red→green, ${t.skipped?.length ?? 0} skipped${t.skipped?.length ? `(${[...new Set(t.skipped.map((s) => s.reason))].join(", ")})` : ""}`;
 export function renderTrajectory(T) {
-  const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ...(T.verify ? [["Verify", T.verify]] : []), ["Review", T.review], ["PR", T.pr], ["Base Sync", T.baseSync ?? "not needed"], ["Merge", T.merge], ["Close", T.close]];
+  const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ...(T.verify ? [["Verify", T.verify]] : []), ...(T.tests ? [["Tests", testsCell(T.tests)]] : []), ["Review", T.review], ["PR", T.pr], ["Base Sync", T.baseSync ?? "not needed"], ["Merge", T.merge], ["Close", T.close]];
   const cellPair = (v) => {
     const [res, notes] = Array.isArray(v) ? v : [v, ""];
     return `${cell(res ?? "not reached")} | ${notes ? cell(notes) : "-"}`;

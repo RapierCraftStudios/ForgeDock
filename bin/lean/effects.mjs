@@ -14,6 +14,7 @@ import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
+import { diskLow } from "./admission.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
@@ -160,6 +161,11 @@ export const runTmpRoot = () => join(homedir(), ".forge", "tmp", "runs");
 const OWNER = ".forge-run-owner";
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code !== "ESRCH"; } };
 
+/** The run-owner marker (#5421): any scratch dir ForgeDock creates under ~/.forge/tmp carries it so gc can reclaim it once its owner is dead. */
+export function markOwned(dir, { issue = null, now = () => Date.now(), host = hostname() } = {}) {
+  try { writeFileSync(join(dir, OWNER), JSON.stringify({ issue, pid: process.pid, host, created: now() })); } catch { /* best effort: unmarked dirs are only reported */ }
+}
+
 /** Per-run scratch dirs under ~/.forge/tmp/runs/<issue>-<run>/. Only dirs carrying our owner marker are ever removed. */
 export function makeRunTmp({ root = runTmpRoot(), now = () => Date.now(), alive = pidAlive, host = hostname() } = {}) {
   const inside = (d) => { const r = resolve(d); return r.startsWith(resolve(root) + sep) && !r.slice(resolve(root).length + 1).includes(sep); };
@@ -216,6 +222,27 @@ export function killLedgerPid(pid, marker, { kill = process.kill.bind(process), 
   try { kill(-n, "SIGTERM"); return true; } catch { try { kill(n, "SIGTERM"); return true; } catch (e) { return e?.code === "ESRCH"; } }
 }
 
+/**
+ * Heavy-step gate on free disk (#5421): below `minFreeGb()` the guard runs `gc()` (owned GC) once, re-checks, and, if the
+ * disk is still low, refuses the step with a DISK_LOW error (an image build must not fill the host). Otherwise it passes
+ * through to `heavy.acquire`. A failed gc or probe never refuses.
+ */
+export function guardHeavyDisk(heavy, { host, minFreeGb = () => null, gc = async () => {} } = {}) {
+  if (!heavy) return heavy;
+  return {
+    ...heavy,
+    async acquire(entry, cfg) {
+      const min = await minFreeGb();
+      if ((await diskLow({ host, minFreeGb: min })).low) {
+        try { await gc(); } catch { /* the re-check decides */ }
+        const again = await diskLow({ host, minFreeGb: min });
+        if (again.low) { const e = new Error(`host disk low: ${again.reasons.join(", ")}`); e.code = "DISK_LOW"; throw e; }
+      }
+      return heavy.acquire(entry, cfg);
+    },
+  };
+}
+
 /** Real host probes for admission (#4105). MemAvailable from /proc/meminfo (fallback os.freemem), statfs for tmp. */
 export function makeHostProbe() {
   return {
@@ -236,6 +263,8 @@ export function makeHostProbe() {
     cores: () => cpus().length || 1,
     /** Live lanes on this host from the ledger (#4182), this lane included once it registered. */
     activeLanes: () => countLiveLanes({ root: ledgerRoot(), host: hostname() }),
+    /** Filesystems a lane fills (#5421): the worktree root and ~/.forge. */
+    hygienePaths: (cwd = process.cwd()) => [...new Set([join(cwd, ".claude", "worktrees"), join(homedir(), ".forge")])],
     tmpPaths: () => [...new Set([join(homedir(), ".forge", "tmp"), tmpdir(), "/tmp"].filter((x) => existsSync(x) || x === join(homedir(), ".forge", "tmp")))],
   };
 }
@@ -306,7 +335,7 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
       drop(dir);
       if (disposed) return;
       if (root) { dir = join(root, `gh-cache-${++n}`); return; }
-      try { dir = mkdtempSync(join(tmp, "forge-gh-cache-")); made.add(dir); } catch { dir = null; }
+      try { dir = mkdtempSync(join(tmp, "forge-gh-cache-")); made.add(dir); markOwned(dir); } catch { dir = null; }
     },
     dispose() { disposed = true; for (const d of [...made]) drop(d); },
   };
@@ -326,7 +355,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   };
   return {
     ghCache: (root) => makeGhCache({ root }),
-    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: guardHeavyDisk(makeHeavyIo({ host: makeHostProbe() }), { host: makeHostProbe(), minFreeGb: async () => (await import("../gc.mjs")).readHygiene(process.cwd()).min_free_gb, gc: async () => { const g = await import("../gc.mjs"); return g.runOwnedGc({ probes: g.makeGcProbes({ cwd: process.cwd() }), hygiene: g.readHygiene(process.cwd()), budgetMs: 60000 }); } }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */

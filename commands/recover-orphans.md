@@ -148,7 +148,7 @@ for NUM in $ORPHAN_LIST; do
 
   # Read current issue state
   ISSUE=$(gh issue view "$NUM" ${GH_FLAG} \
-    --json number,title,labels,state,updatedAt,body 2>/dev/null)
+    --json number,title,labels,state,updatedAt,body,comments 2>/dev/null)
   if [ -z "$ISSUE" ]; then
     echo "#$NUM: Could not fetch — skipping"
     continue
@@ -196,6 +196,36 @@ for NUM in $ORPHAN_LIST; do
     DIAG_REASON[$NUM]="PR #$MERGED_PR already merged — update labels and close issue"
     DIAG_PR_NUM[$NUM]="$MERGED_PR"
     echo "  Diagnosis: LABEL-CLEANUP (PR #$MERGED_PR already merged)"
+    continue
+  fi
+
+  # #5466: a needs-human annotation comment with no state label (needs-human, parked:*, remediation-queue, workflow:*) is a
+  # stateless orphan (a failed relabel removed needs-human): flag it and put needs-human back so a person is asked.
+  if echo "$ISSUE" | jq -e '[.comments[].body | contains("<!-- FORGE" + ":NEEDS_HUMAN")] | any' >/dev/null 2>&1 \
+    && ! echo ", $ISSUE_LABELS," | grep -Eq ", (needs-human|parked:[^,]*|remediation-queue|workflow:[^,]*),"; then
+    # #5486: a person who removed needs-human after the annotation was posted cleared it on purpose: do not re-park.
+    NH_AT=$(echo "$ISSUE" | jq -r '[.comments[] | select(.body | contains("<!-- FORGE" + ":NEEDS_HUMAN")) | .createdAt] | max // ""')
+    # #5494: the pipeline's own removal (a failed #5466 relabel) is not a human clear: ignore events by the bot login
+    # (FORGE_BOT_LOGIN, else GraphQL viewer, never /user which 403s for App tokens) or by any actor of type Bot.
+    BOT_LOGIN="${FORGE_BOT_LOGIN:-}"
+    [ -n "$BOT_LOGIN" ] || BOT_LOGIN=$(gh api graphql -f query='{viewer{login}}' --jq '.data.viewer.login' 2>/dev/null || true)
+    NH_CLEARED=$(gh api "repos/${GH_REPO}/issues/$NUM/events" --paginate 2>/dev/null \
+      | jq -rs --arg at "$NH_AT" --arg bot "$BOT_LOGIN" '[.[][] | select(.event == "unlabeled" and .label.name == "needs-human" and .created_at > $at
+          and (.actor.type // "") != "Bot" and ($bot == "" or (.actor.login // "") != $bot))] | length' 2>/dev/null)
+    if [ "${NH_CLEARED:-0}" -gt 0 ] 2>/dev/null; then
+      echo "  Diagnosis: STATELESS but needs-human was removed after the annotation — cleared by a human, not re-parking"
+      DIAG_ACTION[$NUM]="skip"
+      DIAG_REASON[$NUM]="needs-human cleared by a human — not re-parked"
+      continue
+    fi
+    if [ "$DRY_RUN" = "true" ]; then
+      echo "  Diagnosis: STATELESS (needs-human annotation comment, no state label) — would restore needs-human (dry-run)"
+    else
+      echo "  Diagnosis: STATELESS (needs-human annotation comment, no state label) — restoring needs-human"
+      gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+    fi
+    DIAG_ACTION[$NUM]="skip"
+    DIAG_REASON[$NUM]="Stateless needs-human orphan — needs-human restored"
     continue
   fi
 

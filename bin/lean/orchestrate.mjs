@@ -311,7 +311,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null }) {
   const saved = store?.load?.() ?? null;
@@ -386,6 +386,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
+    // #5423: the lane now provisions the sandbox before ending tool_missing, so the first tool-missing recovery of a remote run retries remotely (not parked behind host load); a repeat goes to the host
+    const rec = recovering.get(n);
+    if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
     if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
@@ -734,7 +737,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
 
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
-  const settle = async (n, r, rec, pf) => {
+  const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
     if (cancelled && releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } } // #5241: the lane ended: its lease goes with it
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
@@ -949,7 +952,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     // #4656: a mechanical terminal park (recovery spent or none applies) moves to the remediation queue, not the human queue.
     if (row.outcome === "needs-human" && !row.parkedQueued && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
-      try { const res = await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); if (res !== false && res !== "failed" && res !== "skipped") row.parkedQueued = true; } catch { /* best effort */ }
+      try { const res = await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); if (res !== false && res !== "failed" && res !== "skipped") row.parkedQueued = true; else if (res === false || res === "failed") { const ev = { event: "relabel.failed", issue: n, batch: batchId ?? null, detail: `parked relabel failed (${row.code}): needs-human kept` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } } catch { /* best effort */ }
     }
     results.set(n, row);
     if (row.outcome === "merged" && lifecycle && r?.milestone) lifecycleTitles.add(String(r.milestone)); // #4657
@@ -967,6 +970,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     done(); save(); update(row);
   };
 
+  // #5437: a lane's post-run bookkeeping (r.postRun) starts once its slot is free; the batch waits for it before it ends.
+  const postRuns = new Set();
+  const settle = async (n, r, rec, pf) => {
+    await settleLane(n, r, rec, pf);
+    if (typeof r?.postRun !== "function") return;
+    const p = Promise.resolve().then(() => r.postRun()).catch(() => {}).finally(() => postRuns.delete(p));
+    postRuns.add(p);
+  };
   const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
   const laneRetries = new Map(); // #4791: transient lane-resolution failures per issue; never counted in `deferrals`
   // A transient refusal (gh/git failed) re-resolves; the settled `deferred` frees the slot and requeues with backoff.
@@ -1081,7 +1092,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   save();
 
-  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? "held by operator" : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
+  // #5469: a final held row names the owner and since when the hold recorded them (`forgedock orchestrate --hold ... --for`)
+  const heldByOperator = (n) => { let e = null; try { e = getHoldInfo?.()?.[n] ?? null; } catch { e = null; } return e ? `held by operator (${e.owner}, since ${e.since})` : "held by operator"; };
+  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? heldByOperator(n) : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
   // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
   // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
   // #4318: also on a throw out of the loop and on a signal (`onExit`); `cause` overrides the held reason. Runs once per process.
@@ -1234,8 +1247,17 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { Promise.resolve(stopLane(n, rec)).then((ok) => { if (ok !== false) s.accepted = true; }, () => {}); } catch { /* best effort */ }
   }
   // #4592: re-read the hold set; one decision and one row when it changes.
+  const holdExpiring = (list) => { let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; } return !!expireHolds && list.some((n) => Number.isFinite(Date.parse(info?.[n]?.expiresAt))); }; // #5469
   const refreshHeld = () => {
     if (!getHeld) return;
+    if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
+      let due = []; try { due = expireHolds() ?? []; } catch { due = []; }
+      for (const e of due) {
+        decided({ issue: null, what: `hold on #${e.issue} expired (held by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); re-admitted`, why: "hold expiry (--hold --for)", alternative: "hold it again" });
+        update({ issue: null, outcome: "hold-expired", detail: `#${e.issue} (${e.owner}, since ${e.since})` });
+        if (e.ownerGone) update({ issue: null, outcome: "hold-alert", detail: `#${e.issue}: the hold owner session (${e.owner}) is gone; the hold expired and the issue was re-admitted` });
+      }
+    }
     let got = [];
     try { got = getHeld() ?? []; } catch { got = opHeld.size ? [...opHeld] : []; }
     const next = new Set((Array.isArray(got) ? got : []).filter((n) => Number.isSafeInteger(n) && n > 0));
@@ -1568,6 +1590,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && baseHit.size) await nap(wake ?? pollMs); // #5031: only issues waiting for a base commit: poll for it
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
+      else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n)) && holdExpiring([...opHeldHit]) && !cancelled) await nap(wake ?? pollMs); // #5469: a hold with an expiry keeps the batch open until it expires (re-admit or alert), not finalised silently
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch
       else if (pending.some((n) => remoteCapped.has(n))) await nap(wake ?? pollMs); // #5138: live max_remote 0: wait for a raise or another placement
@@ -1593,6 +1616,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!halted) try { await relabelQueued(`batch failed: ${firstLine(e?.message ?? e)}`); } catch { /* best effort */ }
     throw e;
   }
+  await Promise.allSettled([...postRuns]); // #5437
   if (reg) withdrawExcept(new Set());
   await relabelQueued();
   // #4657: a milestone whose `close_on` state is reached closes here; a failure is a row, never an outcome change.

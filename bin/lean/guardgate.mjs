@@ -174,16 +174,47 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
     const fresh = lane.filter((n) => !prior.includes(n));
     return fresh.length ? { fresh } : { skip: "fails on base" };
   };
+  /** Write the base copy of a job's test next to the lane's tree; false (with the skip recorded) when it cannot be made. */
+  const materialize = async (j) => {
+    let body;
+    try { body = await git(["show", `${mergeBase}:${j.path}`]); } catch { skipped.push(`#${j.guard.issue} ${j.path}: not on base`); return false; }
+    const abs = join(cwd, j.copy);
+    try { fs.mkdirSync(dirname(abs), { recursive: true }); fs.writeFileSync(abs, body); made.push(abs); return true; } catch (e) { skipped.push(`#${j.guard.issue} ${j.path}: ${String(e?.message ?? e).slice(0, 80)}`); return false; }
+  };
+  let batches = 0;
+  /** #5436: jobs whose command differs only by a trailing path run as one invocation over the union of their base copies. Green = every job passed; anything else leaves the jobs to the per-file runs (attribution and the baseline comparison stay per file). Returns the jobs it settled. */
+  const runBatches = async () => {
+    const groups = new Map();
+    for (const j of jobs) {
+      const s = `@@guard@@${extname(j.path)}`, key = commandFor(s, contract, guardCommand);
+      if (!key || !key.endsWith(s) || key.indexOf(s) !== key.lastIndexOf(s)) continue;
+      const prefix = key.slice(0, key.length - s.length);
+      groups.set(prefix, [...(groups.get(prefix) ?? []), j]);
+    }
+    const settled = new Set();
+    await Promise.all([...groups].filter(([, js]) => new Set(js.map((j) => j.path)).size > 1).map(async ([prefix, js]) => {
+      if (capMs - (now() - t0) <= 0) return;
+      const ready = [];
+      for (const j of js) { if (await materialize(j)) ready.push(j); else settled.add(j); }
+      const copies = [...new Set(ready.map((j) => j.copy))];
+      if (copies.length < 2) return;
+      const command = `${prefix}${copies.join(" ")}`;
+      let r;
+      try { r = await runCommand({ command, cwd, timeoutMs: capMs - (now() - t0), env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+      if (r?.rc !== 0) return;
+      batches++;
+      for (const j of ready) { settled.add(j); runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command, rc: 0, output: String(r?.output ?? ""), failed: null }); }
+    }));
+    return settled;
+  };
   try {
-    const queue = jobs.slice();
+    const done = await runBatches();
+    const queue = jobs.filter((j) => !done.has(j));
     const work = async () => {
       for (let j = queue.shift(); j; j = queue.shift()) {
         const left = capMs - (now() - t0);
         if (left <= 0) { skipped.push(`#${j.guard.issue} ${j.path}: over the ${Math.round(capMs / 1000)}s guard cap`); continue; }
-        let body;
-        try { body = await git(["show", `${mergeBase}:${j.path}`]); } catch { skipped.push(`#${j.guard.issue} ${j.path}: not on base`); continue; }
-        const abs = join(cwd, j.copy);
-        try { fs.mkdirSync(dirname(abs), { recursive: true }); fs.writeFileSync(abs, body); made.push(abs); } catch (e) { skipped.push(`#${j.guard.issue} ${j.path}: ${String(e?.message ?? e).slice(0, 80)}`); continue; }
+        if (!(await materialize(j))) continue;
         let r;
         try { r = await runCommand({ command: j.command, cwd, timeoutMs: left, env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
         if (r?.rc === TIMEOUT_RC) { skipped.push(`#${j.guard.issue} ${j.path}: over the ${Math.round(capMs / 1000)}s guard cap`); continue; }
@@ -198,7 +229,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
         runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command: j.command, rc, output, failed });
       }
     };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(parallelism, jobs.length)) }, work));
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(parallelism, queue.length)) }, work));
   } finally {
     for (const p of made) { try { fs.rmSync(p, { force: true }); } catch { /* best effort */ } }
     const t = base ? await base : null;
@@ -208,7 +239,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
       try { await git(["worktree", "prune"]); } catch { /* best effort */ }
     }
   }
-  return { failures: guardFailures(runs), runs, skipped, ms: now() - t0 };
+  return { failures: guardFailures(runs), runs, skipped, batches, ms: now() - t0 };
 }
 
 /** The only override of a guard_broken failure, named for the builder (#4883); leads the detail so the resume prompt's truncation keeps it. */

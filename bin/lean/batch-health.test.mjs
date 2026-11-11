@@ -8,7 +8,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch } from "./batch.mjs";
 import { DEFAULT_HEALTH, parseHealthConfig, rootsOf, evaluateHealth, formatAlert, runCheck, scheduleChecks, scheduleLine, runNotify, deliverAlert,
   resolvedOnGithub, recordRefusal, readRefusals, statusLines, REFUSAL_KEEP,
-  evaluateDispatchStall, firstHourReport, writeFirstHour, readFirstHour, recordStallAlert, summaryLines } from "./batch-health.mjs";
+  evaluateDispatchStall, firstHourReport, writeFirstHour, readFirstHour, recordStallAlert, summaryLines, statelessNeedsHuman, statelessOnGithub } from "./batch-health.mjs";
 
 // #1 and #3 are roots; #2 depends on #1, #4 on #3.
 const base = (results, extra = {}) => ({ order: [1, 2, 3, 4], deps: { 2: [1], 4: [3] }, results, running: {}, pending: [], ...extra });
@@ -238,5 +238,45 @@ describe("#5314 dispatch stall and first-hour report", () => {
     assert.equal(recordStallAlert(b, { ...s1, ready: [2] }, { now: NOW }), true, "a different ready set is a new item");
     assert.ok(statusLines(root, { now: Date.now() }).some((l) => /BATCH UNHEALTHY b1/.test(l) || /dispatch-stalled/.test(l)));
     assert.ok(summaryLines(root, { now: Date.parse(new Date(NOW).toISOString()) }).some((l) => /DISPATCH STALLED/.test(l)));
+  });
+});
+
+describe("#5466 statelessNeedsHuman", () => {
+  const nh = ["<!-- FORGE:NEEDS_HUMAN -->\nx"];
+  it("flags an open issue with a NEEDS_HUMAN comment and no state label", () => {
+    assert.deepEqual(statelessNeedsHuman([
+      { number: 1, state: "OPEN", labels: ["bug"], comments: nh },
+      { number: 2, state: "OPEN", labels: ["parked:ci.red"], comments: nh },
+      { number: 3, state: "OPEN", labels: ["needs-human"], comments: nh },
+      { number: 4, state: "CLOSED", labels: [], comments: nh },
+      { number: 5, state: "OPEN", labels: [], comments: ["hello"] },
+    ]), [1]);
+  });
+});
+
+describe("#5466 stateless issues surface in the batch health check", () => {
+  it("evaluateHealth reports a stateless cause; statelessOnGithub reads labels and comments", async () => {
+    const h = evaluateHealth(base({ 1: { outcome: "merged" } }), { stateless: [2] });
+    assert.equal(h.healthy, false);
+    assert.equal(h.causes[0].code, "stateless");
+    const gh = async (a) => JSON.stringify(a[2] === "1" ? { state: "OPEN", labels: [], comments: [{ body: "<!-- FORGE:NEEDS_HUMAN -->" }] } : { state: "OPEN", labels: [{ name: "needs-human" }], comments: [{ body: "<!-- FORGE:NEEDS_HUMAN -->" }] });
+    assert.deepEqual(await statelessOnGithub({ order: [1, 2] }, gh, "o/r"), [1]);
+  });
+});
+
+describe("#5469: holds in health and the first-hour report", () => {
+  const since = (h) => new Date(Date.now() - h * 3600000).toISOString();
+  it("#5469: a hold older than holdHours is a stale-hold cause; a recent or legacy hold is not", () => {
+    const st = base({ 1: { outcome: "merged" } }, { pending: [3], running: { 4: {} } });
+    const stale = evaluateHealth(st, { held: [3], holdInfo: { 3: { owner: "op@h", since: since(5) } }, batchId: "b1" });
+    assert.equal(stale.healthy, false);
+    assert.deepEqual(stale.causes.map((c) => c.code), ["stale-hold"]);
+    assert.match(stale.causes[0].detail, /#3 \(op@h, since /);
+    assert.equal(evaluateHealth(st, { held: [3], holdInfo: { 3: { owner: "op@h", since: since(1) } } }).healthy, true);
+    assert.equal(evaluateHealth(st, { held: [3] }).healthy, true, "a legacy hold has no age");
+  });
+  it("the first-hour report lists a held issue as held (owner, since)", () => {
+    const rep = firstHourReport(base({}, { pending: [3] }), { batchId: "b1", held: [3], holdInfo: { 3: { owner: "op@h", since: "2026-11-11T00:00:00.000Z" } } });
+    assert.match(rep.summary, /#3 held \(op@h, since 2026-11-11T00:00:00.000Z\)/);
   });
 });

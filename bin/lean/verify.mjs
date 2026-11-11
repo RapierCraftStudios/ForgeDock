@@ -7,6 +7,8 @@
  */
 import { ciPollDelayMs } from "../engine.mjs";
 import { parseE2e } from "./e2e.mjs";
+import { parseSandboxes } from "./testsandbox.mjs";
+import { parseBaselines } from "./baselines.mjs";
 
 export const VERIFY_MODES = Object.freeze(["local", "ci", "hybrid"]);
 /** Changed files that never need the CI matrix (docs-only lanes skip CI verification). */
@@ -59,6 +61,7 @@ export function parseVerify(sec = {}) {
   const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).trim().replace(/^\[(.*)\]$/s, "$1").split(",");
   const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim().replace(/^(["'])(.*)\1$/s, "$2").trim()).filter(Boolean))];
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
+  const enumeratingMechanical = str(s.enumerating_mechanical).toLowerCase() !== "false"; // #5480: forge.yaml lean.enumerating.mechanical
   const invariants = [...new Set((Array.isArray(s.invariants) ? s.invariants : []).map((x) => String(x ?? "").trim()).filter(Boolean))];
   // #4792: guard_command maps an extension (`.py` or `py`) to a test-file command template; read by engine-cli readYamlMap; the key is omitted when empty so unconfigured repos parse as before
   const guardCommand = {};
@@ -68,9 +71,11 @@ export function parseVerify(sec = {}) {
       if (ext.length > 1 && cmd) guardCommand[ext] = cmd;
     }
   }
+  const sandboxes = parseSandboxes(s.sandboxes); // #5450: omitted when none, so unconfigured repos parse as before
+  const baselines = parseBaselines(s.baselines); // #5448: suites validate runs when matching paths change
   const precheckBlock = str(s.precheck_block).toLowerCase() === "true"; // #5079: a still-failing declared check stops the lane (ci.red)
   const guardBlock = str(s.guard_block).toLowerCase() !== "false"; // #5239: verify.invariants (the pre-merge guard set) block the merge unless false
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, enumeratingMechanical, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), ...(baselines.length ? { baselines } : {}), ...(Object.keys(sandboxes).length ? { sandboxes } : {}), e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

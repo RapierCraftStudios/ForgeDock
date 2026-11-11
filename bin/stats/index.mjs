@@ -120,7 +120,9 @@ Lane depth (forge#5209; local run logs, gh only for post-merge defect signals, n
                         defects (reopen, revert, a fix PR touching the same files within 7 days), grouped by verdict and
                         by every reason/signal code, plus the #5052 light-lane promotion verdict: light-shaped lanes cost
                         <= 1.2x and wall <= 1.3x model time, defect rate <= eligible full lanes of the same size;
-                        "insufficient data" under --min-n per cell. --offline skips the defect crawl (n/a);
+                        "insufficient data" under --min-n per cell. With lean.light.source: investigation (#5426) it also
+                        reports the fast-forward eligibility rate and the outcomes (merge, defects, reverts) of
+                        fast-forwarded, upgraded and full lanes. --offline skips the defect crawl (n/a);
                         --since defaults to the last 30 days; defect results of closed windows are cached
                         (--no-cache / --refresh), progress goes to stderr; the output ends with a recommendation
                         (promote, do not promote, insufficient data) with eligible share and would-be saving
@@ -137,7 +139,8 @@ Conformance outcomes (forge#5210; read only: one GraphQL search per 100 merged P
                         signals inside the window (reverted, closing issue reopened, cited by a later fix, a later fix
                         touching the same hunks via local git blame); defect rate, n and a Wilson 95% interval of
                         nonconforming-merged vs conforming-merged per repo, mode and failure kind; n/a under --min-n
-                        (default ${DEFAULT_OUTCOME_MIN_N} per cell); the last line is the conclusion or "insufficient data"
+                        (default ${DEFAULT_OUTCOME_MIN_N} per cell); a lane's test-adequacy class (adequate|weak|missing) is also split by
+                        reopened within 14 days (#5449); the last line is the conclusion or "insufficient data"
   --replay <pr,...>     with --conformance-outcomes: per named PR, its mode, shadow verdict and risk surfaces, and whether the
                         --enforce-domains <list> / --risk-paths <globs> config would have enforced (nonconforming), only flagged
                         (verdict would pass) or not touched it; the cells also gain per-surface rows (domain:*, risk:*)

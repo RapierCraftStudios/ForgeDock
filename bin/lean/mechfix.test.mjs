@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
-import { insertIntoList, applyEnumerating, renamedExport, renameDuplicates } from "./mechfix.mjs";
+import { insertIntoList, applyEnumerating, verifyApplied, renamedExport, renameDuplicates } from "./mechfix.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
 const tmp = () => tmpDir("mechfix-");
@@ -91,5 +91,32 @@ describe("#5348 duplicate export rename", () => {
     r = await renameDuplicates({ dups: [{ symbol: "Button", path: "app/ui.ts", others: ["x.ts"] }], cwd: w.cwd, git: w.git });
     assert.equal(r.remaining.length, 1);
     assert.match(fs.readFileSync(join(w.cwd, "app/ui.ts"), "utf8"), /export const Button = 1/);
+  });
+});
+
+describe("#5480 verify-after-edit", () => {
+  const setup = () => {
+    const cwd = tmp(), orig = `const names = [\n  "alpha",\n  "beta",\n  "gamma",\n];\n`;
+    fs.writeFileSync(join(cwd, "t.test.mjs"), orig);
+    const missing = [{ symbol: "delta", module: "m", test: "t.test.mjs", line: 3 }];
+    return { cwd, orig, result: applyEnumerating({ missing, cwd }) };
+  };
+  it("a red test gets its original text back and its rows move to remaining", async () => {
+    const { cwd, orig, result } = setup();
+    const r = await verifyApplied({ result, cwd, runTest: async () => false });
+    assert.equal(r.applied.length, 0); assert.equal(r.remaining.length, 1);
+    assert.equal(fs.readFileSync(join(cwd, "t.test.mjs"), "utf8"), orig);
+  });
+  it("a green test keeps the edit", async () => {
+    const { cwd, result } = setup();
+    const r = await verifyApplied({ result, cwd, runTest: async () => true });
+    assert.equal(r.applied.length, 1); assert.equal(r.remaining.length, 0);
+    assert.match(fs.readFileSync(join(cwd, "t.test.mjs"), "utf8"), /"delta"/);
+  });
+  it("a runner that throws counts as red", async () => {
+    const { cwd, orig, result } = setup();
+    const r = await verifyApplied({ result, cwd, runTest: async () => { throw new Error("x"); } });
+    assert.equal(r.remaining.length, 1);
+    assert.equal(fs.readFileSync(join(cwd, "t.test.mjs"), "utf8"), orig);
   });
 });

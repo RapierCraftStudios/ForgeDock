@@ -60,12 +60,13 @@ export function insertIntoList(text, line, symbols) {
  * @returns {{applied: object[], remaining: object[]}}
  */
 export function applyEnumerating({ missing = [], cwd, fsx = fs } = {}) {
-  const applied = [], remaining = [];
+  const applied = [], remaining = [], originals = new Map();
   const byTest = new Map();
   for (const m of missing) { if (!byTest.has(m.test)) byTest.set(m.test, []); byTest.get(m.test).push(m); }
   for (const [test, rows] of byTest) {
     let text;
     try { text = fsx.readFileSync(join(cwd, test), "utf8"); } catch { remaining.push(...rows); continue; }
+    const text0 = text;
     const groups = new Map();
     for (const m of rows) { const k = `${m.line}\0${m.module}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(m); }
     let changed = false;
@@ -77,8 +78,26 @@ export function applyEnumerating({ missing = [], cwd, fsx = fs } = {}) {
       for (const m of g) (done.has(m.symbol) ? mine : remaining).push(m);
       if (r.inserted.length) { text = r.text; changed = true; }
     }
-    if (changed) { try { fsx.writeFileSync(join(cwd, test), text); } catch { remaining.push(...mine); continue; } }
+    if (changed) { const before = text0; try { fsx.writeFileSync(join(cwd, test), text); } catch { remaining.push(...mine); continue; } originals.set(test, before); }
     applied.push(...mine);
+  }
+  return { applied, remaining, originals };
+}
+
+/**
+ * #5480: run each test file applyEnumerating edited (`runTest(path)` -> true when green); a red one gets its original text
+ * back and its rows move to `remaining`, so the engine never commits an edit that fails a test.
+ * @returns {Promise<{applied: object[], remaining: object[]}>}
+ */
+export async function verifyApplied({ result, cwd, runTest, fsx = fs } = {}) {
+  const applied = [], remaining = [...(result?.remaining ?? [])];
+  for (const [test, before] of result?.originals ?? []) {
+    const rows = (result.applied ?? []).filter((m) => m.test === test);
+    let green = false;
+    try { green = (await runTest(test)) === true; } catch { green = false; }
+    if (green) { applied.push(...rows); continue; }
+    try { fsx.writeFileSync(join(cwd, test), before); } catch { /* the detector re-run still sees the file */ }
+    remaining.push(...rows);
   }
   return { applied, remaining };
 }

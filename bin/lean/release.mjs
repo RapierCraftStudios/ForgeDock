@@ -162,6 +162,26 @@ export async function gateState({ io, repo, pr, head }) {
   return { marker, deployGate: gate?.conclusion ?? null };
 }
 
+const GATE_POLLS = 12, GATE_POLL_MS = 10_000;
+
+/** Re-run the newest gate-marker-check run on `head`: the bot's GATE_PASS comment never triggers it, so the status would stay pending. */
+async function retriggerGate({ io, repo, head }) {
+  try {
+    const runs = json(await io.gh(["run", "list", "--repo", repo, "--workflow", "gate-marker-check.yml", "--commit", head, "--json", "databaseId", "--limit", "1"])) ?? [];
+    if (runs[0]?.databaseId) await io.gh(["run", "rerun", String(runs[0].databaseId), "--repo", repo]);
+  } catch { /* a run still in progress cannot be rerun, and it re-reads the markers anyway: just wait */ }
+}
+
+/** Re-trigger the gate, then poll (bounded) until `forge/deploy-gate` is success or failure; @returns the last gateState. */
+async function awaitGate({ io, repo, pr, head, gate }) {
+  await retriggerGate({ io, repo, head });
+  for (let i = 0; i < GATE_POLLS && gate.deployGate !== "success" && gate.deployGate !== "failure"; i++) {
+    await io.sleep(GATE_POLL_MS);
+    gate = await gateState({ io, repo, pr, head });
+  }
+  return gate;
+}
+
 async function promotionStep(ctx) {
   const { io, repo, state, opts } = ctx;
   const { pr } = state.steps["release-pr"].result;
@@ -174,11 +194,12 @@ async function promotionStep(ctx) {
     const chain = checkChain({ git: io.git, record: state.release, sha: head, staging: ctx.staging, exact: true });
     if (!chain.ok) return { stopped: true, why: `release head ${head} is not snapshot + recorded cherry-picks: ${chain.why}`, head };
   }
-  const gate = await gateState({ io, repo, pr, head });
+  let gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
+  if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate });
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }
-  if (gate.deployGate !== "success") return { stopped: true, why: `forge/deploy-gate is ${gate.deployGate ?? "absent"}, not success`, head, gate };
+  if (gate.deployGate !== "success") return { stopped: true, why: `forge/deploy-gate is ${gate.deployGate ?? "absent"}, not success${gate.deployGate === "failure" ? "" : ` after ${GATE_POLLS} polls`}`, head, gate };
   await io.gh(["pr", "merge", String(pr), "--repo", repo, "--merge", "--match-head-commit", head]);
   return { merged: true, head, gate };
 }

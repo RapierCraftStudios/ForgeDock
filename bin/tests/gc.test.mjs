@@ -554,3 +554,94 @@ describe("3-issue batch leaves zero owned leftovers (#4184)", () => {
     assert.equal(await nearCeiling({ host: busy }), false);
   });
 });
+
+import { diskLow, nearCeiling as nearCeiling5421 } from "../lean/admission.mjs";
+import { guardHeavyDisk, markOwned } from "../lean/effects.mjs";
+import { hygieneCheck as hygieneCheck5421 } from "../gc.mjs";
+
+describe("scheduled and disk-pressure hygiene, wider ownership (#5421)", () => {
+  const owned = (n) => ({ Names: n, Labels: "", CreatedAt: dockerTime(NOW - 30 * H), Size: "1MB" });
+  it("readHygiene: schedule and min_free_gb, invalid values fall back", () => {
+    const d = tmpDir("hyg5421-");
+    writeFileSync(join(d, "forge.yaml"), "hygiene:\n  schedule: 6h\n  min_free_gb: 12\n");
+    assert.deepEqual([readHygiene(d).schedule, readHygiene(d).min_free_gb], ["6h", 12]);
+    writeFileSync(join(d, "forge.yaml"), "hygiene:\n  schedule: soon\n  min_free_gb: -3\n");
+    assert.deepEqual([readHygiene(d).schedule, readHygiene(d).min_free_gb], ["", HYGIENE_DEFAULTS.min_free_gb]);
+  });
+
+  it("disk pressure through the injected host probe: nearCeiling and diskLow", async () => {
+    const host = (mb) => ({ memAvailableMb: () => 99999, freeMb: async () => mb, hygienePaths: () => ["/wt", "/forge"], tmpPaths: () => [] });
+    assert.equal((await diskLow({ host: host(3000), minFreeGb: 5 })).low, true);
+    assert.equal((await diskLow({ host: host(9000), minFreeGb: 5 })).low, false);
+    assert.equal((await diskLow({ host: host(3000), minFreeGb: null })).low, false);
+    assert.equal(await nearCeiling5421({ host: host(3000), minFreeGb: 5 }), true);
+    assert.equal(await nearCeiling5421({ host: host(9000), minFreeGb: 5 }), false);
+    assert.equal(await nearCeiling5421({ host: host(3000) }), false); // threshold unset: unchanged behaviour
+    assert.equal((await diskLow({ host: { freeMb: async () => { throw new Error("x"); }, hygienePaths: () => ["/a"] }, minFreeGb: 5 })).low, false);
+  });
+
+  it("guardHeavyDisk: runs gc, then refuses the heavy step while the disk is still low", async () => {
+    let mb = 1000, gcRuns = 0, acquired = 0;
+    const heavy = { acquire: async () => { acquired++; return { release() {} }; } };
+    const host = { freeMb: async () => mb, hygienePaths: () => ["/wt"] };
+    const g = guardHeavyDisk(heavy, { host, minFreeGb: () => 5, gc: async () => { gcRuns++; } });
+    await assert.rejects(g.acquire({}), (e) => e.code === "DISK_LOW");
+    assert.equal(gcRuns, 1); assert.equal(acquired, 0);
+    const g2 = guardHeavyDisk(heavy, { host, minFreeGb: () => 5, gc: async () => { mb = 20000; } });
+    await g2.acquire({});
+    assert.equal(acquired, 1);
+  });
+
+  it("hygieneCheck warns on low free disk and shows the owned reclaimable bytes", async () => {
+    const w = world({ containers: [{ ...owned("lean3-pg"), Labels: "forgedock.owner=1" }] });
+    const plan = await planGc({ probes: w.probes, now: NOW });
+    const c = hygieneCheck5421(plan, { disk: { freeGb: 2.7, minFreeGb: 5 } });
+    assert.equal(c.status, "warn"); assert.equal(c.lowDisk, true);
+    assert.match(c.detail, /free disk 2\.7 GB < 5 GB.*owned reclaimable/);
+    assert.equal(hygieneCheck5421(plan, { disk: { freeGb: 50, minFreeGb: 5 } }).lowDisk, false);
+  });
+
+  it("lane compose volumes are owned by project name; foreign compose volumes stay not owned", async () => {
+    const w = world({ volumes: [
+      { Name: "lane_data", Labels: "com.docker.compose.project=forgedock-lane-42", CreatedAt: new Date(NOW - 30 * H).toISOString() },
+      { Name: "shop_data", Labels: "com.docker.compose.project=shop", CreatedAt: new Date(NOW - 900 * H).toISOString() },
+    ] });
+    const r = await run(w, ["--apply", "--docker"]);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(destructive(w), ["volume rm lane_data"]);
+  });
+
+  it("legacy .forge/worktrees dirs: reclaimed only when clean and on a remote; unpushed, dirty or marker-less ones are kept", async () => {
+    const w = world();
+    const legacy = join(w.repo, ".forge", "worktrees");
+    w.probes.legacyWorktreeRoot = legacy;
+    const mk = (n, { top = true, dirty = false, unpushed = false } = {}) => {
+      const d = join(legacy, n); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "f"), "x");
+      utimesSync(d, new Date(NOW - 40 * 24 * H), new Date(NOW - 40 * 24 * H));
+      w.toplevel[resolve(d)] = top; w.dirty[resolve(d)] = dirty; w.unpushed[resolve(d)] = unpushed;
+      return d;
+    };
+    const clean = mk("orch-1"), dirty = mk("fix-2", { dirty: true }), ahead = mk("recovery-3", { unpushed: true }), plain = mk("orch-4", { top: false });
+    const r = await run(w, ["--apply", "--worktrees"]);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(existsSync(clean), false);
+    for (const d of [dirty, ahead, plain]) assert.equal(existsSync(d), true, d);
+    assert.match(r.out, /orch-4  \(legacy orchestrator dir, cannot inspect\)/);
+  });
+
+  it("marked scratch dirs at the top of ~/.forge/tmp follow the run-dir rule; unmarked ones are only reported", async () => {
+    const w = world();
+    const mk = (n, pid) => { const d = join(w.tmpRoot, n); mkdirSync(d); writeFileSync(join(d, "f"), "x"); if (pid) { writeFileSync(join(d, ".forge-run-owner"), JSON.stringify({ pid, host: HOST, created: NOW - 12 * H })); } return d; };
+    const stale = mk("forge-gh-cache-a", 111), live = mk("forge-gh-cache-b", 222), bare = mk("wt-abc");
+    w.alive.add(222);
+    const r = await run(w, ["--apply", "--tmp"]);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(existsSync(stale), false); assert.equal(existsSync(live), true); assert.equal(existsSync(bare), true);
+  });
+
+  it("markOwned writes the owner marker gc reads", () => {
+    const d = tmpDir("mark-"); markOwned(d, { now: () => 5, host: "h" });
+    const own = JSON.parse(readFileSync(join(d, ".forge-run-owner"), "utf8"));
+    assert.equal(own.created, 5); assert.equal(own.host, "h"); assert.equal(own.pid, process.pid);
+  });
+});

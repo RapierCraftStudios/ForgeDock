@@ -137,6 +137,7 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
       assert.equal(ra.status, "miss-installed", JSON.stringify(ra));
       assert.equal(ra.published, true);
       assert.equal(ra.eco, eco);
+      assert.equal(ra.dir, ".", "#5447: every result row carries its project dir");
       const [snap] = snapDirs(root, eco);
       assert.ok(snap && existsSync(join(snap, "manifest.json")));
       const fullInstalls = f.installs().length;
@@ -446,6 +447,27 @@ describe("depcache (#5331): per-service Python lockfiles", () => {
     const wt = join(base, "wt", "none");
     mkdirSync(join(wt, "services/api"), { recursive: true });
     const [r] = await cache.prepare({ wt, repoKey: "repo-none" });
+    assert.equal(r.reason, "no lockfile");
+  });
+});
+
+describe("depcache (#5423): nested JS lockfiles", () => {
+  it("web/package-lock.json is prepared in web/ next to a root without a lockfile", async () => {
+    const { cache, base } = setup("npm");
+    const wt = join(base, "wt", "web");
+    mkdirSync(wt, { recursive: true });
+    FIXTURES.npm(join(wt, "web"));
+    const res = await cache.prepare({ wt, repoKey: "repo-web" });
+    assert.equal(res.length, 1, JSON.stringify(res));
+    assert.equal(res[0].eco, "npm");
+    assert.equal(res[0].dir, "web");
+    assert.ok(["miss-installed", "hit"].includes(res[0].status), JSON.stringify(res[0]));
+  });
+  it("a web/ without its own package.json is not prepared", async () => {
+    const { cache, base } = setup("npm");
+    const wt = join(base, "wt", "web2");
+    put(join(wt, "web/package-lock.json"), "{}");
+    const [r] = await cache.prepare({ wt, repoKey: "repo-web2" });
     assert.equal(r.reason, "no lockfile");
   });
 });

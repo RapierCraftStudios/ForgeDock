@@ -13,9 +13,10 @@ const iso = (ms) => new Date(ms).toISOString();
 
 /** One synthetic RUN_START..RUN_TERMINAL slice. */
 function slice({ issue = 1, repo = "o/r", at = T0, verdict = "eligible", reasons = [], signals = ["repro"], shape = "full", reason = "merged",
-  cost = 1, wall = 30 * MIN, model = 25 * MIN, size = "S", pr = 100 + issue, rework = false, conformance = [], verifier = 0, elig = true } = {}) {
+  cost = 1, wall = 30 * MIN, model = 25 * MIN, size = "S", pr = 100 + issue, rework = false, conformance = [], verifier = 0, elig = true, ff = null } = {}) {
   const ev = [{ event: "RUN_START", issue, repo, ts: iso(at) }];
   if (elig) ev.push({ event: "LIGHT_ELIGIBILITY", mode: "shadow", verdict, light: false, reasons: reasons.map((code) => ({ code, detail: "" })), signals: signals.map((code) => ({ code, detail: "" })) });
+  if (ff) ev.push({ event: "FASTFORWARD_ELIGIBILITY", mode: "on", verdict: ff.eligible ? "eligible" : "ineligible", light: ff.eligible && !ff.shadow, reasons: [], signals: [], ...ff });
   if (shape === "light") ev.push({ event: "LIGHT_DONE" });
   if (shape === "upgraded") ev.push({ event: "LIGHT_UPGRADE", reasons: [] });
   ev.push({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", trigger: "build", cost_usd_delta: cost });
@@ -155,4 +156,23 @@ test("depthReport recommendation: decision, eligible share, would-be saving and 
   assert.ok(["promote", "do not promote", INSUFFICIENT].includes(rc.decision));
   assert.match(renderDepth(rep), /^recommendation: .*eligible share 75% \(n=3\), would-be saving \$3\.00/m);
   assert.equal(depthReport({ rows: [], minN: 10 }).recommendation.decision, INSUFFICIENT);
+});
+
+test("#5426 fast-forward report: eligibility rate over lanes with an investigation verdict, outcomes of fast-forwarded merges", () => {
+  const rows = rowsOf({ issue: 1, shape: "light", ff: { eligible: true } }, { issue: 2, shape: "light", ff: { eligible: true } },
+    { issue: 3, shape: "upgraded", ff: { eligible: true }, reason: "needs-human" }, { issue: 4, ff: { eligible: false } }, { issue: 5, ff: { eligible: true, shadow: true } },
+    { issue: 6 });
+  assert.deepEqual(rows.map((x) => x.ff?.eligible ?? null), [true, true, true, false, true, null]);
+  const defects = new Map([[1, { defect: true, revert: true }], [2, { defect: false, revert: false }]]);
+  const f = depthReport({ rows, defects }).fast_forward;
+  assert.equal(f.lanes, 5); assert.equal(f.eligible_n, 4); assert.equal(f.eligibility_rate, 0.8); assert.equal(f.shadow_n, 1);
+  assert.equal(f.fast_forwarded.n, 2); assert.equal(f.fast_forwarded.merge_rate, 1);
+  assert.equal(f.fast_forwarded.defect_rate, 0.5); assert.equal(f.fast_forwarded.revert_rate, 0.5); assert.equal(f.fast_forwarded.reverts_n, 2);
+  assert.equal(f.upgraded.n, 1); assert.equal(f.upgraded.needs_human_rate, 1);
+  assert.equal(f.full_lane.n, 2, "ineligible and shadow lanes ran the full lane");
+  const text = renderDepth(depthReport({ rows, defects }));
+  assert.match(text, /fast-forward \(#5426.*5 lane\(s\).*eligible 80% \(n=4, 1 shadow\)/);
+  assert.match(text, /fast-forwarded: n=2.*reverts 50% \(n=2\)/);
+  assert.equal(depthReport({ rows: rowsOf({ issue: 9 }) }).fast_forward.lanes, 0);
+  assert.ok(!/fast-forward \(#5426/.test(renderDepth(depthReport({ rows: rowsOf({ issue: 9 }) }))), "no line without data");
 });

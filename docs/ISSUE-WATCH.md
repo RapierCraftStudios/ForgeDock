@@ -5,6 +5,8 @@
 ```
 forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run]
 forgedock issue-watch status [--name <w>] [--repo owner/repo]
+forgedock issue-watch install [--name <w>] [--repo owner/repo] [--interval <s>]
+forgedock issue-watch watchdog
 ```
 
 `--name` defaults to the only watch in forge.yaml, else `default` (every trusted issue, no caps). `--once` does one pass. `--interval` is the seconds between passes (default 300).
@@ -51,13 +53,13 @@ The lane follows the repo rule: a milestone issue goes to `milestone/<slug>` (fo
 
 - `max_issues: N`: total claims over the watch's lifetime. At N the watch **drains**: no new claims, retry and verify only. When nothing is inflight and no merge is mid-verification it exits with a summary.
 - `until: <ISO time>`: the same, at that time.
-- `max_inflight` (default 4): claims in flight at once.
+- `max_inflight` (default 4; in `mode: batch` the watch's `parallel`): claims in flight at once.
 - With neither `max_issues` nor `until` the watch runs forever: it keeps claiming, retrying (a deferred lane, exit 75, is relaunched up to 3 times) and verifying merges (see [Merge verification](#merge-verification)).
 
 ## Modes
 
 - `mode: per-issue` (default): one `forgedock run-issue` per claim.
-- `mode: batch`: claims are `--add`ed to one long-lived `orchestrate` batch, so its K (`parallel:`), the `Depends on` DAG (claims are ordered dependencies first), the supervisor and the report apply. When the batch writes its report the watch starts a new one with the next claims.
+- `mode: batch`: claims are `--add`ed to one long-lived `orchestrate` batch, so its K (`parallel:`), the `Depends on` DAG (claims are ordered dependencies first), the supervisor and the report apply. When the batch writes its report the watch starts a new one with the next claims. If another running (not reported, not cancelled) batch of the same repo and lane exists, claims are `--add`ed to it instead of starting a new one. A slow `orchestrate` start (no batch dir within 60 s) never stops the watch: the claims are kept in a `pendingStart` record, later passes adopt the batch when it appears, and after 10 minutes without one the claims are released. An error in any pass is logged, saved as `passError` in `status.json`, shown by `issue-watch status`, and the next pass runs (with `--once` the process still exits non-zero).
 
 - `mode: release`: see [Release mode](#release-mode).
 
@@ -120,7 +122,7 @@ A closed issue is not taken on trust. When a claimed issue closes (in `per-issue
 5. the merge commit is on the lane (`compare` reports `behind` or `identical`);
 6. no check on the merge commit failed (report-only `forgedock/verify` is ignored). While those checks run, verification waits up to 60 minutes and then fails.
 
-All pass: the issue counts as **verified**, and a `FORGE:WATCH_VERIFY` comment records the evidence. Any fails: the issue is **unverified**. It is reopened with `needs-human` and a "merge NOT verified" comment that lists the evidence and the failed check. Nothing is reverted; a human decides between a revert, a follow-up fix and accepting the merge. An issue that closed with no merged lane PR (invalid, already fixed, decomposed) counts as **closed unmerged**, never as verified.
+All pass: the issue counts as **verified**, and a `FORGE:WATCH_VERIFY` comment records the evidence. Any fails: the issue is **unverified**. It is reopened with `needs-human`, `workflow:merged` is replaced by `workflow:merged-unverified` (so the open issue does not look merged; best effort: the label is created if missing, and a failed swap never stops the reopen or `needs-human`), and a "merge NOT verified" comment that lists the evidence and the failed check. Nothing is reverted; a human decides between a revert, a follow-up fix and accepting the merge. An issue that closed with no merged lane PR (invalid, already fixed, decomposed) counts as **closed unmerged**, never as verified.
 
 ## Status
 
@@ -152,3 +154,10 @@ issue_watch:
 - **Run**: the watch posts a `FORGE:RELEASE_PLAN` comment (theme, reasons, included, pulled and excluded issues, policy) on `tracker:` (default: the first issue of the set), tags the set (milestone `release/<theme>-<date>` for a milestone target, else label `release:<theme>-<date>`), and starts one `orchestrate` batch. When the batch reports it opens the deploy PR (lane to the default branch) once. **The watch never merges it**; promotion stays human-only.
 - **Roll over**: issues left out stay pooled and keep their age. `max_issues` and `until` stop new releases.
 - `forgedock issue-watch run --name <w> --dry-run` prints `would cut: <theme> (N issues, score S; ...)`, the triggers, the theme scores and each issue's theme, and writes nothing.
+
+## Resilience, supervision and DEAD detection (#5465)
+
+- **Retry.** A transient `gh` failure (TLS handshake timeout, connection reset, DNS, HTTP 5xx or 429, secondary rate limit) is retried 3 times with doubling backoff (2 s, 4 s, 8 s) inside the same call. A call that still fails fails its pass only: the pass is logged and recorded as `passError`, and the next pass runs. A 4xx is never retried.
+- **Exit state.** Whenever `run` stops (crash, SIGTERM/SIGINT, `--once`) `status.json` gets `phase: exited`, `exitReason` and `exitedAt`; it is never left as `running`. A restart resumes it.
+- **Supervision.** `forgedock issue-watch install --name <w>` writes a systemd user unit `forgedock-issue-watch-<w>.service` (`Restart=on-failure`, run from the current directory so `forge.yaml` is found) and a 60 s watchdog timer, or a launchd agent (`KeepAlive` on failure) on macOS. A finished (`done`) or stopped watch exits 0 and stays down.
+- **DEAD.** A heartbeat older than 3 × `heartbeatEveryMs` (+60 s grace) is shown as `state: DEAD` by `issue-watch status` and in a `issue-watch` section of `forgedock status`. `issue-watch watchdog` (the install timer) and `forgedock status` post a `watch.dead` event once per dead heartbeat to `events.webhook_url` (see EVENTS.md).

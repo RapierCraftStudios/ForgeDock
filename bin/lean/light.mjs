@@ -21,6 +21,8 @@ import { postDeployOnly } from "./prefilter.mjs";
 
 export const LIGHT_MODES = Object.freeze(["off", "shadow", "on"]);
 export const LIGHT_DEFAULTS = Object.freeze({ mode: "shadow", maxLines: 40, maxFiles: 2 });
+/** #5426: where eligibility is computed from: the issue text (default) or the investigation's predicted files and size (bin/lean/fastforward.mjs). */
+export const LIGHT_SOURCES = Object.freeze(["text", "investigation"]);
 /** #5209: commits in 90 days (scripts/hotspots.sh commits_90d) at or above which a named file records a `churn_high` signal. */
 export const CHURN_HIGH = 20;
 
@@ -34,10 +36,12 @@ const posInt = (v) => { const s = String(v ?? "").trim(); return /^\d+$/.test(s)
 export function parseLightConfig(lean = {}) {
   const l = lean && typeof lean === "object" ? lean : {};
   const m = String(l.light_mode ?? l.mode ?? "").trim().toLowerCase();
+  const src = String(l.light_source ?? l.source ?? "").trim().toLowerCase();
   return {
     mode: LIGHT_MODES.includes(m) ? m : LIGHT_DEFAULTS.mode,
     maxLines: posInt(l.light_max_lines) ?? posInt(l.max_lines) ?? LIGHT_DEFAULTS.maxLines,
     maxFiles: posInt(l.light_max_files) ?? posInt(l.max_files) ?? LIGHT_DEFAULTS.maxFiles,
+    ...(LIGHT_SOURCES.includes(src) ? { source: src } : {}), // #5426: unset = investigation (see fastforward.mjs); `text` is the kill-switch
   };
 }
 
@@ -92,13 +96,14 @@ function riskDetails(files, riskPaths) {
  * reason. `signals` lists every evaluated signal (codes: repro|no_repro, files_named, churn_high, hotspot, risk_path,
  * label_docs|label_config|label_chore, size_S|size_M|size_L|size_none) and never changes the verdict.
  */
-export function lightEligibility({ title = "", body = "", labels = [], predictedFiles = [], riskPaths = [], hotspots = [], cfg = {} } = {}) {
+export function lightEligibility({ title = "", body = "", labels = [], predictedFiles = [], riskPaths = [], hotspots = [], cfg = {}, source = "text", size: sizeOverride = null, extraHard = [], preText = null } = {}) {
   const c = cfgOf(cfg);
   if (c.mode === "off") return { mode: "off", verdict: "off", eligible: false, light: false, reasons: [], signals: [] };
   const hard = [], soft = [], signals = [];
   const text = String(body ?? "").replace(/<!--[\s\S]*?-->/g, " ");
+  const fromInvestigation = source === "investigation"; // #5426: the investigator's confirmation replaces the text repro requirement
   if (!FENCE_RE.test(text) && !REPRO_RE.test(text)) {
-    soft.push({ code: "no_repro", detail: "no repro, expected behaviour or code block in the body" });
+    if (!fromInvestigation) soft.push({ code: "no_repro", detail: "no repro, expected behaviour or code block in the body" });
     signals.push({ code: "no_repro", detail: "no repro, expected behaviour or code block in the body" });
   } else signals.push({ code: "repro", detail: "repro, expected behaviour or code block in the body" });
 
@@ -122,9 +127,11 @@ export function lightEligibility({ title = "", body = "", labels = [], predicted
   }
 
   const names = labelNames(labels);
-  const size = laneSize({ labels: names });
+  const size = ["S", "M", "L"].includes(sizeOverride) ? sizeOverride : laneSize({ labels: names });
   if (size && size !== "S") hard.push({ code: "size", detail: `size:${size}` });
   signals.push({ code: size ? `size_${size}` : "size_none", detail: size ? `size:${size}` : "no size label" });
+  if (fromInvestigation) signals.push({ code: "source_investigation", detail: "predicted files, size and risk come from the investigation" });
+  if (preText) signals.push({ code: `pre_text_${preText}`, detail: `the pre-investigation text heuristic said ${preText}` }); // shadow only
   for (const [code, re] of KIND_LABELS) {
     const n = names.find((x) => re.test(x));
     if (n) signals.push({ code, detail: `label ${n}` });
@@ -132,6 +139,7 @@ export function lightEligibility({ title = "", body = "", labels = [], predicted
 
   for (const d of riskDetails(files, riskPaths)) { hard.push({ code: "risk_path", detail: d }); signals.push({ code: "risk_path", detail: d }); }
 
+  for (const x of Array.isArray(extraHard) ? extraHard : []) if (x?.code) { hard.push({ code: String(x.code), detail: String(x.detail ?? "") }); signals.push({ code: String(x.code), detail: String(x.detail ?? "") }); }
   if (isInvestigation(title)) hard.push({ code: "investigate", detail: "investigate( issue" });
   const pdLabel = names.find((n) => POST_DEPLOY_LABELS.has(n.toLowerCase()));
   if (pdLabel) hard.push({ code: "post_deploy", detail: `label ${pdLabel}` });

@@ -5,6 +5,9 @@
  * issues, calls scanStalls, and re-dispatches each stalled issue via run-issue.
  */
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
+import { parseDocsConfig } from "./lean/docsgate.mjs";
+import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
+import { execFileSync } from "node:child_process";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -248,6 +251,13 @@ export function readReproTest(cwd = process.cwd()) {
     return ["off", "prefer"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/** forge.yaml `lean.repro_quality` (off|shadow|enforce, #5446); undefined when absent or invalid (the core defaults to shadow). */
+export function readReproQuality(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean?.repro_quality ?? "").trim();
+    return ["off", "shadow", "enforce"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
 /** forge.yaml `decomposition.close_parent` (#3736, #4337): true closes a decomposed parent at decomposition; anything else keeps it open. */
 export function readCloseParent(cwd = process.cwd()) {
   try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.decomposition?.close_parent ?? "").trim() === "true"; } catch { return false; }
@@ -440,10 +450,14 @@ export function readMergeWait(cwd = process.cwd()) {
  */
 export function readVerify(cwd = process.cwd()) {
   try {
-    const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
-    if (!sec || typeof sec !== "object") return undefined;
-    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
-    return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
+    const yml = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"));
+    // #5480: `lean: enumerating: mechanical: false` turns off the engine's own enumerating-test edits (the one-level reader flattens it to lean.mechanical)
+    const enumOff = String(yml?.lean?.enumerating?.mechanical ?? yml?.lean?.mechanical ?? "").trim().toLowerCase() === "false";
+    const base = yml?.verify && typeof yml.verify === "object" ? yml.verify : enumOff ? {} : null;
+    if (!base) return undefined;
+    const sec = enumOff ? { ...base, enumerating_mechanical: "false" } : base;
+    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command"), baselines = readYamlMap(cwd, "verify", "baselines"), sandboxes = readYamlMap(cwd, "verify", "sandboxes"); // #5448: {when glob: command}
+    return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}), ...(baselines ? { baselines } : {}), ...(sandboxes ? { sandboxes } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -564,9 +578,13 @@ export function readEnvConfig(cwd = process.cwd()) {
     const pp = readYamlMap(cwd, "topology", "prod_parity"); // #5284: {path glob: command | "note: how to verify"} production-only facts
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     const rr = s(y?.topology?.route_reachability); // #5087: repo-supplied command: exits non-zero when the ingress does not deliver the added route paths (args) to their service
+    const dc = parseDocsConfig(y?.docs); // #5419: forge.yaml docs: (off unless required_for is set)
+    let appPages = false; // #5428: default-on trigger: the repo tracks Next app/**/page.* files
+    try { appPages = String(execFileSync("git", ["ls-files", "--", "*page.*"], { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] })).split("\n").some((f) => PAGE_RE.test(f)); } catch { /* not a git checkout: off */ }
+    const pg = parsePagesConfig(y?.pages, { hasAppPages: appPages }); // #5428: forge.yaml pages: (off for repos without pages)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -921,6 +939,7 @@ export async function runFromCli(argv, deps = {}) {
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
   const laneOverride = argv.includes("--lane-override");
+  const adopt = argv.includes("--adopt"); // #5469: take over an open PR the pipeline did not author (lean.mjs adoptPr)
   const repo = flag(argv, "--repo");
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
@@ -1016,11 +1035,11 @@ export async function runFromCli(argv, deps = {}) {
     const env = deps.env ?? process.env;
     let lres;
     try {
-      lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
+      lres = await runCore({ issue, repo: leanRepo, deferPostRun: true, ...(adopt ? { adopt: true } : {}), ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1029,6 +1048,7 @@ export async function runFromCli(argv, deps = {}) {
     if (lres.terminalReason === "lane-refused") { console.log(`issue #${issue} → lane-refused ${lres.code} (${lres.detail})`); return lres; }
     console.log(`issue #${issue} → ${lres.terminalReason}`);
     if (!["merged", "invalid"].includes(lres.terminalReason)) console.log(lres.detail ?? "");
+    try { await lres.postRun?.(); } catch { /* #5437: recorded as POSTRUN_FAILED, never the outcome */ }
     return lres;
   }
   const res = await runIssueFn({ issue, dir, agentId, lane, io,
@@ -1225,6 +1245,11 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
+  if (argv.includes("--adopt")) { // #5469: review, base-sync and merge a hand-built open PR of one issue: the single-issue lane in adopt mode
+    const issue = argv[argv.indexOf("--adopt") + 1];
+    if (!/^#?\d+$/.test(String(issue))) throw new Error(ORCH_USAGE);
+    return runFromCli([String(issue).replace("#", ""), "--adopt", ...argv.filter((a, i) => ["--repo", "--lane"].includes(argv[i - 1]) || ["--repo", "--lane"].includes(a))], deps);
+  }
   const inProcess = deps.inProcess || deps.leanModule || deps.laneScript || deps.batchRoot || deps.leanIo
     || argv.includes("--foreground") || process.env.FORGEDOCK_SCHEDD === "0";
   if (inProcess) return runBatch({ argv: argv.filter((a) => a !== "--foreground"), cwd: process.cwd(), env: process.env, sink: consoleSink(), deps });
@@ -1273,8 +1298,8 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1283,6 +1308,8 @@ const issuesOf = (argv) => {
   }
   return issues;
 };
+/** #5471: the reason of `--force <reason>` (null when absent or valueless): lifts the cross-batch ownership skip. */
+const forceOf = (argv) => { const v = flag(argv, "--force"); return v && !String(v).startsWith("--") ? v : null; };
 /** #4469: the operands among `tokens` (`--add`/`--resume` extras): no flags, and no value of a valued flag (`--parallel 5` is not issue #5). */
 const operandsOf = (tokens) => {
   const out = [];
@@ -1334,7 +1361,7 @@ const unhostedFailure = (id, res, requireHost, result) => {
   if (requireHost && !res.hosted && !res.reopened) throw Object.assign(new Error(`batch ${id}: the issues are queued in the batch but NOTHING is scheduled: no schedd hosts it. Start the runner: forgedock orchestrate --resume ${id}`), { code: "batch.not-hosted", result });
 };
 
-async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
+async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost = false, force = null, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
   if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
@@ -1353,7 +1380,9 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, requireHost 
   const open = [];
   for (const n of ints) {
     const st = state.get(n);
-    if (st === "OPEN") open.push(n);
+    const owner = st === "OPEN" && !force ? batchMod.ownerOf(root, repo, n, id) : null; // #5471
+    if (owner) { if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: `owned by ${owner}` }); }
+    else if (st === "OPEN") open.push(n);
     else if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: st ? "closed" : "unreadable" });
   }
   let res = { added: [], skipped: [], requeued: [] };
@@ -1394,19 +1423,45 @@ function baseWaitOf(waits, { io, leanIo, cwd, now = () => Date.now() }) {
   };
 }
 
+/** #5469: `--for 4h` / `30m` / `2d` / `90s` as ms; null when absent. Throws on a malformed value. */
+function parseHoldFor(v) {
+  if (v === null || v === undefined) return null;
+  const m = /^(\d+(?:\.\d+)?)([smhd])$/.exec(String(v).trim());
+  if (!m || !(Number(m[1]) > 0)) throw new Error(`--for expects a duration like 4h, 30m, 2d or 90s, got "${v}"`);
+  return Math.round(Number(m[1]) * { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2]]);
+}
+/** #5469: the hold's owner (the operator session: the CLI's parent pid on this host), expiry (`--for`) and `--reason`. */
+function holdMeta(argv) {
+  const forLabel = flag(argv, "--for"), reason = flag(argv, "--reason");
+  return { owner: process.env.FORGE_HOLD_OWNER || `${process.env.USER || process.env.USERNAME || "operator"}@${hostname()}`, ownerPid: process.ppid, ownerHost: hostname(), forMs: parseHoldFor(forLabel), forLabel, reason: reason && !reason.startsWith("--") ? reason : null };
+}
+
+/** #5469: `--gc-orphans`: cancel every orphaned batch (unhosted, pending issues, idle for a week) through the daemon or the batch files. */
+async function gcOrphans({ root, viaDaemon = null, print = (l) => console.log(l) }) {
+  let res = viaDaemon ? await viaDaemon() : null;
+  if (!res) {
+    const schedd = await import("./lean/schedd.mjs"), batchMod = await import("./lean/batch.mjs");
+    const { orphaned } = schedd.findUnhosted(root);
+    for (const o of orphaned) batchMod.openBatch(root, o.id).requestCancel({ reason: "gc-orphans" });
+    res = { cancelled: orphaned.map((o) => o.id) };
+  }
+  print(res.cancelled?.length ? `cancelled ${res.cancelled.length} orphaned batch(es): ${res.cancelled.join(" ")}` : "no orphaned batches");
+  return { ok: true, cancelled: res.cancelled ?? [] };
+}
+
 /**
  * `--hold <id> N...` / `--release <id> N...` (#4592): the batch's `hold` file, through the daemon (`viaDaemon(op, issues)`, null
  * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
  * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
  */
-async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, print = (l) => console.log(l) }) {
+async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, meta = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
-  let res = viaDaemon ? await viaDaemon(op, issues) : null;
+  let res = viaDaemon ? await viaDaemon(op, issues, meta) : null;
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
-    res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
+    res = { changed: op === "hold" ? b.holdIssues(issues, meta) : b.releaseIssues(issues) };
   }
   if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
     const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;
@@ -1414,7 +1469,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
     if (dead.length) await takeover(dead);
   }
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
-  print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
+  print(op === "hold" ? `batch ${id}: held ${list}${meta?.forMs ? ` for ${meta.forLabel}` : ""}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
     : `batch ${id}: released ${list}`);
   return { ok: true, batch: id, changed: res.changed ?? [] };
 }
@@ -1425,7 +1480,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
  * written. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
  * cleared so `--resume` runs it again). The runner applies the entries and posts the FORGE:DECISION.
  */
-async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, print = (l) => console.log(l) }) {
+async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, force = null, print = (l) => console.log(l) }) {
   if (!id || String(id).startsWith("--") || !tokens.length) throw new Error(ORCH_USAGE);
   const batchMod = await import("./lean/batch.mjs");
   const b = batchMod.openBatch(root, id);
@@ -1440,6 +1495,7 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, re
     try { v = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state,labels"])); } catch { v = null; }
     if (!v) refused.push({ issue: n, reason: "unreadable" });
     else if (v.state !== "OPEN") refused.push({ issue: n, reason: "closed" });
+    else if (!force && batchMod.ownerOf(root, repo, n, id)) refused.push({ issue: n, reason: `owned by ${batchMod.ownerOf(root, repo, n, id)}` }); // #5471
     else if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) refused.push({ issue: n, reason: "still labelled needs-human: record the decision and remove the label first" });
     else open.push(n);
   }
@@ -1526,10 +1582,10 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
-  const holdVia = (id) => async (op, issues) => {
+  const holdVia = (id) => async (op, issues, meta = null) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op, id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
+    return sock ? schedd.request(sock, { op, id, issues, ...(meta ? { meta } : {}) }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
@@ -1544,23 +1600,28 @@ async function orchestrateClient(argv, deps = {}) {
   }
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue"), id = argv[i + 1];
-    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true });
+    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true, force: forceOf(argv) });
   }
+  if (argv.includes("--gc-orphans")) return gcOrphans({ root: await batchRootOf(), viaDaemon: async () => {
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    return sock ? schedd.request(sock, { op: "gc-orphans" }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
+  } });
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
     const root = await batchRootOf(), io = deps.io ?? makeIo();
-    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id),
+    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, viaDaemon: holdVia(id), meta: op === "hold" ? holdMeta(argv) : null,
       takeover: (ns) => requeueBatch({ id, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io, viaDaemon: requeueVia(id) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id), requireHost: true });
+    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id), requireHost: true, force: forceOf(argv) });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
   if (resumeExtra.length) {
-    await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId), force: forceOf(argv) });
     await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root: await batchRootOf(), viaDaemon: holdVia(resumeId), print: (l) => onlyReleased(l) }); // #4592: a named, held issue is re-admitted
   }
   let msg;
@@ -1650,22 +1711,23 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue");
-    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
+    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
+  if (argv.includes("--gc-orphans")) return gcOrphans({ root, print: (l) => sink.line(l) });
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const hid = flag(argv, `--${op}`);
-    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l),
+    return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, meta: op === "hold" ? holdMeta(argv) : null, print: (l) => sink.line(l),
       takeover: (ns) => requeueBatch({ id: hid, tokens: ns, reason: "--release: lease held by a cancelled batch", root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) }) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), requireHost: true, print: (l) => sink.line(l) });
+    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
   const resumeId = flag(argv, "--resume");
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
   if (resumeExtra.length) {
-    await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), force: forceOf(argv), print: (l) => sink.line(l) });
     await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root, print: (l) => onlyReleased(l, (t) => sink.line(t)) }); // #4592
   }
   let batch, plan = null;
@@ -1701,6 +1763,26 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4659: a milestone start is refused unless every dependency of its issues is merged into its lane, or --force <reason>
     const force = flag(argv, "--force");
     if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
+    { // #5442: page work waits for an approved design: a design:* issue is never dispatched (--force does not lift it)
+      const held = new Map();
+      for (const n of issues) {
+        let v = null;
+        try { v = JSON.parse(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])); } catch { v = null; }
+        const h = designHold(v?.labels);
+        if (h) held.set(n, h);
+      }
+      for (const [n, h] of held) sink.line(`skipped: #${n} design_pending (${h}); run /design, design:approved lifts the hold`);
+      if (held.size) {
+        if (held.size === issues.length) throw new Error(`every issue is design_pending (${[...held.values()].join(", ")}); run /design first`);
+        const out = [];
+        for (let i = 0; i < argv.length; i++) {
+          if (ORCH_VALUED.includes(argv[i])) { out.push(argv[i], argv[++i]); continue; }
+          if (/^#?\d+$/.test(argv[i]) && held.has(parseInt(argv[i].replace("#", ""), 10))) continue;
+          out.push(argv[i]);
+        }
+        argv = out; issues = issuesOf(argv);
+      }
+    }
     if (!force) {
       const { unmetDependencies } = await import("../scripts/plan-validate-live.mjs");
       const gateBranches = readBranches(cwd);
@@ -1768,6 +1850,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
+  const { formatTestAdequacySummary } = await import("./lean/testadequacy.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   // #4399: declared acceptance probes of closed issues whose fix reached the default branch; never fails the batch
   const sweep = deps.sweepProbes !== undefined ? deps.sweepProbes : (await import("./lean/probe.mjs")).sweepProbes;
@@ -1799,9 +1882,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
-    lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+    lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
+      laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -2000,7 +2084,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     try {
       const { nearCeiling } = await import("./lean/admission.mjs");
       const host = deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe();
-      near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio });
+      near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio, minFreeGb: hygiene.min_free_gb }); // #5421: disk pressure triggers GC too
     } catch { near = false; }
     if (near || gcPending) await runGcPhase("admission");
   };
@@ -2033,6 +2117,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
     resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
+    statelessOf: (st) => batchHealth.statelessOnGithub(st, (a) => leanIo.gh(a), repo),
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
@@ -2045,7 +2130,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
@@ -2061,7 +2146,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
-      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo }),
+      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
@@ -2125,6 +2210,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
+  const adequacyLine = formatTestAdequacySummary(rows); // #5449
+  if (adequacyLine) report.push(adequacyLine);
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396
@@ -2181,7 +2268,7 @@ export async function closedScope({ gh, repo, issue, labels }) {
  * Release review #4500: an OPEN issue reopened after that PR merged (a failed acceptance probe, #4399, or an operator
  * reopening it for rework) is new work, so the lane runs; an unreadable reopen history also runs the lane.
  */
-export function makeDispatchCheck({ gh, repo }) {
+export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
   /** Latest `reopened` event time (ms) on the issue, 0 when never reopened, null when unreadable. */
   const lastReopen = async (n) => {
@@ -2214,6 +2301,9 @@ export function makeDispatchCheck({ gh, repo }) {
     // #4920: a live lease held by another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox.
     // Release review #4931: never the open feat/issue-N-lean PR here. That branch is this issue's own lane, which a
     // relaunch or recovery lane resumes by design; a lane still running on it holds the lease.
+    // #5471: another live batch of the repo runs / holds the issue: no lane here (--force on the batch lifts it)
+    const other = state === "OPEN" && batchOwner ? batchOwner(n) : null;
+    if (other) return { outcome: "deferred", code: "batch.owned", detail: `owned by ${other}` };
     const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
@@ -2237,8 +2327,8 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
       const { parkedLabel, REMEDIATION_QUEUE_LABEL } = await import("./engine/outcome-codes.mjs");
-      try { await gh(["label", "create", parkedLabel(parked.code), "-R", repo, "--force", "--color", "C5DEF5", "--description", "Mechanical park on a terminal code. Managed by ForgeDock."]); } catch { /* exists, or no rights: the edit says */ }
-      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `${parkedLabel(parked.code)},${REMEDIATION_QUEUE_LABEL}`, "--remove-label", "needs-human"]); } catch { return "failed"; }
+      const { parkedRelabel } = await import("./lean/parked-relabel.mjs");
+      if (!(await parkedRelabel({ gh, repo, issue, code: parked.code })).ok) return "failed"; // #5466: needs-human stays unless the replacement labels landed
       try {
         const { capComment } = await import("./lean/render.mjs");
         await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:PARKED code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""} -->\n## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}`)]);
@@ -2322,7 +2412,9 @@ export async function scheddFromCli(argv, deps = {}) {
       const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
       console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
     }
+    for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
+    if (st.orphaned?.length) console.log(`schedd: ${st.orphaned.length} orphaned batch(es) (not hosted, pending issues, idle over 7 days): ${st.orphaned.slice(0, 3).map((o) => o.id).join(" ")}${st.orphaned.length > 3 ? " …" : ""} (forgedock orchestrate --gc-orphans cancels them)`);
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }

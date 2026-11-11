@@ -65,4 +65,4 @@ Grading is deterministic: the diff paths and added lines, never an LLM. The scor
 
 ## Published scorecard
 
-Scorecards live in `docs/eval/published/adversarial-<date>.md`. No run has been published yet: it needs API spend and private sandbox repos (#5292 follows up).
+Scorecards live in `docs/eval/published/adversarial-<date>.md`. Latest: [`adversarial-2026-11-11.md`](published/adversarial-2026-11-11.md) (#5370). If a lane closes an issue as invalid, it never pushes its branch, and the harness grades that as no change.

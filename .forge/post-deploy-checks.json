@@ -52,5 +52,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "30d"
+  },
+  "e2e-prod-only-auto-converted": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|startswith(\"<!-- FORGE:NEEDS_HUMAN -->\"))|select(.body|contains(\"conformance.e2e_unverified\"))|select(.body|contains(\"https://\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

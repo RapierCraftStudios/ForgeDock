@@ -58,6 +58,27 @@ function detect(fs, wt) {
   if (has("uv.lock")) out.push({ eco: "uv", lock: "uv.lock" });
   else if (has("poetry.lock")) out.push({ eco: "poetry", lock: "poetry.lock" });
   else out.push(...serviceLocks(fs, wt));
+  out.push(...nestedJsLocks(fs, wt));
+  return out;
+}
+
+const JS_LOCKS = [["pnpm", "pnpm-lock.yaml"], ["npm", "package-lock.json"], ["yarn", "yarn.lock"]];
+const JS_DIRS = ["web", "frontend", "client", "ui"];
+/** #5423: JS lockfiles one level down (web/, frontend/, services|packages|apps/<name>/) with their own package.json; each is prepared in its own dir, so a sandbox has the vitest/vite a validate command calls. */
+function nestedJsLocks(fs, wt) {
+  const dirs = [...JS_DIRS];
+  for (const root of SERVICE_ROOTS) {
+    try { for (const n of fs.readdirSync(join(wt, root)).sort()) dirs.push(`${root}/${n}`); } catch { /* absent */ }
+  }
+  const out = [];
+  for (const dir of dirs) {
+    if (out.length >= SERVICE_CAP) break;
+    try {
+      if (!fs.existsSync(join(wt, dir, "package.json"))) continue;
+      const hit = JS_LOCKS.find(([, lock]) => fs.existsSync(join(wt, dir, lock)));
+      if (hit) out.push({ eco: hit[0], lock: hit[1], dir, ...(hit[0] === "yarn" ? { berry: fs.existsSync(join(wt, dir, ".yarnrc.yml")) } : {}) });
+    } catch { /* unreadable: skip */ }
+  }
   return out;
 }
 
@@ -304,8 +325,8 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     for (const d of found) {
       try {
         const r = await prepareOne(d.dir ? join(wt, d.dir) : wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined);
-        out.push(d.dir ? { ...r, dir: d.dir } : r);
-      } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e) }); }
+        out.push({ ...r, dir: d.dir ?? "." });
+      } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e), dir: d.dir ?? "." }); }
     }
     return out;
   }

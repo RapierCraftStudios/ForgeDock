@@ -698,6 +698,9 @@ branches:
 # lean:
 #   explore: off            # off | on
 #   explore_model: haiku    # model of the explorer subagent (haiku, sonnet or a model id)
+#   light:
+#     mode: shadow        # off | shadow (default) | on
+#     source: investigation   # investigation (default) | text (kill-switch): the investigation's predicted files and size decide the light lane (#5426)
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)
@@ -931,6 +934,21 @@ branches:
 #   # ingress does not send them to the service that implements them. Blocking when set.
 #   # topology:
 #   #   route_reachability: "bash scripts/check-ingress.sh"
+#   # #5428 page gate (optional; default on only for repos with Next app/**/page.* files).
+#   # A public page needs a design spec, SEO intent/ICP brief and GEO brief, plus sitemap/metadata/canonical/structured data.
+#   # pages:
+#   #   enabled: true
+#   #   routes: ["web/pages/**"]
+#   #   icp_doc: "docs/icp.md"
+#   #   require: [design, seo_intent, geo]
+#   #   forbid_patterns: ["\\[\\[null\\]\\]"]
+#   # #5419 user docs (optional, default unset = off; leave unset for library/CLI repos).
+#   # A diff touching a user-facing surface needs a docs change; added /docs links must resolve.
+#   # docs:
+#   #   required_for: [api, mcp, dashboard, cli, sdk]
+#   #   paths: ["web/docs/**"]
+#   #   registries: ["web/public/llms.txt"]
+#   #   link_check: "bash scripts/check-docs-links.sh"
 #   # #5079: "if file A changes, file B must change" (digest pins, manifests, runtime
 #   # closures, CI wiring). Block map {when glob: required glob[, glob]}; a key
 #   # prefixed `added:` fires only for files the lane adds. A miss is
@@ -1452,3 +1470,11 @@ branches:
 #   mode: auto                 # remote | local-first | local-attested | auto
 #   monthly_minutes: 40000     # default: the plan's included minutes
 #   reserve_pct: 10
+
+# Test sandboxes (#5450): services a lane's validate commands need, created only when a frozen
+# validate entry declares `env: ["postgres"]`. One line per entry; see docs/CONFIG.md `verify.sandboxes`.
+# verify:
+#   sandboxes:
+#     postgres: { image: postgres:16, init: "make migrate DB_URL=$SANDBOX_URL", ttl: 30m }
+#     redis: { image: redis:7 }
+#     http-replay: { fixtures: tests/fixtures/http/, for: integration }

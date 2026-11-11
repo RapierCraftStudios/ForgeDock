@@ -176,8 +176,9 @@ export async function runArm({ arm, issue, corpus, cfg, run = benchDefaultRun, t
       await git(run, ["fetch", "-q", "origin", `refs/pull/${pr}/head`], src);
       head = SHA_RE.test(String(v.stdout).trim()) ? String(v.stdout).trim() : await git(run, ["rev-parse", "FETCH_HEAD"], src);
     } else if (res?.branch) {
-      await git(run, ["fetch", "-q", "origin", res.branch], src);
-      head = await git(run, ["rev-parse", "FETCH_HEAD"], src);
+      // A lane that ends before pushing (e.g. closed invalid) names a branch that never reached the remote: no diff to grade.
+      const f = await run("git", ["fetch", "-q", "origin", res.branch], { cwd: src });
+      if (f.code === 0) head = await git(run, ["rev-parse", "FETCH_HEAD"], src);
     }
   }
   if (!head) return row; // no PR and no branch: nothing to grade; oracle_pass stays false
