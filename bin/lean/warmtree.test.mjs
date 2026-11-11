@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { claimWarm, refillWarm, warmTreeCount } from "./warmtree.mjs";
+import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 
 const gitSync = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const git = async (args, { cwd } = {}) => gitSync(args, cwd);
@@ -64,5 +64,18 @@ describe("local warm worktrees (#5435)", () => {
     const bad = async (args, o) => { if (args[0] === "checkout") throw new Error("boom"); return git(args, o); };
     assert.equal(await claimWarm({ git: bad, cwd: r, root, wt, branch: "b", base: "main", n: 1 }), null);
     assert.equal(existsSync(wt), false);
+  });
+});
+
+describe("cold add without the post-checkout hook (#5435 R2)", () => {
+  it("runs the hook normally but not under NO_HOOKS", () => {
+    const { r, root } = fixture();
+    const hook = join(r, ".git", "hooks", "post-checkout");
+    writeFileSync(hook, `#!/bin/sh\ntouch "${root}/hook-ran"\n`, { mode: 0o755 });
+    const run = (wt, env) => execFileSync("git", ["worktree", "add", "-q", "-b", wt.split("/").pop(), wt, "main"], { cwd: r, env: { ...process.env, ...env } });
+    run(join(root, "nohook"), NO_HOOKS);
+    assert.equal(existsSync(join(root, "hook-ran")), false);
+    run(join(root, "hooked"), {});
+    assert.equal(existsSync(join(root, "hook-ran")), true);
   });
 });

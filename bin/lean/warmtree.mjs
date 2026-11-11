@@ -72,3 +72,6 @@ export async function claimWarm({ git, cwd, root, wt, branch, base, n }) {
   }
   return null;
 }
+
+/** #5435: env that turns off the repo's git hooks for one call (the lane checkout never needs post-checkout installers). */
+export const NO_HOOKS = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null" };

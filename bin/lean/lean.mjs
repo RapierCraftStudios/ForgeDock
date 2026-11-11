@@ -63,7 +63,7 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { applyEnumerating, renameDuplicates } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
-import { claimWarm, refillWarm, warmTreeCount } from "./warmtree.mjs";
+import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
 import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, NO_TRIGGER } from "./e2e.mjs";
 import { transferToEpic } from "./acceptance.mjs";
@@ -1365,9 +1365,10 @@ export async function runCore(o) {
     const sparseMaxKb = Number.isFinite(o.sparseMaxKb) && o.sparseMaxKb >= 0 ? o.sparseMaxKb : DEFAULT_SPARSE_MAX_KB;
     // #5435: attribute the cold add to its git calls: the sparse plan (ls-tree), the add + checkout (which runs any post-checkout hook), the sparse checkout
     const GIT_STEP = { "ls-tree": "sparse_plan", worktree: "git_worktree_add", "sparse-checkout": "sparse_checkout", "read-tree": "sparse_checkout" };
+    // #5435 (R2): the lane's own checkout never needs the repo's post-checkout hook (husky/lfs installs); it is skipped for these calls only.
     const timedGit = async (args, opts) => {
       const name = GIT_STEP[args[0]], s0 = now();
-      try { return await io.git(args, opts); } finally { if (name) { const ms = Math.max(0, now() - s0); phaseLedger.addStep("sandbox_start", name, ms); ev({ event: "SANDBOX_STEP", step: name, ms }); } }
+      try { return await io.git(args, name && args[0] !== "ls-tree" ? { ...opts, env: { ...opts?.env, ...NO_HOOKS } } : opts); } finally { if (name) { const ms = Math.max(0, now() - s0); phaseLedger.addStep("sandbox_start", name, ms); ev({ event: "SANDBOX_STEP", step: name, ms }); } }
     };
     const addWorktree = async (args, ref) => {
       let cleaned = false;
