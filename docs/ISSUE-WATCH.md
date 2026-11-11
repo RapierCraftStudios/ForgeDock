@@ -51,13 +51,13 @@ The lane follows the repo rule: a milestone issue goes to `milestone/<slug>` (fo
 
 - `max_issues: N`: total claims over the watch's lifetime. At N the watch **drains**: no new claims, retry and verify only. When nothing is inflight and no merge is mid-verification it exits with a summary.
 - `until: <ISO time>`: the same, at that time.
-- `max_inflight` (default 4): claims in flight at once.
+- `max_inflight` (default 4; in `mode: batch` the watch's `parallel`): claims in flight at once.
 - With neither `max_issues` nor `until` the watch runs forever: it keeps claiming, retrying (a deferred lane, exit 75, is relaunched up to 3 times) and verifying merges (see [Merge verification](#merge-verification)).
 
 ## Modes
 
 - `mode: per-issue` (default): one `forgedock run-issue` per claim.
-- `mode: batch`: claims are `--add`ed to one long-lived `orchestrate` batch, so its K (`parallel:`), the `Depends on` DAG (claims are ordered dependencies first), the supervisor and the report apply. When the batch writes its report the watch starts a new one with the next claims.
+- `mode: batch`: claims are `--add`ed to one long-lived `orchestrate` batch, so its K (`parallel:`), the `Depends on` DAG (claims are ordered dependencies first), the supervisor and the report apply. When the batch writes its report the watch starts a new one with the next claims. If another running (not reported, not cancelled) batch of the same repo and lane exists, claims are `--add`ed to it instead of starting a new one. A slow `orchestrate` start (no batch dir within 60 s) never stops the watch: the claims are kept in a `pendingStart` record, later passes adopt the batch when it appears, and after 10 minutes without one the claims are released. An error in any pass is logged, saved as `passError` in `status.json`, shown by `issue-watch status`, and the next pass runs (with `--once` the process still exits non-zero).
 
 - `mode: release`: see [Release mode](#release-mode).
 

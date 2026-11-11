@@ -163,19 +163,74 @@ test("two named watches on one repo never double-claim", async () => {
   assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "c"), false);
 });
 
-test("release #4820 BUG-1: a throwing batch.start loses no claim; the same watch re-claims on the next pass", async () => {
-  const dir = tmp();
-  const mk = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
-  const watch = validateWatch("w", { mode: "batch", max_inflight: "3" });
-  const io = fakeIo(dir, [iss(1), iss(2)]);
-  const start = io.batch.start;
-  io.batch.start = async () => { throw new Error("schedd unreachable"); };
-  await assert.rejects(tick({ watch, repo: "o/r", io, state: mk() }), /schedd unreachable/); // status.json never saved
-  io.batch.start = start;
-  const state = await tick({ watch, repo: "o/r", io, state: mk() }); // restart from the last saved (empty) state
-  assert.deepEqual([...state.claimed].sort(), [1, 2]);
-  assert.deepEqual(io.batchOps, [["start", [1, 2], watch.parallel, "staging"]]);
-  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "another watch still cannot take it");
+const mkState = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
+const slowStart = (io) => { io.batch.start = async () => { throw Object.assign(new Error("orchestrate did not create a batch within 60s"), { before: ["old"] }); }; };
+
+test("#5425: max_inflight defaults to parallel in batch mode; an explicit value and other modes keep their own", () => {
+  assert.equal(validateWatch("w", { mode: "batch", parallel: "20" }).max_inflight, 20);
+  assert.equal(validateWatch("w", { mode: "batch" }).max_inflight, 4);
+  assert.equal(validateWatch("w", { mode: "batch", parallel: "20", max_inflight: "5" }).max_inflight, 5);
+  assert.equal(validateWatch("w", { parallel: "20" }).max_inflight, 4);
+});
+
+test("#5425: a batch watch with parallel 6 claims six issues in one pass", async () => {
+  const io = fakeIo(tmp(), [1, 2, 3, 4, 5, 6, 7].map((n) => iss(n)));
+  const state = await tick({ watch: validateWatch("w", { mode: "batch", parallel: "6" }), repo: "o/r", io, state: mkState() });
+  assert.equal(state.claimed.length, 6);
+});
+
+test("#5425: a throwing batch.start keeps the claims in a pending-start record; the pass does not throw", async () => {
+  const dir = tmp(), watch = validateWatch("w", { mode: "batch" }), io = fakeIo(dir, [iss(1), iss(2)]);
+  slowStart(io);
+  const state = await tick({ watch, repo: "o/r", io, state: mkState() });
+  assert.deepEqual(state.claimed.sort(), [1, 2]);
+  assert.deepEqual(state.pendingStart.issues, [1, 2]);
+  assert.deepEqual(state.pendingStart.before, ["old"]);
+  assert.match(formatStatus(state, watch, io.now()), /batch start pending for 2 claim/);
+  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "claims stay held");
+  // later pass: the batch appeared, so it is adopted and no second start happens
+  io.batch.find = (before) => (before.includes("old") ? "b9" : null);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.equal(state.batch, "b9");
+  assert.equal(state.pendingStart, null);
+  assert.deepEqual(io.batchOps, []);
+});
+
+test("#5425: a pending start that never shows up releases its claims after the timeout", async () => {
+  const dir = tmp(), watch = validateWatch("w", { mode: "batch" }), io = fakeIo(dir, [iss(1)]);
+  slowStart(io);
+  const state = await tick({ watch, repo: "o/r", io, state: mkState() });
+  io.batch.find = () => null;
+  io.tickClock(5 * 60000);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.ok(state.pendingStart, "still pending inside the window");
+  io.tickClock(6 * 60000);
+  io.batch.start = async (nums) => { io.batchOps.push(["start", nums]); return "b1"; };
+  await tick({ watch, repo: "o/r", io, state }); // releases, then re-claims and starts again
+  assert.equal(state.pendingStart, null);
+  assert.deepEqual(io.batchOps, [["start", [1]]]);
+});
+
+test("#5425: a running batch of the same repo and lane gets the claims by --add instead of a new start", async () => {
+  const io = fakeIo(tmp(), [iss(1)]);
+  io.batch.running = (lane) => (lane === "staging" ? "brun" : null);
+  const state = await tick({ watch: validateWatch("w", { mode: "batch" }), repo: "o/r", io, state: mkState() });
+  assert.equal(state.batch, "brun");
+  assert.deepEqual(io.batchOps, [["add", "brun", [1]]]);
+});
+
+test("#5425: runWatch survives a throwing pass, saves status.json with the error, and runs the next pass", async () => {
+  const dir = tmp(), watch = validateWatch("w", { until: "2026-10-30T00:10:00Z" }), io = fakeIo(dir, [iss(1)]);
+  let fail = true; const gh = io.gh;
+  io.gh = async (a) => { if (fail) throw new Error("gh boom"); return gh(a); };
+  const seen = [];
+  io.sleep = async () => { seen.push(JSON.parse(readFileSync(join(dir, "status.json"), "utf8")).passError); fail = false; io.tickClock(300000); };
+  const errs = console.error; console.error = () => {};
+  let state; try { state = await runWatch({ watch, repo: "o/r", io, dir, intervalMs: 300000 }); } finally { console.error = errs; }
+  assert.match(seen[0], /gh boom/);
+  assert.equal(state.passError, null);
+  assert.equal(state.phase, "done");
+  assert.match(formatStatus({ ...state, passError: "x boom" }, watch, io.now()), /last pass failed: x boom/);
 });
 
 test("max_issues stops claiming at N, drains, then finishes", async () => {
