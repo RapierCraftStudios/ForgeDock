@@ -131,6 +131,7 @@ describe("backfillForgeYaml (#1982)", () => {
     "agents", "repos", "project_board", "pipeline", "services", "review",
     "verification", "deploy", "autopilot", "billing", "devdocs",
     "adaptive_scripts", "learned", "index", "attribution", "pattern_feeds",
+    "fd-introspect",
   ];
 
   it("returns present:false and does nothing when forge.yaml does not exist", () => {
