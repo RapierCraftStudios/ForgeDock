@@ -162,3 +162,12 @@ export function formatLedgerSummary(rows) {
     return `phases (p50/p90 per lane, ${s.n} lane${s.n === 1 ? "" : "s"}): ${parts.join(", ")}; largest: ${s.largest.phase} (${Math.round(s.largest.share * 100)}% of ledger time)`;
   } catch { return "phases (wall time): n/a"; }
 }
+
+/** #5435: the local `sandbox_start` budget (issue: p50 <= 3 s on the bench corpus). */
+export const SANDBOX_START_P50_BUDGET_MS = 3000;
+
+/** p50 of `sandbox_start` over the lanes' `phases` objects against the budget; `ok` is true when no lane carried the phase. */
+export function sandboxStartBudget(list, budgetMs = SANDBOX_START_P50_BUDGET_MS) {
+  const v = summarizePhases(list).phases.sandbox_start;
+  return { n: v?.n ?? 0, p50: v?.p50 ?? null, budgetMs, ok: !v || v.p50 <= budgetMs };
+}

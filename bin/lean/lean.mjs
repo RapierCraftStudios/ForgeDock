@@ -1363,10 +1363,16 @@ export async function runCore(o) {
     const LOCK_RE = /could not lock|cannot lock ref|\.lock'?: File exists|Unable to create .*\.lock|index\.lock|packed-refs\.lock/i;
     // #4221: tracked blobs >= sparseMaxKb stay out of the checkout (lockfiles/manifests always in); falls back to a full checkout.
     const sparseMaxKb = Number.isFinite(o.sparseMaxKb) && o.sparseMaxKb >= 0 ? o.sparseMaxKb : DEFAULT_SPARSE_MAX_KB;
+    // #5435: attribute the cold add to its git calls: the sparse plan (ls-tree), the add + checkout (which runs any post-checkout hook), the sparse checkout
+    const GIT_STEP = { "ls-tree": "sparse_plan", worktree: "git_worktree_add", "sparse-checkout": "sparse_checkout", "read-tree": "sparse_checkout" };
+    const timedGit = async (args, opts) => {
+      const name = GIT_STEP[args[0]], s0 = now();
+      try { return await io.git(args, opts); } finally { if (name) { const ms = Math.max(0, now() - s0); phaseLedger.addStep("sandbox_start", name, ms); ev({ event: "SANDBOX_STEP", step: name, ms }); } }
+    };
     const addWorktree = async (args, ref) => {
       let cleaned = false;
       for (let i = 0; ; i++) {
-        try { return await addLaneWorktree(io.git, io.fs?.write, { cwd, wt, addArgs: args, ref, maxBlobBytes: sparseMaxKb * 1024 }); } catch (e) {
+        try { return await addLaneWorktree(timedGit, io.fs?.write, { cwd, wt, addArgs: args, ref, maxBlobBytes: sparseMaxKb * 1024 }); } catch (e) {
           const msg = String(e?.stderr ?? e?.message ?? e);
           if (!cleaned && /already exists/i.test(msg) && (await leftoverDir())) { cleaned = true; continue; }
           if (i >= 4 || !LOCK_RE.test(msg)) throw e;
