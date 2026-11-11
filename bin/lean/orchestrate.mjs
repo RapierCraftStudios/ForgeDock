@@ -386,6 +386,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
+    // #5423: the lane now provisions the sandbox before ending tool_missing, so the first tool-missing recovery of a remote run retries remotely (not parked behind host load); a repeat goes to the host
+    const rec = recovering.get(n);
+    if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
     if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };

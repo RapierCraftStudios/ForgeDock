@@ -864,6 +864,20 @@ describe("core work-on", () => {
     assert.notEqual((await run(l, { placement: { where: "local", reason: "x" } })).code, "env.tool_missing");
   });
 
+  it("#5423 a remote lane provisions the sandbox once before ending env.tool_missing; a first env lane leaves no needs-human label", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const w = world({ contract }); let fixed = false, prep = 0;
+    w.io.deps = { prepare: async () => { prep++; fixed = true; return []; } };
+    w.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) && !fixed ? 127 : 0, output: "" });
+    assert.notEqual((await run(w, { dir: tmpDir("lean-5423-"), ...remote })).code, "env.tool_missing");
+    assert.ok(prep >= 1);
+    const l = world({ contract }); l.io.probeCommand = async (a) => ({ rc: /promtool/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(l, { dir: tmpDir("lean-5423b-"), ...remote });
+    assert.equal(r.code, "env.tool_missing");
+    assert.ok(!l.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(l.edits));
+  });
+
   it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
     const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };

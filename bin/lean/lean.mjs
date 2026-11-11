@@ -12,7 +12,7 @@ import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { readSelfReview, compareSelfReview, firstReviewRecord, selfCheckFailures } from "./selfreview.mjs";
-import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT } from "../engine/outcome-codes.mjs";
+import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, ENV_ENGINE_OWNED_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
@@ -614,8 +614,11 @@ export async function runCore(o) {
       const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
       try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`); }
       catch (e) { labelFailed("comment", e); }
-      try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); }
-      catch (e) { labelFailed("label", e); }
+      // #5423: an environment gap is the engine's to recover (the batch requeues it), so a first lane leaves the issue visible; a final recovery lane still labels
+      if (!(!recover && ENV_ENGINE_OWNED_CODES.includes(code))) {
+        try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); }
+        catch (e) { labelFailed("label", e); }
+      }
     } catch { /* best effort */ }
     return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
   }
@@ -2023,7 +2026,15 @@ export async function runCore(o) {
         const hn = contractHostNeeds(frozen, o.hostCaps && { ...o.hostCaps, hostCapabilities: (o.hostCaps.hostCapabilities ?? []).filter((c) => !relayed.has(c)) });
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
         // #5331: a tool the sandbox itself lacks (probed where the lane runs) ends the lane before the builder implements; the tool-missing recovery places it on the host (orchestrate placeOf)
-        const tm = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => []));
+        let tm = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => []));
+        if (tm.tools.length) { // #5423: provision the sandbox once (nested lockfiles, pytest) and re-probe before giving the lane up
+          try {
+            if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined });
+            if (tm.tools.includes("pytest") && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
+            tm = toolMisses(await preflightValidates(frozen).catch(() => []));
+            ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
+          } catch { /* keep the original miss */ }
+        }
         if (tm.tools.length) {
           ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });
           return await needsHuman(`Remote sandbox lacks ${tm.tools.join(", ")}, which the frozen contract's validate command(s) ${tm.ids.join(", ")} need; the lane is re-placed on the host before the builder implements.`, OUTCOME_CODES.ENV_TOOL_MISSING);

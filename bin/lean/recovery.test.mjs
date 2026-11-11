@@ -559,3 +559,19 @@ describe("#4318: the batch-exit relabel survives a throw and a signal; relabel r
     });
   });
 });
+
+describe("#5423 env.tool_missing recovery placement", () => {
+  const run = async (maxAttempts) => {
+    const calls = [];
+    await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts, mechanicalMaxAttempts: maxAttempts }, readBody: async () => "",
+      remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async (n, _l, ctx = {}) => {
+        calls.push(ctx.placement?.where);
+        return calls.length <= maxAttempts ? { terminalReason: "needs-human", code: "env.tool_missing", detail: `vitest ${calls.length}`, placement: { where: ctx.placement?.where } } : { terminalReason: "merged", pr: 9 };
+      } });
+    return calls;
+  };
+  it("the first recovery of a remote run retries remotely, a repeat goes to the host", async () => {
+    assert.deepEqual(await run(2), ["remote", "remote", "local"]);
+  });
+});
