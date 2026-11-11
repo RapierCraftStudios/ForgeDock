@@ -26,6 +26,8 @@ const sha = async (git, cwd, ref) => String(await git(["rev-parse", "--verify", 
 /** Create missing slots (or move stale ones to `ref`) up to `n`. Returns the number of slots ready. */
 export async function refillWarm({ git, cwd, root, ref, n, maxBlobBytes = DEFAULT_SPARSE_MAX_KB * 1024, write }) {
   let ready = 0;
+  const m = /^origin\/(.+)$/.exec(ref);
+  if (m) { try { await git(["fetch", "origin", m[1]], { cwd }); } catch { /* offline: the local ref */ } } // refresh = fetch + checkout
   const want = await sha(git, cwd, ref);
   mkdirSync(join(root, "warm"), { recursive: true });
   for (let i = 0; i < n; i++) {
