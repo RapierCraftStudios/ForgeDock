@@ -45,7 +45,7 @@ If a probe fails, the item is reported. A probe failure never leads to a reclaim
 ## Scheduling, disk pressure and wider ownership (#5421)
 
 - **Triggers:** `hygiene.schedule` (timer or cron running `gc --apply`, owned scope only), and free disk below `hygiene.min_free_gb` on the worktree root or `~/.forge` (counts in `nearCeiling`; heavy steps are refused when GC cannot free enough).
-- **Owned in addition:** docker containers and volumes of a compose project named `forgedock-lane-<issue>`; top-level `~/.forge/tmp` dirs carrying the `.forge-run-owner` marker (run-dir rule); legacy `<repo>/.forge/worktrees/*` dirs only when clean, HEAD on a remote, no live process and past the worktree TTL.
+- **Owned in addition:** docker containers and volumes of a compose project named `forgedock-lane-<issue>`; kept while a live lane ledger has that issue or the project has a running container (#5496); top-level `~/.forge/tmp` dirs carrying the `.forge-run-owner` marker (run-dir rule); legacy `<repo>/.forge/worktrees/*` dirs only when clean, HEAD on a remote, no live process and past the worktree TTL.
 - **Still report-only:** marker-less `~/.forge/tmp` entries (`wt-*`, `stg*`, `text-*`, `zero-*`: no ForgeDock code that creates them was found), unlabelled foreign volumes, unpushed or uncommitted legacy dirs.
 
 ## Rejected
