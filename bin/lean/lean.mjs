@@ -25,7 +25,7 @@ import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, depInstallFailures, testRunSummary } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -370,6 +370,7 @@ export async function runCore(o) {
   }
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
+  let depResults = [], gateProvisioned = false; // #5447
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
   const ctxBase = parseContextPackConfig(o.contextPack ?? {});
@@ -1437,6 +1438,7 @@ export async function runCore(o) {
       phaseLedger.enter("deps_install");
       let res;
       try { res = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
+      depResults = Array.isArray(res) ? res : []; // #5447: classified against the changed files at the gate
       for (const r of Array.isArray(res) ? res : []) {
         ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
         if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
@@ -2785,7 +2787,25 @@ export async function runCore(o) {
         const note = `Relaxation in a declared risk path (${[...new Set(relaxations.map((r) => r.file))].slice(0, 5).join(", ")}): negative tests added ${rx.negatives}; independent verifier enforced`;
         if (!T.decisions.includes(note)) T.decisions.push(note);
       }
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const reproWords = await reproOf(effective);
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: reproWords, validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
+      const depFail = depInstallFailures({ results: depResults, changedFiles: files });
+      for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);
+      pc.failures.push(...depFail.block);
+      // #5447: a test that could not run gets one provisioning pass (dependencies, pytest) and a fresh gate before the lane is given up
+      const unrun = pc.failures.filter((f) => ["validate_env", "repro_env", "dep_install"].includes(f.kind));
+      const wantsPytest = unrun.some((f) => /pytest/.test(`${f.tool ?? ""} ${f.detail}`));
+      if (unrun.length && !gateProvisioned && (io.deps?.prepare || (wantsPytest && io.runCommand))) {
+        gateProvisioned = true;
+        try {
+          if (io.deps?.prepare) { const rp = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); depResults = Array.isArray(rp) ? rp : []; }
+          if (wantsPytest && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
+        } catch { /* the rerun below reports what is still missing */ }
+        ev({ event: "GATE_PROVISIONED", kinds: [...new Set(unrun.map((f) => f.kind))] });
+        return await gate();
+      }
+      T.tests = testRunSummary({ contract: effective, failures: pc.failures, repro: reproWords });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });

@@ -1556,6 +1556,20 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
   });
 
+  it("#5447 replay: a missing test module is provisioned once and the lane retries; if it stays missing it ends env.tool_missing, never merged", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: v }); let provisioned = 0, installed = false;
+    w.io.deps = { prepare: async () => { provisioned++; installed = true; return []; } };
+    w.io.runCommand = async () => (installed ? { rc: 0, output: "" } : { rc: 1, output: "ModuleNotFoundError: No module named 'pytest'" });
+    const ok = await run(w, { conformance: "enforce" });
+    assert.notEqual(ok.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(provisioned >= 1, true);
+    const w2 = world({ validation: v }); let again = 0;
+    w2.io.deps = { prepare: async () => { again++; return []; } };
+    w2.io.runCommand = async () => ({ rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" });
+    const r = await run(w2, { conformance: "enforce" });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0); assert.equal(again, 2, "the toolchain prepare plus exactly one provisioning retry");
+  });
+
   it("#4323 a validate the host cannot run (missing module) ends env.tool_missing naming it: no builder resume, no reviewer", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
     for (const conformance of ["shadow", "enforce"]) {
@@ -2453,6 +2467,7 @@ describe("comment templates", () => {
     const m = renderTrajectory(base);
     assert.match(m, /^## Pipeline Trajectory — #9\n\n\| Phase \| Result \| Notes \|/);
     for (const row of ["| Validate | CONFIRMED | 2 evidence item(s) |", "| Review | PASS | 1 round |", "| PR | #5 | opened |", "| Merge | all | merged at abc |", "| Close | issue closed (completed) | label workflow:merged |", "- d1", "- none", "_cost $1_"]) assert.ok(m.includes(row), row);
+    assert.match(renderTrajectory({ ...base, tests: { declared: 3, ran: 2, redGreen: 1, skipped: [{ id: "V2", reason: "validate_env" }] } }), /\| Tests \| 3 declared, 2 ran, 1 red→green, 1 skipped\(validate_env\) \|/);
     const nh = renderTrajectory({ issue: 9, validate: "CONFIRMED", anomalies: ["needs-human: Review FAIL twice"], close: ["left open", "label needs-human"] });
     assert.match(nh, /\| Implement \| not reached \| - \|/);
     assert.match(nh, /\*\*Anomalies\*\*\n- needs-human: Review FAIL twice/);
