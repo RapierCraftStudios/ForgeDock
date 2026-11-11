@@ -203,8 +203,22 @@ for NUM in $ORPHAN_LIST; do
   # stateless orphan (a failed relabel removed needs-human): flag it and put needs-human back so a person is asked.
   if echo "$ISSUE" | jq -e '[.comments[].body | contains("<!-- FORGE" + ":NEEDS_HUMAN")] | any' >/dev/null 2>&1 \
     && ! echo ", $ISSUE_LABELS," | grep -Eq ", (needs-human|parked:[^,]*|remediation-queue|workflow:[^,]*),"; then
-    echo "  Diagnosis: STATELESS (needs-human annotation comment, no state label) — restoring needs-human"
-    gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+    # #5486: a person who removed needs-human after the annotation was posted cleared it on purpose: do not re-park.
+    NH_AT=$(echo "$ISSUE" | jq -r '[.comments[] | select(.body | contains("<!-- FORGE" + ":NEEDS_HUMAN")) | .createdAt] | max // ""')
+    NH_CLEARED=$(gh api "repos/${GH_REPO}/issues/$NUM/events" --paginate 2>/dev/null \
+      | jq -rs --arg at "$NH_AT" '[.[][] | select(.event == "unlabeled" and .label.name == "needs-human" and .created_at > $at)] | length' 2>/dev/null)
+    if [ "${NH_CLEARED:-0}" -gt 0 ] 2>/dev/null; then
+      echo "  Diagnosis: STATELESS but needs-human was removed after the annotation — cleared by a human, not re-parking"
+      DIAG_ACTION[$NUM]="skip"
+      DIAG_REASON[$NUM]="needs-human cleared by a human — not re-parked"
+      continue
+    fi
+    if [ "$DRY_RUN" = "true" ]; then
+      echo "  Diagnosis: STATELESS (needs-human annotation comment, no state label) — would restore needs-human (dry-run)"
+    else
+      echo "  Diagnosis: STATELESS (needs-human annotation comment, no state label) — restoring needs-human"
+      gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+    fi
     DIAG_ACTION[$NUM]="skip"
     DIAG_REASON[$NUM]="Stateless needs-human orphan — needs-human restored"
     continue
