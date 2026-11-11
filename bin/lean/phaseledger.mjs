@@ -35,7 +35,7 @@ function waitOf(ms, modelMs, typed = {}, id) {
 /** Sequential ledger starting in `first` at `start`. `now` is the lane clock. */
 export function createLedger(now, first = "sandbox_start", start = now()) {
   let cur = LANE_PHASES.includes(first) ? first : null, since = start;
-  const ms = {}, model = {}, usd = {}, wait = {};
+  const ms = {}, model = {}, usd = {}, wait = {}, steps = {};
   const close = (t) => { if (cur) ms[cur] = (ms[cur] ?? 0) + Math.max(0, t - since); };
   const enter = (phase) => {
     if (!LANE_PHASES.includes(phase) || phase === cur) return;
@@ -61,6 +61,12 @@ export function createLedger(now, first = "sandbox_start", start = now()) {
       if (!id || !WAIT_CAUSES.includes(cause) || !isNum(waitMs) || waitMs <= 0) return;
       (wait[id] ??= {})[cause] = (wait[id][cause] ?? 0) + waitMs;
     },
+    /** #5435: `stepMs` spent in the named step of `phase` (sub-timing, e.g. sandbox_start's fetch); not added to the phase total. */
+    addStep(phase, name, stepMs) {
+      const id = LANE_PHASES.includes(phase) ? phase : cur;
+      if (!id || typeof name !== "string" || !name || !isNum(stepMs) || stepMs < 0) return;
+      (steps[id] ??= {})[name] = (steps[id][name] ?? 0) + stepMs;
+    },
     /** The ledger as of now (the open phase counted up to now); does not end the current phase. */
     snapshot() {
       const t = now(), total = { ...ms };
@@ -69,7 +75,7 @@ export function createLedger(now, first = "sandbox_start", start = now()) {
       for (const id of LANE_PHASES) {
         if (!(id in total) && !(id in model) && !(id in usd)) continue;
         const w = waitOf(total[id] ?? 0, model[id] ?? 0, wait[id], id);
-        out[id] = { ms: Math.round(total[id] ?? 0), ...(model[id] ? { model_ms: Math.round(model[id]) } : {}), ...(usd[id] ? { usd: Math.round(usd[id] * 1e6) / 1e6 } : {}), ...(Object.keys(w).length ? { wait: w } : {}) };
+        out[id] = { ms: Math.round(total[id] ?? 0), ...(model[id] ? { model_ms: Math.round(model[id]) } : {}), ...(usd[id] ? { usd: Math.round(usd[id] * 1e6) / 1e6 } : {}), ...(Object.keys(w).length ? { wait: w } : {}), ...(steps[id] ? { steps: Object.fromEntries(Object.entries(steps[id]).map(([k, x]) => [k, Math.round(x)])) } : {}) };
       }
       return out;
     },
