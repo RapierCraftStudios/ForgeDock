@@ -6,11 +6,10 @@
  * of the epic's other children); the reviewer only adds an optional `test_adequacy` judgment per requirement.
  * Verdicts: `adequate`, `weak (reason)`, `missing`. Inputs a lane does not have report "n/a", never a guess.
  */
-import { isBugIssue, isTestPath, isOutOfBand, unverifiedRequirements } from "./conformance.mjs";
+import { isTestPath, isOutOfBand, unverifiedRequirements } from "./conformance.mjs";
 
 export const TEST_MISSING = "conformance.test_missing";
 export const TEST_WEAK = "conformance.test_weak";
-export { isBugIssue };
 
 const NA = "n/a";
 const planOf = (contract, id) => (Array.isArray(contract?.test_plan) ? contract.test_plan : contract?.test_plan?.requirements ?? []).find?.((p) => p?.requirement === id || p?.id === id) ?? null;
