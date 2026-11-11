@@ -94,6 +94,17 @@ test("runArm without a PR or branch grades nothing; oracle_pass stays false and 
   });
 });
 
+test("runArm full: a lane that ends before pushing (closed invalid) names a branch absent from the remote: graded as no change, not a crash (#5370)", async () => {
+  await withTmp(async (tmp) => {
+    const c = corpus();
+    const { run: base, calls } = fakeRun({ result: { terminalReason: "invalid", branch: "feat/issue-21-lean", cost_usd: 0.19 } });
+    const run = async (cmd, args, opts) => (cmd === "git" && args[0] === "fetch" ? { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref feat/issue-21-lean" } : base(cmd, args, opts));
+    const row = await runArm({ arm: "full", issue: c.issues[2], corpus: c, cfg: CFG, run, tmp, apiShape: async () => assert.fail("not graded") });
+    assert.equal(row.terminal, "invalid"); assert.equal(row.claimed_fix, false); assert.equal(row.oracle_pass, false); assert.equal(row.cost_usd, 0.19);
+    assert.ok(!calls.some((x) => x[0] === "sh"));
+  });
+});
+
 test("runArm control: claude -p with the filled prompt; cost and time from its JSON; the working tree is committed and graded", async () => {
   await withTmp(async (tmp) => {
     const c = corpus(), issue = c.issues[2];
