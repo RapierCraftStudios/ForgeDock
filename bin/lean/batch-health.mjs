@@ -228,6 +228,18 @@ export function statusLines(root, { now = Date.now(), batch = null } = {}) {
 }
 
 /**
+ * #5466: open issues that carry a FORGE:NEEDS_HUMAN comment but no state label (needs-human, parked:*, remediation-queue,
+ * workflow:*): they look untouched to a person and to issue-watch. `issues` is `[{number, state, labels: [name], comments: [body]}]`.
+ * @returns issue numbers
+ */
+export function statelessNeedsHuman(issues) {
+  const stateLabel = (l) => l === "needs-human" || l.startsWith("needs-human:") || l.startsWith("parked:") || l === "remediation-queue" || l.startsWith("workflow:");
+  return (issues ?? []).filter((i) => String(i?.state ?? "OPEN").toUpperCase() === "OPEN"
+    && (i.comments ?? []).some((c) => String(c).includes("<!-- FORGE:NEEDS_HUMAN"))
+    && !(i.labels ?? []).some((l) => stateLabel(String(l)))).map((i) => i.number);
+}
+
+/**
  * #5243: which `[{issue, outcome}]` rows GitHub shows as resolved: the issue is CLOSED with a MERGED closing PR, or a
  * `needs-human` row whose label was removed with a `FORGE:DECISION` comment. Any read failure leaves the row unresolved.
  * @returns issue numbers

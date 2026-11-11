@@ -8,7 +8,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch } from "./batch.mjs";
 import { DEFAULT_HEALTH, parseHealthConfig, rootsOf, evaluateHealth, formatAlert, runCheck, scheduleChecks, scheduleLine, runNotify, deliverAlert,
   resolvedOnGithub, recordRefusal, readRefusals, statusLines, REFUSAL_KEEP,
-  evaluateDispatchStall, firstHourReport, writeFirstHour, readFirstHour, recordStallAlert, summaryLines } from "./batch-health.mjs";
+  evaluateDispatchStall, firstHourReport, writeFirstHour, readFirstHour, recordStallAlert, summaryLines, statelessNeedsHuman } from "./batch-health.mjs";
 
 // #1 and #3 are roots; #2 depends on #1, #4 on #3.
 const base = (results, extra = {}) => ({ order: [1, 2, 3, 4], deps: { 2: [1], 4: [3] }, results, running: {}, pending: [], ...extra });
@@ -238,5 +238,18 @@ describe("#5314 dispatch stall and first-hour report", () => {
     assert.equal(recordStallAlert(b, { ...s1, ready: [2] }, { now: NOW }), true, "a different ready set is a new item");
     assert.ok(statusLines(root, { now: Date.now() }).some((l) => /BATCH UNHEALTHY b1/.test(l) || /dispatch-stalled/.test(l)));
     assert.ok(summaryLines(root, { now: Date.parse(new Date(NOW).toISOString()) }).some((l) => /DISPATCH STALLED/.test(l)));
+  });
+});
+
+describe("#5466 statelessNeedsHuman", () => {
+  const nh = ["<!-- FORGE:NEEDS_HUMAN -->\nx"];
+  it("flags an open issue with a NEEDS_HUMAN comment and no state label", () => {
+    assert.deepEqual(statelessNeedsHuman([
+      { number: 1, state: "OPEN", labels: ["bug"], comments: nh },
+      { number: 2, state: "OPEN", labels: ["parked:ci.red"], comments: nh },
+      { number: 3, state: "OPEN", labels: ["needs-human"], comments: nh },
+      { number: 4, state: "CLOSED", labels: [], comments: nh },
+      { number: 5, state: "OPEN", labels: [], comments: ["hello"] },
+    ]), [1]);
   });
 });
