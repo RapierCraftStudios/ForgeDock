@@ -3099,3 +3099,7 @@ Bug lanes (`reproOn()`: `lean.repro_test` not off and a `bug` label) freeze `tes
 Image cache (#5450): `batchImageCache` (`testsandbox.mjs`) is shared by every lane of the batch process, so an image is inspected or pulled once per batch.
 
 R3/R5/R7 follow-up (#5450): image sandboxes join a per-lane network `forge-sbx-<lane>-net` removed in `down`; fixtures entries export `SANDBOX_<NAME>_MODE` (replay|record); `init-detect.mjs` `detectSandboxes`/`sandboxesProposalYaml` feed a commented `verify.sandboxes` block into `init --minimal`.
+
+## Entry 2026-11-11 — parked relabel never leaves an issue stateless (#5466)
+
+`parkedRelabel` (`parked-relabel.mjs`, called from `makeRelabelNeedsHuman` in `engine-cli.mjs`) creates `parked:<code>` and `remediation-queue` with `--force` (the queue label is skipped if it cannot be created), adds them, reads the labels back with `issue view --json labels`, and only then removes `needs-human`. A failed add or verify rolls back the added labels, leaves `needs-human` on and returns `{ ok: false }`; the relabel then returns `"failed"`. `orchestrate.mjs` emits a `relabel.failed` batch event (store log and `onUpdate`) when the relabel returns `false`/`"failed"`; `parkedQueued` semantics are unchanged. `statelessNeedsHuman` (`batch-health.mjs`, pure, not yet wired into the status output) flags open issues with a `FORGE:NEEDS_HUMAN` comment and no `needs-human`, `parked:*`, `remediation-queue` or `workflow:*` label; `/recover-orphans` diagnoses the same case and restores `needs-human`.
