@@ -295,6 +295,12 @@ export function docsPlanNote(cfg) {
   return `\n\nThis repo requires user docs for user-facing surfaces (${cfg.required_for.join(", ")}). When the issue adds or changes one (a public API endpoint, MCP tool, dashboard page or feature, CLI command or SDK method), ${CONTRACT_FILE} must carry a requirement R-docs and a deliverable for each docs page${where} to create or update${reg}. A \`/docs/...\` link the change adds must resolve to a page. If no docs apply, say why in the result file as docs: [{"surface":"<kind>","justification":"<why>"}].`;
 }
 
+/** #5428: the page_gate rule for the planner; "" when forge.yaml pages is off. */
+export function pagePlanNote(cfg) {
+  if (!cfg?.require?.length) return "";
+  return `\n\nThis repo gates public pages (forge.yaml pages.require: ${cfg.require.join(", ")}). When the issue adds or changes a public page, ${CONTRACT_FILE} must carry "page_gate":{"design_spec":"<approved FORGE:DESIGN_SPEC ref, from /design>","seo":{"intent":"<target query>","icp":"<named ICP${cfg.icp_doc ? ` from ${cfg.icp_doc}` : ""}>","title":"","h1":"","meta":"","structured_data":"<schema.org type>","links_in":[],"links_out":[],"gsc_baseline":"","measure_by":"YYYY-MM-DD"},"geo":{"surfaces":["llms.txt","llms-full","markdown mirror","ai-catalog","MCP tool description"],"agent_question":"<natural-language question that must resolve to the page>"}}, plus a sitemap entry, metadata, canonical and structured data in the page, and the result file must list page_gate.screenshots (390 and 1440 wide). Never render raw JSON first or null samples on a public page.`;
+}
+
 export function reproPlanNote(on) {
   if (!on) return "";
   return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
@@ -531,6 +537,8 @@ export function decisionNote(comments = []) {
 
 /** #5099: one check line per review domain (domains from review-trigger.mjs pathDomains); mirrors the /review-pr personas. */
 export const DOMAIN_CHECKS = Object.freeze({
+  design: "A public page diff with no approved FORGE:DESIGN_SPEC, or a rendering that ignores it (raw JSON as main content, null samples, dead-end empty states, no 390/1440 check), is a regression.",
+  "seo-geo": "A public page diff with no target intent/ICP, title/H1/meta, canonical, structured data, sitemap entry or internal links, or no GEO surface (llms.txt, markdown mirror, ai-catalog, MCP description) an agent question resolves to, is a regression.",
   docs: "A user-facing diff (public API endpoint, MCP tool, dashboard page, CLI command, SDK method) with no matching docs change, or docs that contradict the code (endpoint paths, fields, scopes), is a regression.",
   frontend: "Dynamic API in a static/ISR tree: a headers(), cookies(), connection() or searchParams read in a layout, a not-found/error boundary or a module they import, when the route tree is static or ISR (revalidate, generateStaticParams, dynamic = 'force-static'), opts the route out of static rendering or throws at render and turns pages into HTTP 500.",
 });

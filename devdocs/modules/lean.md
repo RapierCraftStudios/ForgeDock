@@ -3032,3 +3032,10 @@ path is authorized (#5380).
 - **Lane.** `docsgate.mjs` `docsFailures` runs beside `routeFailures` and `precheck` blocks `docs_missing` (surface touched, no docs file changed, no `docs: [{surface, justification}]` in the result) and `docs_link_broken` (added `/docs/...` link: `link_check` command, else a docs file under `paths`). `docsPlanNote` asks the planner for an R-docs requirement. 0 LLM calls.
 - **Review.** `docs` is a review domain (`pathDomains(files, {docs})`, `DOMAIN_CHECKS.docs`); never enforced by default.
 - **Milestone.** `forgedock docs gate --milestone T --repo o/r` (`milestoneDocsGate`): user-facing children (labelled a configured kind or `user-facing`) need a closed child labelled `docs`; `/milestone` plans that child and gates close. `/review-pr-staging` Phase 1G lists undocumented user-facing changes as blockers.
+
+## Entry 2026-11-11 — page gate for public pages (#5428)
+
+- **Config.** forge.yaml `pages: {enabled, routes, icp_doc, require, sitemap, metadata_patterns, canonical_patterns, structured_data_patterns, forbid_patterns, lint}`; default on only for repos tracking `app/**/page.*` (`parsePagesConfig`, `readEnvConfig` -> `pagesConfig`).
+- **Contract time.** `validateContract(..., {pages})` -> `contractBriefProblems`: a page deliverable needs `page_gate` {design_spec, seo, geo}; `pagePlanNote` tells the planner.
+- **Lane.** `pagegate.mjs` `pageFailures` beside `docsFailures`; `precheck` blocks `page_*` rows (design spec, 390/1440 screenshots, metadata, canonical, structured data, sitemap, forbidden patterns, links, lint). 0 LLM calls.
+- **Review.** `design` and `seo-geo` domains (`pathDomains(files, {pages})`, `DOMAIN_CHECKS`); `/review-pr-staging` Phase 1H blocks. GSC baseline capture is owner work.

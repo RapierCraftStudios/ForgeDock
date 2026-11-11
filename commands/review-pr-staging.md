@@ -237,6 +237,11 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ---
 
+### 1H: Page Gate (BLOCKING when the forge.yaml `pages` gate is on, forge#5428)
+On for repos with `app/**/page.*` files unless `pages.enabled: false`. List every public page the bundle adds or changes (`app/**/page.*`, `pages.routes`) lacking any of: an approved `FORGE:DESIGN_SPEC` on its issue, an SEO intent/ICP brief and GEO brief in the contract `page_gate`, a sitemap entry, metadata, canonical, structured data, a 390/1440 visual check, or content matching `pages.forbid_patterns` (null samples, raw JSON first): each is a BLOCKER (`Page: <path> missing <item>`). A blocker makes the gate fail (`FORGE:GATE_FAILURE`).
+
+---
+
 ### 1G: Docs Gate (BLOCKING when `docs.required_for` is set, forge#5419)
 `git diff --name-only origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH` lists the bundle's changes. When forge.yaml sets `docs.required_for`, list every user-facing change in it (public API endpoint, MCP tool, dashboard page, CLI command, SDK method; `docs.surfaces` globs) that has no docs change under `docs.paths`/`docs.registries` and no `docs` justification: each is a BLOCKER (`Docs: <path> has no user docs`). Every `/docs/...` link the bundle adds must resolve (`docs.link_check`). Unset = skip. A blocker here makes the gate fail (`FORGE:GATE_FAILURE`).
 
