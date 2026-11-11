@@ -2117,6 +2117,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
     resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
+    statelessOf: (st) => batchHealth.statelessOnGithub(st, (a) => leanIo.gh(a), repo),
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
@@ -2326,8 +2327,8 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
       const { parkedLabel, REMEDIATION_QUEUE_LABEL } = await import("./engine/outcome-codes.mjs");
-      try { await gh(["label", "create", parkedLabel(parked.code), "-R", repo, "--force", "--color", "C5DEF5", "--description", "Mechanical park on a terminal code. Managed by ForgeDock."]); } catch { /* exists, or no rights: the edit says */ }
-      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `${parkedLabel(parked.code)},${REMEDIATION_QUEUE_LABEL}`, "--remove-label", "needs-human"]); } catch { return "failed"; }
+      const { parkedRelabel } = await import("./lean/parked-relabel.mjs");
+      if (!(await parkedRelabel({ gh, repo, issue, code: parked.code })).ok) return "failed"; // #5466: needs-human stays unless the replacement labels landed
       try {
         const { capComment } = await import("./lean/render.mjs");
         await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:PARKED code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""} -->\n## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}`)]);
