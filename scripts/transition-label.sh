@@ -182,6 +182,7 @@ VALID_STATES=(
   "building"
   "in-review"
   "merged"
+  "merged-unverified"
   "invalid"
   "decomposed"
   "awaiting-merge"
@@ -294,6 +295,7 @@ ensure_label() {
     "workflow:remediating") LBL_COLOR="C5DEF5"; LBL_DESC="Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock." ;;
     "workflow:awaiting-merge") LBL_COLOR="FF8C00"; LBL_DESC="Pipeline: remediated + re-reviewed, awaiting a human merge decision. Managed by ForgeDock." ;;
     "workflow:merged") LBL_COLOR="0E8A16"; LBL_DESC="Pipeline: PR merged, issue closed. Managed by ForgeDock." ;;
+    "workflow:merged-unverified") LBL_COLOR="FBCA04"; LBL_DESC="Pipeline: PR merged but verification failed, needs a human decision. Managed by ForgeDock." ;;
     "workflow:decomposed") LBL_COLOR="BFD4F2"; LBL_DESC="Pipeline: decomposed into sub-issues. Managed by ForgeDock." ;;
     "workflow:invalid") LBL_COLOR="CCCCCC"; LBL_DESC="Pipeline: issue closed as invalid after investigation. Managed by ForgeDock." ;;
     "needs-human") LBL_COLOR="E4E669"; LBL_DESC="Pipeline stalled — requires human intervention. Managed by ForgeDock." ;;

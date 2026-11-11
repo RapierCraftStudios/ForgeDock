@@ -197,6 +197,14 @@ describe("renderLiteReceipt (#4452)", () => {
     assert.ok(!/<!--|undefined|NaN/.test(body), body);
   });
 
+  it("#5426 a fast-forwarded lane lists the skipped stages and why; an upgraded one does not", async () => {
+    const skipped = [{ stage: "plan", why: "small change" }, { stage: "contract freeze", why: "small change" }];
+    const ok = renderLiteReceipt({ lr: await runLightStep(step().ctx), eligibility: ELIG, skipped });
+    assert.match(ok, /\*\*Fast-forward \(investigation decided the depth\):\*\* skipped stages\n  - plan: small change\n  - contract freeze: small change/);
+    assert.ok(!/Fast-forward/.test(renderLiteReceipt({ lr: await runLightStep(step().ctx), eligibility: ELIG })));
+    assert.ok(!/Fast-forward/.test(renderLiteReceipt({ lr: { upgrade: true, reasons: [{ code: "diff_lines", detail: "x" }] }, eligibility: ELIG, skipped })));
+  });
+
   it("an upgraded lane lists the gates that fired and the upgrade reasons; free text is sanitised", async () => {
     const api = { status: "changed", changes: [{ file: "src/foo.js", symbol: "foo", change: "sync-async" }], unknown: [] };
     const r = await runLightStep(step({ api, testRcs: [1, 1], repro: { base: "PASSED", head: "RAN" } }).ctx);
@@ -267,5 +275,17 @@ describe("#4502 light lane fixes", () => {
     const seen = [];
     await runLightTests({ commands: ["a", "b"], timeoutMs: 900000, run: async (x) => { seen.push(x.timeoutMs); return { rc: 0, output: "" }; } });
     assert.deepEqual(seen, [900000, 900000]);
+  });
+});
+
+describe("light lane freezes a test plan (#5445)", () => {
+  const PLAN = { requirement: "R9", proof: "foo returns null for a null argument instead of throwing a TypeError", level: "unit", level_reason: "a direct call observes the cause", repro: "foo handles null", regression: [], env: [], command: "node --test test/foo.test.js" };
+  const strict = (c) => validateContract(c, ISSUE, { repro: true, testPlan: true });
+  it("a derived bug contract without a test_plan row is rejected; with one it is frozen as R1", () => {
+    const bare = deriveLightContract({ title: TITLE, issueText: ISSUE, result: RESULT, files: FILES });
+    assert.match(strict(bare).problems.join("\n"), /R1: test_plan needs a row/);
+    const c = deriveLightContract({ title: TITLE, issueText: ISSUE, result: { ...RESULT, test_plan: [PLAN] }, files: FILES });
+    assert.equal(c.test_plan[0].requirement, "R1");
+    assert.deepEqual(strict(c), { ok: true, problems: [] });
   });
 });

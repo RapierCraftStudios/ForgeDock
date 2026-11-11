@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { loadWatches, validateWatch, planClaims, tick, runWatch, formatStatus, formatClaimPlan } from "./issuewatch.mjs";
-import { isPullRequest, closingPrIssues, releaseInFlight, watchLiveness, DEFAULT_SKIP_LABELS } from "./issuewatch-parity.mjs";
+import { isPullRequest, closingPrIssues, releaseInFlight, watchLiveness, listWatches, alertDeadWatches, DEFAULT_SKIP_LABELS } from "./issuewatch-parity.mjs";
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
 const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, author: { login: "me" }, createdAt: "2026-11-09T00:00:00Z", ...o });
@@ -86,17 +86,18 @@ test("#5313 a release in flight pauses the watch (no claims), the next pass resu
   writeFileSync(join(env, "releases", "r20261110-110000-9", "state.json"), JSON.stringify({ repo: "o/r", status: "done", steps: {} })); // the job ends
   s = await pass();
   assert.equal(s.paused, null); assert.deepEqual(io.batchOps[0], ["start", [1]]);
-  assert.match(formatStatus(s, watch, io.now()), /state: running/);
+  assert.match(formatStatus(s, watch, io.now()), /state: exited \(single pass/);
 });
 
-test("#5313 watchLiveness: a fresh heartbeat runs, an old one is stale, a finished watch is done", () => {
+test("#5313 watchLiveness: a fresh heartbeat runs, an old one is dead, a finished watch is done", () => {
   const beat = (ms) => new Date(NOW - ms).toISOString();
   assert.equal(watchLiveness({ phase: "running", heartbeat: beat(1000), heartbeatEveryMs: 300000 }, NOW).state, "running");
-  assert.equal(watchLiveness({ phase: "running", heartbeat: beat(3600000), heartbeatEveryMs: 300000 }, NOW).state, "stale");
+  assert.equal(watchLiveness({ phase: "running", heartbeat: beat(3600000), heartbeatEveryMs: 300000 }, NOW).state, "dead");
   assert.equal(watchLiveness({ phase: "running", heartbeat: beat(1000), paused: { reason: "release r1 in flight" } }, NOW).state, "paused");
   assert.equal(watchLiveness({ phase: "done", heartbeat: beat(9e9) }, NOW).state, "done");
   assert.equal(watchLiveness(null, NOW).state, "unknown");
-  assert.match(formatStatus({ ...state(), heartbeat: beat(3600000), heartbeatEveryMs: 300000 }, validateWatch("w", {}), NOW), /state: stale/);
+  assert.match(formatStatus({ ...state(), heartbeat: beat(3600000), heartbeatEveryMs: 300000 }, validateWatch("w", {}), NOW), /state: DEAD/);
+  assert.equal(watchLiveness({ phase: "exited", exitReason: "crashed: x", heartbeat: beat(1000) }, NOW).state, "exited");
 });
 
 test("#5313 a batch that reported between the settle check and the add is never added to: a new batch starts", async () => {
@@ -134,4 +135,18 @@ test("#5442 a design:needed issue is skipped with design_pending, whatever skip_
     assert.ok(plan.skip.some((s) => s.number === 2 && /^design_pending/.test(s.reason)));
     assert.match(formatClaimPlan(plan), /skip #2: design_pending/);
   }
+});
+
+test("#5465 a killed watch shows DEAD within 3 heartbeats and the watchdog alerts once per dead heartbeat", async () => {
+  const root = tmpDir("iw-"), now = Date.parse("2026-11-11T14:00:00Z"), dir = join(root, "o__r", "w");
+  mkdirSync(dir, { recursive: true });
+  const beat = (ms) => new Date(now - ms).toISOString();
+  writeFileSync(join(dir, "status.json"), JSON.stringify({ ...state(), heartbeat: beat(3 * 300000 + 120000), heartbeatEveryMs: 300000 }));
+  const sent = [], emit = async (type, data) => { sent.push([type, data]); };
+  assert.equal(listWatches(root, now)[0].live.state, "dead");
+  assert.equal((await alertDeadWatches({ root, now, emit })).length, 1);
+  await alertDeadWatches({ root, now, emit });
+  assert.equal(sent.length, 1); assert.equal(sent[0][0], "watch.dead"); assert.equal(sent[0][1].watch, "w");
+  writeFileSync(join(dir, "status.json"), JSON.stringify({ ...state(), heartbeat: beat(1000), heartbeatEveryMs: 300000 }));
+  assert.equal((await alertDeadWatches({ root, now, emit })).length, 0);
 });

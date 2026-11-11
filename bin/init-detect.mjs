@@ -26,7 +26,7 @@
 
 import { execFileSync } from "child_process";
 import { join, resolve } from "path";
-import { readdirSync, existsSync } from "fs";
+import { readdirSync, existsSync, readFileSync } from "fs";
 
 // ---------------------------------------------------------------------------
 // Field factory helpers
@@ -474,8 +474,78 @@ export async function detectConfig(cwd = process.cwd()) {
       remoteDetected,
       ...repoState,
       stagingMissing: stagingBranchField.source !== "git branch -r",
+      sandboxes: detectSandboxes(gitRoot),
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// verify.sandboxes proposal (#5450)
+// ---------------------------------------------------------------------------
+
+const COMPOSE_FILES = ["docker-compose.test.yml", "docker-compose.test.yaml", "compose.test.yml", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
+const MIGRATION_DIRS = ["migrations", "db/migrate", "db/migrations", "alembic", "prisma/migrations", "drizzle", "supabase/migrations"];
+const TEST_MARKERS = ["pytest.ini", "conftest.py", "tox.ini", "jest.config.js", "jest.config.ts", "vitest.config.ts", "vitest.config.js"];
+
+/** Services (name -> image|null) from a compose file's text; indentation-based, no YAML dependency. */
+function composeServices(text) {
+  const out = {};
+  let inServices = false, cur = null;
+  for (const line of String(text).split("\n")) {
+    if (/^\S/.test(line)) { inServices = /^services\s*:/.test(line); cur = null; continue; }
+    if (!inServices) continue;
+    const svc = /^ {1,4}([A-Za-z0-9_.-]+)\s*:\s*$/.exec(line);
+    if (svc) { cur = svc[1]; out[cur] = null; continue; }
+    const img = /^\s+image\s*:\s*["']?([^\s"']+)/.exec(line);
+    if (img && cur) out[cur] = img[1];
+  }
+  return out;
+}
+
+/**
+ * Propose `verify.sandboxes` from compose files, migration directories and test markers. Pure over `fs` ({existsSync, readFileSync});
+ * returns `{name: "{ image: ... }"}` one-line entries (the forge.yaml form), `{}` when nothing is detected. Postgres/redis
+ * services become image entries; other compose services become compose entries that need them; migrations without a compose
+ * postgres propose one with a migrate `init` placeholder. A proposal only: init writes it commented.
+ */
+export function detectSandboxes(cwd, fs = { existsSync, readFileSync }) {
+  const out = {};
+  const compose = COMPOSE_FILES.find((f) => fs.existsSync(join(cwd, f)));
+  const hasMigrations = MIGRATION_DIRS.some((d) => fs.existsSync(join(cwd, d)));
+  const hasTests = TEST_MARKERS.some((f) => fs.existsSync(join(cwd, f)));
+  if (compose) {
+    let svcs = {};
+    try { svcs = composeServices(fs.readFileSync(join(cwd, compose), "utf8")); } catch { /* unreadable: no proposal from it */ }
+    const infra = [];
+    for (const [name, image] of Object.entries(svcs)) {
+      const base = String(image ?? "").split(":")[0].split("/").pop();
+      if (base === "postgres" || base === "redis") { out[base] = `{ image: ${image} }`; infra.push(base); }
+    }
+    for (const [name, image] of Object.entries(svcs)) {
+      const base = String(image ?? "").split(":")[0].split("/").pop();
+      if (base === "postgres" || base === "redis" || !/^[a-z][a-z0-9_-]*$/.test(name)) continue;
+      out[name] = `{ compose: ${compose}, service: ${name}${infra.length ? `, needs: [${infra.join(", ")}]` : ""} }`;
+    }
+  }
+  if (hasMigrations && !out.postgres && (hasTests || compose)) out.postgres = '{ image: postgres:16, init: "<your migrate command> $SANDBOX_URL" }';
+  else if (hasMigrations && out.postgres && !out.postgres.includes("init:")) out.postgres = out.postgres.replace(/ }$/, ', init: "<your migrate command> $SANDBOX_URL" }');
+  return out;
+}
+
+/** The commented forge.yaml block for a detected proposal; "" when there is none. */
+export function sandboxesProposalYaml(sandboxes) {
+  const names = Object.keys(sandboxes ?? {});
+  if (!names.length) return "";
+  return `
+# =============================================================================
+# TEST SANDBOXES (proposed by init, uncomment to enable; see docs/CONFIG.md verify.sandboxes)
+# =============================================================================
+# A lane creates these only when a contract validate entry names them in env.
+#
+# verify:
+#   sandboxes:
+${names.map((n) => `#     ${n}: ${sandboxes[n]}`).join("\n")}
+`;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +601,7 @@ export function buildMinimalForgeYaml({
   worktreeBase,
   defaultBranch,
   stagingBranch,
+  sandboxes = {},
 }) {
   const e = escapeYamlScalar;
   const descLine = description
@@ -570,5 +641,5 @@ branches:
   default: "${e(defaultBranch)}"
   staging: "${e(stagingBranch)}"
   feature_pattern: "milestone/{slug}"
-`;
+${sandboxesProposalYaml(sandboxes)}`;
 }

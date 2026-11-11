@@ -1526,6 +1526,7 @@ describe("doctor --fix (forge#1944)", () => {
       "workflow:in-review",
       "workflow:awaiting-merge",
       "workflow:merged",
+      "workflow:merged-unverified", // #5443
       "workflow:decomposed",
       "workflow:invalid",
       // forge#2261: bin/labels.json gained a new "workflow:"-prefixed label

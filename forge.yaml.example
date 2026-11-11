@@ -698,6 +698,9 @@ branches:
 # lean:
 #   explore: off            # off | on
 #   explore_model: haiku    # model of the explorer subagent (haiku, sonnet or a model id)
+#   light:
+#     mode: shadow        # off | shadow (default) | on
+#     source: investigation   # investigation (default) | text (kill-switch): the investigation's predicted files and size decide the light lane (#5426)
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)
@@ -1467,3 +1470,11 @@ branches:
 #   mode: auto                 # remote | local-first | local-attested | auto
 #   monthly_minutes: 40000     # default: the plan's included minutes
 #   reserve_pct: 10
+
+# Test sandboxes (#5450): services a lane's validate commands need, created only when a frozen
+# validate entry declares `env: ["postgres"]`. One line per entry; see docs/CONFIG.md `verify.sandboxes`.
+# verify:
+#   sandboxes:
+#     postgres: { image: postgres:16, init: "make migrate DB_URL=$SANDBOX_URL", ttl: 30m }
+#     redis: { image: redis:7 }
+#     http-replay: { fixtures: tests/fixtures/http/, for: integration }

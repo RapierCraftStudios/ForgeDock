@@ -202,6 +202,7 @@ const LABEL_TRANSITIONS = {
   "workflow:remediating": ["workflow:in-review", "workflow:awaiting-merge", "workflow:merged", "workflow:invalid"], // #3541/#3565: remediation → re-review/merge; evidenced reversal allowed
   "workflow:awaiting-merge": ["workflow:merged", "workflow:in-review", "workflow:remediating", "workflow:invalid"], // #1810/#3565: merge queue; evidenced reversal allowed
   "workflow:merged": [],     // terminal — no successors
+  "workflow:merged-unverified": [], // terminal — a human decides (#5443)
   "workflow:invalid": [],    // terminal
   "workflow:decomposed": [], // terminal
 };

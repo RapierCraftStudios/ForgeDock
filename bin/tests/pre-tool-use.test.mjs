@@ -180,6 +180,7 @@ const LABEL_TRANSITIONS = {
   "workflow:remediating": ["workflow:in-review", "workflow:awaiting-merge", "workflow:merged", "workflow:invalid"],
   "workflow:awaiting-merge": ["workflow:merged", "workflow:in-review", "workflow:remediating", "workflow:invalid"],
   "workflow:merged": [],
+  "workflow:merged-unverified": [],
   "workflow:invalid": [],
   "workflow:decomposed": [],
 };

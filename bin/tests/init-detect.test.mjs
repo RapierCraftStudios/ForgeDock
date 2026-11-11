@@ -720,3 +720,16 @@ describe("detectConfig — empty repo / no remote meta (forge#4173)", async () =
     assert.equal(after.branches.staging.value, "staging");
   });
 });
+
+import { detectSandboxes, sandboxesProposalYaml } from "../init-detect.mjs";
+it("#5450 detectSandboxes proposes postgres/redis images, compose services and a migrate init", () => {
+  const files = { "/p/docker-compose.yml": "services:\n  db:\n    image: postgres:16\n  cache:\n    image: redis:7\n  api:\n    build: .\n", "/p/migrations": "", "/p/pytest.ini": "" };
+  const fs = { existsSync: (f) => f in files, readFileSync: (f) => files[f] };
+  const s = detectSandboxes("/p", fs);
+  assert.match(s.postgres, /image: postgres:16, init:/);
+  assert.equal(s.redis, "{ image: redis:7 }");
+  assert.match(s.api, /compose: docker-compose.yml, service: api, needs: \[postgres, redis\]/);
+  assert.match(sandboxesProposalYaml(s), /^#     redis: /m);
+  assert.deepEqual(detectSandboxes("/q", { existsSync: () => false, readFileSync: () => "" }), {});
+  assert.equal(sandboxesProposalYaml({}), "");
+});

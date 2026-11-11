@@ -995,6 +995,17 @@ async function batchHealthSection(c, batchId) {
   } catch { /* status never fails on batch health */ }
 }
 
+/** #5465: issue-watch health; a dead watch is flagged and alerted once (events.webhook_url). */
+async function watchHealthSection(c) {
+  try {
+    const [{ listWatches, alertDeadWatches }, { watchRoot }, { makeEventEmitter }, { readEvents }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs"), import("./engine/events.mjs"), import("./engine-cli.mjs")]);
+    const rows = listWatches(watchRoot());
+    if (!rows.length) return;
+    await alertDeadWatches({ root: watchRoot(), emit: (type, data, ctx) => makeEventEmitter({ repo: ctx.repo, config: readEvents(c.cwd) }).emitEvent(type, data, ctx) });
+    c.stdout.write(`  issue-watch\n${rows.map((w) => `    ${w.name} (${w.repo}): ${w.live.state === "dead" ? "DEAD" : w.live.state}${["dead", "exited"].includes(w.live.state) ? ` - ${w.live.reason}` : ""}`).join("\n")}\n\n`);
+  } catch { /* status never fails on watch health */ }
+}
+
 /** Compact status screen for configured/managed directories. */
 /** #5174: the status `host` row: the host_overloaded line, else `load X.X/core ...`; null (rendered `unknown`) on any failure. */
 async function hostLoadRow(cwd) {
@@ -1154,6 +1165,7 @@ async function initFlow(c) {
       worktreeBase: draft.paths.worktreeBase.value,
       defaultBranch: draft.branches.default.value,
       stagingBranch: draft.branches.staging.value,
+      sandboxes: draft.meta?.sandboxes, // #5450: commented verify.sandboxes proposal
     });
     atomicWriteFile(outputPath, content);
     ensureToolStateIgnored(c);
@@ -3942,7 +3954,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "docs", "review-staging", "release", "gc", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "docs", "review-staging", "release", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4034,6 +4046,7 @@ switch (command) {
     if (statusDir) c.cwd = resolve(statusDir);
     await statusScreen(c);
     await batchHealthSection(c, bi === -1 ? null : statusArgs[bi + 1] ?? null);
+    await watchHealthSection(c);
     break;
   }
   case "uninstall":
@@ -4176,6 +4189,12 @@ switch (command) {
     // Reaper (#4180): dry-run report by default; --apply reclaims only ForgeDock-owned resources (ledger, label, lane naming, own tmp).
     const { runGc } = await import("./gc.mjs");
     exitCode = await runGc(restArgs);
+    break;
+  }
+  case "sandbox": {
+    // #5450: operator control of the lane test sandboxes (verify.sandboxes): up <name>... | down | ls
+    const { sandboxFromCli } = await import("./lean/testsandbox.mjs");
+    exitCode = await sandboxFromCli(restArgs);
     break;
   }
   case "orchestrate": {
