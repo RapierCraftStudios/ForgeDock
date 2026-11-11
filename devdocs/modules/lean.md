@@ -3064,3 +3064,5 @@ path is authorized (#5380).
 ## Entry 2026-11-11 — Test sandboxes from the validate `env` (#5450)
 
 `testsandbox.mjs` (0 LLM calls) provisions `verify.sandboxes` entries (`parseVerify`, `verify.mjs`) that a frozen contract's validate entries name in `env`, after the contract freeze in `lean.mjs`. No `env`: no provider call. Containers are named `forge-sbx-<lane>-<name>`, bound to ephemeral loopback ports, labelled `forgedock.*` and registered in the lane ledger as kind `container` before `docker run`, so the existing `teardown` container loop and `forgedock gc` reclaim them after a crash; `sandboxDown` removes them on every exit. `laneEnv()` carries `SANDBOX_<NAME>_URL`. An undefined name or a host without Docker ends `needs-human` (`env.tool_missing` for no Docker, so orchestrate re-places the lane), never a skip. `forgedock sandbox up|down|ls` is the operator view; each sandbox adds a `FORGE:SANDBOX` line to the lane decisions. Separate from the lane execution providers (`execution.mjs`).
+
+Image cache (#5450): `batchImageCache` (`testsandbox.mjs`) is shared by every lane of the batch process, so an image is inspected or pulled once per batch.
