@@ -53,3 +53,23 @@ describe("validateForgeYaml (#5315)", () => {
     assert.deepEqual([...missing], [], `documented sections missing from TOP_LEVEL: ${[...missing].join(", ")}`);
   });
 });
+
+describe("gate.required_checks type (#5504)", () => {
+  it("accepts block and flow lists, flags a scalar", () => {
+    assert.deepEqual(codes(BASE + 'gate:\n  required_checks:\n    - "CI"\n'), []);
+    assert.deepEqual(codes(BASE + 'gate:\n  required_checks: ["CI", "lint"]\n'), []);
+    assert.deepEqual(codes(BASE + "gate:\n  required_checks: CI\n").sort(), ["list-not-array:gate.required_checks", "wrong-type:gate.required_checks"]);
+  });
+});
+
+describe("list-not-array warning (#5504)", () => {
+  it("is silent when lists parse to arrays", () => {
+    assert.deepEqual(codes(BASE + 'gate:\n  required_checks:\n    - "CI"\n'), []);
+    assert.deepEqual(codes(BASE + 'gate:\n  required_checks: ["CI"]\n'), []);
+  });
+  it("warns, at warn level, when a list-valued key parses to a non-array", () => {
+    const f = validateForgeYaml(BASE + "gate:\n  - CI\n");
+    assert.deepEqual(f.map((x) => `${x.level}:${x.code}:${x.key}`), ["warn:list-not-array:gate"]);
+    assert.ok(validateForgeYaml(BASE + "gate:\n  required_checks: CI\n").some((x) => x.code === "list-not-array"));
+  });
+});

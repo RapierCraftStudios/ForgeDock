@@ -306,3 +306,15 @@ describe("formatVersionAvailableSummary", () => {
     assert.equal(formatVersionAvailableSummary(), "Changelog.");
   });
 });
+
+describe("parseForgeYaml lists (forge#5504)", () => {
+  it("parses block and flow lists under a section, quote-aware", async () => {
+    const { parseForgeYaml } = await import("../forge-utils.mjs");
+    const raw = 'gate:\n  required_checks:\n    - "CI"\n    - lint # c\n  flow: ["a, b", c]\n  empty: []\n  one: x\nname: [p, q]\nquoted: "[z]"\n';
+    assert.deepEqual(parseForgeYaml(raw), {
+      gate: { required_checks: ["CI", "lint"], flow: ["a, b", "c"], empty: [], one: "x" },
+      name: ["p", "q"],
+      quoted: "[z]",
+    });
+  });
+});
