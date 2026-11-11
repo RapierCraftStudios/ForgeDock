@@ -1828,7 +1828,7 @@ describe("conformance shadow mode (the default)", () => {
     const r = await runShadow(w, { dir, reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
     assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
     assert.equal(r.code, "conformance.omission"); assert.equal(builders(w).length, 3, "one builder resume, as in enforce");
-    assert.deepEqual(r.conformance, { mode: "enforce", would: null, risk: true });
+    assert.deepEqual(noAdq(r.conformance), { mode: "enforce", would: null, risk: true });
     const log = readLog(dir, 7);
     assert.deepEqual(log.filter((e) => e.event === "CONFORMANCE_RISK_ENFORCED").map((e) => e.paths), [["src/foo.js"]], "logged once (sticky across the resume)");
     assert.equal(log.find((e) => e.event === "RUN_TERMINAL").conformance_mode, "enforce");
@@ -1843,7 +1843,7 @@ describe("conformance shadow mode (the default)", () => {
     const s = world({ contract: { ...CONTRACT, preserve: [] }, changed: ["src/auth/foo.js", "test/foo.test.js"], reviews: [omission()] });
     const rs = await runShadow(s, { reviewTrigger: { mode: "shadow", riskPaths: ["db/**"] } });
     assert.equal(rs.terminalReason, "merged", "an auth path with no declared glob stays shadow");
-    assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
+    assert.deepEqual(noAdq(rs.conformance), { mode: "shadow", would: "nonconforming", risk: false });
   });
 
   it("#5207 shadow: an in-lane engineering deferral (bucket new-issue) resumes the builder once and is never filed", async () => {
@@ -1878,7 +1878,7 @@ describe("conformance shadow mode (the default)", () => {
     const e = world({ contract: k, changed, reviews: [omission(), omission()] });
     const re = await runShadow(e, { reviewTrigger: { mode: "shadow", riskPaths: [], enforceDomains: ["frontend"] } });
     assert.equal(re.terminalReason, "needs-human"); assert.equal(e.merges.length, 0);
-    assert.deepEqual(re.conformance, { mode: "enforce", would: null, risk: true });
+    assert.deepEqual(noAdq(re.conformance), { mode: "enforce", would: null, risk: true });
     assert.ok(traj(e)[0].includes("Conformance enforced (review.enforce_domains): frontend"));
   });
 
@@ -8347,5 +8347,38 @@ describe("#5440 precheck scope: directory deliverable and renumbered migration",
     const c = mk("db/migrations/0637_*");
     assert.equal(creep(c, ["db/migrations/0639_add_x.sql"]).length, 0);
     assert.equal(creep(c, ["db/migrations/0639_add_x.sql", "src/billing.js"]).length, 1);
+  });
+});
+
+/** #5449: the conformance record also carries test_adequacy counts; these assertions pin the older fields. */
+function noAdq({ test_adequacy: _t, ...c } = {}) { return c; }
+
+describe("test adequacy gate in the lane (#5449)", () => {
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const bugWorld = (contract) => {
+    const w = world({ labels: [{ name: "bug" }], contract: { ...CONTRACT, repro_test: RT, test_plan: TEST_PLAN, ...contract } });
+    w.io.redGreen = async () => ({ base: "FAILED", head: "RAN" });
+    return w;
+  };
+
+  it("test adequacy: FORGE:REVIEW renders the table and RUN_TERMINAL carries the telemetry fields", async () => {
+    const w = bugWorld({});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const review = w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->"));
+    assert.match(review, /Test adequacy/); assert.match(review, /BASE=FAILED HEAD=RAN/); assert.match(review, /adequate/);
+    const term = w.telemetry.find((x) => x.event === "RUN_TERMINAL");
+    assert.equal(typeof term.tests_declared, "number"); assert.equal(typeof term.tests_ran, "number");
+    assert.equal(term.repro_quality, "red_green");
+    assert.equal(term.first_review === undefined || typeof term.first_review === "object", true, "existing fields keep their shape");
+  });
+
+  it("test adequacy: a weak test (patch-echo repro) gets exactly one builder resume, then is recorded in the table and merges", async () => {
+    const w = bugWorld({ repro_quality: "patch-echo" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan, build and one resume to strengthen the test");
+    const review = w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->"));
+    assert.match(review, /weak \(repro quality patch-echo\)/);
   });
 });

@@ -1369,7 +1369,8 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
 const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? ""));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
-const DEFAULT_ENFORCED_KINDS = ["e2e_row"];
+// #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
+const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
 const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
 /**
  * #4726: whether a validate command runs a real end-to-end check: an entry of `verify.e2e_checks`, a file of the e2e spec set

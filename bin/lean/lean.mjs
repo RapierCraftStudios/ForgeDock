@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
+import { testAdequacyRows, testAdequacyFailures, testAdequacyTelemetry, adequacyCounts, regressionRan } from "./testadequacy.mjs";
 import { readSelfReview, compareSelfReview, firstReviewRecord, selfCheckFailures } from "./selfreview.mjs";
 import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, ENV_ENGINE_OWNED_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
@@ -407,6 +408,7 @@ export async function runCore(o) {
   let domains = [], domainsLogged = null; // #5099: review domains the diff touches (review-roster.sh path triggers)
   let reproQ = null; // #5446: repro_quality of the frozen repro_test, carried on RUN_TERMINAL
   let firstReview = null; // #5345: the first gate judgement and review.incomplete of the first reply, on RUN_TERMINAL
+  let adequacy = null, adequacyIn = {}, adequacyTel = null; // #5449: the Test adequacy rows of the last gate and the facts they were computed from
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   let light = false, modelMs = 0; // #4451: the light lane finished without an upgrade (the same structure/hotspot gates as the full lane, #4502); summed session time
@@ -546,7 +548,7 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
-      ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}),
+      ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
@@ -582,7 +584,7 @@ export async function runCore(o) {
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(followupsFiled.length ? { followups: followupsFiled.map((f) => ({ ...f })) } : {}), ...(pendingRecord().length ? { pendingFollowups: pendingRecord() } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
-      ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced), ...(Object.keys(kinds).length ? { kinds: [...failureClasses] } : {}) } } : {}), ...extra };
+      ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, ...(adequacyCounts(adequacy) ? { test_adequacy: adequacyCounts(adequacy) } : {}), risk: Boolean(riskEnforced), ...(Object.keys(kinds).length ? { kinds: [...failureClasses] } : {}) } } : {}), ...extra };
     if (deferTail && o.deferPostRun) done.postRun = () => postRun.run(); // the caller runs it once the lane slot is free
     else await postRun.run();
     return done;
@@ -2934,7 +2936,7 @@ export async function runCore(o) {
         baselineRuns.push({ ...b, rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") });
       }
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
-      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro, validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
@@ -2957,6 +2959,7 @@ export async function runCore(o) {
       let mutBlock = [];
       if (conformanceMutation === "report" && io.runCommand) { // #4913: report-only unless conformance_kinds enforces the kind
         const m = await phaseLedger.during("validate", () => runMutationCheck({ targets: mutationTargets(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered }), files, base, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), tmp: runTmp ?? undefined }));
+        adequacyIn.mutation = m.results;
         const mf = mutationFailures(m.results);
         if (m.results.length || m.skipped) ev({ event: "REQUIREMENT_MUTATION_SURVIVED", ids: mf.map((f) => f.detail.split(" ")[0]), checked: m.results.length, skipped: m.skipped || undefined });
         if (mf.length) {
@@ -2965,11 +2968,19 @@ export async function runCore(o) {
           if (!T.decisions.includes(note)) T.decisions.push(note);
         }
       }
+      // #5449: test adequacy per requirement; missing blocks a bug lane, weak gets one builder resume
+      const adqEv = { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered };
+      // enforced on a bug lane with lean.repro_test on, unless the plan declared the bug untestable (repro_test "none" with a reason)
+      Object.assign(adequacyIn, adqEv, { bug: reproOn() && effective.repro_test !== "none" });
+      adequacy = testAdequacyRows(effective, { ...adqEv, mutation: adequacyIn.mutation, repro: adequacyIn.repro });
+      adequacyTel = testAdequacyTelemetry(effective, adequacy, { repro: adequacyIn.repro, mutation: adequacyIn.mutation, regression: regressionRan(effective, adequacyIn) });
+      // an environment or repro-verdict failure is settled first (already-fixed, env.repro_unrunnable): adequacy never mixes into it
+      const adqFail = pc.failures.some((f) => ENV_CODES.includes(f.code) || String(f.kind ?? "").startsWith("repro")) ? [] : testAdequacyFailures(adequacy, { bug: adequacyIn.bug, firstRound: resumes === 0 });
       Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
       // #4323/#4334: a missing host tool or module, or a repro test the harness could not run, is an environment error:
       // never a conformance failure, never a builder resume
       const envFails = pc.failures.filter((f) => ENV_CODES.includes(f.code));
-      const pre = [...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems, ...mutBlock];
+      const pre = [...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems, ...mutBlock, ...adqFail];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       // #5080: the repro already passes on the base and the diff changes no source: the fix is on the base, not missing
       if (alreadyFixedOnBase(pre, files, IGNORE)) return { state: "already-fixed", by: "precheck", failures: pre };
@@ -2991,6 +3002,13 @@ export async function runCore(o) {
         triggerSkipped = false;
       }
       let d = await reviewOnce();
+      if (d.state === "conforms" || d.state === "nonconforming") { // #5449: the reviewer's test_adequacy judgment joins the engine's rows
+        adequacy = testAdequacyRows(effective, { ...adequacyIn, mutation: adequacyIn.mutation, review });
+        adequacyTel = testAdequacyTelemetry(effective, adequacy, { repro: adequacyIn.repro, mutation: adequacyIn.mutation, regression: regressionRan(effective, adequacyIn) });
+        const seen = new Set(pre.map((f) => f.detail));
+        const more = testAdequacyFailures(adequacy, { bug: adequacyIn.bug, firstRound: resumes === 0 }).filter((f) => !seen.has(f.detail));
+        if (more.length) d = { state: "nonconforming", failures: [...(d.state === "nonconforming" ? d.failures : []), ...more], by: "review", review };
+      }
       // #4397: the verifier runs only on a change every gate and the reviewer passed; in enforce its findings block
       if ((verifierCfg.mode !== "off" || relaxations.length) && d.state === "conforms" && !pre.length) { // #5237: a relaxation lane always gets the independent second look
         const vf = await runVerifier();
@@ -3118,10 +3136,10 @@ export async function runCore(o) {
         ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }) + verifierSection());
+        await post("FORGE:REVIEW", renderShadowReview({ adequacy, would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }) + verifierSection());
       } else {
         T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderReview(review, effective) + verifierSection());
+        await post("FORGE:REVIEW", renderReview(review, effective, adequacy) + verifierSection());
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });

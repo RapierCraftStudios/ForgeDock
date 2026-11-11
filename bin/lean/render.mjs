@@ -155,20 +155,27 @@ export function parseAmendmentsComment(body) {
 }
 
 /** FORGE:REVIEW for a conforming change: the engine-computed verdict and the reviewer's rows. */
-export function renderReview(rv, contract) {
+/** #5449: the Test adequacy table (rows from testadequacy.mjs), or "" without rows. */
+export function renderTestAdequacy(rows) {
+  if (!rows?.length) return "";
+  const body = rows.map((r) => `| ${esc(r.id)} | ${esc(r.planned)} | ${esc(r.test)} | ${esc(r.level)} | ${esc(r.redgreen)} | ${esc(r.mutation)} | ${esc(r.regression)} | ${esc(r.verdict === "weak" ? `weak (${r.reason})` : r.verdict)} |`).join("\n");
+  return `\n\n**Test adequacy**\n| Requirement | Planned proof | Test written | Level | Red→green | Mutation | Regression set | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${body}`;
+}
+
+export function renderReview(rv, contract, adequacy = null) {
   const rows = contract.requirements.map((r) => {
     const x = (rv.requirements ?? []).find((y) => y.id === r.id) ?? {};
     const oob = r.verify === "out_of_band" ? ` (out of band${r.evidence ? `: ${r.evidence}` : ""})` : "";
     return `| ${esc(r.id)} | ${oob ? esc(`${x.status ?? ""}${oob}`) : esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
   }).join("\n");
   const cov = rv.issue_coverage ?? [];
-  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}`;
+  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none${renderTestAdequacy(adequacy)}\n\n**Notes:** ${escl(rv.summary)}`;
 }
 
 /** FORGE:REVIEW in shadow mode: what the enforced gate would have done, without enforcing it. */
-export function renderShadowReview({ would, failures = [], review, contract, degraded = null }) {
+export function renderShadowReview({ would, failures = [], review, contract, degraded = null, adequacy = null }) {
   const head = would === "conforms" ? "would PASS" : `would BLOCK (${escl(would)})`;
-  const rows = review ? `\n\n${renderReview(review, contract).split("\n").slice(2).join("\n")}` : "";
+  const rows = review ? `\n\n${renderReview(review, contract, adequacy).split("\n").slice(2).join("\n")}` : "";
   const fl = failures.length ? `\n\n**What the enforced gate would have flagged:**\n${failures.slice(0, 30).map((f) => `- \`${escl(f.code)}\`: ${escl(f.detail)}`).join("\n")}` : "";
   const dg = degraded ? `\n\n**Review degraded:** the review stayed incomplete after the targeted re-ask; merged with label \`review-degraded\`, follow-up ${escl(degraded)}.` : "";
   return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. In shadow mode a requirement not implemented (found by the review or the precheck), a regression, or a review without complete rows blocks; accepted deferrals are filed as follow-ups.${fl}${dg}${rows}`;
