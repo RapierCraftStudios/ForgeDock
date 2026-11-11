@@ -971,6 +971,9 @@ describe("core work-on", () => {
   });
 });
 
+import { e2eCheckFor } from "./postdeploy-check.mjs";
+import { autoPostDeployE2e } from "./conformance.mjs";
+
 describe("conformance gate (frozen contract, precheck, structured review)", () => {
   const Q2 = "Existing callers of foo keep working.";
   const two = (d2 = "deliver", extra = {}) => ({ ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: Q2, disposition: d2, ...(d2 === "defer" || d2 === "post-deploy" ? { bucket: "post-deploy" } : {}), ...extra }],
@@ -1047,6 +1050,18 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(w.comments.find((c) => c.includes("FORGE:AMENDMENT")), /\| defer \| R2 \| callers live in another module/);
     assert.ok(w.comments.findIndex((c) => c.includes("FORGE:REVIEW")) < w.comments.findIndex((c) => c.includes("FORGE:TRACKED")));
     assert.equal(w.closed[0].at(-1), "completed");
+  });
+
+  it("#5468 prod-only e2e_unverified is the only finding: the engine converts it to a post-deploy check and the lane merges", async () => {
+    const PQ = "https://store.example.io/{slug}/agent.md returns 200 for every published listing [type:e2e]";
+    const k = two("deliver", { quote: PQ });
+    const kFrozen = autoPostDeployE2e(k).contract; // the engine's freeze rewrite: the reviewer judges the post-deploy row
+    const w = world({ contract: k, body: `${ISSUE_BODY}\n- ${PQ}`, claims: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], reviews: [conf({ issue_coverage: [{ quote: "foo must handle a null argument without throwing.", status: "covered" }, { quote: PQ, status: "covered" }] }, kFrozen, files2)], resumeChanged: files2 });
+    const g = e2eCheckFor("R2", PQ); // the fake git cannot show the engine's commit: serve the generated entry as HEAD's checks file
+    w.baseFiles = { "HEAD:.forge/post-deploy-checks.json": JSON.stringify({ [g.id]: g.entry }) };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.notEqual(r.code, "conformance.e2e_unverified");
+    assert.equal(w.merges.length, 1);
   });
 
   for (const d of ["defer", "post-deploy"]) {
