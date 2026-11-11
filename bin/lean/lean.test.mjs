@@ -1570,6 +1570,20 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0); assert.equal(again, 2, "the toolchain prepare plus exactly one provisioning retry");
   });
 
+  it("#5447 a failed install covering a changed file blocks through the gate (needs-human env.tool_missing, not merged); an unrelated failed install is only logged", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }];
+    const w = world({ validation: v }); let calls = 0;
+    w.io.deps = { prepare: async () => { calls++; return [{ status: "failed", eco: "npm", dir: ".", key: null, ms: 1, reason: "install failed: ERESOLVE" }]; } };
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w.merges.length, 0);
+    assert.equal(calls, 2, "the toolchain prepare plus exactly one provisioning retry");
+    assert.match(nhBody(w), /dependency install failed \(npm: install failed: ERESOLVE\) for a package the changed file/);
+    const w2 = world({ validation: v });
+    w2.io.deps = { prepare: async () => [{ status: "failed", eco: "poetry", dir: "services/other", key: null, ms: 1, reason: "install failed" }] };
+    const r2 = await run(w2, { conformance: "enforce" });
+    assert.notEqual(r2.code, OUTCOME_CODES.ENV_TOOL_MISSING);
+  });
+
   it("#4323 a validate the host cannot run (missing module) ends env.tool_missing naming it: no builder resume, no reviewer", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
     for (const conformance of ["shadow", "enforce"]) {
