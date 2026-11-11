@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as nodeFs from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -294,4 +295,34 @@ test("failingNames reads TAP, spec and pytest output and ignores skips", () => {
   assert.deepEqual(failingNames("  ✖ spec one (1.2ms)\n✖ failing tests:\n  ✖ spec one (1.2ms)"), ["spec one"]);
   assert.deepEqual(failingNames("FAILED tests/t.py::test_x - assert 1 == 2"), ["tests/t.py::test_x"]);
   assert.equal(failingNames("all fine"), null);
+});
+
+test("guards sharing one runner run as one invocation over the union of base copies; a red batch falls back per file (#5436)", async () => {
+  const guard = (issue, path) => ({ v: 1, issue, pr: issue, merge_sha: "a".repeat(40), tests: [{ path, ids: [] }], hunks: [], why: `g${issue}` });
+  const selected = [{ guard: guard(1, "src/a.test.mjs"), reason: "r" }, { guard: guard(2, "src/b.test.mjs"), reason: "r" }, { guard: guard(3, "src/a.test.mjs"), reason: "r" }];
+  const fs = { ...nodeFs, mkdirSync() {}, writeFileSync() {}, rmSync() {} };
+  const git = async () => "body";
+  const calls = [];
+  const green = await runGuards({ selected, mergeBase: "base", contract: {}, git, fs, cwd: "/w", env: {}, runCommand: async (a) => { calls.push(a.command); return { rc: 0, output: "ok" }; } });
+  assert.deepEqual(calls, ["node --test src/a.test__guardbase.mjs src/b.test__guardbase.mjs"]);
+  assert.equal(green.runs.length, 3);
+  assert.equal(green.batches, 1);
+  assert.equal(green.failures.length, 0);
+  const seen = [];
+  const red = await runGuards({ selected: selected.slice(0, 2), mergeBase: "base", contract: {}, git, fs, cwd: "/w", env: {}, runCommand: async (a) => {
+    seen.push(a.command);
+    return a.cwd !== "/w" || /a\.test__guardbase\.mjs$/.test(a.command) ? { rc: 0, output: "ok" } : { rc: 1, output: "not ok 1 - b\n" };
+  } });
+  assert.equal(seen[0], "node --test src/a.test__guardbase.mjs src/b.test__guardbase.mjs");
+  assert.ok(seen.length > 2, "the failed batch reran per file");
+  assert.equal(red.batches, 0);
+  assert.deepEqual(red.failures.map((f) => f.guard), ["#2"], "the failing guard is still attributed to its own test");
+});
+
+test("a template that does not end in the path is never batched", async () => {
+  const guard = (issue, path) => ({ v: 1, issue, pr: issue, merge_sha: "a".repeat(40), tests: [{ path, ids: [] }], hunks: [], why: "w" });
+  const fs = { ...nodeFs, mkdirSync() {}, writeFileSync() {}, rmSync() {} };
+  const calls = [];
+  await runGuards({ selected: [{ guard: guard(1, "a.test.mjs"), reason: "r" }, { guard: guard(2, "b.test.mjs"), reason: "r" }], mergeBase: "b", contract: {}, guardCommand: { ".mjs": "run {path} --quiet" }, git: async () => "x", fs, cwd: "/w", env: {}, runCommand: async (a) => { calls.push(a.command); return { rc: 0, output: "" }; } });
+  assert.deepEqual(calls.sort(), ["run a.test__guardbase.mjs --quiet", "run b.test__guardbase.mjs --quiet"]);
 });

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePagesConfig, pageFiles, contractBriefProblems, pageFailures, designSpecApproved } from "./pagegate.mjs";
+import { parsePagesConfig, pageFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved } from "./pagegate.mjs";
 import { pagePlanNote, domainChecksBlock } from "./prompts.mjs";
 import { pathDomains } from "./review-trigger.mjs";
 import { validateContract, precheck } from "./conformance.mjs";
@@ -63,5 +63,15 @@ describe("page gate (#5428)", () => {
     assert.ok(d.includes("design") && d.includes("seo-geo"));
     assert.ok(!pathDomains(storeFiles).includes("design"));
     assert.match(domainChecksBlock(["seo-geo"]), /canonical/);
+  });
+});
+
+describe("design hold (#5442)", () => {
+  it("holds design:* before approval and lifts on design:approved", () => {
+    assert.equal(designHold([{ name: "design:needed" }]), "design:needed");
+    assert.equal(designHold(["design:needed", "design:approved"]), null);
+    assert.equal(designHold([{ name: "bug" }]), null);
+    assert.equal(designLabelApproved([{ name: "design:approved" }]), true);
+    assert.equal(designLabelApproved([]), false);
   });
 });

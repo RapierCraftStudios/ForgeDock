@@ -76,6 +76,14 @@ export function designSpecApproved(comments) {
   return (comments ?? []).map((c) => String(c?.body ?? c ?? "")).some((b) => b.includes("FORGE:DESIGN_SPEC") && !/"?(?:status|approved)"?\s*[:=]\s*"?(?:draft|rejected|false)/i.test(b));
 }
 
+/** #5442: the first `design:*` label before approval (`design:needed`...), or null; `design:approved` lifts the hold. */
+export function designHold(labels) {
+  const names = (labels ?? []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
+  return names.includes("design:approved") ? null : names.find((n) => n.startsWith("design:")) ?? null;
+}
+/** #5442: true when the `design:approved` label is on the issue. */
+export const designLabelApproved = (labels) => (labels ?? []).some((l) => (typeof l === "string" ? l : l?.name) === "design:approved");
+
 /** Added lines per file from a unified diff. */
 export function addedByFile(diff) {
   const out = {}; let cur = null;
