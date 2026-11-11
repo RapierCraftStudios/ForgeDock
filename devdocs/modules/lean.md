@@ -207,6 +207,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    block the rename and are left untouched, any other mentioning file does), commit it (`MECHANICAL_FIX` event) and re-run the detector.
    #5405: `applyEnumerating` collects each test's applied rows per test and adds them to `applied` only after that test's write
    succeeds; a failed write moves only that test's rows to `remaining`, so earlier tests' written fixes stay applied and committed.
+   #5480: a `files` group counts a test only when its literals sit next to path context (an `.mjs`/`.js` suffix, `readdir`, `import(` or the
+   directory's name within two lines); a line asserting `.has(x)` of an imported Set never does. `verifyApplied` runs each edited test
+   (`node --test <file>`) and restores a red or unrunnable one, leaving its rows to the narrow session, so no red edit is committed.
+   forge.yaml `lean.enumerating.mechanical: false` (parsed by `readVerify` into `enumeratingMechanical`) skips the mechanical step.
    What is left goes to one narrow session per stage: the enumerating round also carries the pending duplicate-export and
    English-copy findings (`mergeNarrowTasks`; their gates re-check). The session runs profile `narrow` (no lane text,
    CLAUDE.md off, `prompts.mjs` `narrowFixPrompt`: contract excerpt, failure output and named files, `NARROW_PROMPT_MAX`

@@ -1060,6 +1060,10 @@ verify:
   flaky: "memory-erasure,e2e-pdf"  # optional; known-flaky CI job names: reported, never block or feed the builder
   post_merge: pnpm -r typecheck # optional; run on the merged tree at base-sync before the push (default: the lane's scoped typecheck)
   duplicate_exports: false      # optional; turn off the same-app duplicate-export check (default true)
+
+lean:
+  enumerating:
+    mechanical: false          # optional; kill switch for the engine's own enumerating-test edits (default true; #5480): a model session fixes them instead
   invariants:                   # optional block list; repo-wide check commands that always run before the PR
     - pnpm check:registry
   guard_command:                # optional; per-extension command for the guard gate's base test files

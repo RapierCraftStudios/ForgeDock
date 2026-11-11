@@ -43,18 +43,42 @@ export function exportNames(text, path = "") {
   return [...out];
 }
 
-/** Line (1-based) of the first literal/key mention of any of `names` in `text`, and the distinct names mentioned. */
-function mentions(text, names) {
+const PATH_CONTEXT = /\.[cm]?[jt]sx?\b|readdir|import\(/;
+const SUFFIXED = /\.[cm]?[jt]sx?["'`]$/;
+/** Local names bound by an ES import (named, default or namespace). */
+function importedNames(text) {
+  const out = new Set();
+  for (const m of text.matchAll(/import\s+(?:([A-Za-z_$][\w$]*)\s*,?\s*)?(?:\*\s+as\s+([A-Za-z_$][\w$]*)|\{([^}]*)\})?\s*from\s*["']/g)) {
+    for (const n of [m[1], m[2]]) if (n) out.add(n);
+    for (const part of (m[3] ?? "").split(",")) { const n = /([A-Za-z_$][\w$]*)\s*$/.exec(part.trim())?.[1]; if (n) out.add(n); }
+  }
+  return out;
+}
+
+/**
+ * Line (1-based) of the first literal/key mention of any of `names` in `text`, and the distinct names mentioned. `dir` (files groups,
+ * #5480): a bare word that merely equals a stem is not a mention; it needs an extension, or readdir / import( / the directory's name
+ * within two lines, and a line asserting `.has(x)` of an imported Set is never one.
+ */
+function mentions(text, names, dir) {
   const hit = new Set();
   let line = 0;
+  const rows = dir ? text.split("\n") : [], imported = dir ? importedNames(text) : null;
+  const dirRe = dir ? new RegExp(`(?<![\\w$])${esc(dir)}(?![\\w$])`) : null;
   for (const n of names) {
     if (n.length < MIN_NAME) continue;
-    const re = new RegExp(`(["'\`])${esc(n)}\\1|(?:^|[{,\\s])${esc(n)}\\s*:(?!:)`, "m");
-    const m = re.exec(text);
-    if (!m) continue;
-    hit.add(n);
-    const l = text.slice(0, m.index).split("\n").length;
-    if (!line || l < line) line = l;
+    const re = new RegExp(`(["'\`])${esc(n)}${dir ? "(?:\\.[cm]?[jt]sx?)?" : ""}\\1|(?:^|[{,\\s])${esc(n)}\\s*:(?!:)`, "gm");
+    for (const m of text.matchAll(re)) {
+      const l = text.slice(0, m.index).split("\n").length;
+      if (dir) {
+        if ([...rows[l - 1].matchAll(/([A-Za-z_$][\w$]*)\.has\(/g)].some((x) => imported.has(x[1]))) continue;
+        const near = rows.slice(Math.max(0, l - 3), l + 2).join("\n");
+        if (!SUFFIXED.test(m[0]) && !PATH_CONTEXT.test(near) && !dirRe.test(near)) continue;
+      }
+      hit.add(n);
+      if (!line || l < line) line = l;
+      break;
+    }
   }
   return { hit, line };
 }
@@ -98,14 +122,14 @@ async function loadTests(git, cwd) {
 }
 
 /** Tests enumerating one group: [{test, line, why}]. `exports` groups also match Object.keys/entries of an import of `module`. */
-function enumerators(tests, { module, names, kind }, pkgs) {
+function enumerators(tests, { module, names, kind, strict }, pkgs) {
   const out = [];
   const usable = names.filter((n) => n.length >= MIN_NAME);
   if (usable.length < 2) return out;
   const need = Math.min(3, usable.length);
   for (const t of tests) {
     if (t.path === module) continue;
-    const { hit, line } = mentions(t.text, usable);
+    const { hit, line } = mentions(t.text, usable, kind === "files" && strict ? basename(module) : undefined);
     if (hit.size >= need) { out.push({ test: t.path, line, why: `literal list of ${hit.size} sibling ${kind === "files" ? "file names" : "export names"}` }); continue; }
     if (kind !== "exports") continue;
     for (const b of importBindings(t.text, t.path, module, pkgs)) {
@@ -116,6 +140,8 @@ function enumerators(tests, { module, names, kind }, pkgs) {
   return out.slice(0, MAX_TESTS_PER_MODULE);
 }
 
+/** #5480: a directory of source files has stems that collide with common words, so its lists need path context; data files (locale namespaces) do not. */
+const strictDir = (files, dir) => files.some((f) => dirname(f) === dir && SOURCE_RE.test(f) && !isTestPath(f));
 const fileGroup = (files, dir, exclude = new Set()) => [...new Set(files.filter((f) => dirname(f) === dir && !isTestPath(f) && !exclude.has(f) && stem(f) !== "index").map(stem))];
 
 /**
@@ -132,8 +158,8 @@ export async function enumeratingTests({ git, cwd, paths = [] }) {
       if (tracked.has(raw) && SOURCE_RE.test(raw) && !isTestPath(raw)) {
         let text = ""; try { text = fs.readFileSync(join(cwd, raw), "utf8"); } catch { /* sparse */ }
         groups.push({ module: raw, names: exportNames(text, raw), kind: "exports" });
-        groups.push({ module: dirname(raw), names: fileGroup(files, dirname(raw)), kind: "files" });
-      } else if (files.some((f) => dirname(f) === raw)) groups.push({ module: raw, names: fileGroup(files, raw), kind: "files" });
+        groups.push({ module: dirname(raw), names: fileGroup(files, dirname(raw)), kind: "files", strict: strictDir(files, dirname(raw)) });
+      } else if (files.some((f) => dirname(f) === raw)) groups.push({ module: raw, names: fileGroup(files, raw), kind: "files", strict: strictDir(files, raw) });
       for (const g of groups) for (const e of enumerators(tests, g, pkgs)) {
         const k = `${g.module}\0${e.test}`;
         if (!seen.has(k)) { seen.add(k); out.push({ module: g.module, ...e }); }
@@ -169,7 +195,7 @@ export async function missingEntries({ git, cwd, base }) {
     const newFiles = [...added].filter((f) => !isTestPath(f) && !SKIP_RE.test(f));
     for (const dir of [...new Set(newFiles.map(dirname))]) {
       const fresh = newFiles.filter((f) => dirname(f) === dir).map(stem).filter((s) => s.length >= MIN_NAME && s !== "index");
-      if (fresh.length) groups.push({ module: dir, names: fileGroup(files, dir, added), fresh, kind: "files" });
+      if (fresh.length) groups.push({ module: dir, names: fileGroup(files, dir, added), fresh, kind: "files", strict: strictDir(files, dir) });
     }
     const out = [];
     for (const g of groups.slice(0, MAX_MODULES)) {
