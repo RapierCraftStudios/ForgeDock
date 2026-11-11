@@ -1043,7 +1043,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     }
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
-  if (repro) failures.push(...reproFailures(contract, repro));
+  if (repro) failures.push(...reproFailures(contract, repro), ...reproQualityFailures(repro));
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
@@ -1090,6 +1090,13 @@ export function reproFailures(contract, { base, head } = {}) {
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)` }];
   return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
+}
+
+/** #5446: a repro_test every targeted mutation of the fix survived. Only under lean.repro_quality: enforce; patch_echo is the reviewer's call. */
+export function reproQualityFailures({ quality, enforce } = {}) {
+  if (!enforce || quality !== "mutation_survivor") return [];
+  return [{ code: MUTATION_SURVIVED, kind: "repro_mutation_survivor",
+    detail: "repro_test still passes with the fix's changed lines mutated (flipped condition, early return, dropped call): it does not exercise the fix" }];
 }
 
 const DOC_ONLY_RE = /\.(?:md|mdx|txt|rst|adoc)$/i;

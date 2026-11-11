@@ -2230,6 +2230,15 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     assert.equal(w.rgCalls[0].env.PATH, "/shim/bin:/host/bin"); assert.match(w.rgCalls[0].env.TMPDIR, /^\/rt\//);
   });
 
+  it("a green-red repro records repro_quality in the trajectory; reproQuality off skips the check (#5446)", async () => {
+    const w = rworld([RED_GREEN]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(traj(w)[0].includes("repro_quality: "), "quality decision recorded");
+    const o = rworld([RED_GREEN]);
+    assert.equal((await run(o, { reproQuality: "off" })).terminalReason, "merged");
+    assert.ok(!traj(o)[0].includes("repro_quality: "));
+  });
+
   it("a non-testable bug records repro_test none with a reason and is not blocked; a missing repro_test gets the one contract correction", async () => {
     const none = { ...CONTRACT, repro_test: "none", repro_test_reason: "spec-only change, nothing executable" };
     const w = rworld([RED_GREEN], { contract: none });
