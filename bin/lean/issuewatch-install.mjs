@@ -13,7 +13,7 @@ import { join } from "node:path";
 const safe = (s) => String(s).replace(/[^\w.-]/g, "_");
 const quote = (s) => (/[\s"\\]/.test(s) ? `"${s.replace(/(["\\])/g, "\\$1")}"` : s);
 
-export const unitName = (name) => `forgedock-issue-watch-${safe(name)}`;
+export const watchUnitName = (name) => `forgedock-issue-watch-${safe(name)}`;
 
 /** The argv after `forgedock.mjs` that runs the watch. */
 const runArgs = ({ name, repo, interval }) => ["issue-watch", "run", "--name", name, ...(repo ? ["--repo", repo] : []), ...(interval ? ["--interval", String(interval)] : [])];
@@ -83,7 +83,7 @@ export function installWatchUnit({ name, repo, interval, cwd = process.cwd(), no
     return { files, platform };
   }
   if (platform !== "linux") throw new Error(`issue-watch install: unsupported platform ${platform} (systemd or launchd only)`);
-  const dir = join(home, ".config", "systemd", "user"), u = unitName(name), w = renderWatchdog(o);
+  const dir = join(home, ".config", "systemd", "user"), u = watchUnitName(name), w = renderWatchdog(o);
   for (const [n, t] of [[`${u}.service`, renderSystemdUnit(o)], [`${u}-watchdog.service`, w.service], [`${u}-watchdog.timer`, w.timer]]) { write(join(dir, n), t); files.push(join(dir, n)); }
   run("systemctl", ["--user", "daemon-reload"]);
   run("systemctl", ["--user", "enable", "--now", `${u}.service`]);

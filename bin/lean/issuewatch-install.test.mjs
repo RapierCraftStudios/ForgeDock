@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderSystemdUnit, renderWatchdog, renderLaunchdPlist, installWatchUnit, unitName } from "./issuewatch-install.mjs";
+import { renderSystemdUnit, renderWatchdog, renderLaunchdPlist, installWatchUnit, watchUnitName } from "./issuewatch-install.mjs";
 
 const o = { node: "/usr/bin/node", cli: "/x/forgedock.mjs", name: "nomilestone", repo: "o/r", cwd: "/work dir" };
 
@@ -25,7 +25,7 @@ test("#5465 installWatchUnit writes three systemd files and enables them; other 
   const written = [], ran = [];
   const r = installWatchUnit({ ...o, platform: "linux", home: "/h", run: (c, a) => ran.push([c, ...a].join(" ")), write: (p) => written.push(p) });
   assert.equal(written.length, 3); assert.equal(r.files.length, 3);
-  assert.ok(written[0].endsWith(`${unitName("nomilestone")}.service`));
+  assert.ok(written[0].endsWith(`${watchUnitName("nomilestone")}.service`));
   assert.ok(ran.some((l) => /enable --now forgedock-issue-watch-nomilestone\.service/.test(l)));
   assert.throws(() => installWatchUnit({ ...o, platform: "win32" }), /unsupported platform/);
 });
