@@ -300,7 +300,7 @@ export async function runCore(o) {
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
   const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1, final: o.recover.final !== false } : null;
-  const branch = `feat/issue-${issue}-lean`;
+  let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
   const phaseLedger = createLedger(now, "sandbox_start", t0); // #4908: where the lane wall time goes
@@ -1342,6 +1342,17 @@ export async function runCore(o) {
     // ---- 2. worktree (resume an open PR / remote branch) ----
     await fetchP;
     let resumed = null, fromSalvage = false;
+    // #5469: adopt: the open PR to the lane base that references this issue and was not made by the pipeline; its head branch is the lane branch
+    let adoptPr = null;
+    if (o.adopt) {
+      await step("adopt_probe", async () => { try {
+        const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--state", "open", "--base", lane, "--json", "number,headRefName,body,closingIssuesReferences"])) || "[]");
+        adoptPr = prs.find((x) => x.headRefName !== branch && ((x.closingIssuesReferences ?? []).some((r) => r.number === issue) || new RegExp(`#${issue}(?!\\d)`).test(x.body ?? ""))) ?? null;
+      } catch { adoptPr = null; } });
+      if (!adoptPr) return await needsHuman(`--adopt: no open PR to \`${lane}\` references #${issue} from a branch other than ${branch}; nothing to adopt.`, OUTCOME_CODES.LANE_MISMATCH);
+      branch = adoptPr.headRefName;
+      T.decisions.push(`Adopting PR #${adoptPr.number} (${branch}): review, base-sync and merge without a rebuild`);
+    }
     await step("resume_probe", async () => { try {
       const [prsRaw, remoteRaw] = await Promise.all([ // #5435: independent network reads, in parallel
         ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"]),
@@ -1984,7 +1995,14 @@ export async function runCore(o) {
       }
       return dups;
     }
-    if (isSplit) {
+    if (adoptPr) {
+      // ---- 3''. #5469 adopt: the PR's diff is the change; no plan and no builder session, a location-only contract for the renderers ----
+      { const f = await gateSetup(); if (f) return f; }
+      files = await changedFiles();
+      frozen = { requirements: [], deliverables: files.map((path, i) => ({ id: `D${i + 1}`, path, change: `adopted from PR #${adoptPr.number}: reviewed as built`, requirements: [] })), preserve: [], validate: [] };
+      hash = contractHash(contractJson(frozen));
+      T.decisions.push(`Adopted PR #${adoptPr.number}: ${files.length} changed file(s) go to review as built`);
+    } else if (isSplit) {
       // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
       { const f = await gateSetup(); if (f) return f; } // #5434
       split = await splitStep();
@@ -2240,7 +2258,7 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
-      if (!isSplit && io.sequenceReserveBuild) { // #5235: reserve numbers / versions before the builder picks them from its stale snapshot
+      if (!isSplit && !adoptPr && io.sequenceReserveBuild) { // #5235: reserve numbers / versions before the builder picks them from its stale snapshot
         const rs = await io.sequenceReserveBuild({ cwd: wt, base, lane, repo, issue, deliverables: frozen?.deliverables ?? [], versioned: o.sequenceVersioned ?? [] }).catch(() => []);
         seqBuildNote = sequenceBuildRule(rs);
         if (rs.length) { ev({ event: "SEQUENCE_RESERVED", reservations: rs }); T.decisions.push(`Sequence numbers reserved at build start: ${rs.map((r) => `${r.cls ?? r.dir}=${r.numbers.join(",")}`).join("; ")}`); }

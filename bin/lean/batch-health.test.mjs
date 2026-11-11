@@ -240,3 +240,20 @@ describe("#5314 dispatch stall and first-hour report", () => {
     assert.ok(summaryLines(root, { now: Date.parse(new Date(NOW).toISOString()) }).some((l) => /DISPATCH STALLED/.test(l)));
   });
 });
+
+describe("#5469: holds in health and the first-hour report", () => {
+  const since = (h) => new Date(Date.now() - h * 3600000).toISOString();
+  it("#5469: a hold older than holdHours is a stale-hold cause; a recent or legacy hold is not", () => {
+    const st = base({ 1: { outcome: "merged" } }, { pending: [3], running: { 4: {} } });
+    const stale = evaluateHealth(st, { held: [3], holdInfo: { 3: { owner: "op@h", since: since(5) } }, batchId: "b1" });
+    assert.equal(stale.healthy, false);
+    assert.deepEqual(stale.causes.map((c) => c.code), ["stale-hold"]);
+    assert.match(stale.causes[0].detail, /#3 \(op@h, since /);
+    assert.equal(evaluateHealth(st, { held: [3], holdInfo: { 3: { owner: "op@h", since: since(1) } } }).healthy, true);
+    assert.equal(evaluateHealth(st, { held: [3] }).healthy, true, "a legacy hold has no age");
+  });
+  it("the first-hour report lists a held issue as held (owner, since)", () => {
+    const rep = firstHourReport(base({}, { pending: [3] }), { batchId: "b1", held: [3], holdInfo: { 3: { owner: "op@h", since: "2026-11-11T00:00:00.000Z" } } });
+    assert.match(rep.summary, /#3 held \(op@h, since 2026-11-11T00:00:00.000Z\)/);
+  });
+});

@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
+import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -987,5 +987,16 @@ describe("#4762 win32 socket path", () => {
   it("the spawn script is a filesystem path, not a URL pathname", () => {
     assert.ok(existsSync(SCHEDD_SCRIPT), SCHEDD_SCRIPT);
     assert.doesNotMatch(SCHEDD_SCRIPT, /^\/[A-Za-z]:/);
+  });
+});
+
+describe("#5469: orphaned batches", () => {
+  it("#5469: findUnhosted splits unhosted batches with pending issues by idle time and skips cancelled ones", () => {
+    const root = tmpDir("schedd-orphan-");
+    const mk = (id, ageMs) => { const b = openBatch(root, id); b.writePlan({ argv: [], repo: "o/r" }); b.store.save({ order: [1], pending: [1], results: {} }); const t = new Date(Date.now() - ageMs); utimesSync(join(b.dir, "state.json"), t, t); return b; };
+    mk("ancient", 10 * 86400000); mk("recent", 60000); mk("hosted", 10 * 86400000); mk("cancelled", 10 * 86400000).requestCancel({ reason: "t" });
+    const r = findUnhosted(root, { isHosted: (id) => id === "hosted" });
+    assert.deepEqual(r.orphaned, [{ id: "ancient", pending: [1] }]);
+    assert.deepEqual(r.unhosted, [{ id: "recent", pending: [1] }]);
   });
 });

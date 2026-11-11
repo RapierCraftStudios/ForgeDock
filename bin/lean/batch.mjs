@@ -17,7 +17,7 @@
  */
 import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { sanitizeOverride, validateExecutionPatch } from "./live-execution.mjs";
 
@@ -97,6 +97,13 @@ const readRequeueFile = (file) => {
 };
 
 /** The positive integers among `list` (numbers, `7`, `#7`). */
+/** #5469: the `hold-info` file as an object; {} when missing or invalid. */
+const readHoldInfo = (file) => { try { const v = JSON.parse(readFileSync(file, "utf8")); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; } };
+/** #5469: the hold owner's session pid is known, on this host, and no longer alive. */
+const ownerGone = (e) => {
+  if (!Number.isSafeInteger(e?.ownerPid) || e.ownerPid < 1 || (e.ownerHost && e.ownerHost !== hostname())) return false;
+  try { process.kill(e.ownerPid, 0); return false; } catch (err) { return err?.code === "ESRCH"; }
+};
 const ints = (list) => (Array.isArray(list) ? list : []).map((x) => (typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN)).filter((n) => Number.isSafeInteger(n) && n > 0);
 
 export function newBatchId(now = Date.now(), pid = process.pid) {
@@ -257,18 +264,40 @@ export function openBatch(root, id) {
     readHeld: () => readAdded(f("hold")),
     /** #4656: gates waiting on issues (`gates` file: [{ name, waitsOn: [n...], since? }], written by the ship/settle pre-flight); [] when missing or invalid. */
     readGates: () => { const v = readJson(f("gates")); return Array.isArray(v) ? v.filter((g) => g && typeof g.name === "string" && Array.isArray(g.waitsOn)) : []; },
-    /** Merge the positive integers of `list` into the `hold` file. @returns {number[]} the issues newly held */
-    holdIssues: (list) => {
+    /**
+     * Merge the positive integers of `list` into the `hold` file. #5469: `meta` ({owner, ownerPid, ownerHost, forMs, reason}) is
+     * recorded per newly held issue in the `hold-info` file as {owner, since, expiresAt|null, reason, ownerPid, ownerHost}.
+     * @returns {number[]} the issues newly held
+     */
+    holdIssues: (list, meta = null) => {
       const have = new Set(readAdded(f("hold")));
       const added = [...new Set(ints(list))].filter((n) => !have.has(n)).sort((a, b) => a - b);
       if (added.length) put(f("hold"), JSON.stringify([...have, ...added].sort((a, b) => a - b)) + "\n");
+      if (added.length && meta) {
+        const now = Date.now(), info = readHoldInfo(f("hold-info"));
+        for (const n of added) info[n] = { owner: String(meta.owner ?? "operator"), since: new Date(now).toISOString(), expiresAt: Number(meta.forMs) > 0 ? new Date(now + Number(meta.forMs)).toISOString() : null, reason: meta.reason ? String(meta.reason) : null, ownerPid: Number.isSafeInteger(meta.ownerPid) ? meta.ownerPid : null, ownerHost: meta.ownerHost ?? null };
+        put(f("hold-info"), JSON.stringify(info) + "\n");
+      }
       return added;
+    },
+    /** #5469: `{issue: {owner, since, expiresAt, reason, ownerPid, ownerHost}}` for held issues; {} when missing, invalid or a legacy hold. */
+    readHoldInfo: () => { const held = new Set(readAdded(f("hold"))), info = readHoldInfo(f("hold-info")); return Object.fromEntries(Object.entries(info).filter(([n]) => held.has(Number(n)))); },
+    /** #5469: release every hold whose `expiresAt` has passed. @returns {Array<{issue, owner, since, reason, ownerGone}>} (`ownerGone`: the owner's session pid is dead on this host) */
+    expireHolds: (now = Date.now()) => {
+      const info = readHoldInfo(f("hold-info")), held = new Set(readAdded(f("hold")));
+      const due = Object.entries(info).filter(([n, e]) => held.has(Number(n)) && e.expiresAt && Date.parse(e.expiresAt) <= now).map(([n, e]) => ({ issue: Number(n), ...e }));
+      if (!due.length) return [];
+      const out = due.map((e) => ({ issue: e.issue, owner: e.owner, since: e.since, reason: e.reason ?? null, ownerGone: ownerGone(e) }));
+      self.releaseIssues(due.map((e) => e.issue));
+      return out;
     },
     /** Remove `list` from the `hold` file. @returns {number[]} the issues that were held */
     releaseIssues: (list) => {
       const have = new Set(readAdded(f("hold")));
       const freed = [...new Set(ints(list))].filter((n) => have.has(n)).sort((a, b) => a - b);
       if (freed.length) put(f("hold"), JSON.stringify([...have].filter((n) => !freed.includes(n)).sort((a, b) => a - b)) + "\n");
+      const info = readHoldInfo(f("hold-info"));
+      if (freed.some((n) => info[n])) { for (const n of freed) delete info[n]; put(f("hold-info"), JSON.stringify(info) + "\n"); }
       return freed;
     },
     /** `--cancel` (#4376): `{at, reason, stopRemote?}` in the `cancel` file; the runner re-reads it every pass. `stopRemote` (#4612) also asks remote lanes to stop at their checkpoint. */
