@@ -58,5 +58,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "staging-version-synced": {
+    "run": "git fetch -q origin main staging && test \"$(git show origin/staging:package.json | node -pe 'JSON.parse(require(\"fs\").readFileSync(0)).version')\" = \"$(git show origin/main:package.json | node -pe 'JSON.parse(require(\"fs\").readFileSync(0)).version')\"",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
   }
 }

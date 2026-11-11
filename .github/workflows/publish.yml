@@ -263,9 +263,9 @@ jobs:
               echo "Opened staging sync PR $SYNC_PR"
               exit 0
             fi
-            echo "::warning::staging sync: could not open a PR for $SYNC_BRANCH (attempt $attempt), retrying"
+            echo "::warning::staging sync: could not open a PR for $SYNC_BRANCH (attempt $attempt), retrying; the host forgedock release post-merge step will open it if this fails"
           done
-          echo "::warning::staging sync failed after 3 attempts — deploy-pr Phase 2A.5 will repair it"
+          echo "::warning::staging sync failed after 3 attempts; the host forgedock release post-merge step will open the PR (deploy-pr Phase 2A.5 is the fallback)"
           exit 0
 
       - name: Create GitHub Release

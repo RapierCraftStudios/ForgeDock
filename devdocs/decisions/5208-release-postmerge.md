@@ -11,11 +11,15 @@ the release PR; decisions:
   finish; a failed run or an exhausted wait is `blocked`.
 - `release.artifact_check` is a shell command from the repo's own forge.yaml (the target repo's truth, like its test commands).
   It is retried with exponential backoff (5s doubling, capped at 120s, 8 tries) for the npm propagation delay.
-- `release.version_sync`: the version is read from `package.json` at the merge commit, the branch is
-  `chore/sync-version-<VERSION>` (what `publish.yml` pushes). An existing sync PR to the staging branch is reused, a merged one
-  counts as done, otherwise the PR is opened once the branch exists. It is merged with `--match-head-commit` only when it has
-  checks and all are green. A PR opened with `GITHUB_TOKEN` gets no CI, so "no checks" is a stop with the instruction to close
-  and reopen it, never a force-merge.
+- `release.version_sync` (#5513): the version is read from `package.json` at the merge commit and compared with
+  `package.json` on the staging branch; staging at or above it is "already synced" and makes no further calls. The branch is
+  `chore/sync-version-<VERSION>` (what `publish.yml` pushes). A merged sync PR counts as done, an open one is reused, otherwise
+  the PR is opened with a `docs-not-needed:` body line. `publish.yml` cannot open it (enterprise policy: Actions may not create
+  PRs), so the host does, with its own identity. When the branch never appeared, it is cut from the staging head through the gh
+  API (`git/refs`, then a contents PUT of the version in `package.json` and `.claude-plugin/plugin.json`), no local git. The PR is
+  then set to `gh pr merge --merge --auto` and polled (`autoPolls`/`autoPollMs`) for MERGED. A timeout, a closed PR or an
+  auto-merge that cannot be enabled is a `warning` on the result and a `release: WARNING` line, not `blocked`: the publish
+  already succeeded. The PR number is in the step result (`sync.pr`) and the final line.
 - Every exhausted bound returns `{blocked}` (exit 3). The runner does not mark the step done, so `--resume <id>` retries it;
   every sub-step is idempotent. Bounds are overridable with `ctx.config.postMerge` (tests use tiny ones; waits go through
   `io.sleep`, commands through `io.run`).
