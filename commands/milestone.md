@@ -167,6 +167,8 @@ For each proposed issue in the preliminary list, MUST read the actual code befor
 3. **Write exhaustive acceptance criteria**: For coverage/refactor tasks, acceptance criteria MUST be falsifiable. A `grep`/absence assertion qualifies (e.g., `` `grep -rn 'hardcoded_value' commands/` returns no matches ``). The number of criteria must match the scope — there is no cap. Two criteria for a 14-call-site refactor is not acceptable.
 4. **Identify override/companion files**: If a file needs a change, its companion files (config overrides, prod variants, sibling modules) almost certainly do too. List all of them.
 
+**Docs child (forge#5419)**: when forge.yaml sets `docs.required_for` and any planned child touches a user-facing surface (public API endpoint, MCP tool, dashboard page, CLI command, SDK method), also create one child labelled `docs` in the same milestone, depending on those children: it names the docs pages to create or update and their registration (`docs.paths`, `docs.registries`). Without `docs.required_for`, create none.
+
 **4C: Output format — per-issue, after code read**
 
 For each proposed issue, after completing the per-issue investigation in Step 4B:
@@ -449,6 +451,8 @@ bash "$(forge_resolve milestone-drift.sh)" "{slug}" --format text
 **Re-plan (forge#5342)**: a lane or journey run that finds the design wrong ends with a `design-invalidated` block; the engine files one spike-amendment issue and holds the affected open siblings behind it. After it merges, run `npx forgedock replan apply --amendment N --repo {REPO}` to mark each open child unchanged, re-scoped or dropped and update the epic checklist. A re-scoped user-visible child is routed to `/design` before build (forge#5330 owns the generic visual gate).
 
 **Feature acceptance (forge#5336, hard gate)**: `npx forgedock acceptance gate --milestone "{TITLE}" --stage ship`. A non-zero exit (a journey is red or never ran on the branch head) blocks the ship; print its lines and stop. A milestone without an epic is not gated.
+**Docs gate (forge#5419, hard gate)**: `npx forgedock docs gate --milestone "{TITLE}" --repo {REPO}`. A non-zero exit (user-facing children and no merged `docs` child) blocks the ship; print its lines and stop. Exit 0 when `docs.required_for` is unset.
+
 
 ```bash
 # Check milestone branch exists
@@ -792,7 +796,7 @@ Protected branches get ONE sync PR (`sync/milestone-{slug}`) whose head is force
 
 ## Action: Close Milestone (without shipping)
 
-For milestones that are abandoned or superseded: shipped milestones close only after `npx forgedock acceptance gate --milestone "{TITLE}" --stage close` exits 0 (post-deploy journeys passed; the epic keeps `awaiting-measurement` until then). Abandoning an unshipped milestone is not gated.
+For milestones that are abandoned or superseded: shipped milestones close only after `npx forgedock acceptance gate --milestone "{TITLE}" --stage close` exits 0 and `npx forgedock docs gate --milestone "{TITLE}" --repo {REPO}` exits 0 (forge#5419) (post-deploy journeys passed; the epic keeps `awaiting-measurement` until then). Abandoning an unshipped milestone is not gated.
 
 ```bash
 gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field state="closed"

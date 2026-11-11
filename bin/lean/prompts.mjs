@@ -287,6 +287,14 @@ export function unrunnableValidateNote(testRunners = null) {
   return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd (never combine \`poetry -C <dir>\` or \`uv run --project <dir>\` with repo-root-relative paths: use \`cd <dir> && poetry run pytest <dir-relative paths>\`)${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments. A post-deploy requirement needs a registered check id; one that is a manual or production-credential action with no runnable check is disposition "defer" with bucket "owner:<action>" only when it needs credentials, spend, an account, a third party or a customer; read-only prod data is "host". forge.yaml validate.recipes rewrite matching commands at freeze.`;
 }
 
+/** #5419: the R-docs rule for the planner; "" when forge.yaml docs.required_for is unset. */
+export function docsPlanNote(cfg) {
+  if (!cfg?.required_for?.length) return "";
+  const where = cfg.paths?.length ? ` under ${cfg.paths.join(", ")}` : "";
+  const reg = cfg.registries?.length ? ` and their registration (${cfg.registries.join(", ")})` : "";
+  return `\n\nThis repo requires user docs for user-facing surfaces (${cfg.required_for.join(", ")}). When the issue adds or changes one (a public API endpoint, MCP tool, dashboard page or feature, CLI command or SDK method), ${CONTRACT_FILE} must carry a requirement R-docs and a deliverable for each docs page${where} to create or update${reg}. A \`/docs/...\` link the change adds must resolve to a page. If no docs apply, say why in the result file as docs: [{"surface":"<kind>","justification":"<why>"}].`;
+}
+
 export function reproPlanNote(on) {
   if (!on) return "";
   return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
@@ -523,6 +531,7 @@ export function decisionNote(comments = []) {
 
 /** #5099: one check line per review domain (domains from review-trigger.mjs pathDomains); mirrors the /review-pr personas. */
 export const DOMAIN_CHECKS = Object.freeze({
+  docs: "A user-facing diff (public API endpoint, MCP tool, dashboard page, CLI command, SDK method) with no matching docs change, or docs that contradict the code (endpoint paths, fields, scopes), is a regression.",
   frontend: "Dynamic API in a static/ISR tree: a headers(), cookies(), connection() or searchParams read in a layout, a not-found/error boundary or a module they import, when the route tree is static or ISR (revalidate, generateStaticParams, dynamic = 'force-static'), opts the route out of static rendering or throws at render and turns pages into HTTP 500.",
 });
 

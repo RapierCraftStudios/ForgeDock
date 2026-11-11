@@ -931,6 +931,13 @@ branches:
 #   # ingress does not send them to the service that implements them. Blocking when set.
 #   # topology:
 #   #   route_reachability: "bash scripts/check-ingress.sh"
+#   # #5419 user docs (optional, default unset = off; leave unset for library/CLI repos).
+#   # A diff touching a user-facing surface needs a docs change; added /docs links must resolve.
+#   # docs:
+#   #   required_for: [api, mcp, dashboard, cli, sdk]
+#   #   paths: ["web/docs/**"]
+#   #   registries: ["web/public/llms.txt"]
+#   #   link_check: "bash scripts/check-docs-links.sh"
 #   # #5079: "if file A changes, file B must change" (digest pins, manifests, runtime
 #   # closures, CI wiring). Block map {when glob: required glob[, glob]}; a key
 #   # prefixed `added:` fires only for files the lane adds. A miss is

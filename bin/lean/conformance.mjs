@@ -33,6 +33,7 @@ export const MIN_QUOTE_CHARS = 12;
 export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
+import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -958,7 +959,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, docsPaths = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -968,7 +969,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
   // #5285: interactive UI changed on a high-risk surface with no real-browser check configured: a recorded skip that blocks
   if (uiBrowser?.files?.length && uiBrowser.highRisk && !uiBrowser.ran) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "ui_browser_unverified", detail: `interactive UI changed (${uiBrowser.files.slice(0, 5).join(", ")}) on a high-risk surface but no real-browser check runs (${uiBrowser.reason}); configure verify.e2e_label/e2e_workflow or add a Playwright spec` });
-  const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
+  const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f) && !(docsPaths?.length && docsPaths.some((g) => globToRegex(g).test(f)))); // #5419: configured docs.paths/registries are authorized
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
@@ -1032,6 +1033,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
+  failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }

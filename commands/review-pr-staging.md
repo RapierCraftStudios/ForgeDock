@@ -237,6 +237,9 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ---
 
+### 1G: Docs Gate (BLOCKING when `docs.required_for` is set, forge#5419)
+`git diff --name-only origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH` lists the bundle's changes. When forge.yaml sets `docs.required_for`, list every user-facing change in it (public API endpoint, MCP tool, dashboard page, CLI command, SDK method; `docs.surfaces` globs) that has no docs change under `docs.paths`/`docs.registries` and no `docs` justification: each is a BLOCKER (`Docs: <path> has no user docs`). Every `/docs/...` link the bundle adds must resolve (`docs.link_check`). Unset = skip. A blocker here makes the gate fail (`FORGE:GATE_FAILURE`).
+
 ## Phase 2: Material Change Analysis
 
 **Launched-agent bookkeeping (MANDATORY)**: Step 1 writes the launch manifest (`<PR>_review_manifest.json`) and fills the PR-keyed launched-agent file from the DISPATCH briefs, so briefed domains need no append. Before launching each spec-owned Phase 2-6 reviewer (e.g. `bug-hunter-api`, `regression-risk`), append its lowercase marker domain: `printf '%s\n' "<domain>" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/<PR>_launched_review_agents"`. Reviewers post with `forgedock review-staging <PR> --post-reviewer <domain> --body-file <file>`: it writes the marker and the full `Reviewed-SHA:` from the manifest and refuses a domain that is not launched. Step 7A checks delivery for exactly these domains; on a shortfall it names each reviewer and why (stale SHA, no findings block, absent) with a `REDISPATCH <domain>` line: re-run only that reviewer.
@@ -540,6 +543,7 @@ Every completed staging review MUST leave one of the following structured marker
 |--------|---------|
 | `<!-- FORGE:GATE_PASS -->` | Gate ran and passed — deploy may proceed |
 | `<!-- FORGE:GATE_FAILURE -->` | Gate ran and blocked — do NOT deploy |
+| (blockers) | Phase 1G docs-gate blockers (forge#5419) are gate blockers: they produce `FORGE:GATE_FAILURE`, never a pass. |
 
 **Absence of both markers = bypass detected.** The `.github/workflows/gate-marker-check.yml` workflow enforces this with the `forge/deploy-gate` commit status on the PR head: success only when the newest trusted marker is `FORGE:GATE_PASS`, failure when it is `FORGE:GATE_FAILURE`, and pending while no trusted marker exists. A missing marker is a deploy blocker, not a pass; requiring `forge/deploy-gate` on `main` makes GitHub refuse the merge.
 

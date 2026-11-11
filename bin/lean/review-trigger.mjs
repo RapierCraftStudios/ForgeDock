@@ -8,6 +8,7 @@
  * Run directly, it reports per repo how many would-skip lanes the reviewer flagged as nonconforming.
  */
 import { execFileSync } from "node:child_process";
+import { userFacingSurfaces } from "./docsgate.mjs";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +46,7 @@ export function parseRiskPaths(v) {
 }
 
 /** #5099: the review domains a lane can touch, from scripts/review-roster.sh path triggers. */
-export const DOMAINS = Object.freeze(["api", "auth", "database", "frontend", "infra"]);
+export const DOMAINS = Object.freeze(["api", "auth", "database", "docs", "frontend", "infra"]);
 const DOMAIN_OF_TRIGGER = Object.freeze({ "frontend-path": "frontend", "auth-path": "auth", "infra-path": "infra", "route-handler": "infra", "migration-path": "database", "sdk-path": "api" });
 const ROSTER = fileURLToPath(new URL("../../scripts/review-roster.sh", import.meta.url));
 
@@ -58,14 +59,16 @@ export function parseEnforceDomains(v) {
  * #5099: the domains the changed files touch, by the path triggers of the bundled scripts/review-roster.sh (the one
  * source of the domain path rules). Sorted, unique; [] without files; null when the script fails (the caller logs it).
  */
-export function pathDomains(files = [], { script = ROSTER } = {}) {
+export function pathDomains(files = [], { script = ROSTER, docs = null } = {}) {
   const list = [...new Set((files ?? []).map(String).filter(Boolean))];
   if (!list.length) return [];
   let out;
   try { out = execFileSync("bash", [script, "--files-file", "-", "--changed-lines", "1"], { input: `${list.join("\n")}\n`, encoding: "utf8", timeout: 15000, stdio: ["pipe", "pipe", "ignore"] }); } catch { return null; }
   const m = /^REASON=.*?triggers:([^\n]*)$/m.exec(String(out));
   if (!/^SELECTED_AGENTS=/m.test(String(out))) return null;
-  return [...new Set((m ? m[1].trim().split(/\s+/) : []).map((t) => DOMAIN_OF_TRIGGER[t]).filter(Boolean))].sort();
+  const found = (m ? m[1].trim().split(/\s+/) : []).map((t) => DOMAIN_OF_TRIGGER[t]).filter(Boolean);
+  if (docs && Object.keys(userFacingSurfaces(list, docs)).length) found.push("docs"); // #5419
+  return [...new Set(found)].sort();
 }
 
 /**
