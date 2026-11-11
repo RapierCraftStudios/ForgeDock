@@ -1490,6 +1490,15 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(traj(w)[0], /\| Review \| shadow: would block \(nonconforming\) \|/);
   });
 
+  it("#5439 a shadow would-BLOCK lane still files its accepted deferral and merges", async () => {
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Old callers log a warning.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
+    const w = world({ contract: k, body: `${ISSUE_BODY}\n- Old callers log a warning.`, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({ issue_coverage: [{ quote: "foo must handle a null argument without throwing.", status: "covered" }, { quote: "Existing callers of foo keep working.", status: "missing" }] }, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.match(shadowNote(w), /would BLOCK/);
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
+  });
+
   it("scope creep does not block in shadow (as today) but is recorded", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");

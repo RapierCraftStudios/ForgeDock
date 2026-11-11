@@ -3049,6 +3049,10 @@ path is authorized (#5380).
 
 `prompts.mjs` `builderPlanPrompt` and `PREFILTER_SYSTEM`: a feature request whose behaviour is already reachable (same semantics under another name, or a stdlib or dependency function the project wraps or re-exports) is a duplicate. The verdict is INVALID (result status `invalid`, no new verdict value), with the equivalent and its path as evidence; the project deprecating that capability counts against adding an alias.
 
+## Entry 2026-11-11 — a shadow `would BLOCK` is advisory in the issue-watch merge verifier (#5439)
+
+`issuewatch-verify.mjs` `reviewVerdict` now returns `shadow-block` for a `would BLOCK` FORGE:REVIEW; `verifyMerge` treats it as verified and records an advisory evidence line. Shadow mode merges by design (`lean.mjs` shadow gate), so reopening with `needs-human` contradicted the shadow label. An enforced `NONCONFORMING/BLOCK/FAIL` verdict, an unrecognised one, or no review still fails. Accepted deferrals are filed before the PR whatever the shadow verdict (`lean.test.mjs` pins it).
+
 ## Entry 2026-11-11 — cancelled post-merge checks are superseded, not red (#5441)
 
 `issuewatch-verify.mjs` `verifyMerge`: a `cancelled`/`stale` check on the merge commit (a concurrency group cancelled it for a newer commit) is no longer red. `resolveSuperseded` reads `compare/<sha>...<lane>` (newest first, cap 10) and the newest descendant that ran the same check decides: success/neutral/skipped passes (evidence line), a failure fails (`CI red: a cancelled check on the merge commit was superseded by a failing run`), no finished run yet is `pending`. Required checks cancelled on the merged head resolve the same way (a manual cancel is indistinguishable). A genuinely failed check still fails `<lane> CI red on the merge commit`; `forgedock/verify` stays report-only.
