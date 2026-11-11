@@ -8382,3 +8382,24 @@ describe("test adequacy gate in the lane (#5449)", () => {
     assert.match(review, /weak \(repro quality patch-echo\)/);
   });
 });
+
+describe("#5469: --adopt takes over a hand-built open PR", () => {
+  it("#5469: adopt without a foreign PR referencing the issue parks needs-human and runs no builder", async () => {
+    const w = world();
+    w.prList = [{ number: 9, headRefName: "feat/issue-7-lean", baseRefName: "staging", body: "Fixes #7", closingIssuesReferences: [{ number: 7 }] }, { number: 10, headRefName: "hand/other", baseRefName: "staging", body: "Fixes #70", closingIssuesReferences: [{ number: 70 }] }];
+    const r = await run(w, { adopt: true });
+    assert.notEqual(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 0);
+    assert.ok(w.comments.some((c) => /--adopt: no open PR to `staging` references #7/.test(c)), "the park comment says why");
+  });
+
+  it("#5469: adopt of a hand-made PR reviews it on its own branch and runs no builder", async () => {
+    const w = world();
+    w.prList = [{ number: 55, headRefName: "hand/fix-7", baseRefName: "staging", body: "Fixes #7", closingIssuesReferences: [{ number: 7 }] }];
+    const r = await run(w, { adopt: true });
+    assert.equal(builders(w).length, 0, "no rebuild");
+    assert.ok(reviewers(w).length >= 1, "the PR is reviewed");
+    assert.ok(w.calls.some((c) => c[0] === "git" && JSON.stringify(c).includes("hand/fix-7")), "its head branch is the lane branch");
+    assert.equal(r.terminalReason, "merged");
+  });
+});

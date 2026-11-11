@@ -61,6 +61,24 @@ export const LOCK_CHECK_MS = 5 * 1000;
 export const ADMIT_MS = 120 * 1000; // #4775: how long one add/requeue/attach/resume waits for its batch to start before answering an error
 export const LAG_MS = 5 * 1000; // #4775: an event-loop stall longer than this is logged
 export const REQUEST_MS = 15 * 1000; // #4775: default bound of a control/status request
+/**
+ * #5469: the unhosted batches of `root` that still have pending issues and are not cancelled, split by idle time:
+ * `orphaned` (no progress for `minAgeMs`) and `unhosted` (recent). @returns {{unhosted: Array<{id, pending}>, orphaned: Array<{id, pending}>}}
+ */
+export function findUnhosted(root, { isHosted = () => false, now = Date.now(), minAgeMs = ORPHAN_AGE_MS } = {}) {
+  const unhosted = [], orphaned = [];
+  for (const id of listBatches(root)) {
+    if (isHosted(id)) continue;
+    try {
+      const b = openBatch(root, id), pending = b.pendingIssues();
+      if (!pending.length || b.readCancel()) continue;
+      const last = b.lastProgressMs();
+      (last !== null && now - last > minAgeMs ? orphaned : unhosted).push({ id, pending });
+    } catch { /* advisory */ }
+  }
+  return { unhosted, orphaned };
+}
+export const ORPHAN_AGE_MS = 7 * 24 * 3600 * 1000; // #5469: an unhosted batch idle this long with pending issues is orphaned
 export const UNIT = "forgedock-schedd";
 export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
@@ -272,16 +290,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     return out;
   };
 
+  const unhostedBatches = (now, minAgeMs = ORPHAN_AGE_MS) => findUnhosted(root, { isHosted: (id) => hosted.has(id) || starting.has(id), now, minAgeMs });
+
   const handle = async (req, send) => {
     if (req.op === "status") {
       // #4917: a batch dir that still holds pending issues but is not hosted (finalised early, or never resumed)
-      const unhosted = [];
-      for (const id of listBatches(root)) {
-        if (hosted.has(id) || starting.has(id)) continue;
-        try { const pending = openBatch(root, id).pendingIssues(); if (pending.length) unhosted.push({ id, pending }); } catch { /* advisory */ }
-      }
+      // #5469: ones idle longer than ORPHAN_AGE_MS collapse into `orphaned` (one line; `orchestrate --gc-orphans` cancels them)
+      const { unhosted, orphaned } = unhostedBatches(Date.now());
       let host = null; try { host = hostLoad?.() ?? null; } catch { host = null; } // #5174
-      return send({ type: "status", pid, lastTick, batches: statusBatches(), unhosted, host }, true);
+      return send({ type: "status", pid, lastTick, batches: statusBatches(), unhosted, orphaned, host }, true);
     }
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
@@ -318,8 +335,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (req.op === "hold" || req.op === "release") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
-      const changed = req.op === "hold" ? b.holdIssues(req.issues ?? []) : b.releaseIssues(req.issues ?? []);
+      const changed = req.op === "hold" ? b.holdIssues(req.issues ?? [], req.meta ?? null) : b.releaseIssues(req.issues ?? []);
       return send({ type: "ok", changed, hosted: hosted.has(req.id) }, true);
+    }
+    if (req.op === "gc-orphans") { // #5469: cancel every orphaned batch (unhosted, pending issues, idle past the threshold)
+      const { orphaned } = unhostedBatches(Date.now(), Number.isFinite(req.minAgeMs) ? req.minAgeMs : ORPHAN_AGE_MS);
+      for (const o of orphaned) openBatch(root, o.id).requestCancel({ reason: "gc-orphans" });
+      return send({ type: "ok", cancelled: orphaned.map((o) => o.id) }, true);
     }
     if (req.op === "cancel") {
       const b = openBatch(root, req.id);
@@ -456,7 +478,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const isHosted = hosted.has(id) || starting.has(id);
         const stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported });
         if (Number.isFinite(created) && (reported || now - created >= FIRST_HOUR_MIN * 60_000) && !existsSync(join(b.dir, FIRST_HOUR_FILE)) && now - created < 24 * 3600_000) {
-          if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), stall }))) log(`schedd: first-hour report written for batch ${id}`);
+          if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), holdInfo: b.readHoldInfo?.() ?? null, stall }))) log(`schedd: first-hour report written for batch ${id}`);
         }
         if (!stall) continue;
         const sig = stall.ready.join(",");
