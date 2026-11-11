@@ -472,7 +472,7 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
 });
 
 test("verify: failed verify swaps workflow:merged for workflow:merged-unverified", async () => {
-  const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+  const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
   const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
   const edits = r.io.calls.filter((a) => a[1] === "edit" && a.includes("needs-human,workflow:merged-unverified"));
   assert.equal(edits.length, 1);
