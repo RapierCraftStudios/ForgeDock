@@ -54,6 +54,19 @@ describe("gc schedule entry (#5421)", () => {
     assert.equal(r.kind, "cron"); assert.equal(r.status, "installed");
     assert.match(written, /0 1 \* \* \* backup/); assert.equal(written.match(/forgedock-gc/g).length, 1); assert.match(written, /0 \*\/12 /);
   });
+  it("cron fallback leaves another repo's entry alone when its path shares our prefix (#5485)", async () => {
+    const other = `0 */6 * * * old # forgedock-gc /work/repo2`;
+    for (const enabled of [true, false]) {
+      const f = fake({ fail: /show-environment/, crontab: `0 1 * * * backup\n0 */6 * * * old # forgedock-gc /work/repo\n${other}\n` });
+      let written = "";
+      const exec = async (cmd, args, input) => { if (cmd === "crontab" && args[0] === "-") { written = input; return ""; } return f.exec(cmd, args, input); };
+      const r = await installGcSchedule({ schedule: "12h", enabled, cwd: "/work/repo", home: tmpDir("sched-"), platform: "linux", exec, ...common });
+      assert.equal(r.kind, "cron");
+      assert.ok(written.split("\n").includes(other), `enabled=${enabled}: sibling line kept`);
+      assert.match(written, /backup/);
+      assert.equal(written.split("\n").filter((l) => l.endsWith("# forgedock-gc /work/repo")).length, enabled ? 1 : 0);
+    }
+  });
   it("an exec failure is reported, never thrown", async () => {
     const r = await installGcSchedule({ schedule: "6h", cwd: "/work/repo", home: tmpDir("sched-"), platform: "linux", exec: fake({ fail: /daemon-reload|crontab/ }).exec, ...common });
     assert.equal(r.status, "failed");
