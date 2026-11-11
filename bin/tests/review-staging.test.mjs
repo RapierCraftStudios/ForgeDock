@@ -607,6 +607,25 @@ describe("review-staging --summary", () => {
     assert.deepEqual(cancelOnlyChecks(ck, ["CI", "lint"]), [{ name: "CI", link }]);
   });
 
+  it("a pending required check blocks (rerun poll timeout must not post GATE_PASS)", async () => {
+    assert.deepEqual(classifyChecks([{ name: "CI", bucket: "pending" }], ["CI"]), { blocking: 1, warnings: [] });
+    assert.deepEqual(classifyChecks([{ name: "CI", bucket: "pass" }, { name: "CI", bucket: "pending" }], ["CI"]), { blocking: 0, warnings: [] });
+    assert.deepEqual(classifyChecks([{ name: "CI", bucket: "pass" }, { name: "e2e", bucket: "pending" }], ["CI"]), { blocking: 0, warnings: ["e2e"] });
+    assert.deepEqual(classifyChecks([{ name: "forge/deploy-gate", bucket: "pending" }], []), { blocking: 0, warnings: [] });
+    const link = "https://github.com/o/r/actions/runs/777/job/1";
+    let reran = false;
+    const w = await finalized({ required: ["CI"], ciFn: (a) => {
+      if (a[1] === "rerun") { reran = true; return { code: 0, stdout: "", stderr: "" }; }
+      return { code: 0, stdout: JSON.stringify([{ name: "CI", bucket: reran ? "pending" : "cancel", link }]), stderr: "" };
+    } });
+    w.io.sleep = async () => {};
+    assert.equal(await reviewStagingFromCli(["--summary", "--json"], w.io), 1);
+    assert.match(posted(w)[0], /FORGE:GATE_FAILURE/);
+    const d = JSON.parse(w.out.at(-1));
+    assert.equal(d.ciFailing, 1);
+    assert.equal(d.ciCancelOnly, false);
+  });
+
   it("forge.yaml gate.required_checks adds required checks", () => {
     const ck = [{ name: "CI", bucket: "pass" }, { name: "lighthouse-hands", bucket: "fail" }];
     assert.deepEqual(classifyChecks(ck, ["CI"]), { blocking: 0, warnings: ["lighthouse-hands"] });
