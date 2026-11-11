@@ -1795,6 +1795,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
+  const { formatTestAdequacySummary } = await import("./lean/testadequacy.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   // #4399: declared acceptance probes of closed issues whose fix reached the default branch; never fails the batch
   const sweep = deps.sweepProbes !== undefined ? deps.sweepProbes : (await import("./lean/probe.mjs")).sweepProbes;
@@ -2152,6 +2153,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
+  const adequacyLine = formatTestAdequacySummary(rows); // #5449
+  if (adequacyLine) report.push(adequacyLine);
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396

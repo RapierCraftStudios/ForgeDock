@@ -137,7 +137,8 @@ Conformance outcomes (forge#5210; read only: one GraphQL search per 100 merged P
                         signals inside the window (reverted, closing issue reopened, cited by a later fix, a later fix
                         touching the same hunks via local git blame); defect rate, n and a Wilson 95% interval of
                         nonconforming-merged vs conforming-merged per repo, mode and failure kind; n/a under --min-n
-                        (default ${DEFAULT_OUTCOME_MIN_N} per cell); the last line is the conclusion or "insufficient data"
+                        (default ${DEFAULT_OUTCOME_MIN_N} per cell); a lane's test-adequacy class (adequate|weak|missing) is also split by
+                        reopened within 14 days (#5449); the last line is the conclusion or "insufficient data"
   --replay <pr,...>     with --conformance-outcomes: per named PR, its mode, shadow verdict and risk surfaces, and whether the
                         --enforce-domains <list> / --risk-paths <globs> config would have enforced (nonconforming), only flagged
                         (verdict would pass) or not touched it; the cells also gain per-surface rows (domain:*, risk:*)
