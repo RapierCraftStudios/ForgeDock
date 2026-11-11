@@ -2142,7 +2142,7 @@ export async function runCore(o) {
           T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
           T.decisions.push(`Builder verdict: ${result.status}`);
           // #5152: already-fixed is delivered behaviour (`completed`); only invalid is dropped scope (`not planned`)
-          await Promise.all([result.status === "already-fixed" && (await closeBlockers("completed")).length ? null : ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]), label("invalid")]); // #5437: independent calls
+          await Promise.all([result.status === "already-fixed" && (await closeBlockers("completed", resumed?.pr ?? null)).length ? null : ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]), label("invalid")]); // #5437: independent calls
           if (result.status === "invalid") { const f = await resolveFindingLabel({ io, issue, labels: iss.labels, reason: "invalid" }); if (f.error) T.anomalies.push(`finding label not resolved: ${f.error}`); } // #5254
           return await finish("invalid", result.summary ?? result.status, result.status === "already-fixed" ? { close: "already-fixed" } : {});
         }
@@ -3218,7 +3218,7 @@ export async function runCore(o) {
           const sha = String(await git(["rev-parse", base]).catch(() => "")).trim().slice(0, 12) || base;
           const note = `Already fixed on the base: the repro test passes on \`${base}\` (${sha}) without this change, and the diff changes no source file. Closing as delivered.\n\n${list}`;
           T.decisions.push(`Already fixed on base ${sha} (repro BASE=RAN HEAD=RAN)`);
-          if (!(await closeBlockers("completed")).length) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed", "--comment", note]);
+          if (!(await closeBlockers("completed", resumed?.pr ?? null)).length) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed", "--comment", note]);
           return await finish("invalid", `already fixed on base ${sha}`, { close: "already-fixed" });
         }
         if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);

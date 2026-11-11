@@ -295,6 +295,16 @@ describe("core work-on", () => {
     assert.equal(reviewers(w).length, 0);
   });
 
+  it("#5518 already-fixed on a resumed lane closes the issue: the lane's own open PR is not a close blocker, another own PR still is", async () => {
+    const own = { number: 77, headRefOid: "x", headRefName: "feat/issue-7-lean", baseRefName: "staging", body: "Closes #7" };
+    const w = world({ changed: [], prList: [own], remote: "abc\trefs/heads/feat/issue-7-lean", result: { status: "already-fixed", summary: "done upstream", evidence: ["a.js:1"], tests: [] } });
+    assert.equal((await run(w)).terminalReason, "invalid");
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"]);
+    const w2 = world({ changed: [], prList: [own, { number: 78, headRefName: "feat/other", body: "<!-- FORGE:ISSUE_PR issue=7 -->" }], remote: "abc\trefs/heads/feat/issue-7-lean", result: { status: "already-fixed", summary: "done upstream", evidence: ["a.js:1"], tests: [] } });
+    await run(w2);
+    assert.equal(w2.closed.length, 0, "a different open PR for the issue still blocks");
+  });
+
   it("already-fixed with evidence also closes, as completed (#5152)", async () => {
     const w = world({ changed: [], result: { status: "already-fixed", summary: "done upstream", evidence: ["a.js:1"], tests: [] } });
     assert.equal((await run(w)).terminalReason, "invalid");
