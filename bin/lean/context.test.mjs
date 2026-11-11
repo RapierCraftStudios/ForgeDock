@@ -138,7 +138,7 @@ describe("context pack (forge#4275)", () => {
 
   it("per-source switches turn one source off without disabling the pack", async () => {
     const f = fakes();
-    const facts = await gather(f, { sources: ["graph", "facts"] });
+    const facts = await gather(f, { sources: ["graph", "facts", "issuewatch-reconcile"] });
     assert.equal(facts.ledger.length + facts.attempts.length, 0);
     assert.ok(!f.calls.some((c) => c[1] === "for-each-ref"), "a disabled source makes no calls");
     const g = fakes();
