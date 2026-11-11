@@ -135,3 +135,23 @@ test("lanes sharing the batch image cache inspect an image once", async () => {
   }
   assert.equal(inspects, 1);
 });
+
+test("each lane gets its own network, joined by its containers and removed on down", async () => {
+  const calls = [];
+  const docker = async (a) => { calls.push(a.join(" ")); if (a[0] === "port") return "0.0.0.0:49161\n"; return ""; };
+  const specs = parseSandboxes({ redis: { image: "redis:7" } });
+  const r = await provisionSandboxes({ names: ["redis"], specs, lane: "lane-9", docker, exec: async () => ({ rc: 0 }), sleep: async () => {}, cache: new Set() });
+  assert.ok(calls.some((c) => c.startsWith("network create") && c.endsWith("forge-sbx-lane-9-net")));
+  assert.ok(calls.some((c) => c.startsWith("run ") && c.includes("--network forge-sbx-lane-9-net")));
+  await r.down();
+  assert.ok(calls.includes("network rm forge-sbx-lane-9-net"));
+});
+
+test("a fixtures entry exports replay mode, and record: true switches it to record", async () => {
+  const run = async (raw) => provisionSandboxes({ names: ["http-replay"], specs: parseSandboxes({ "http-replay": raw }), lane: "l", docker: async () => "", exec: async () => ({ rc: 0 }), cwd: "/w" });
+  const a = await run("{ fixtures: tests/fx/ }");
+  assert.equal(a.env.SANDBOX_HTTP_REPLAY_MODE, "replay");
+  const b = await run("{ fixtures: tests/fx/, record: true }");
+  assert.equal(b.env.SANDBOX_HTTP_REPLAY_MODE, "record");
+  assert.equal(b.env.SANDBOX_HTTP_REPLAY_DIR, "/w/tests/fx");
+});

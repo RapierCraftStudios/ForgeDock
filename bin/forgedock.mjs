@@ -1154,6 +1154,7 @@ async function initFlow(c) {
       worktreeBase: draft.paths.worktreeBase.value,
       defaultBranch: draft.branches.default.value,
       stagingBranch: draft.branches.staging.value,
+      sandboxes: draft.meta?.sandboxes, // #5450: commented verify.sandboxes proposal
     });
     atomicWriteFile(outputPath, content);
     ensureToolStateIgnored(c);

@@ -60,7 +60,7 @@ export function parseSandboxes(raw) {
     const needs = (Array.isArray(s.needs) ? s.needs : str(s.needs).split(",")).map((x) => str(x)).filter(Boolean);
     const port = Number(str(s.port));
     out[name] = { ...(image ? { image } : {}), ...(compose && service ? { compose, service } : {}), ...(fixtures ? { fixtures } : {}), needs, ...(str(s.init) ? { init: str(s.init) } : {}),
-      ...(str(s.ttl) ? { ttl: str(s.ttl) } : {}), ...(str(s.for) ? { for: str(s.for) } : {}), ...(Number.isInteger(port) && port > 0 && port < 65536 ? { port } : {}), ...(str(s.ready) ? { ready: str(s.ready) } : {}) };
+      ...(str(s.ttl) ? { ttl: str(s.ttl) } : {}), ...(str(s.for) ? { for: str(s.for) } : {}), ...(str(s.record) ? { record: str(s.record) } : {}), ...(Number.isInteger(port) && port > 0 && port < 65536 ? { port } : {}), ...(str(s.ready) ? { ready: str(s.ready) } : {}) };
   }
   return out;
 }
@@ -92,6 +92,9 @@ export function planNeeds(names, specs) {
 /** Images already pulled/inspected by this process: lanes of one batch share it (pass as `cache`), so an image is checked once per batch. */
 export const batchImageCache = new Set();
 
+/** A `fixtures` entry replays recorded upstream responses; `record: true` (or FORGE_SANDBOX_RECORD=1, an operator recording run) makes the test write them instead. */
+const recordMode = (s) => /^(true|1|yes)$/i.test(str(s.record)) || process.env.FORGE_SANDBOX_RECORD === "1";
+
 /** One FORGE:SANDBOX trajectory line: what was created, how long it lived, what it cost (local docker: 0). */
 export const sandboxLine = ({ name, kind, ms, cost_usd = 0, id = null }) => `FORGE:SANDBOX ${JSON.stringify({ name, kind, ms, cost_usd, ...(id ? { id } : {}) })}`;
 
@@ -111,6 +114,7 @@ export async function provisionSandboxes({ names, specs, lane, docker, exec, led
   const env = {}, created = [], lines = [], lab = labels.flatMap((l) => ["--label", l]);
   const prefix = `forge-sbx-${safeSegment(lane)}`;
   const urls = {};
+  let net = null; // the lane's own network (`forge-sbx-<lane>-net`): image sandboxes of one lane join it, no other lane's does
   const down = async () => {
     let ok = true;
     for (const c of [...created].reverse()) {
@@ -118,21 +122,26 @@ export async function provisionSandboxes({ names, specs, lane, docker, exec, led
       catch (e) { if (!/No such container/i.test(str(e?.message))) ok = false; else ledger?.release("container", c.id); }
     }
     created.length = 0;
+    if (net) { try { await docker(["network", "rm", net]); } catch (e) { if (!/No such network|not found/i.test(str(e?.message))) ok = false; } net = null; }
     return ok;
   };
   try {
     for (const name of order) {
       const s = specs[name], t0 = now(), known = KNOWN[name] ?? KNOWN[str(s.image).split(":")[0].split("/").pop()] ?? {};
-      if (s.fixtures && !s.image && !s.compose) { env[`${envName(name)}_DIR`] = resolve(cwd, s.fixtures); lines.push(sandboxLine({ name, kind: "fixtures", ms: 0 })); continue; }
+      if (s.fixtures && !s.image && !s.compose) { const dir = resolve(cwd, s.fixtures), record = recordMode(s);
+        env[`${envName(name)}_DIR`] = dir; env[`${envName(name)}_MODE`] = record ? "record" : "replay";
+        if (/^http/i.test(name)) { env.SANDBOX_HTTP_REPLAY_DIR = dir; env.SANDBOX_HTTP_REPLAY_MODE = record ? "record" : "replay"; }
+        lines.push(sandboxLine({ name, kind: "fixtures", ms: 0 })); continue; }
       const id = `${prefix}-${name}`;
       let url;
       if (s.image) {
+        if (!net) { net = `${prefix}-net`; await docker(["network", "rm", net]).catch(() => {}); await docker(["network", "create", ...lab, net]); }
         const port = s.port ?? known.port;
         if (!cache.has(s.image)) { try { await docker(["image", "inspect", s.image]); } catch { await docker(["pull", s.image]); } cache.add(s.image); }
         ledger?.register("container", id, { sandbox: name });
         await docker(["rm", "-f", "-v", id]).catch(() => {}); // a leftover of a crashed run under the same lane name
         created.push({ id });
-        await docker(["run", "-d", "--rm", "--name", id, ...lab, ...(port ? ["-p", `127.0.0.1::${port}`] : []), ...(known.env ?? []).flatMap((e) => ["-e", e]), s.image]);
+        await docker(["run", "-d", "--rm", "--name", id, "--network", net, "--network-alias", name, ...lab, ...(port ? ["-p", `127.0.0.1::${port}`] : []), ...(known.env ?? []).flatMap((e) => ["-e", e]), s.image]);
         let hostPort = null;
         if (port) { const m = /:(\d+)\s*$/m.exec(await docker(["port", id, `${port}/tcp`])); hostPort = m ? Number(m[1]) : null; }
         const probe = s.ready ? s.ready.split(/\s+/) : known.ready;
