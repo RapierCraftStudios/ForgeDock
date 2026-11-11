@@ -4770,6 +4770,18 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");
     assert.doesNotMatch(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#4785\\"/, "precheck does not report the superseded #4785");
   });
+  it("#5436 the review starts beside guard+precheck: a green gate adopts it once, a red guard resumes the builder and the review is not applied", async () => {
+    const green = world({ prList: [] });
+    assert.equal((await run(green)).terminalReason, "merged");
+    assert.equal(reviewers(green).length, 1, "one reviewer session, started early and adopted");
+    const mkGuard = (issue) => ({ v: 1, issue, pr: issue * 10, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: `guard ${issue}` });
+    const dir = tmpDir("guard-overlap-");
+    const w = world({ prList: [], baseFiles: { ":src/foo.js": "old" } });
+    w.io.runCommand = async (a) => ({ rc: String(a?.cwd).includes("guardbase-") ? 0 : 1, output: "guard test failed" });
+    await run(w, { dir, worktreeRoot: dir, loadGuards: async () => [mkGuard(9)] });
+    assert.ok(builders(w).length >= 2, "a failing guard still resumes the builder");
+
+  });
   it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
     const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
     assert.deepEqual(parseAmendmentsComment(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });
