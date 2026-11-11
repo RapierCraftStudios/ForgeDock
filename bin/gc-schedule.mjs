@@ -71,7 +71,7 @@ export async function installGcSchedule({ schedule = "", enabled = true, cwd = p
     // cron fallback: replace our tagged line for this repo, keep every other line.
     let cur = "";
     try { cur = String(await exec("crontab", ["-l"])); } catch { cur = ""; }
-    const mine = (l) => l.includes(`${CRON_TAG} ${resolve(cwd)}`);
+    const mine = (l) => l.trimEnd().endsWith(`${CRON_TAG} ${resolve(cwd)}`); // end-anchored: `/work/repo` must not match `/work/repo2`
     const rest = cur.split("\n").filter((l) => l.trim() && !mine(l));
     if (!want && rest.length === cur.split("\n").filter((l) => l.trim()).length) return { status: "off", kind: "cron", detail: "no schedule set" };
     const next = [...rest, ...(want ? [renderCron(opts)] : [])];
