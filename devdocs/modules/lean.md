@@ -495,7 +495,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    no runner calls are added.
    Generated files (forge#4519): `hotspots.sh` marks a row `generated` (and
    so `excluded`) for `linguist-generated`, a `maintenance.generated_paths`
-   glob or an `@generated` / `DO NOT EDIT` header in the first 5 lines, and
+   glob (`maintenance.generated` is an alias, merged), a `generated/` path
+   segment (#5470) or an `@generated` / `DO NOT EDIT` header in the first 5 lines, and
    `hotspotGrowth` never counts it. `generated_paths` (bot-owned) is also in
    the output head, so `amend()` passes it to `applyAmendments`, which refuses
    an add-deliverable on a matching path; `hotspotPlanNote`/`hotspotBuildRule`
@@ -3103,3 +3104,7 @@ R3/R5/R7 follow-up (#5450): image sandboxes join a per-lane network `forge-sbx-<
 ## Entry 2026-11-11 — issue-watch survives transient gh errors and reports a dead heartbeat (#5465)
 
 `ghRunner` (`issuewatch.mjs`) retries `isTransientGhError` failures (TLS timeout, ECONNRESET, 5xx/429, secondary rate limit) with bounded doubling backoff (injectable `sleep`, default sync `Atomics.wait`); 4xx and the 401/403 warning are unchanged, and a pass that still fails is recorded in `passError` and skipped, so the loop never exits on it. `runWatch` writes `phase: exited` plus `exitReason` on every exit (crash, SIGTERM/SIGINT, `--once`), never `running`. `watchLiveness` (`issuewatch-parity.mjs`) now returns `dead` (heartbeat older than 3x `heartbeatEveryMs` + grace; was `stale`) or `exited`; `listWatches` lists every watch under `watchRoot` and `alertDeadWatches` emits one `watch.dead` event (`events.mjs`, webhook via `events.webhook_url`) per dead heartbeat, recorded as `deadAlerted` in status.json. `forgedock status` prints an issue-watch health section and fires that alert; `issue-watch watchdog` does the same for the timer. `issuewatch-install.mjs` (`issue-watch install`) writes a systemd user unit (`Restart=on-failure`) plus a 60s watchdog timer, or a launchd agent (`KeepAlive.SuccessfulExit=false`), mirroring forgedock-schedd. Docs: `docs/ISSUE-WATCH.md`. 0 LLM calls.
+
+## Entry 2026-11-11 — issue-watch reconciles claims with batch outcomes (#5467)
+
+`issuewatch-reconcile.mjs` is the batch-mode reconcile each `tick` runs before the batch `reported()` settle. `classifyClaim` maps a batch result row to `merged | needs-human(code) | parked(code) | running | stranded` (a `needs-human` row with a non-human, non-`unclassified` code is `parked`). `reconcileClaims` takes every final row out of `inflight` at once (merged to `settle`, the rest to `fail`) and records `state.outcomes[n]`. `remediateStep` launches one `run-issue --recover <code> --recover-attempt 1` lane per parked issue (`io.remediate`), capped by the watch key `max_remediations` (default 10, `state.remediated`); a lane that exits non-zero labels the issue `needs-human` with the reason in a comment, and a running remediation holds the drain. `reclaimStep` releases a `needs-human`/parked claim once a person cleared the label and left a trusted `FORGE:DECISION` or a newer comment, so the next pass re-claims it. `issue-watch status` prints the reconciled counts and `status --stuck [--hours N]` (default 24) lists unmerged claims older than N hours with the reason (`claimedAt`). `status.json` fields are additive; old files still read. No daily digest; `--stuck` covers it.
