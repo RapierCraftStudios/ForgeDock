@@ -8258,3 +8258,33 @@ describe("#5440 precheck scope: directory deliverable and renumbered migration",
 
 /** #5449: the conformance record also carries test_adequacy counts; these assertions pin the older fields. */
 function noAdq({ test_adequacy: _t, ...c } = {}) { return c; }
+
+describe("test adequacy gate in the lane (#5449)", () => {
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const bugWorld = (contract) => {
+    const w = world({ labels: [{ name: "bug" }], contract: { ...CONTRACT, repro_test: RT, ...contract } });
+    w.io.redGreen = async () => ({ base: "FAILED", head: "RAN" });
+    return w;
+  };
+
+  it("test adequacy: FORGE:REVIEW renders the table and RUN_TERMINAL carries the telemetry fields", async () => {
+    const w = bugWorld({});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const review = w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->"));
+    assert.match(review, /Test adequacy/); assert.match(review, /BASE=FAILED HEAD=RAN/); assert.match(review, /adequate/);
+    const term = w.telemetry.find((x) => x.event === "RUN_TERMINAL");
+    assert.equal(typeof term.tests_declared, "number"); assert.equal(typeof term.tests_ran, "number");
+    assert.equal(term.repro_quality, "red_green");
+    assert.equal(term.first_review === undefined || typeof term.first_review === "object", true, "existing fields keep their shape");
+  });
+
+  it("test adequacy: a weak test (patch-echo repro) gets exactly one builder resume, then is recorded in the table and merges", async () => {
+    const w = bugWorld({ repro_quality: "patch-echo" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan, build and one resume to strengthen the test");
+    const review = w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->"));
+    assert.match(review, /weak \(repro quality patch-echo\)/);
+  });
+});
