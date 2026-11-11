@@ -1759,8 +1759,7 @@ describe("#5469: holds carry an owner and an expiry", () => {
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(started, [1], "held until it expires");
     expired = true;
-    await until(() => started.includes(2));
-    free();
+    try { await until(() => started.includes(2), 3000); } finally { free(); } // a failure frees the gate so the run ends instead of hanging
     assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
     assert.ok(log.some((r) => r.outcome === "hold-expired" && /#2 \(op@h/.test(r.detail)));
     assert.ok(log.some((r) => r.outcome === "hold-alert" && /owner session \(op@h\) is gone/.test(r.detail)), "a dead owner session raises an alert row");
