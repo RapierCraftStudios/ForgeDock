@@ -551,12 +551,19 @@ export function domainChecksBlock(domains = []) {
   return `\n<domain_checks>\nThis diff touches these review domains. Report every finding below as a regressions row with path:line (it blocks the merge).\n${lines.join("\n")}\n</domain_checks>`;
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [] }) {
+/** #5446: the engine flagged the repro_test (patch_echo, mutation_survivor); the reviewer must accept or reject it explicitly. "" otherwise. */
+export function reproFlagNote(flag) {
+  if (flag !== "patch_echo" && flag !== "mutation_survivor") return "";
+  const why = flag === "patch_echo" ? "its assertions only compare against literals this diff introduced (no behaviour or output is asserted)" : "it still passes when the fix's changed lines are mutated";
+  return `\n<repro_quality>${flag}: the repro_test ${why}. Accept or reject it explicitly in a row (a rejection is a failing row naming the behaviour the test must exercise).</repro_quality>`;
+}
+
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [], reproFlag = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}${relaxationBlock(relaxations)}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}${relaxationBlock(relaxations)}${reproFlagNote(reproFlag)}`;
 }
 
 /**

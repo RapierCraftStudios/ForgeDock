@@ -1490,6 +1490,15 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(traj(w)[0], /\| Review \| shadow: would block \(nonconforming\) \|/);
   });
 
+  it("#5439 a shadow would-BLOCK lane still files its accepted deferral and merges", async () => {
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Old callers log a warning.", disposition: "defer", why: "w", bucket: "owner:rotate the key" }] };
+    const w = world({ contract: k, body: `${ISSUE_BODY}\n- Old callers log a warning.`, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({ issue_coverage: [{ quote: "foo must handle a null argument without throwing.", status: "covered" }, { quote: "Existing callers of foo keep working.", status: "missing" }] }, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.match(shadowNote(w), /would BLOCK/);
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
+  });
+
   it("scope creep does not block in shadow (as today) but is recorded", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -2219,6 +2228,15 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     w.io.prepareToolchain = async () => ({ pins: [{}], env: { PATH: "/shim/bin:/host/bin" }, summary: "pnpm@10.4.1" });
     assert.equal((await run(w)).terminalReason, "merged");
     assert.equal(w.rgCalls[0].env.PATH, "/shim/bin:/host/bin"); assert.match(w.rgCalls[0].env.TMPDIR, /^\/rt\//);
+  });
+
+  it("a green-red repro records repro_quality in the trajectory; reproQuality off skips the check (#5446)", async () => {
+    const w = rworld([RED_GREEN]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(traj(w)[0].includes("repro_quality: "), "quality decision recorded");
+    const o = rworld([RED_GREEN]);
+    assert.equal((await run(o, { reproQuality: "off" })).terminalReason, "merged");
+    assert.ok(!traj(o)[0].includes("repro_quality: "));
   });
 
   it("a non-testable bug records repro_test none with a reason and is not blocked; a missing repro_test gets the one contract correction", async () => {
@@ -8206,5 +8224,22 @@ describe("admission disk ceiling (#5421)", () => {
     assert.equal(await nearCeilingDisk({ host: host(2000), minFreeGb: 5 }), true);
     assert.equal(await nearCeilingDisk({ host: host(20000), minFreeGb: 5 }), false);
     assert.equal((await diskLowAdmission({ host: host(2000), minFreeGb: 5 })).reasons.length, 2);
+  });
+});
+
+import { precheck as precheck5440 } from "./conformance.mjs";
+describe("#5440 precheck scope: directory deliverable and renumbered migration", () => {
+  const mk = (path) => ({ requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [{ id: "D8", path, change: "regenerate", requirements: ["R1"] }], validate: [] });
+  const res = { requirements: [{ id: "R1", status: "implemented" }], validation: [] };
+  const creep = (contract, changedFiles) => precheck5440({ contract, result: res, changedFiles }).failures.filter((f) => f.kind === "scope_creep");
+  it("directory deliverable without a slash: files beneath it are not scope_creep (#40566 shape); a sibling is", () => {
+    const c = mk("listings/official/travel");
+    assert.equal(creep(c, ["listings/official/travel/agent.md", "listings/official/travel/page.md"]).length, 0);
+    assert.equal(creep(c, ["listings/official/travel2/agent.md"]).length, 1);
+  });
+  it("renumbered migration (0637_* -> 0639_*) stays covered; an unrelated file is still scope_creep", () => {
+    const c = mk("db/migrations/0637_*");
+    assert.equal(creep(c, ["db/migrations/0639_add_x.sql"]).length, 0);
+    assert.equal(creep(c, ["db/migrations/0639_add_x.sql", "src/billing.js"]).length, 1);
   });
 });
