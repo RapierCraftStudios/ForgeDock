@@ -65,6 +65,7 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { applyEnumerating, renameDuplicates } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
+import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
 import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, NO_TRIGGER } from "./e2e.mjs";
 import { transferToEpic } from "./acceptance.mjs";
@@ -304,6 +305,11 @@ export async function runCore(o) {
   let sessionId = null;
 
   const ev = (e) => appendEvent(dir, issue, e, { repo }); // #4432: the run log is keyed by repo + issue
+  /** #5435: time one sandbox_start step (SANDBOX_STEP event + ledger sub-timing); the result and errors pass through. */
+  const step = async (name, fn) => {
+    const s0 = now();
+    try { return await fn(); } finally { const ms = Math.max(0, now() - s0); phaseLedger.addStep("sandbox_start", name, ms); ev({ event: "SANDBOX_STEP", step: name, ms }); }
+  };
   const expTag = armed.tag; // #4629: same arm for the whole run; #5206: plus the applied overrides
   const emit = async (rec) => { try { await emitTelemetry?.({ ...rec, issue }); } catch { /* never fails a run */ } };
   let ghCache = null; // #4507: the run's own gh HTTP cache (set once the run tmp dir exists)
@@ -1309,6 +1315,9 @@ export async function runCore(o) {
 
   try {
     // ---- 1. claim ----
+    // #5435: the lane fetch is independent of the claim's GitHub writes; start it now and await it before the resume probe.
+    const fetchP = step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
+    await step("claim", async () => {
     await label("investigating");
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
     if (recover) {
@@ -1321,17 +1330,21 @@ export async function runCore(o) {
       T.decisions.push(`Recovery pass for ${recover.code} (attempt ${recover.attempt}): needs-human removed, PR resumed`);
       ev({ event: "RECOVERY_START", code: recover.code, attempt: recover.attempt });
     }
+    });
 
     // ---- 2. worktree (resume an open PR / remote branch) ----
-    try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
+    await fetchP;
     let resumed = null, fromSalvage = false;
-    try {
-      const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
-      const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
+    await step("resume_probe", async () => { try {
+      const [prsRaw, remoteRaw] = await Promise.all([ // #5435: independent network reads, in parallel
+        ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"]),
+        io.git(["ls-remote", "--heads", "origin", branch], { cwd })]);
+      const prs = JSON.parse(String(prsRaw) || "[]");
+      const remote = String(remoteRaw).trim();
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
       const salv = (await pickSalvage({ io, cwd, issue, branch, hasBranch: Boolean(remote) }).catch((e) => { ev({ event: "SALVAGE_PICK_FAILED", error: String(e?.message ?? e).slice(0, 200) }); return null; }))?.ref; // release #5068 delta SPEC-2: never silent // #4958, #5063: the newest salvage ref that is not behind the lane branch
       if (salv) { await io.git(["fetch", "origin", `${salv}:refs/remotes/origin/${branch}`], { cwd }); resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null }; fromSalvage = true; ev({ event: "RESUME_FROM_SALVAGE", ref: salv }); }
-    } catch { /* no resume info: start fresh */ }
+    } catch { /* no resume info: start fresh */ } });
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
     // #4593: a shipped milestone lane (fully merged into staging) cannot take new work; follow the open PR's live base.
     if (resumed?.base && resumed.base !== lane && !isDefaultLane(resumed.base, defaults)) {
@@ -1360,10 +1373,12 @@ export async function runCore(o) {
     }
     // #4162: a run that died can leave its runner writing into this worktree, and uncommitted work in it. Stop the
     // processes and save the work before the worktree is removed; the lease above makes this run the only one doing so.
+    await step("salvage_cleanup", async () => {
     await stopWorktreeProcs();
     salvagedRef = await salvage("an earlier run");
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
+    });
     // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
     // A leftover dir that git no longer lists as a worktree blocks `worktree add`. Remove ONLY this issue's lean dir under the lean root.
     const wtRoot = o.worktreeRoot ?? join(cwd, ".claude", "worktrees");
@@ -1380,10 +1395,17 @@ export async function runCore(o) {
     const LOCK_RE = /could not lock|cannot lock ref|\.lock'?: File exists|Unable to create .*\.lock|index\.lock|packed-refs\.lock/i;
     // #4221: tracked blobs >= sparseMaxKb stay out of the checkout (lockfiles/manifests always in); falls back to a full checkout.
     const sparseMaxKb = Number.isFinite(o.sparseMaxKb) && o.sparseMaxKb >= 0 ? o.sparseMaxKb : DEFAULT_SPARSE_MAX_KB;
+    // #5435: attribute the cold add to its git calls: the sparse plan (ls-tree), the add + checkout (which runs any post-checkout hook), the sparse checkout
+    const GIT_STEP = { "ls-tree": "sparse_plan", worktree: "git_worktree_add", "sparse-checkout": "sparse_checkout", "read-tree": "sparse_checkout" };
+    // #5435 (R2): the lane's own checkout never needs the repo's post-checkout hook (husky/lfs installs); it is skipped for these calls only.
+    const timedGit = async (args, opts) => {
+      const name = GIT_STEP[args[0]], s0 = now();
+      try { return await io.git(args, name && args[0] !== "ls-tree" ? { ...opts, env: { ...opts?.env, ...NO_HOOKS } } : opts); } finally { if (name) { const ms = Math.max(0, now() - s0); phaseLedger.addStep("sandbox_start", name, ms); ev({ event: "SANDBOX_STEP", step: name, ms }); } }
+    };
     const addWorktree = async (args, ref) => {
       let cleaned = false;
       for (let i = 0; ; i++) {
-        try { return await addLaneWorktree(io.git, io.fs?.write, { cwd, wt, addArgs: args, ref, maxBlobBytes: sparseMaxKb * 1024 }); } catch (e) {
+        try { return await addLaneWorktree(timedGit, io.fs?.write, { cwd, wt, addArgs: args, ref, maxBlobBytes: sparseMaxKb * 1024 }); } catch (e) {
           const msg = String(e?.stderr ?? e?.message ?? e);
           if (!cleaned && /already exists/i.test(msg) && (await leftoverDir())) { cleaned = true; continue; }
           if (i >= 4 || !LOCK_RE.test(msg)) throw e;
@@ -1423,7 +1445,14 @@ export async function runCore(o) {
         T.decisions.push(`Lane branch ${branch} held only ${LEAN_DIR}/ scratch: its stale checkpoint was dropped and the issue is planned fresh`);
       }
     } else {
-      wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
+      const warmN = warmTreeCount(o.warmTrees);
+      const wtRootDir = o.worktreeRoot ?? join(cwd, ".claude", "worktrees");
+      if (warmN) { // #5435: a pooled tree is claimed and its HEAD verified against the base sha; any failure is the cold add below
+        wtInfo = await step("warm_claim", () => claimWarm({ git: io.git, cwd, root: wtRootDir, wt, branch, base, n: warmN }).catch(() => null));
+        if (wtInfo) ev({ event: "WARM_TREE_CLAIMED", sha: wtInfo.sha });
+      }
+      if (!wtInfo) wtInfo = await step("worktree_add", () => addWorktree(["worktree", "add", "-B", branch, wt, base], base));
+      if (warmN) refillWarm({ git: io.git, cwd, root: wtRootDir, ref: base, n: warmN, maxBlobBytes: sparseMaxKb * 1024, write: io.fs?.write }).catch(() => {});
     }
     wtCreated = true;
     if (fromSalvage) await dropSalvageTracking({ git, branch }); // #5047: the salvaged commits are unpublished: the sign-off range must include them
@@ -1435,10 +1464,12 @@ export async function runCore(o) {
       ev({ event: "WORKTREE_SPARSE_FALLBACK", reason: wtInfo.fallback });
       T.anomalies.push(`Sparse checkout failed, full checkout used: ${wtInfo.fallback}`);
     }
+    await step("scratch_setup", async () => { // #5435: timed with the other startup steps
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     await installSignoffHook();
     if (!resumed && await clearLaneScratch({ git, fs: io.fs, cwd: wt })) ev({ event: "LANE_SCRATCH_CLEARED" }); // #4880: never read a previous lane's scratch
+    });
     // ---- 2a. lane profile (#4395): the repo's lane instruction file replaces CLAUDE.md; a bad one falls back with an anomaly ----
     const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
     if (laneProfile.name !== "full" && lanePath) {
@@ -1454,8 +1485,8 @@ export async function runCore(o) {
       : laneProfile.name === "full" ? "Lane profile: full session (FORGEDOCK_FULL_SESSION=1)" : "Lane profile: auto-memory off, CLAUDE.md loaded");
     // ---- 2b. toolchain pins + env.setup (#4163): before the builder; zero LLM. No pins and no setup changes nothing ----
     try {
-      const tc = await (io.prepareToolchain ?? prepareToolchain)({ dir: wt, override: toolchainOverride, read: io.fs.read,
-        binDir: join(runTmp ?? join(wt, LEAN_DIR), "toolchain", "bin") });
+      const tc = await step("toolchain", () => (io.prepareToolchain ?? prepareToolchain)({ dir: wt, override: toolchainOverride, read: io.fs.read,
+        binDir: join(runTmp ?? join(wt, LEAN_DIR), "toolchain", "bin") }));
       if (tc?.summary) {
         toolchain = { env: tc.env ?? null, summary: tc.summary };
         ev({ event: "TOOLCHAIN_PINNED", pins: tc.summary, shims: tc.shims });

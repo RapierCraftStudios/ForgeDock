@@ -3056,6 +3056,10 @@ path is authorized (#5380).
 - **Sign-off.** `installSignoffHook` puts a commit-msg hook (chaining the repo's own hooks) on the builder env via `GIT_CONFIG_*` so builder commits are signed when made; `ensureSignedOff` stays the fallback.
 - **Invalid.** the close and the `workflow:invalid` label run in `Promise.all`.
 
+## Entry 2026-11-11 — sandbox_start step timings and opt-in local warm worktrees (#5435)
+
+`lean.mjs` times each `sandbox_start` step (`fetch`, `resume_probe`, `salvage_cleanup`, `warm_claim`, `worktree_add`, `toolchain`) via `step()`: a `SANDBOX_STEP {step, ms}` event plus `phaseledger.addStep`, which adds a `steps` object (ms) to that phase in `snapshot()` (not added to the phase total; shape and `LANE_PHASES` order unchanged). The resume probe's `gh pr list` and `ls-remote` now run in parallel. `warmtree.mjs`: with `FORGE_LOCAL_WARM_TREES=1..4` (or `o.warmTrees`, default off) a fresh, non-resumed lane claims a detached tree from `<worktreeRoot>/warm/` (`worktree move` + `checkout -B branch <base sha>`), verifies `HEAD` against the resolved base sha, then `refillWarm` tops the pool up best effort. Any error removes the claimed tree and falls to the cold `addLaneWorktree` path; the pool never fails a lane. Tests: `warmtree.test.mjs` (6). Cost: 0 LLM calls.
+
 ## Entry 2026-11-11 — a shadow `would BLOCK` is advisory in the issue-watch merge verifier (#5439)
 
 `issuewatch-verify.mjs` `reviewVerdict` now returns `shadow-block` for a `would BLOCK` FORGE:REVIEW; `verifyMerge` treats it as verified and records an advisory evidence line. Shadow mode merges by design (`lean.mjs` shadow gate), so reopening with `needs-human` contradicted the shadow label. An enforced `NONCONFORMING/BLOCK/FAIL` verdict, an unrecognised one, or no review still fails. Accepted deferrals are filed before the PR whatever the shadow verdict (`lean.test.mjs` pins it).
