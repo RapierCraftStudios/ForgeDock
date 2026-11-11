@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { foldRegression } from "./baselines.mjs";
 import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
@@ -5745,6 +5746,23 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     w.io.runCommand = async () => (n++ ? { rc: 0, output: "" } : { rc: 1, output: "registry missing table x" });
     await run(w, { verify: { invariants: ["bash scripts/inv.sh"] } });
     assert.ok(n >= 2, "the invariant is rerun after the builder fix round");
+  });
+
+  it("#5448 a declared baseline runs when a shared path changes and a failing one blocks the merge", async () => {
+    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
+    const b = [{ when: "shared/content/**", run: "make stealth-baseline" }];
+    const ok = mk(0); await run(ok, { verify: { baselines: b } });
+    assert.ok(ok.ran.includes("make stealth-baseline"), "baseline ran for the shared change");
+    const none = world(); none.ran = []; none.io.runCommand = async (a) => { none.ran.push(a.command); return { rc: 0, output: "" }; };
+    await run(none, { verify: { baselines: b } });
+    assert.ok(!none.ran.includes("make stealth-baseline"), "unrelated change runs no baseline");
+    const bad = mk(1); const r = await run(bad, { verify: { baselines: b } });
+    assert.equal(bad.merges.length, 0); assert.notEqual(r.terminalReason, "merged");
+  });
+
+  it("#5448 contract.regression is folded into validate as G# entries at freeze", () => {
+    const c = foldRegression({ ...CONTRACT, regression: [{ id: "G1", command: "node --test test/bar.test.js", covers: "bar caller" }, { id: "G2", command: "node --test test/foo.test.js" }] });
+    assert.deepEqual(c.validate.map((v) => v.id), ["V1", "G1"], "G2 duplicates an existing validate command");
   });
 
   it("#5239 a guard failing only on the lane tree blocks the merge (ci.red), never merges", async () => {
