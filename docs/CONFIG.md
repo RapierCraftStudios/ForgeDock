@@ -1032,6 +1032,8 @@ Each alert line names the event, the rate, the sample size (`count/sample` lanes
 
 ### Phase ledger (#4908)
 
+Setup overlaps the plan session (#5434): deps install, heavy shims and `env.setup` run in the background and are awaited before implement, so `deps_install` is only the residual wait. The run log gets `LANE_SETUP_TIMING` (`step`, `ms`) per sub-step and `FIRST_SESSION` (`ms` from lane start to the first model session). The runner option `contextWaitSeconds` (default 5, 0 = wait without bound) caps how long the plan waits for hotspots and the context pack.
+
 No configuration. Every lane records start and end of the engine phases it reaches, so a lane's wall time is attributed instead of guessed: `queue_wait`, `sandbox_start` (claim, worktree, toolchain), `deps_install`, `validate`, `plan`, `implement`, `precheck`, `review`, `ci_wait`, `base_sync`, `merge`, each with `model_ms` and `usd` where model calls ran in it. A lane's phases sum to its `wall_ms`; `queue_wait` precedes the lane clock and is added by the batch runner. The ledger is the `phases` object on each `log.jsonl` outcome row and on `RUN_TERMINAL`, and `phase_<id>_ms|_model_ms|_usd` fields in `FORGE:TELEMETRY`. The batch report prints a `phases` line (p50/p90 per phase, largest share of wall time, `n/a` without ledger data) and `forgedock stats` prints a `Lane wall time by phase` table. The efficiency lines also list merged issues with no acceptance probe declared (`unprobed merged issues`).
 
 ## `verify` (OPTIONAL)
