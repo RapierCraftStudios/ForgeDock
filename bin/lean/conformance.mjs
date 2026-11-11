@@ -1411,11 +1411,17 @@ export function loneE2eRows(failures) {
   const ids = fs.map((f) => /^(\S+) is a /.exec(String(f.detail ?? ""))?.[1]);
   return ids.every(Boolean) ? [...new Set(ids)] : null;
 }
+/** #5468 (#5450): a validate that declares `env` names of configured test sandboxes (forge.yaml `sandboxes`) runs against a provisioned live service: the route for an e2e check that can run pre-merge. */
+export function sandboxedRun(v, e2e = null) {
+  const known = e2e?.sandboxes ?? [];
+  const names = Array.isArray(v?.env) ? v.env : typeof v?.env === "string" ? v.env.split(",") : [];
+  return names.some((n) => known.includes(String(n).trim()));
+}
 /** #4726: true when a V-ref named in the row's `validated_by` resolves to a contract validate command that is a real e2e check. */
 export function e2eVerified(row, contract, e2e = null) {
   const by = String(row?.validated_by ?? "");
   const refs = (contract?.validate ?? []).filter((v) => v?.id && new RegExp(`(?:^|[^A-Za-z0-9_])${v.id}(?![A-Za-z0-9_])`).test(by));
-  return refs.some((v) => isE2eCommand(v.command, e2e)) || (!refs.length && isE2eCommand(by, e2e));
+  return refs.some((v) => isE2eCommand(v.command, e2e) || sandboxedRun(v, e2e)) || (!refs.length && isE2eCommand(by, e2e));
 }
 /**
  * The engine's decision from the reviewer's rows. state: conforms | nonconforming | review.unparseable | review.incomplete
@@ -1440,7 +1446,7 @@ export function decide(raw, ctx) {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
       const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
-      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance${ctx.e2e?.sandboxes?.length ? `; it can run pre-merge: declare env: [${ctx.e2e.sandboxes.slice(0, 3).join(", ")}] on its validate to use the test sandbox (#5450), do not defer it` : ""}` });
     } else if (r.disposition === "defer" && wantsE2e(r)) {
       // #5339: a deferred e2e/manual requirement is not met; only a post-deploy one is transferred to the epic (the lane closes partial)
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });

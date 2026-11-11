@@ -1862,7 +1862,7 @@ describe("#5449 test adequacy kinds are enforced by default", () => {
   });
 });
 
-import { prodOnlyE2e, autoPostDeployE2e, loneE2eRows } from "./conformance.mjs";
+import { prodOnlyE2e, autoPostDeployE2e, loneE2eRows, sandboxedRun } from "./conformance.mjs";
 import { e2eCheckFor, mergeCheckEntries, parseChecks } from "./postdeploy-check.mjs";
 
 describe("#5468 production-only e2e/manual criteria become post-deploy checks", () => {
@@ -1903,6 +1903,19 @@ describe("#5468 production-only e2e/manual criteria become post-deploy checks", 
     assert.equal(e2eCheckFor("R1", "Operators restore after deploy [type:manual]"), null);
     const { m, d } = decideRow(LQ);
     assert.equal(autoPostDeployE2e(m.contract, loneE2eRows(d.failures)).converted.length, 0);
+  });
+  it("a pre-merge e2e row is verified by a validate declaring a configured test sandbox, never deferred (#5450 route)", () => {
+    const m = mk(LQ);
+    m.contract.validate = [{ id: "V1", command: "pytest tests/test_x.py", env: ["web"] }];
+    const r = { ...good, issue_coverage: [{ quote: LQ, status: "covered" }, ...good.issue_coverage.slice(1)] };
+    assert.equal(sandboxedRun(m.contract.validate[0], { sandboxes: ["web"] }), true);
+    assert.equal(sandboxedRun(m.contract.validate[0], { sandboxes: [] }), false);
+    assert.equal(decide(r, { ...m.ctx, contract: m.contract, e2e: { sandboxes: ["web"] } }).state, "conforms");
+    const d = decide(r, { ...m.ctx, contract: m.contract, e2e: { sandboxes: ["db"] } });
+    assert.match(d.failures[0].detail, /declare env: \[db\] on its validate to use the test sandbox/);
+    const rd = { ...r, requirements: [{ ...r.requirements[0], status: "deferred", deferral_ok: true }, ...r.requirements.slice(1)] };
+    const dd = decide(rd, { ...m.ctx, contract: { ...m.contract, requirements: [{ ...m.contract.requirements[0], disposition: "defer", bucket: "post-deploy" }, m.contract.requirements[1]] }, e2e: { sandboxes: ["web"] } });
+    assert.ok(dd.failures.some((f) => f.code === "conformance.e2e_unverified"), "a deferred pre-merge e2e row still fails");
   });
   it("mergeCheckEntries keeps existing entries", () => {
     const o = JSON.parse(mergeCheckEntries(JSON.stringify({ a: { run: "x" } }), { a: { run: "y" }, b: { run: "z" } }));
