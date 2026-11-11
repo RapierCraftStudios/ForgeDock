@@ -93,3 +93,13 @@ describe("#4965 auto_add_children", () => {
     }
   });
 });
+
+describe("#5437 post-run after the slot frees", () => {
+  it("result.postRun runs once the lane's slot is free (the next lane starts) and the batch waits for it", async () => {
+    const order = [];
+    await orchestrate({ issues: [1, 2], parallel: 1, pollMs: 5, trusted: () => true, readBody: async () => "",
+      runOne: async (n) => { order.push(`start:${n}`); return n === 1 ? { terminalReason: "merged", postRun: async () => { order.push("post:1"); await new Promise((r) => setTimeout(r, 60)); order.push("post-done:1"); } } : merged; } });
+    assert.ok(order.indexOf("start:2") < order.indexOf("post-done:1"), `lane 2 starts while the post-run job is still running: ${order}`);
+    assert.ok(order.includes("post-done:1"), "the batch did not end before the job finished");
+  });
+});

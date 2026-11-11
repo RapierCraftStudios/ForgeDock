@@ -61,7 +61,7 @@ export async function checkAdmission({ cfg = {}, host }) {
  * mem/tmp <= min / ratio). Orchestrate runs owned-resource GC before an admission when this is true. A failed or
  * non-finite probe never counts as near.
  */
-export async function nearCeiling({ cfg = {}, host, ratio = 0.8 } = {}) {
+export async function nearCeiling({ cfg = {}, host, ratio = 0.8, minFreeGb = null } = {}) {
   const c = { ...ADMISSION_DEFAULTS, ...Object.fromEntries(Object.entries(cfg ?? {}).filter(([, v]) => v !== undefined && v !== null)) };
   if (c.enabled === false || !host) return false;
   const r = Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : 0.8;
@@ -69,10 +69,30 @@ export async function nearCeiling({ cfg = {}, host, ratio = 0.8 } = {}) {
   const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null; // off by default (#4169)
   const load = maxLoad === null ? null : await safe(host.loadAvg1), cores = maxLoad === null ? null : await safe(host.cores);
   if (load !== null && cores && load / cores >= r * maxLoad) return true;
+  if ((await diskLow({ host, minFreeGb: Number.isFinite(minFreeGb) && minFreeGb > 0 ? minFreeGb / r : null })).low) return true; // #5421
   const mem = await safe(host.memAvailableMb);
   if (mem !== null && mem <= c.min_free_mem_mb / r) return true;
   let paths = [];
   try { paths = (await host.tmpPaths?.()) ?? []; } catch { paths = []; }
   for (const p of paths) { const free = await safe(host.freeMb, p); if (free !== null && free <= c.min_free_tmp_mb / r) return true; }
   return false;
+}
+
+/**
+ * Free-disk check (#5421): the filesystems holding the worktree root and `~/.forge` (`host.hygienePaths()`, else
+ * `host.tmpPaths()`) against `minFreeGb` (hygiene.min_free_gb). A failed probe never counts as low; null/0 is off.
+ * @returns {Promise<{low: boolean, reasons: string[]}>}
+ */
+export async function diskLow({ host, minFreeGb = null } = {}) {
+  const min = Number(minFreeGb);
+  if (!host || !Number.isFinite(min) || min <= 0) return { low: false, reasons: [] };
+  let paths = [];
+  try { paths = (await (host.hygienePaths ?? host.tmpPaths)?.call(host)) ?? []; } catch { paths = []; }
+  const reasons = [];
+  for (const p of paths) {
+    let mb = null;
+    try { const v = await host.freeMb?.(p); mb = Number.isFinite(v) ? v : null; } catch { mb = null; }
+    if (mb !== null && mb / 1024 < min) reasons.push(`disk ${p} ${(mb / 1024).toFixed(1)} GB < ${min} GB`);
+  }
+  return { low: reasons.length > 0, reasons };
 }

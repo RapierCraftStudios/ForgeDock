@@ -9,6 +9,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { userFacingSurfaces } from "./docsgate.mjs";
+import { pageFiles } from "./pagegate.mjs";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -46,7 +47,7 @@ export function parseRiskPaths(v) {
 }
 
 /** #5099: the review domains a lane can touch, from scripts/review-roster.sh path triggers. */
-export const DOMAINS = Object.freeze(["api", "auth", "database", "docs", "frontend", "infra"]);
+export const DOMAINS = Object.freeze(["api", "auth", "database", "design", "docs", "frontend", "infra", "seo-geo"]);
 const DOMAIN_OF_TRIGGER = Object.freeze({ "frontend-path": "frontend", "auth-path": "auth", "infra-path": "infra", "route-handler": "infra", "migration-path": "database", "sdk-path": "api" });
 const ROSTER = fileURLToPath(new URL("../../scripts/review-roster.sh", import.meta.url));
 
@@ -59,7 +60,7 @@ export function parseEnforceDomains(v) {
  * #5099: the domains the changed files touch, by the path triggers of the bundled scripts/review-roster.sh (the one
  * source of the domain path rules). Sorted, unique; [] without files; null when the script fails (the caller logs it).
  */
-export function pathDomains(files = [], { script = ROSTER, docs = null } = {}) {
+export function pathDomains(files = [], { script = ROSTER, docs = null, pages = null } = {}) {
   const list = [...new Set((files ?? []).map(String).filter(Boolean))];
   if (!list.length) return [];
   let out;
@@ -68,6 +69,7 @@ export function pathDomains(files = [], { script = ROSTER, docs = null } = {}) {
   if (!/^SELECTED_AGENTS=/m.test(String(out))) return null;
   const found = (m ? m[1].trim().split(/\s+/) : []).map((t) => DOMAIN_OF_TRIGGER[t]).filter(Boolean);
   if (docs && Object.keys(userFacingSurfaces(list, docs)).length) found.push("docs"); // #5419
+  if (pages && pageFiles(list, pages).length) found.push("design", "seo-geo"); // #5428
   return [...new Set(found)].sort();
 }
 

@@ -1084,6 +1084,18 @@ function ensureToolStateIgnored(c) {
   } catch { /* .gitignore is best effort */ }
 }
 
+/** #5421: install (or remove) the scheduled `gc --apply` timer from forge.yaml hygiene.schedule; silent when nothing is set. */
+async function installHygieneSchedule(cwd, write = () => {}) {
+  try {
+    const gc = await import("./gc.mjs");
+    const h = gc.readHygiene(cwd);
+    const { installGcSchedule } = await import("./gc-schedule.mjs");
+    const r = await installGcSchedule({ schedule: h.schedule, enabled: h.auto_gc, cwd });
+    if (r.status !== "off") write(`  Hygiene schedule: ${r.status} (${r.kind}) ${r.detail}\n`);
+    return r;
+  } catch { return null; }
+}
+
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
   if (flags.includes("--refresh-context")) {
@@ -1142,9 +1154,11 @@ async function initFlow(c) {
       worktreeBase: draft.paths.worktreeBase.value,
       defaultBranch: draft.branches.default.value,
       stagingBranch: draft.branches.staging.value,
+      sandboxes: draft.meta?.sandboxes, // #5450: commented verify.sandboxes proposal
     });
     atomicWriteFile(outputPath, content);
     ensureToolStateIgnored(c);
+    await installHygieneSchedule(c.cwd, (m) => c.stdout.write(m));
     celebrate(c, { written: true, todoCount: 0, isMinimal: true });
     await maybeOfferDemo(c);
     return 0;
@@ -3328,7 +3342,16 @@ async function doctor(fix = false, verbose = false) {
       const plan = await gc.planGc({ probes, ttlMs: gc.hygieneTtls(h), deleteMergedBranches: h.delete_merged_branches });
       const applied = fix ? await gc.applyGc(plan, probes) : null;
       if (applied && applied.reclaimed.length > 0) fixesApplied++;
-      const r = gc.hygieneCheck(plan, { applied });
+      // #5421: free disk on the worktree root and ~/.forge against hygiene.min_free_gb; --fix also installs the timer.
+      let disk = null;
+      try {
+        const host = (await import("./lean/effects.mjs")).makeHostProbe();
+        const mbs = [];
+        for (const p of host.hygienePaths(process.cwd())) { try { mbs.push(await host.freeMb(p)); } catch { /* unreadable path */ } }
+        if (mbs.length) disk = { freeGb: Math.min(...mbs) / 1024, minFreeGb: h.min_free_gb };
+      } catch { disk = null; }
+      let r = gc.hygieneCheck(plan, { applied, disk });
+      if (fix && h.schedule) { const sr = await installHygieneSchedule(process.cwd()); if (sr?.status === "installed") fixesApplied++; if (sr?.status === "failed") r = { ...r, detail: `${r.detail}; schedule: ${sr.detail}` }; }
       if (r.status === "pass") pass("Resource hygiene", r.detail);
       else warn("Resource hygiene", r.detail);
     } catch (e) {
@@ -3920,7 +3943,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "docs", "review-staging", "release", "gc", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "docs", "review-staging", "release", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4154,6 +4177,12 @@ switch (command) {
     // Reaper (#4180): dry-run report by default; --apply reclaims only ForgeDock-owned resources (ledger, label, lane naming, own tmp).
     const { runGc } = await import("./gc.mjs");
     exitCode = await runGc(restArgs);
+    break;
+  }
+  case "sandbox": {
+    // #5450: operator control of the lane test sandboxes (verify.sandboxes): up <name>... | down | ls
+    const { sandboxFromCli } = await import("./lean/testsandbox.mjs");
+    exitCode = await sandboxFromCli(restArgs);
     break;
   }
   case "orchestrate": {

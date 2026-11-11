@@ -277,3 +277,15 @@ describe("#4502 light lane fixes", () => {
     assert.deepEqual(seen, [900000, 900000]);
   });
 });
+
+describe("light lane freezes a test plan (#5445)", () => {
+  const PLAN = { requirement: "R9", proof: "foo returns null for a null argument instead of throwing a TypeError", level: "unit", level_reason: "a direct call observes the cause", repro: "foo handles null", regression: [], env: [], command: "node --test test/foo.test.js" };
+  const strict = (c) => validateContract(c, ISSUE, { repro: true, testPlan: true });
+  it("a derived bug contract without a test_plan row is rejected; with one it is frozen as R1", () => {
+    const bare = deriveLightContract({ title: TITLE, issueText: ISSUE, result: RESULT, files: FILES });
+    assert.match(strict(bare).problems.join("\n"), /R1: test_plan needs a row/);
+    const c = deriveLightContract({ title: TITLE, issueText: ISSUE, result: { ...RESULT, test_plan: [PLAN] }, files: FILES });
+    assert.equal(c.test_plan[0].requirement, "R1");
+    assert.deepEqual(strict(c), { ok: true, problems: [] });
+  });
+});

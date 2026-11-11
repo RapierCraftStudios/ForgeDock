@@ -7,6 +7,8 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
+import { stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
+const require_stuck = (s, now) => formatStuck(stuckClaims(s, now));
 
 const tmp = () => tmpDir("iw-");
 const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, authorAssociation: "OWNER", author: { login: "me" }, createdAt: "2026-10-01T00:00:00Z", ...o });
@@ -20,7 +22,7 @@ const REVIEW_PASS = { author: { login: "rapiercraft-forgedock" }, authorAssociat
  * issue has a merged `feat/issue-N-lean` PR into staging with a passing review and green CI unless `prs[n]` / `comments[n]` /
  * `checks[sha]` / `compare` say otherwise.
  */
-function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", failGh = () => false } = {}) {
+function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", descendants = {}, failGh = () => false } = {}) {
   const calls = [], launched = [], batchOps = [];
   let clock = Date.parse("2026-10-30T00:00:00Z"), nb = 0;
   const io = { env: { FORGEDOCK_WATCH_DIR: env }, calls, launched, batchOps, closed, bodies, prs, comments, checks, tickClock: (ms) => { clock += ms; }, now: () => clock, sleep: async () => {},
@@ -28,6 +30,8 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, 
     gh: async (a) => {
       calls.push(a);
       if (failGh(a)) throw new Error("gh transient");
+      const desc = a[0] === "api" && /\/compare\/([0-9a-f]+)\.\.\.staging/.exec(a[1]); // descendants of a commit, oldest first
+      if (desc) return (descendants[desc[1]] ?? []).join("\n");
       if (a[0] === "api" && /\/compare\//.test(a[1])) return compare;
       if (a[0] === "api" && /\/commits\/([0-9a-f]+)\/check-runs/.test(a.join(" "))) { const sha = /commits\/([0-9a-f]+)/.exec(a.join(" "))[1]; return (checks[sha] ?? []).map(([n, st, c], i) => `${i + 1}\t${n}\t${st}\t${c ?? ""}`).join("\n"); }
       if (a[0] === "api" && /\/commits\/[0-9a-f]+\/status/.test(a[1])) return "";
@@ -43,7 +47,7 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, 
       return "";
     },
     launch: (n, lane) => { launched.push([n, lane]); return { poll: () => ({ code: exit(n) }) }; },
-    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false } };
+    batch: { add: (id, nums) => batchOps.push(["add", id, nums]), start: async (nums, k, lane) => { batchOps.push(["start", nums, k, lane]); return `b${++nb}`; }, reported: (id) => io.reported?.has(id) ?? false, results: (id) => io.results?.[id] ?? null }, remediated: [], remediate: (n, lane, code) => { io.remediated.push([n, lane, code]); return { poll: () => (io.remediateExit === undefined ? null : { code: io.remediateExit }) }; } };
   return io;
 }
 
@@ -163,19 +167,74 @@ test("two named watches on one repo never double-claim", async () => {
   assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "c"), false);
 });
 
-test("release #4820 BUG-1: a throwing batch.start loses no claim; the same watch re-claims on the next pass", async () => {
-  const dir = tmp();
-  const mk = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
-  const watch = validateWatch("w", { mode: "batch", max_inflight: "3" });
-  const io = fakeIo(dir, [iss(1), iss(2)]);
-  const start = io.batch.start;
-  io.batch.start = async () => { throw new Error("schedd unreachable"); };
-  await assert.rejects(tick({ watch, repo: "o/r", io, state: mk() }), /schedd unreachable/); // status.json never saved
-  io.batch.start = start;
-  const state = await tick({ watch, repo: "o/r", io, state: mk() }); // restart from the last saved (empty) state
-  assert.deepEqual([...state.claimed].sort(), [1, 2]);
-  assert.deepEqual(io.batchOps, [["start", [1, 2], watch.parallel, "staging"]]);
-  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "another watch still cannot take it");
+const mkState = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
+const slowStart = (io) => { io.batch.start = async () => { throw Object.assign(new Error("orchestrate did not create a batch within 60s"), { before: ["old"] }); }; };
+
+test("#5425: max_inflight defaults to parallel in batch mode; an explicit value and other modes keep their own", () => {
+  assert.equal(validateWatch("w", { mode: "batch", parallel: "20" }).max_inflight, 20);
+  assert.equal(validateWatch("w", { mode: "batch" }).max_inflight, 4);
+  assert.equal(validateWatch("w", { mode: "batch", parallel: "20", max_inflight: "5" }).max_inflight, 5);
+  assert.equal(validateWatch("w", { parallel: "20" }).max_inflight, 4);
+});
+
+test("#5425: a batch watch with parallel 6 claims six issues in one pass", async () => {
+  const io = fakeIo(tmp(), [1, 2, 3, 4, 5, 6, 7].map((n) => iss(n)));
+  const state = await tick({ watch: validateWatch("w", { mode: "batch", parallel: "6" }), repo: "o/r", io, state: mkState() });
+  assert.equal(state.claimed.length, 6);
+});
+
+test("#5425: a throwing batch.start keeps the claims in a pending-start record; the pass does not throw", async () => {
+  const dir = tmp(), watch = validateWatch("w", { mode: "batch" }), io = fakeIo(dir, [iss(1), iss(2)]);
+  slowStart(io);
+  const state = await tick({ watch, repo: "o/r", io, state: mkState() });
+  assert.deepEqual(state.claimed.sort(), [1, 2]);
+  assert.deepEqual(state.pendingStart.issues, [1, 2]);
+  assert.deepEqual(state.pendingStart.before, ["old"]);
+  assert.match(formatStatus(state, watch, io.now()), /batch start pending for 2 claim/);
+  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "claims stay held");
+  // later pass: the batch appeared, so it is adopted and no second start happens
+  io.batch.find = (before) => (before.includes("old") ? "b9" : null);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.equal(state.batch, "b9");
+  assert.equal(state.pendingStart, null);
+  assert.deepEqual(io.batchOps, []);
+});
+
+test("#5425: a pending start that never shows up releases its claims after the timeout", async () => {
+  const dir = tmp(), watch = validateWatch("w", { mode: "batch" }), io = fakeIo(dir, [iss(1)]);
+  slowStart(io);
+  const state = await tick({ watch, repo: "o/r", io, state: mkState() });
+  io.batch.find = () => null;
+  io.tickClock(5 * 60000);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.ok(state.pendingStart, "still pending inside the window");
+  io.tickClock(6 * 60000);
+  io.batch.start = async (nums) => { io.batchOps.push(["start", nums]); return "b1"; };
+  await tick({ watch, repo: "o/r", io, state }); // releases, then re-claims and starts again
+  assert.equal(state.pendingStart, null);
+  assert.deepEqual(io.batchOps, [["start", [1]]]);
+});
+
+test("#5425: a running batch of the same repo and lane gets the claims by --add instead of a new start", async () => {
+  const io = fakeIo(tmp(), [iss(1)]);
+  io.batch.running = (lane) => (lane === "staging" ? "brun" : null);
+  const state = await tick({ watch: validateWatch("w", { mode: "batch" }), repo: "o/r", io, state: mkState() });
+  assert.equal(state.batch, "brun");
+  assert.deepEqual(io.batchOps, [["add", "brun", [1]]]);
+});
+
+test("#5425: runWatch survives a throwing pass, saves status.json with the error, and runs the next pass", async () => {
+  const dir = tmp(), watch = validateWatch("w", { until: "2026-10-30T00:10:00Z" }), io = fakeIo(dir, [iss(1)]);
+  let fail = true; const gh = io.gh;
+  io.gh = async (a) => { if (fail) throw new Error("gh boom"); return gh(a); };
+  const seen = [];
+  io.sleep = async () => { seen.push(JSON.parse(readFileSync(join(dir, "status.json"), "utf8")).passError); fail = false; io.tickClock(300000); };
+  const errs = console.error; console.error = () => {};
+  let state; try { state = await runWatch({ watch, repo: "o/r", io, dir, intervalMs: 300000 }); } finally { console.error = errs; }
+  assert.match(seen[0], /gh boom/);
+  assert.equal(state.passError, null);
+  assert.equal(state.phase, "done");
+  assert.match(formatStatus({ ...state, passError: "x boom" }, watch, io.now()), /last pass failed: x boom/);
 });
 
 test("max_issues stops claiming at N, drains, then finishes", async () => {
@@ -317,10 +376,18 @@ test("verify: a merged, reviewed, green lane PR is verified and the evidence is 
   assert.match(r.posted[0], /FORGE:WATCH_VERIFY[\s\S]*merge verified[\s\S]*PR #1001[\s\S]*CI green on the merge commit \(1 check/); // forgedock/verify is report-only
 });
 
-test("verify: a shadow `would BLOCK` review merged anyway is NOT verified: reopened, needs-human, evidence", async () => {
+test("verify: a shadow `would BLOCK` review merged anyway is advisory: verified, not reopened, no needs-human", async () => {
   const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
   const r = await settleOne({ comments: { 1: [REVIEW_PASS, block] } });
-  assert.deepEqual(r.state.verified, []);
+  assert.deepEqual(r.state.verified, [1]);
+  assert.deepEqual(r.state.unverified ?? [], []);
+  assert.equal(r.reopened || r.escalated, false);
+  assert.match(r.posted[0], /merge verified[\s\S]*shadow `would BLOCK` \(advisory/);
+});
+
+test("verify: an enforced NONCONFORMING review is still NOT verified: reopened, needs-human, evidence", async () => {
+  const bad = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
+  const r = await settleOne({ comments: { 1: [REVIEW_PASS, bad] } });
   assert.deepEqual(r.state.unverified, [1]);
   assert.ok(r.reopened && r.escalated);
   assert.match(r.posted[0], /merge NOT verified[\s\S]*FAIL: the latest FORGE:REVIEW did not pass/);
@@ -357,6 +424,31 @@ test("verify: review-degraded, wrong base, missing required check, merge commit 
   assert.match(io.calls.filter((a) => a[1] === "comment").at(-1).at(-1), /required check\(s\) not green on the merged head aa1: build=missing/);
 });
 
+test("verify: a cancelled merge-commit check resolved by a later descendant success is verified", async () => {
+  const r = await settleOne({ checks: { bb1: [["Regenerate", "completed", "cancelled"], ["test", "completed", "success"]], dd1: [["Regenerate", "completed", "cancelled"]], dd2: [["Regenerate", "completed", "success"]] }, descendants: { bb1: ["dd1", "dd2"] } });
+  assert.deepEqual(r.state.verified, [1]);
+  assert.match(r.posted[0], /Regenerate superseded by a success run on dd2/);
+});
+
+test("verify: a cancelled merge-commit check whose newest descendant run failed is red; none finished is pending", async () => {
+  const red = await settleOne({ checks: { bb1: [["Regenerate", "completed", "cancelled"]], dd1: [["Regenerate", "completed", "success"]], dd2: [["Regenerate", "completed", "failure"]] }, descendants: { bb1: ["dd1", "dd2"] } });
+  assert.deepEqual(red.state.unverified, [1]);
+  assert.match(red.posted[0], /superseded by a failing run: Regenerate=failure on dd2/);
+  const none = await settleOne({ checks: { bb1: [["Regenerate", "completed", "stale"]] } });
+  assert.deepEqual(none.state.pendingVerify, [1]);
+});
+
+test("verify: a required check cancelled on the head resolves against a later run like a post-merge one", async () => {
+  const dir = tmp();
+  const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), checks: { aa1: [["build", "completed", "cancelled"]], bb1: [["build", "completed", "success"]], dd1: [["build", "completed", "success"]] }, descendants: { bb1: ["dd1"] } });
+  io.requiredChecks = async () => ["build"];
+  const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+  const handles = new Map();
+  await tick({ watch: W(), repo: "o/r", io, state, handles });
+  await tick({ watch: W(), repo: "o/r", io, state, handles });
+  assert.deepEqual(state.verified, [1]);
+});
+
 test("verify: pending merge-commit CI waits, holds the drain, then fails after 60 minutes", async () => {
   const r = await settleOne({ checks: { bb1: [["test", "in_progress"]] } }, { ticks: 2, gap: 30 * 60000 });
   assert.deepEqual(r.state.pendingVerify, [1]);
@@ -381,7 +473,7 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
 
 for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
   test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
-    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" };
     let failing = true;
     const dir = tmp();
     const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), comments: { 1: [block] }, failGh: (a) => failing && bad(a) });
@@ -541,4 +633,45 @@ test("#5088 ghRunner names the failing call; 401/403 also warn with the effect o
   assert.equal(ghRunner((cmd, args, opts) => { seen = { cmd, args, opts }; return "out"; })(["repo", "view"]), "out");
   assert.equal(seen.cmd, "gh");
   assert.deepEqual(seen.opts.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+const batchState = (o = {}) => ({ claimed: [1, 2, 3, 4], inflight: [1, 2, 3, 4], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: { 1: "staging", 2: "staging", 3: "staging", 4: "staging" }, phase: "running", batch: "b1", ...o });
+const parkedRow = (code) => ({ outcome: "needs-human", code });
+
+test("inflight drops issues whose batch result is final and parked lanes get remediation", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: parkedRow("conformance.e2e_unverified"), 2: parkedRow("conformance.unimplemented"), 3: parkedRow("maintenance.hotspot_growth"), 4: { outcome: "needs-human" } } };
+  const state = batchState();
+  await tick({ watch: W({ mode: "batch" }), repo: "o/r", io, state });
+  assert.deepEqual(state.inflight, []); // the batch has not reported, yet every result is final
+  assert.deepEqual(io.remediated.map((r) => r[0]), [1, 2, 3]);
+  assert.deepEqual(io.remediated[0], [1, "staging", "conformance.e2e_unverified"]);
+  assert.equal(state.outcomes[4].kind, "needs-human"); // no terminal code: not a mechanical park
+  const t = formatStatus(state, W({ mode: "batch" }), io.now());
+  assert.match(t, /parked 3/); assert.match(t, /needs-human 1/);
+});
+
+test("a failed remediation lane makes the parked issue needs-human with the reason; budget caps lanes", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: parkedRow("ci.red"), 2: parkedRow("ci.red") } };
+  io.remediateExit = 1;
+  const state = batchState({ claimed: [1, 2], inflight: [1, 2] });
+  await tick({ watch: W({ mode: "batch", max_remediations: "1" }), repo: "o/r", io, state });
+  assert.equal(io.remediated.length, 1);
+  assert.equal(state.outcomes[1].kind, "needs-human");
+  assert.match(state.outcomes[1].reason, /exited 1/);
+  assert.ok(io.calls.some((a) => a[1] === "edit" && a.includes("needs-human")));
+});
+
+test("a needs-human issue a person cleared with a new comment is re-claimed; stuck lists old claims", async () => {
+  const io = fakeIo(tmp(), []);
+  io.results = { b1: { 1: { outcome: "needs-human" } } };
+  const state = batchState({ claimed: [1], inflight: [1], started: io.now() - 30 * 3600_000 });
+  const w = W({ mode: "batch" });
+  await tick({ watch: w, repo: "o/r", io, state });
+  assert.match(require_stuck(state, io.now()), /#1 claimed 30h ago.*needs-human/);
+  const at = state.outcomes[1].at;
+  io.gh = ((orig) => async (a) => (a[1] === "view" && a.includes("state,labels,comments") ? JSON.stringify({ state: "OPEN", labels: [], comments: [{ authorAssociation: "OWNER", body: "fixed the cause", createdAt: new Date(at + 1000).toISOString() }] }) : orig(a)))(io.gh);
+  await tick({ watch: w, repo: "o/r", io, state });
+  assert.ok(!state.outcomes?.[1]); // released, then re-selected is up to planClaims
 });

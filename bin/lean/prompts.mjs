@@ -174,8 +174,9 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### History   (introducing commit, prior fixes)
 ### Recommendation
 ### Related Issues
+### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
 
-If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
+If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<defer, post-deploy>","bucket":"<defer, post-deploy: post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|host>","check":"<post-deploy: id in .forge/post-deploy-checks.json>","evidence":"<file:line, required for not-applicable>","verify":"<optional: in_lane|out_of_band>"}],
@@ -191,6 +192,8 @@ A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e s
 A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with "Build reads:", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.
+
+Blast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add \`"regression":[{"id":"G1","command":"","covers":""}]\` (engine runs it as validate). A post-deploy row needs a registered \`check\` and \`local_infeasible_why\`; developing or fixing the signal is never post-deploy.
 
 An added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
 
@@ -254,7 +257,7 @@ ${REVIEW_RUBRIC}
 
 Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line","instrumented":"<true if out_of_band bench+job committed>"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
 Optional "facts":{"decisions":[],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[]}; rejected: approaches you dropped, with why.
-Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
+Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: override file labels on services, volumes, networks; keep $COMPOSE_PROJECT_NAME); tear down via trap/finally.
 If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
 }
@@ -295,9 +298,17 @@ export function docsPlanNote(cfg) {
   return `\n\nThis repo requires user docs for user-facing surfaces (${cfg.required_for.join(", ")}). When the issue adds or changes one (a public API endpoint, MCP tool, dashboard page or feature, CLI command or SDK method), ${CONTRACT_FILE} must carry a requirement R-docs and a deliverable for each docs page${where} to create or update${reg}. A \`/docs/...\` link the change adds must resolve to a page. If no docs apply, say why in the result file as docs: [{"surface":"<kind>","justification":"<why>"}].`;
 }
 
+/** #5428: the page_gate rule for the planner; "" when forge.yaml pages is off. */
+export function pagePlanNote(cfg) {
+  if (!cfg?.require?.length) return "";
+  return `\n\nThis repo gates public pages (forge.yaml pages.require: ${cfg.require.join(", ")}). When the issue adds or changes a public page, ${CONTRACT_FILE} must carry "page_gate":{"design_spec":"<approved FORGE:DESIGN_SPEC ref, from /design>","seo":{"intent":"<target query>","icp":"<named ICP${cfg.icp_doc ? ` from ${cfg.icp_doc}` : ""}>","title":"","h1":"","meta":"","structured_data":"<schema.org type>","links_in":[],"links_out":[],"gsc_baseline":"","measure_by":"YYYY-MM-DD"},"geo":{"surfaces":["llms.txt","llms-full","markdown mirror","ai-catalog","MCP tool description"],"agent_question":"<natural-language question that must resolve to the page>"}}, plus a sitemap entry, metadata, canonical and structured data in the page, and the result file must list page_gate.screenshots (390 and 1440 wide). Never render raw JSON first or null samples on a public page.`;
+}
+
 export function reproPlanNote(on) {
   if (!on) return "";
-  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
+  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The command's environment must come from the repo's own lockfile or toolchain (its project runner, a lockfile export fed to uv run --with-requirements, or a forge.yaml validate.recipes entry); never a hand-picked --with package list with --offline, which cannot import the module under test (env.repro_unrunnable). The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.
+
+Also write a \`### Test plan\` section in ${INVESTIGATION_FILE} and "test_plan":[{"requirement":"R1","proof":"<the root-cause observable that was wrong and must now hold, e.g. 'www.reddit.com/*.json returns 200 JSON', never 'the URL is rewritten'>","level":"unit|integration|e2e|live","level_reason":"<why this is the cheapest level that observes the cause>","repro":"<test id, red on base and green on head> or no-repro","reason":"<no-repro only>","regression":["<neighbouring behaviours that must stay green>"],"env":["<services, fixtures, packages>"],"command":"<exact command>"}] in ${CONTRACT_FILE}, one row per deliver requirement. A proof that restates a deliverable is rejected; never mock the component the bug lives in.`;
 }
 
 /** forge#4519: the repo's generated, bot-owned globs (forge.yaml maintenance.generated_paths via hotspots.sh); "" when none. */
@@ -476,6 +487,7 @@ You receive the GitHub issue with its comments, the frozen contract (requirement
 - requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change, including an outcome criterion (a metric, rate or log expectation) this change could ship as a test, metric or alert, or a read-only production check possible now (bucket verify-now). For a verify out_of_band row (measured by the named job, not in this lane) set instrumented: true only when its budget test or bench is committed and that job is configured, with that path:line as evidence; false otherwise. Do not judge the measured result.
 - post-deploy requirements: deferral_ok is false when the requirement has no \`check\` id, or its check is neither in .forge/post-deploy-checks.json on the default branch nor added by this change (the commands run from that file only).
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
+- test_adequacy (optional, on a requirement row): {"verdict":"adequate|weak","reason":""}; weak only when the test would still pass with the bug present (it asserts the patch or routing, not the root cause).
 - preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.
 - regressions: concrete breakages only, each with path:line.
 
@@ -531,6 +543,8 @@ export function decisionNote(comments = []) {
 
 /** #5099: one check line per review domain (domains from review-trigger.mjs pathDomains); mirrors the /review-pr personas. */
 export const DOMAIN_CHECKS = Object.freeze({
+  design: "A public page diff with no approved FORGE:DESIGN_SPEC, or a rendering that ignores it (raw JSON as main content, null samples, dead-end empty states, no 390/1440 check), is a regression.",
+  "seo-geo": "A public page diff with no target intent/ICP, title/H1/meta, canonical, structured data, sitemap entry or internal links, or no GEO surface (llms.txt, markdown mirror, ai-catalog, MCP description) an agent question resolves to, is a regression.",
   docs: "A user-facing diff (public API endpoint, MCP tool, dashboard page, CLI command, SDK method) with no matching docs change, or docs that contradict the code (endpoint paths, fields, scopes), is a regression.",
   frontend: "Dynamic API in a static/ISR tree: a headers(), cookies(), connection() or searchParams read in a layout, a not-found/error boundary or a module they import, when the route tree is static or ISR (revalidate, generateStaticParams, dynamic = 'force-static'), opts the route out of static rendering or throws at render and turns pages into HTTP 500.",
 });
@@ -543,12 +557,19 @@ export function domainChecksBlock(domains = []) {
   return `\n<domain_checks>\nThis diff touches these review domains. Report every finding below as a regressions row with path:line (it blocks the merge).\n${lines.join("\n")}\n</domain_checks>`;
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [] }) {
+/** #5446: the engine flagged the repro_test (patch_echo, mutation_survivor); the reviewer must accept or reject it explicitly. "" otherwise. */
+export function reproFlagNote(flag) {
+  if (flag !== "patch_echo" && flag !== "mutation_survivor") return "";
+  const why = flag === "patch_echo" ? "its assertions only compare against literals this diff introduced (no behaviour or output is asserted)" : "it still passes when the fix's changed lines are mutated";
+  return `\n<repro_quality>${flag}: the repro_test ${why}. Accept or reject it explicitly in a row (a rejection is a failing row naming the behaviour the test must exercise).</repro_quality>`;
+}
+
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [], reproFlag = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}${relaxationBlock(relaxations)}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}${relaxationBlock(relaxations)}${reproFlagNote(reproFlag)}`;
 }
 
 /**
@@ -564,7 +585,7 @@ export function reviewerRepairPrompt({ missing = [], problems = [], rows = null,
 /** Pre-filter (#4123): one read-only, single-turn check of an issue a cheap signal flagged as possibly already fixed. */
 export const PREFILTER_SYSTEM = `You check whether one GitHub issue is still open work. Read-only: use Read, Grep and Glob on the repository when needed. Answer in a single turn.
 
-Signals from the engine (a merged PR that mentions the issue, or code paths the issue names that no longer exist) are hints, not proof. Answer ALREADY-FIXED only when the code you can see shows the described problem is gone or the requested change is present, and cite file:line. Answer INVALID only when the issue cannot apply to this code at all. Otherwise answer CONFIRMED.
+Signals from the engine (a merged PR that mentions the issue, or code paths the issue names that no longer exist) are hints, not proof. Answer ALREADY-FIXED only when the code you can see shows the described problem is gone or the requested change is present, and cite file:line. Answer INVALID only when the issue cannot apply to this code at all. A feature request whose behaviour is already reachable under another name, or from the stdlib or a dependency the project wraps, is a duplicate: answer INVALID and name the equivalent and its path; a deprecation of it counts against a new alias. Otherwise answer CONFIRMED.
 
 Output ONLY a JSON object in a json code fence:
 {"verdict":"CONFIRMED|ALREADY-FIXED|INVALID","summary":"<one line>","evidence":["<file:line or PR/commit reference showing it>"]}

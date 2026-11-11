@@ -311,7 +311,8 @@ export function conformanceVerdicts({ records = [], runs = [], batchRows = [] } 
     const c = row?.conformance;
     if (!c || typeof c !== "object") continue;
     const v = verdictOf({ mode: c.mode, would: c.would, merged: row.outcome === "merged", failures: c.kinds });
-    if (v) put({ issue: int(row.issue), pr: int(row.pr), ...v, ts: row.ts ?? row.created ?? "", source: "batch" });
+    const ta = c.test_adequacy; // #5449: the lane's worst test-adequacy class, for the reopened-by-class split
+    if (v) put({ issue: int(row.issue), pr: int(row.pr), ...v, ...(ta && typeof ta === "object" ? { test_adequacy: ta.missing > 0 ? "missing" : ta.weak > 0 ? "weak" : "adequate" } : {}), ts: row.ts ?? row.created ?? "", source: "batch" });
   }
   for (const r of runs) {
     if (!r?.finished) continue;

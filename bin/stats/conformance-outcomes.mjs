@@ -19,6 +19,9 @@ export const DEFAULT_OUTCOME_MIN_N = 20;
 export const DEFAULT_WINDOW_DAYS = 7;
 export const DEFAULT_LOOKBACK_DAYS = 30;
 export const PAGE_SIZE = 100;
+/** #5449: the window of the reopened-by-test-adequacy-class split. */
+export const ADEQUACY_WINDOW_DAYS = 14;
+export const ADEQUACY_CLASSES = ["adequate", "weak", "missing"];
 export const SIGNALS = ["reverted", "reopened", "cited", "same_hunks"];
 export const OUTCOME_INSUFFICIENT = "insufficient data";
 export const HIGHER = "nonconforming merges show a higher defect rate";
@@ -139,13 +142,17 @@ export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEF
   const merged = prs.filter((p) => ms(p.mergedAt) != null).sort((a, b) => ms(a.mergedAt) - ms(b.mergedAt));
   const sinceMs = ms(since);
   if (git) warmSameHunks(merged.filter((q) => isFix(q) && (sinceMs == null || ms(q.mergedAt) >= sinceMs)), git, onProgress);
-  const rows = [];
+  const rows = [], adequacyRows = [];
   let unjoined = 0, pending = 0, unresolved = 0;
   for (const p of merged) {
     const t = ms(p.mergedAt);
     if (sinceMs != null && t < sinceMs) continue;
     const v = verdicts.get(`pr:${p.number}`) ?? refsOf(p).slice(1).map((i) => verdicts.get(`issue:${i}`)).find(Boolean) ?? null;
     if (!v) { unjoined++; continue; }
+    // #5449: a lane's test-adequacy class (v.test_adequacy) against a reopen inside 14 days, whatever windowDays is
+    if (ADEQUACY_CLASSES.includes(v.test_adequacy) && t + ADEQUACY_WINDOW_DAYS * DAY <= now) {
+      adequacyRows.push({ repo: p.repo ?? "unknown", test_adequacy: v.test_adequacy, defect: (p.closingIssues ?? []).some((i) => (i.reopenedAt ?? []).some((ts) => ms(ts) > t && ms(ts) <= t + ADEQUACY_WINDOW_DAYS * DAY)) });
+    }
     if (t + win > now) { pending++; continue; }
     const later = merged.filter((q) => q !== p && q.number !== p.number && (p.repo == null || q.repo == null || q.repo === p.repo) && ms(q.mergedAt) > t && ms(q.mergedAt) <= t + win);
     const signals = {
@@ -172,7 +179,8 @@ export function conformanceOutcomes({ prs = [], verdicts = new Map(), minN = DEF
     for (const m of [...new Set(rs.map((r) => r.mode ?? "unknown"))].sort()) by_mode[m] = twoByTwo(rs.filter((r) => (r.mode ?? "unknown") === m), minN);
     const by_surface = {};
     for (const sf of [...new Set(rs.flatMap((r) => r.surfaces ?? []))].sort()) by_surface[sf] = twoByTwo(rs.filter((r) => r.surfaces?.includes(sf)), minN);
-    repos[repo] = { overall: twoByTwo(rs, minN), by_kind, by_mode, by_surface };
+    const by_adequacy = Object.fromEntries(ADEQUACY_CLASSES.map((c) => [c, cell(adequacyRows.filter((r) => r.repo === repo && r.test_adequacy === c), minN)]).filter(([, x]) => x.n));
+    repos[repo] = { overall: twoByTwo(rs, minN), by_kind, by_mode, by_surface, by_adequacy };
   }
   const overall = twoByTwo(rows, minN);
   return {
@@ -229,6 +237,8 @@ export function renderConformanceOutcomes(r) {
   for (const [repo, x] of Object.entries(r.repos)) {
     out.push("", `## ${repo}`, "", ...HEAD, row("all", x.overall), ...Object.entries(x.by_mode).map(([m, y]) => row(`mode ${m}`, y)),
       ...Object.entries(x.by_kind).map(([k, y]) => row(`kind ${k}`, y)), ...Object.entries(x.by_surface ?? {}).map(([k, y]) => row(`surface ${k}`, y)));
+    const adq = Object.entries(x.by_adequacy ?? {});
+    if (adq.length) out.push("", `reopened within ${ADEQUACY_WINDOW_DAYS}d by test-adequacy class:`, ...adq.map(([c, y]) => `- ${c}: ${fmtCell(y)}`));
   }
   if (!Object.keys(r.repos).length) out.push("", "no merged lane PR with an elapsed window");
   out.push("", `conclusion: ${r.conclusion}`);

@@ -37,7 +37,7 @@ When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comment
 ### Changes   (file: what)
 ### Verification   (each test command, its result, and whether the new test fails without the fix)
 
-Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirement":"<one sentence of the issue, verbatim, that this fix delivers>","repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"},"tests":[{"command":"<targeted test command>","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}]}
+Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirement":"<one sentence of the issue, verbatim, that this fix delivers>","repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"},"test_plan":[{"requirement":"R1","proof":"<the root-cause observable that was wrong and must now hold, never 'the fix is present'>","level":"unit|integration|e2e|live","level_reason":"<why the cheapest level that observes the cause; never mock the component the bug lives in>","repro":"<test id> or no-repro","reason":"<no-repro only>","regression":[],"env":[],"command":"<exact command>"}],"tests":[{"command":"<targeted test command>","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}]}
 If the issue is invalid, already fixed, blocked, or bigger than a small fix (more than a couple of files, a design decision), do not grind: write {"status":"upgrade","summary":"<why>"} and stop. The engine then runs the full lane, keeping what you committed.`;
 }
 
@@ -92,10 +92,12 @@ export function deriveLightContract({ title = "", issueText = "", result = null,
   const repro = t && typeof t === "object" && !Array.isArray(t) && String(t.path ?? "").trim() && String(t.command ?? "").trim()
     ? { path: String(t.path).trim(), id: String(t.id ?? "").trim(), command: String(t.command).trim() } : null;
   const commands = [...new Set([repro?.command, ...(Array.isArray(r.tests) ? r.tests : []).map((x) => (x && typeof x === "object" ? String(x.command ?? "").trim() : ""))].filter(Boolean))];
+  const plan = Array.isArray(r.test_plan) ? r.test_plan.filter((x) => x && typeof x === "object").map((x) => ({ ...x, requirement: "R1" })).slice(0, 1) : []; // #5445: the single light requirement carries one plan row
   return {
     requirements: [{ id: "R1", quote, disposition: "deliver" }],
     deliverables: code.map((path, i) => ({ id: `D${i + 1}`, path, change: "light-lane fix (issue-named file)", requirements: ["R1"] })),
     validate: commands.map((command, i) => ({ id: `V${i + 1}`, command })),
+    ...(plan.length ? { test_plan: plan } : {}),
     ...(repro ? { repro_test: repro } : { repro_test: "none", repro_test_reason: "the light-lane builder named no repro test" }),
   };
 }

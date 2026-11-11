@@ -9,14 +9,14 @@
 # Config file (#5163, forge.yaml is often gitignored so a lane worktree has none): --config, then $FORGE_CONFIG, then ./forge.yaml;
 #   output config_source is the file read, or null (defaults used).
 # Config: forge.yaml maintenance.hotspot {enabled, file_lines, growth_lines, exclude_globs}; defaults true/2000/150/[] (lockfiles are always excluded)
-#   (also when forge.yaml or yq is missing); maintenance.generated_paths (forge#4519): shell globs of generated,
-#   bot-owned files, default [].
+#   (also when forge.yaml or yq is missing); maintenance.generated_paths (forge#4519) and its alias maintenance.generated
+#   (#5470): shell globs of generated, bot-owned files, merged, default [].
 # Output (stdout, one JSON object):
 #   {"enabled","file_lines","growth_lines","generated_paths","config_source",
 #    "files":[{path,lines,commits_90d,hotspot,over,generated,excluded,base_lines,growth}]}
 # lines = `wc -l` of the working-tree file (0 when missing); commits_90d = `git rev-list --count --since=90.days HEAD`;
 # hotspot = lines × commits_90d; over = lines > file_lines; generated = linguist-generated set by .gitattributes, a
-# match of a generated_paths glob, or `@generated` / `DO NOT EDIT` in the first 5 lines of the working-tree file;
+# match of a generated_paths glob, a `generated/` path segment (#5470), or `@generated` / `DO NOT EDIT` in the first 5 lines of the working-tree file;
 # excluded = generated, linguist-vendored, or a match of an exclude_glob (shell pattern, `*` crosses `/`). Without --base no blob is read and
 # base_lines/growth are null; with --base they are the line count at git merge-base(<ref>, HEAD) (0 when absent there)
 # and lines - base_lines. enabled:false prints files:[] (generated_paths still set) and does no per-file work.
@@ -44,8 +44,10 @@ if [ -f "$CONFIG_FILE" ] && command -v yq >/dev/null 2>&1; then
   printf '%s' "$c" | jq -e 'type == "object"' >/dev/null 2>&1 && CFG="$c"
   g=$(yq -o=json '.maintenance.generated_paths // []' "$CONFIG_FILE" 2>/dev/null) || g=""
   printf '%s' "$g" | jq -e 'type == "array"' >/dev/null 2>&1 && GEN_CFG="$g"
+  g2=$(yq -o=json '.maintenance.generated // []' "$CONFIG_FILE" 2>/dev/null) || g2=""
+  printf '%s' "$g2" | jq -e 'type == "array"' >/dev/null 2>&1 && GEN_CFG=$(jq -c -n --argjson a "$GEN_CFG" --argjson b "$g2" '$a + $b')
 fi
-GEN_CFG=$(printf '%s' "$GEN_CFG" | jq -c '[.[] | strings | select(length > 0)]')
+GEN_CFG=$(printf '%s' "$GEN_CFG" | jq -c '[.[] | strings | select(length > 0)] | reduce .[] as $x ([]; if index($x) then . else . + [$x] end)')
 CFG=$(printf '%s' "$CFG" | jq -c '
   def pos($d): if type == "number" and . > 0 then floor else $d end;
   { enabled: (.enabled != false), file_lines: (.file_lines | pos(2000)), growth_lines: (.growth_lines | pos(150)),
@@ -117,6 +119,7 @@ for p in "$@"; do
   commits=$(cat "$T/c.$i" 2>/dev/null); case "$commits" in ''|*[!0-9]*) commits=0 ;; esac
   generated=false; excluded=false
   if git check-attr linguist-generated -- "$p" 2>/dev/null | grep -qE ': (set|true)$' || glob_hit "$p" "$GEN_GLOBS" \
+    || case "$p" in generated/*|*/generated/*) true ;; *) false ;; esac \
     || { [ -f "$p" ] && head -n 5 "$p" 2>/dev/null | grep -qE '@generated|DO NOT EDIT'; }; then generated=true; excluded=true; fi
   if [ "$excluded" = false ] && git check-attr linguist-vendored -- "$p" 2>/dev/null | grep -qE ': (set|true)$'; then excluded=true; fi
   if [ "$excluded" = false ] && glob_hit "$p" "$GLOBS"; then excluded=true; fi

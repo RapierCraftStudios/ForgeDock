@@ -737,7 +737,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
 
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
-  const settle = async (n, r, rec, pf) => {
+  const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
     if (cancelled && releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } } // #5241: the lane ended: its lease goes with it
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
@@ -970,6 +970,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     done(); save(); update(row);
   };
 
+  // #5437: a lane's post-run bookkeeping (r.postRun) starts once its slot is free; the batch waits for it before it ends.
+  const postRuns = new Set();
+  const settle = async (n, r, rec, pf) => {
+    await settleLane(n, r, rec, pf);
+    if (typeof r?.postRun !== "function") return;
+    const p = Promise.resolve().then(() => r.postRun()).catch(() => {}).finally(() => postRuns.delete(p));
+    postRuns.add(p);
+  };
   const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
   const laneRetries = new Map(); // #4791: transient lane-resolution failures per issue; never counted in `deferrals`
   // A transient refusal (gh/git failed) re-resolves; the settled `deferred` frees the slot and requeues with backoff.
@@ -1596,6 +1604,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!halted) try { await relabelQueued(`batch failed: ${firstLine(e?.message ?? e)}`); } catch { /* best effort */ }
     throw e;
   }
+  await Promise.allSettled([...postRuns]); // #5437
   if (reg) withdrawExcept(new Set());
   await relabelQueued();
   // #4657: a milestone whose `close_on` state is reached closes here; a failure is a row, never an outcome change.

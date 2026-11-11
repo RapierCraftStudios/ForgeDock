@@ -125,3 +125,13 @@ test("#5313 the follow-up rules and skip reasons show in the --dry-run plan: def
   assert.match(out, /skip #3: skip label epic/);
   assert.match(out, /skip #4: pull request/);
 });
+
+test("#5442 a design:needed issue is skipped with design_pending, whatever skip_labels says; design:approved lifts it", async () => {
+  const io = bind(fakeIo(tmpDir("iwp-"), [iss(1), iss(2, { labels: lbl("design:needed") }), iss(3, { labels: lbl("design:needed", "design:approved") })]));
+  for (const cfg of [{}, { mode: "batch" }, { mode: "batch", skip_labels: [] }]) {
+    const plan = await planClaims({ watch: validateWatch("w", cfg), repo: "o/r", io, state: state() });
+    assert.deepEqual(plan.claim.map((c) => c.number).sort(), [1, 3]);
+    assert.ok(plan.skip.some((s) => s.number === 2 && /^design_pending/.test(s.reason)));
+    assert.match(formatClaimPlan(plan), /skip #2: design_pending/);
+  }
+});
