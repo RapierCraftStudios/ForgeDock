@@ -241,7 +241,8 @@ describe("core work-on", () => {
     assert.equal(w.followups.length, 0);
     const ev = readLog(dir, 7).map((e) => e.event);
     assert.ok(ev.includes("CONTRACT_FROZEN") && ev.includes("CONFORMANCE"));
-    assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
+    assert.equal(ev[0], "RUN_START"); assert.equal(ev.filter((e) => e === "RUN_TERMINAL").length, 1);
+    assert.ok(ev.slice(ev.indexOf("RUN_TERMINAL") + 1).every((e) => /^(POSTRUN_|LEDGER_|BRANCH_DELET|TEARDOWN|WORKTREE|GUARD_|STRUCTURE_DELTA)/.test(e)), "#5437: only post-run bookkeeping follows RUN_TERMINAL");
   });
 
   it("investigation and plan comments are posted before the reviewer runs and before the in-review label", async () => {
@@ -269,8 +270,9 @@ describe("core work-on", () => {
     const mapped = w.telemetry.map((t) => mapRecord(t, 5)).filter(Boolean);
     assert.deepEqual(mapped.filter((m) => m.event === "phase_attempt").map((m) => m.phase), ["implement", "implement", "review"]);
     assert.equal(mapped[0].payload.input_tokens, 10);
-    assert.equal(mapped.at(-1).event, "run_terminal");
-    assert.equal(mapped.at(-1).payload.reason, "merged");
+    const term = mapped.filter((m) => m.event === "run_terminal");
+    assert.equal(term.length, 1);
+    assert.equal(term[0].payload.reason, "merged");
   });
 
   it("invalid with evidence: the investigation is the evidence comment, closes, trajectory rows", async () => {
@@ -8178,5 +8180,52 @@ describe("admission disk ceiling (#5421)", () => {
     assert.equal(await nearCeilingDisk({ host: host(2000), minFreeGb: 5 }), true);
     assert.equal(await nearCeilingDisk({ host: host(20000), minFreeGb: 5 }), false);
     assert.equal((await diskLowAdmission({ host: host(2000), minFreeGb: 5 })).reasons.length, 2);
+  });
+});
+
+describe("#5437 post-run bookkeeping", () => {
+  const names = (dir) => readLog(dir, 7).map((x) => x.event);
+  it("a merged lane reports RUN_TERMINAL before its branch delete, ledger clear and post-run jobs, and records each job", async () => {
+    const dir = tmpDir("postrun-merge-");
+    const w = world();
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const ev = names(dir), term = ev.indexOf("RUN_TERMINAL");
+    assert.ok(term >= 0);
+    for (const e of ["BRANCH_DELETED", "LEDGER_CLEARED"]) if (ev.includes(e)) assert.ok(ev.indexOf(e) > term, `${e} after RUN_TERMINAL`);
+    const ok = readLog(dir, 7).filter((x) => x.event === "POSTRUN_OK").map((x) => x.job);
+    for (const j of ["branch-delete", "trajectory", "teardown"]) assert.ok(ok.includes(j), `${j} recorded`);
+    assert.ok(ev.indexOf("POSTRUN_OK") > term);
+    assert.ok(!ev.includes("POSTRUN_FAILED"));
+  });
+  it("deferPostRun hands the jobs to the caller: nothing ran before postRun(), everything after", async () => {
+    const dir = tmpDir("postrun-defer-");
+    const w = world();
+    const r = await run(w, { dir, deferPostRun: true });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(typeof r.postRun, "function");
+    assert.ok(!names(dir).includes("POSTRUN_OK"), "no job before the caller runs them");
+    assert.equal(traj(w).length, 0, "trajectory is a post-run job");
+    await r.postRun();
+    assert.ok(names(dir).includes("POSTRUN_OK"));
+    assert.equal(traj(w).length, 1);
+  });
+  it("an unmerged lane keeps its teardown inline and has no postRun", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "x", evidence: ["a:1"], tests: [] } });
+    const r = await run(w, { deferPostRun: true });
+    assert.equal(r.terminalReason, "invalid");
+    assert.equal(r.postRun, undefined);
+    assert.equal(traj(w).length, 1);
+  });
+  it("an invalid verdict closes the issue and labels it in parallel", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "x", evidence: ["a:1"], tests: [] } });
+    let labelStarted = false, closeSawLabel = null;
+    const gh = w.io.gh, tl = w.io.transitionLabel;
+    w.io.transitionLabel = async (n, st) => { if (st === "invalid") labelStarted = true; return tl(n, st); };
+    w.io.gh = async (a, o) => { if (a[0] === "issue" && a[1] === "close") { for (let i = 0; i < 30 && !labelStarted; i++) await new Promise((x) => setTimeout(x, 5)); closeSawLabel = labelStarted; } return gh(a, o); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "invalid");
+    assert.equal(closeSawLabel, true, "the label call started before the close finished");
+    assert.equal(w.closed.length, 1);
   });
 });

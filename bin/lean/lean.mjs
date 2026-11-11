@@ -86,6 +86,7 @@ import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registry
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
 import { pickSalvage } from "./salvage-resume.mjs";
+import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
@@ -341,6 +342,7 @@ export async function runCore(o) {
   };
   /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
   const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
+  const postRun = makePostRun({ ev, sleep: sleepFn, now }); // #5437: bookkeeping after RUN_TERMINAL, idempotent and retried
   const usageLine = () => `cost $${usage.cost_usd.toFixed(4)}, tokens ${usage.input} in / ${usage.output} out / ${usage.cache} cache, wall ${Math.round((now() - t0) / 60000 * 10) / 10} min`;
 
   // ---- lease (same FORGE:STATE lease the full path uses) ----
@@ -525,8 +527,11 @@ export async function runCore(o) {
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { const sw = sumWaits(await io.fs.read(heavyWaitsFile)); heavyQueueMax = Math.max(heavyQueueMax, sw.queueMax); for (const [ph, ms] of Object.entries(sw.waits)) addWait(ph, ms); } catch { /* no heavy step ran */ }
     }
-    await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
-    await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
+    const deferTail = reason === "merged"; // #5437: a merged lane's facts, trajectory and teardown run after RUN_TERMINAL (postRun)
+    if (!deferTail) {
+      await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
+      await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
+    }
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
@@ -556,8 +561,10 @@ export async function runCore(o) {
       else if (reason === "invalid" && extra.close === "already-fixed") T.close = ["issue closed (completed)", "already fixed on the base"]; // #5080
       else if (reason === "invalid") T.close = ["issue closed (not planned)", "label workflow:invalid"];
       else { T.close = ["left open", "label needs-human"]; T.anomalies.push(`needs-human: ${String(detail).split("\n")[0].slice(0, 300)}`); }
-      try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
+      const postTrajectory = async () => { try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ } };
+      if (deferTail) { postRun.add("lane-facts", postLaneFacts); postRun.add("trajectory", postTrajectory); } else await postTrajectory();
     }
+    if (deferTail) postRun.add("teardown", () => teardown(reason, extra)); // last: the structure delta and guard read the worktree
     await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
@@ -565,6 +572,8 @@ export async function runCore(o) {
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
       ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced), ...(Object.keys(kinds).length ? { kinds: [...failureClasses] } : {}) } } : {}), ...extra };
+    if (deferTail && o.deferPostRun) done.postRun = () => postRun.run(); // the caller runs it once the lane slot is free
+    else await postRun.run();
     return done;
   }
   /** #4401: post the lane's FORGE:FACTS (result.json facts and validation, changed files, contract decisions); never fails a run. */
@@ -715,11 +724,27 @@ export async function runCore(o) {
    * #4325: the lane env every engine-run command shares with the builder: shared package-manager stores (#4220), the run
    * TMPDIR (#4104), FORGE_HOST_PARALLELISM (#4182) and the pinned toolchain (#4163); the engine's own keys win over the stores.
    */
+  let signoffEnv = {};
+  const SIGNOFF_HOOK = '#!/bin/sh\nid=$(git var GIT_COMMITTER_IDENT 2>/dev/null | sed \'s/>.*/>/\')\ncase "$id" in ""|*@localhost\\>) ;; *) git interpret-trailers --in-place --if-exists addIfDifferent --trailer "Signed-off-by: $id" "$1" ;; esac\n';
+  /** #5437: builder commits are signed off when made (a worktree commit-msg hook via GIT_CONFIG_*, the repo's own hooks chained), so signOffUnpushed finds nothing to rewrite. Best effort: without it the rewrite stays the fallback. */
+  async function installSignoffHook() {
+    if (!runTmp || !io.fs?.list || !io.runCommand) return;
+    try {
+      const orig = String(await git(["rev-parse", "--git-path", "hooks"])).trim(), abs = orig.startsWith("/") ? orig : `${wt}/${orig}`, dir = `${runTmp}/hooks`;
+      const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`, own = ((await io.fs.list(abs)) ?? []).filter((n) => n && !n.endsWith(".sample"));
+      for (const n of own.filter((x) => x !== "commit-msg")) await io.fs.write(`${dir}/${n}`, `#!/bin/sh\nexec ${q(`${abs}/${n}`)} "$@"\n`);
+      await io.fs.write(`${dir}/commit-msg`, `${SIGNOFF_HOOK}${own.includes("commit-msg") ? `exec ${q(`${abs}/commit-msg`)} "$@"\n` : "exit 0\n"}`);
+      const x = await io.runCommand({ command: `chmod +x ${q(dir)}/*`, cwd: wt, timeoutMs: 10000, env: laneEnv() }), r = x?.r ?? x;
+      if (r?.exit) throw new Error("chmod failed");
+      signoffEnv = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: dir };
+      ev({ event: "SIGNOFF_HOOK", dir });
+    } catch { signoffEnv = {}; }
+  }
   function laneEnv() {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
+    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...signoffEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator),
@@ -1405,6 +1430,7 @@ export async function runCore(o) {
     }
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
+    await installSignoffHook();
     if (!resumed && await clearLaneScratch({ git, fs: io.fs, cwd: wt })) ev({ event: "LANE_SCRATCH_CLEARED" }); // #4880: never read a previous lane's scratch
     // ---- 2a. lane profile (#4395): the repo's lane instruction file replaces CLAUDE.md; a bad one falls back with an anomaly ----
     const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
@@ -1952,8 +1978,7 @@ export async function runCore(o) {
           T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
           T.decisions.push(`Builder verdict: ${result.status}`);
           // #5152: already-fixed is delivered behaviour (`completed`); only invalid is dropped scope (`not planned`)
-          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]);
-          await label("invalid");
+          await Promise.all([ghw(["issue", "close", String(issue), "-R", repo, "--reason", result.status === "already-fixed" ? "completed" : "not planned"]), label("invalid")]); // #5437: independent calls
           if (result.status === "invalid") { const f = await resolveFindingLabel({ io, issue, labels: iss.labels, reason: "invalid" }); if (f.error) T.anomalies.push(`finding label not resolved: ${f.error}`); } // #5254
           return await finish("invalid", result.summary ?? result.status, result.status === "already-fixed" ? { close: "already-fixed" } : {});
         }
@@ -3247,7 +3272,11 @@ export async function runCore(o) {
       }
       deleteLocalBranch = true;
       try { await io.git(["push", "origin", "--delete", branch], { cwd }); ev({ event: "BRANCH_DELETED", branch, where: "origin" }); }
-      catch (e) { ev({ event: "BRANCH_DELETE_FAILED", branch, where: "origin", error: String(e?.stderr ?? e?.message ?? e).slice(0, 300) }); }
+      catch (e) {
+        const error = String(e?.stderr ?? e?.message ?? e).slice(0, 300);
+        if (/remote ref does not exist/i.test(error)) { ev({ event: "BRANCH_DELETED", branch, where: "origin", already: true }); return; } // #5437: a retry after the first delete landed
+        ev({ event: "BRANCH_DELETE_FAILED", branch, where: "origin", error }); throw e; // the post-run queue retries it
+      }
     }
 
     /**
@@ -3275,7 +3304,7 @@ export async function runCore(o) {
         edges_added: s.deps_added.length, edges_removed: s.deps_removed.length, import_files_added: sum("files_added"), import_files_removed: sum("files_removed"),
         boundary_changed: Boolean(d.boundary_config_changed?.changed), boundary_loosened: Boolean(d.boundary_config_changed?.loosens) };
       ev(rec);
-      await emit(rec);
+      postRun.add("structure-telemetry", () => emit(rec)); // #5437: the telemetry write leaves the critical path
     }
 
     /**
@@ -3437,7 +3466,7 @@ export async function runCore(o) {
       }
     }
     try { await recordStructure(pr); } catch (e) { ev({ event: "STRUCTURE_DELTA_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
-    await deleteMergedBranch();
+    postRun.add("branch-delete", deleteMergedBranch); // #5437: sets deleteLocalBranch before the teardown job
     let keepOpen = false;
     if (pendingRecord().length) { // #5141: the close step files what the lane could not track before the PR (idempotent by the marker)
       const left = pendingFollowups.filter((p) => !p.req.tracked);
@@ -3487,7 +3516,7 @@ export async function runCore(o) {
     for (const sp of supersededIds(effective, guardSel)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
       try { await ghw(["issue", "comment", sp.guard.slice(1), "-R", repo, "--body", supersessionComment({ guard: sp.guard, pr, why: sp.why })]); ev({ event: "supersedes_accepted", guard: sp.guard, pr }); T.decisions.push(`Guard ${sp.guard} superseded: ${sp.why}`); } catch (e) { T.anomalies.push(`supersession of ${sp.guard} not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
     }
-    try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ }
+    postRun.add("guard", async () => { try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ } }); // #5437
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
     let mergedTo = null; // #4711: FORGE:STATE records the lane and merge commit, so a dependent's check needs no PR search

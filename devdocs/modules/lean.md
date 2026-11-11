@@ -3047,3 +3047,10 @@ path is authorized (#5380).
 ## Entry 2026-11-11 — duplicate feature requests are INVALID, not CONFIRMED (#5432)
 
 `prompts.mjs` `builderPlanPrompt` and `PREFILTER_SYSTEM`: a feature request whose behaviour is already reachable (same semantics under another name, or a stdlib or dependency function the project wraps or re-exports) is a duplicate. The verdict is INVALID (result status `invalid`, no new verdict value), with the equivalent and its path as evidence; the project deprecating that capability counts against adding an alias.
+
+## Entry 2026-11-11 — post-run bookkeeping off the lane's critical path (#5437)
+
+- **Queue.** `postrun.mjs` `makePostRun`: named, ordered, idempotent jobs; a failing job retries (3x, backoff) and records `POSTRUN_OK` / `POSTRUN_FAILED`, never changing the outcome.
+- **Merged lane.** `lean.mjs` queues branch delete, structure telemetry emit, guard, FORGE:FACTS, trajectory and teardown (worktree, ledger clear) as jobs; `RUN_TERMINAL` is reported first. `deferPostRun: true` (engine-cli) returns them as `result.postRun`; `orchestrate.mjs` runs it after the slot frees and waits for it before the batch ends; `run-issue` awaits it before exit. Without the option `finish` runs them inline. Other reasons keep teardown before `RUN_TERMINAL`.
+- **Sign-off.** `installSignoffHook` puts a commit-msg hook (chaining the repo's own hooks) on the builder env via `GIT_CONFIG_*` so builder commits are signed when made; `ensureSignedOff` stays the fallback.
+- **Invalid.** the close and the `workflow:invalid` label run in `Promise.all`.
