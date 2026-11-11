@@ -6,6 +6,8 @@
 // The sections below mirror docs/CONFIG.md (bin/tests/config-schema.test.mjs fails when a documented section is missing here).
 // Nested keys are only checked where a section is listed in CLOSED; elsewhere only the top level and typed keys are.
 
+import { parseForgeYaml } from "./forge-utils.mjs";
+
 export const TOP_LEVEL = [
   "project", "paths", "branches", "agents", "repos", "project_board", "orchestration", "orchestrate", "notify", "decisions",
   "hygiene", "pipeline", "execution", "engine", "prod_watch", "selftest", "release", "issue_watch", "followups", "rollouts",
@@ -92,6 +94,8 @@ function typeError(spec, { kind, value }) {
  */
 export function validateForgeYaml(text, { path } = {}) {
   const keys = scanKeys(text);
+  let parsed = {};
+  try { parsed = parseForgeYaml(String(text)); } catch { /* unparseable: scan findings still apply */ }
   const active = keys.get("engine.path")?.value.replace(/^["']|["']$/g, "") ?? "";
   const engine = path ?? (active || "core");
   const side = engine === "full" ? "full" : "core";
@@ -104,6 +108,13 @@ export function validateForgeYaml(text, { path } = {}) {
     const ignored = IGNORED_ON[side].find((p) => key === p || key.startsWith(p + "."));
     if (ignored && key === ignored) add("error", "ignored-on-path", key, `"${key}" is set but the ${side} engine path (engine.path: ${engine}) never reads it`);
     if (DEPRECATED[key]) add("warn", "deprecated-alias", key, `"${key}" is a deprecated alias; use "${DEPRECATED[key]}"`);
+    // #5504: a list the YAML text writes (block or flow) or the schema types as a list must reach readers as an array.
+    // Only `key` and `section.key` are checked: deeper blocks have their own readers (e.g. issue_watch.watches.*).
+    const [sec, leaf, deeper] = key.split(".");
+    const got = leaf === undefined ? parsed[sec] : deeper === undefined ? parsed[sec]?.[leaf] : undefined;
+    if (deeper === undefined && (node.kind === "list" || TYPES[key] === "list") && node.kind !== "map" && got !== undefined && !Array.isArray(got)) {
+      add("warn", "list-not-array", key, `"${key}" is a list but parses to ${typeof got === "string" ? JSON.stringify(got) : typeof got}, not an array (readers of it will ignore it)`);
+    }
     if (TYPES[key]) {
       const want = typeError(TYPES[key], node);
       if (want) add("error", "wrong-type", key, `"${key}" must be ${want} (got ${node.kind === "scalar" ? JSON.stringify(node.value) : node.kind})`);
