@@ -53,6 +53,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
 | `batch-p3` | Sweep: fold stale unbatched P3 review findings into surface-area-grouped batch issues (same file, then leaf directory) |
+| `labels` (Phase 1E) | Also reports OPEN issues carrying `workflow:merged` or `workflow:merged-unverified` |
 | `all` | All of the above, in order |
 
 ---
@@ -201,6 +202,23 @@ echo "Total stale-open intermediate issues: $STALE_OPEN_COUNT"
 ```
 
 These are **report-only** — no automatic action is taken. Use `/work-on <n>` (idempotent) to resume a stalled issue. Priority issues (P1/P2) should be actioned first.
+
+---
+
+### 1E: Report OPEN issues with a terminal workflow label
+
+A reopened issue must not keep `workflow:merged`; it makes an open issue look merged-but-unclosed and `issue-watch` skips it. `templates/workflows/forgedock-reopen-clean.yml` removes the label on reopen, but issues reopened before it was installed keep it.
+
+```bash
+echo "=== Open issues with a terminal workflow label ==="
+for LABEL in "workflow:merged" "workflow:merged-unverified"; do
+  gh issue list {GH_FLAG} --state open --label "$LABEL" --limit 200 \
+    --json number,title \
+    --jq ".[] | \"#\(.number) — \(.title[:60]) [label: $LABEL]\"" 2>/dev/null
+done
+```
+
+Report-only. To fix an issue, the operator removes the label by hand (`gh issue edit <n> --remove-label workflow:merged`). `workflow:merged-unverified` is set by `issue-watch` when a merge fails verification: a human decides, then removes it.
 
 ---
 

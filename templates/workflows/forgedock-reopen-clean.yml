@@ -1,0 +1,33 @@
+# ForgeDock reopen cleanup — Workflow Template
+#
+# Copy this file to .github/workflows/forgedock-reopen-clean.yml in your repository.
+# When an issue is reopened, remove the terminal labels workflow:merged and
+# workflow:merged-unverified so the open issue does not look merged and the next
+# lane starts from a clean state.
+
+name: ForgeDock Reopen Cleanup
+
+on:
+  issues:
+    types: [reopened]
+
+# Minimum permissions: edit labels on issues.
+permissions:
+  issues: write
+
+jobs:
+  clean-labels:
+    name: Remove terminal labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove workflow:merged labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          for L in "workflow:merged" "workflow:merged-unverified"; do
+            if gh issue view "$ISSUE" --json labels --jq '.labels[].name' | grep -qx "$L"; then
+              gh issue edit "$ISSUE" --remove-label "$L"
+            fi
+          done
