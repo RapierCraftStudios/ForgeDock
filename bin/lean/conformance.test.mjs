@@ -1490,13 +1490,33 @@ describe("#5020 freeze-time environment defects", () => {
     assert.equal(reproEnvMiss({ rc: 0, output: "" }), null);
   });
   it("a post-deploy requirement with no check id is deferred to the orchestrator; one with a check is untouched", () => {
-    const c = { requirements: [{ id: "R1", quote: "q", disposition: "post-deploy", why: "needs prod creds" }, { id: "R2", quote: "q", disposition: "post-deploy", check: "login-smoke", why: "w" }] };
+    const c = { requirements: [{ id: "R1", quote: "q", disposition: "post-deploy", why: "needs prod credentials" }, { id: "R2", quote: "q", disposition: "post-deploy", check: "login-smoke", why: "w" }] };
     const { contract, converted } = deferChecklessPostDeploy(c);
     assert.deepEqual(converted, ["R1"]);
     assert.equal(contract.requirements[0].disposition, "defer");
     assert.equal(contract.requirements[0].bucket, ORCHESTRATOR_BUCKET);
     assert.equal(contract.requirements[1].disposition, "post-deploy");
     assert.deepEqual(bucketProblems(contract.requirements[0]), []);
+  });
+  it("#5448: a check-less prod-only claim is not converted and freeze rejects it; local_infeasible_why is required", () => {
+    const c = { requirements: [{ id: "R1", quote: "Listing returns results on prod.", disposition: "post-deploy", bucket: "post-deploy", why: "only measurable on prod after release" }], deliverables: [], validate: [{ id: "V1", command: "true" }] };
+    const d = deferChecklessPostDeploy(c);
+    assert.deepEqual(d.converted, []);
+    const v = validateContract(d.contract, "Listing returns results on prod.");
+    assert.ok(v.problems.some((p) => /needs a check id/.test(p)));
+    assert.ok(v.problems.some((p) => /local_infeasible_why/.test(p)));
+    const ok = validateContract({ ...c, requirements: [{ ...c.requirements[0], check: "listing-prod", local_infeasible_why: "needs live vendor traffic" }] }, "Listing returns results on prod.");
+    assert.deepEqual(ok.problems, []);
+  });
+  it("#5448 replay of #40539: development work cannot be deferred as prod-only", () => {
+    const q = "Find and fix the 403 signal for reddit listings.";
+    const r = { id: "R3", quote: q, disposition: "post-deploy", bucket: "post-deploy", check: "reddit-403", why: "w", local_infeasible_why: "live" };
+    const v = validateContract({ requirements: [r], deliverables: [], validate: [{ id: "V1", command: "true" }] }, q);
+    assert.ok(v.problems.some((p) => /development work/.test(p)));
+  });
+  it("#5448: a malformed regression set is a contract problem", () => {
+    const c = { requirements: [{ id: "R1", quote: "q q q q q q q q q q q q", disposition: "deliver" }], deliverables: [{ id: "D1", path: "a", change: "c" }], validate: [{ id: "V1", command: "true" }], regression: [{ id: "G1" }] };
+    assert.ok(validateContract(c, "q q q q q q q q q q q q").problems.some((p) => /regression entry/.test(p)));
   });
   it("a post-deploy amendment with no check becomes a tracked defer instead of a problem", () => {
     const c = { requirements: [{ id: "R1", quote: "q", disposition: "deliver" }], deliverables: [], validate: [] };
