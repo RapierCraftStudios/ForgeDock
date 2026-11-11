@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, cancelOnlyChecks, requiredSet, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, cancelOnlyChecks, requiredSet, readConfig, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -763,5 +763,18 @@ describe("review-staging --post-reviewer and delivery repair (#5317)", () => {
     assert.throws(() => parseArgs(["--post-reviewer", "Bad Name", "--body-file", "f"]));
     assert.throws(() => parseArgs(["--post-reviewer", "security"]));
     assert.throws(() => parseArgs(["--body-file", "f"]));
+  });
+});
+
+describe("readConfig gate.required_checks (#5504)", () => {
+  const cfgIo = (gate) => ({ env: {}, cwd: "/w", readFile: () => `project:\n  owner: o\n  repo: r\ngate:\n${gate}` });
+  it("readConfig parses gate.required_checks in block and flow style", () => {
+    assert.deepEqual(readConfig(cfgIo('  required_checks:\n    - "CI"\n    - "lint"\n')).extraRequiredChecks, ["CI", "lint"]);
+    assert.deepEqual(readConfig(cfgIo('  required_checks: ["CI", "lint"]\n')).extraRequiredChecks, ["CI", "lint"]);
+  });
+  it("a red check outside gate.required_checks is a warning, not a block", () => {
+    const extra = readConfig(cfgIo('  required_checks: ["CI"]\n')).extraRequiredChecks;
+    const ck = [{ name: "CI", bucket: "pass" }, { name: "macos", bucket: "fail" }];
+    assert.deepEqual(classifyChecks(ck, requiredSet({ checks: [] }, extra)), { blocking: 0, warnings: ["macos"] });
   });
 });

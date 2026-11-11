@@ -30,6 +30,7 @@ export const TYPES = {
   "verification.ci_local.max_parallel": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "billing.enabled": "bool",
+  "gate.required_checks": "list",
 };
 
 /** Keys the legacy `full` path never reads (the core path reads them: bin/engine-cli.mjs readEnvConfig, readConformanceMode). */

@@ -53,3 +53,11 @@ describe("validateForgeYaml (#5315)", () => {
     assert.deepEqual([...missing], [], `documented sections missing from TOP_LEVEL: ${[...missing].join(", ")}`);
   });
 });
+
+describe("gate.required_checks type (#5504)", () => {
+  it("accepts block and flow lists, flags a scalar", () => {
+    assert.deepEqual(codes(BASE + 'gate:\n  required_checks:\n    - "CI"\n'), []);
+    assert.deepEqual(codes(BASE + 'gate:\n  required_checks: ["CI", "lint"]\n'), []);
+    assert.deepEqual(codes(BASE + "gate:\n  required_checks: CI\n"), ["wrong-type:gate.required_checks"]);
+  });
+});

@@ -142,7 +142,7 @@ function defaultIo() {
   };
 }
 
-function readConfig(io) {
+export function readConfig(io) {
   const path = io.env.FORGE_CONFIG || join(io.cwd, "forge.yaml");
   let cfg = {};
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
