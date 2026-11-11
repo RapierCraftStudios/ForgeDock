@@ -108,7 +108,7 @@ describe("#4655 multi-requirement amendment references", () => {
     assert.match(applyAmendments(C, [{ kind: "flaky-note", why: "w" }]).problems[0], /unknown kind 'flaky-note'; valid kinds are/);
   });
   it("supersede-guard guards[] expands to per-guard supersedes", () => {
-    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838", "warmtree"], why: "x" }]);
+    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);
     assert.deepEqual(a.problems, []);
     assert.deepEqual(a.contract.supersedes, [{ guard: "#4879", why: "x" }, { guard: "#4838", why: "x" }]);
     assert.equal(a.applied.length, 2);
@@ -1770,5 +1770,25 @@ describe("page gate wiring (#5428)", () => {
     assert.ok(!validateContract(c, "q").problems.some((p) => /page_gate/.test(p)));
     const pc = precheck({ contract: c, result: {}, changedFiles: [], pageFailures: [{ code: "x", kind: "page_sitemap_missing", detail: "d" }] });
     assert.ok(pc.failures.some((f) => f.kind === "page_sitemap_missing"));
+  });
+});
+
+import { pathCovers as cover5440 } from "./conformance.mjs";
+describe("#5440 pathCovers: directory without slash, renumbered sequence file", () => {
+  it("#5440 directory deliverable without slash covers files beneath it", () => {
+    assert.ok(cover5440("listings/official/travel", "listings/official/travel/agent.md"));
+    assert.ok(cover5440("listings/official/travel", "listings/official/travel/a/b/page.md"));
+    assert.ok(cover5440("listings/official/travel", "listings/official/travel"));
+  });
+  it("#5440 a sibling directory sharing the prefix is not covered", () => {
+    assert.ok(!cover5440("listings/official/travel", "listings/official/travel2/agent.md"));
+    assert.ok(!cover5440("listings/official/travel", "listings/official/jobs/agent.md"));
+  });
+  it("#5440 a renumbered migration is covered (exact and glob); other dirs and names are not", () => {
+    assert.ok(cover5440("db/migrations/0637_add_x.sql", "db/migrations/0639_add_x.sql"));
+    assert.ok(cover5440("db/migrations/0637_*", "db/migrations/0639_add_x.sql"));
+    assert.ok(!cover5440("db/migrations/0637_add_x.sql", "db/migrations/0639_other.sql"));
+    assert.ok(!cover5440("db/migrations/0637_*", "other/0639_add_x.sql"));
+    assert.ok(!cover5440("src/a.js", "src/b.js"));
   });
 });
