@@ -89,6 +89,9 @@ export function planNeeds(names, specs) {
   return { order, missing };
 }
 
+/** Images already pulled/inspected by this process: lanes of one batch share it (pass as `cache`), so an image is checked once per batch. */
+export const batchImageCache = new Set();
+
 /** One FORGE:SANDBOX trajectory line: what was created, how long it lived, what it cost (local docker: 0). */
 export const sandboxLine = ({ name, kind, ms, cost_usd = 0, id = null }) => `FORGE:SANDBOX ${JSON.stringify({ name, kind, ms, cost_usd, ...(id ? { id } : {}) })}`;
 

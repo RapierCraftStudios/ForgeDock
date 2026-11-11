@@ -121,3 +121,17 @@ test("forgedock sandbox up prints the env, ls lists and down removes", async () 
   assert.equal(d.live.size, 0);
   assert.equal(await sandboxFromCli(["up"], { specs, out: o, ledger }), 2);
 });
+
+test("lanes sharing the batch image cache inspect an image once", async () => {
+  const { batchImageCache } = await import("./testsandbox.mjs");
+  batchImageCache.clear();
+  let inspects = 0;
+  const docker = async (a) => { if (a[0] === "image") inspects++; if (a[0] === "port") return "0.0.0.0:49160\n"; return ""; };
+  const specs = parseSandboxes({ redis: { image: "redis:7" } });
+  for (const lane of ["a", "b"]) {
+    const r = await provisionSandboxes({ names: ["redis"], specs, lane, docker, exec: async () => ({ rc: 0 }), cache: batchImageCache, sleep: async () => {} });
+    assert.equal(r.ok, true);
+    await r.down();
+  }
+  assert.equal(inspects, 1);
+});

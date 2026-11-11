@@ -30,7 +30,7 @@ import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } fro
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
-import { envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
+import { batchImageCache, envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
@@ -2048,7 +2048,7 @@ export async function runCore(o) {
         const names = envNamesOf(frozen);
         if (names.length && !sandboxDown) {
           const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS });
-          const sb = await provisionSandboxes({ names, specs: vcfg.sandboxes ?? {}, lane: `lean-${issue}`, docker: (a) => io.docker(a), exec: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: 600000, env: { ...laneEnv(), ...a.env } }).then((x) => x?.r ?? x), ledger, labels, cwd: wt, now });
+          const sb = await provisionSandboxes({ names, specs: vcfg.sandboxes ?? {}, lane: `lean-${issue}`, docker: (a) => io.docker(a), exec: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: 600000, env: { ...laneEnv(), ...a.env } }).then((x) => x?.r ?? x), ledger, labels, cwd: wt, now, cache: batchImageCache });
           if (!sb.ok) return await needsHuman(`Test sandbox unavailable (${sb.reason}): ${sb.detail}. Nothing was skipped and nothing merged.`, sb.reason === "no_docker" ? OUTCOME_CODES.ENV_TOOL_MISSING : OUTCOME_CODES.ENGINE_ERROR);
           sandboxEnv = sb.env; sandboxDown = sb.down;
           for (const l of sb.lines) T.decisions.push(l);
