@@ -8210,6 +8210,19 @@ describe("#5437 post-run bookkeeping", () => {
     assert.ok(names(dir).includes("POSTRUN_OK"));
     assert.equal(traj(w).length, 1);
   });
+  it("builder commits are signed when made: a commit-msg hook chains the repo's hooks and rides the lane env (R6)", async () => {
+    const dir = tmpDir("postrun-signoff-");
+    const w = world();
+    w.io.runTmp = { prune: async () => {}, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    w.io.fs.list = async () => ["pre-commit", "commit-msg", "applypatch-msg.sample"];
+    const base = w.io.runCommand; w.io.runCommand = async (a) => (/^chmod /.test(a.command) ? { r: { exit: 0 } } : base ? base(a) : { rc: 0, output: "" });
+    await run(w, { dir });
+    const hook = Object.entries(w.files).filter(([p]) => /\/hooks\//.test(p));
+    assert.ok(hook.some(([p, t]) => /commit-msg$/.test(p) && /Signed-off-by/.test(t) && /exec '.*\/commit-msg'/.test(t)), "commit-msg signs and chains the repo's own");
+    assert.ok(hook.some(([p, t]) => /pre-commit$/.test(p) && /exec /.test(t)), "other hooks are forwarded");
+    assert.ok(!hook.some(([p]) => /\.sample$/.test(p)));
+    assert.ok(names(dir).includes("SIGNOFF_HOOK"));
+  });
   it("an unmerged lane keeps its teardown inline and has no postRun", async () => {
     const w = world({ changed: [], result: { status: "invalid", summary: "x", evidence: ["a:1"], tests: [] } });
     const r = await run(w, { deferPostRun: true });
