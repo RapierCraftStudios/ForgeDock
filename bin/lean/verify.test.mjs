@@ -301,3 +301,11 @@ describe("forgedock/verify check run (#4270)", () => {
     assert.equal((await runCiVerify(g.args({ verify: parseVerify({ mode: "ci" }) }))).detail, "1 check(s) green", "its own check alone is not CI");
   });
 });
+
+it("parseVerify reads verify.sandboxes (#5450), drops invalid entries and omits the key when none", () => {
+  const v = parseVerify({ sandboxes: { postgres: "{ image: postgres:16, init: \"make migrate\" }", bad: "{ ttl: 1m }" } });
+  assert.deepEqual(Object.keys(v.sandboxes), ["postgres"]);
+  assert.equal(v.sandboxes.postgres.image, "postgres:16");
+  assert.equal("sandboxes" in parseVerify({}), false);
+  assert.equal("sandboxes" in parseVerify({ sandboxes: { bad: "{ ttl: 1m }" } }), false);
+});

@@ -7,6 +7,7 @@
  */
 import { ciPollDelayMs } from "../engine.mjs";
 import { parseE2e } from "./e2e.mjs";
+import { parseSandboxes } from "./testsandbox.mjs";
 
 export const VERIFY_MODES = Object.freeze(["local", "ci", "hybrid"]);
 /** Changed files that never need the CI matrix (docs-only lanes skip CI verification). */
@@ -68,9 +69,10 @@ export function parseVerify(sec = {}) {
       if (ext.length > 1 && cmd) guardCommand[ext] = cmd;
     }
   }
+  const sandboxes = parseSandboxes(s.sandboxes); // #5450: omitted when none, so unconfigured repos parse as before
   const precheckBlock = str(s.precheck_block).toLowerCase() === "true"; // #5079: a still-failing declared check stops the lane (ci.red)
   const guardBlock = str(s.guard_block).toLowerCase() !== "false"; // #5239: verify.invariants (the pre-merge guard set) block the merge unless false
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), e2e: parseE2e(s) };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), ...(Object.keys(sandboxes).length ? { sandboxes } : {}), e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

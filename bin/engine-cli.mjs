@@ -452,8 +452,8 @@ export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
-    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
-    return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
+    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command"), sandboxes = readYamlMap(cwd, "verify", "sandboxes");
+    return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}), ...(sandboxes ? { sandboxes } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */

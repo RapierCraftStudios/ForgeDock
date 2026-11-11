@@ -30,6 +30,7 @@ import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } fro
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
+import { envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
@@ -403,7 +404,7 @@ export async function runCore(o) {
   let lightVerdict = null, lightUpgrade = null; // #4453: the eligibility verdict and the upgrade reason codes, on the run result for the bench
   let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; a final ci-pending (or needsHuman()) puts it back
   const runId = `${issue}-${t0}`;
-  let runTmp = null;
+  let runTmp = null, sandboxEnv = {}, sandboxDown = null; // #5450: test sandboxes of this lane (testsandbox.mjs)
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   // #4395: lane profile. full (FORGEDOCK_FULL_SESSION=1): unchanged sessions; memory-off: no auto-memory; lane: also no CLAUDE.md, the lane file appended
   let laneProfile = { name: process.env.FORGEDOCK_FULL_SESSION === "1" ? "full" : "memory-off", text: null };
@@ -463,6 +464,7 @@ export async function runCore(o) {
     } else if (wtCreated) {
       ev({ event: "TEARDOWN_KEPT", reason: stillRunning.length ? `builder process ${stillRunning.join(",")} still running: worktree and branch kept` : "checkpoint failed: worktree and branch kept so no work is lost", worktree: wt });
     }
+    if (sandboxDown) { try { await sandboxDown(); } catch { /* the ledger loop below retries */ } sandboxDown = null; }
     for (const kind of ["container", "volume"]) {
       for (const r of ledger ? ledger.entries(kind) : []) {
         if (!io.docker) continue;
@@ -721,7 +723,7 @@ export async function runCore(o) {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
+    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator),
@@ -2041,6 +2043,16 @@ export async function runCore(o) {
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
+      }
+      { // #5450: the frozen validate entries' `env` names verify.sandboxes; none declared: no provider call
+        const names = envNamesOf(frozen);
+        if (names.length && !sandboxDown) {
+          const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS });
+          const sb = await provisionSandboxes({ names, specs: vcfg.sandboxes ?? {}, lane: `lean-${issue}`, docker: (a) => io.docker(a), exec: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: 600000, env: { ...laneEnv(), ...a.env } }).then((x) => x?.r ?? x), ledger, labels, cwd: wt, now });
+          if (!sb.ok) return await needsHuman(`Test sandbox unavailable (${sb.reason}): ${sb.detail}. Nothing was skipped and nothing merged.`, sb.reason === "no_docker" ? OUTCOME_CODES.ENV_TOOL_MISSING : OUTCOME_CODES.ENGINE_ERROR);
+          sandboxEnv = sb.env; sandboxDown = sb.down;
+          for (const l of sb.lines) T.decisions.push(l);
+        }
       }
       if (o.placement?.where === "remote" && !recover) { // #4785: the frozen validate commands need a tool only the host has
         const relayed = new Set(o.relayCaps ?? []); // #4778: a relayed capability is served to the sandbox, so the lane builds there
