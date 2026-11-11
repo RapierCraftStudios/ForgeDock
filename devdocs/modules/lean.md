@@ -3013,3 +3013,10 @@ path is authorized (#5380).
 - **Backslash escape.** `mechfix.mjs` `word()` escapes `\` as well as `$` when building the symbol regex (CodeQL incomplete-escaping).
 - **Barrel others (#5406).** `renameDuplicates` reads each detector `others` file: one that imports the name (ES `import`/`export … from` clause incl. default/aliased, or python from-import) or cannot be read sends the dup to `remaining` with nothing rewritten, since a barrel (import then export) is listed as a declarer but breaks when only the declaring file is renamed. A genuine declaring other (no import) still permits the rename; the detector output is unchanged.
 - **Deploy gate re-run (#5417).** `release.mjs` promotion: with GATE_PASS present and `forge/deploy-gate` pending/absent, `retriggerGate` runs `gh run rerun` on the newest `gate-marker-check.yml` run for the head (the bot comment never triggers it), then `awaitGate` polls `gateState` (12 × 10 s) until success/failure, before the opt-in stop and merge. A failed rerun is ignored; a gate still pending stops with "after 12 polls".
+
+## Entry 2026-11-11 — user docs gate for user-facing surfaces (#5419)
+
+- **Config.** forge.yaml `docs: {required_for, paths, registries, surfaces, link_prefixes, link_check}`; unset `required_for` = off (`parseDocsConfig`, `readEnvConfig` -> `docsConfig`).
+- **Lane.** `docsgate.mjs` `docsFailures` runs beside `routeFailures` and `precheck` blocks `docs_missing` (surface touched, no docs file changed, no `docs: [{surface, justification}]` in the result) and `docs_link_broken` (added `/docs/...` link: `link_check` command, else a docs file under `paths`). `docsPlanNote` asks the planner for an R-docs requirement. 0 LLM calls.
+- **Review.** `docs` is a review domain (`pathDomains(files, {docs})`, `DOMAIN_CHECKS.docs`); never enforced by default.
+- **Milestone.** `forgedock docs gate --milestone T --repo o/r` (`milestoneDocsGate`): user-facing children (labelled a configured kind or `user-facing`) need a closed child labelled `docs`; `/milestone` plans that child and gates close. `/review-pr-staging` Phase 1G lists undocumented user-facing changes as blockers.
