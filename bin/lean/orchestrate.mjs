@@ -1247,6 +1247,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { Promise.resolve(stopLane(n, rec)).then((ok) => { if (ok !== false) s.accepted = true; }, () => {}); } catch { /* best effort */ }
   }
   // #4592: re-read the hold set; one decision and one row when it changes.
+  const holdExpiring = (list) => { let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; } return !!expireHolds && list.some((n) => Number.isFinite(Date.parse(info?.[n]?.expiresAt))); }; // #5469
   const refreshHeld = () => {
     if (!getHeld) return;
     if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
@@ -1589,6 +1590,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && baseHit.size) await nap(wake ?? pollMs); // #5031: only issues waiting for a base commit: poll for it
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
+      else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n)) && holdExpiring([...opHeldHit]) && !cancelled) await nap(wake ?? pollMs); // #5469: a hold with an expiry keeps the batch open until it expires (re-admit or alert), not finalised silently
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch
       else if (pending.some((n) => remoteCapped.has(n))) await nap(wake ?? pollMs); // #5138: live max_remote 0: wait for a raise or another placement

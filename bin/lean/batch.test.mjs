@@ -1765,6 +1765,25 @@ describe("#5469: holds carry an owner and an expiry", () => {
     assert.ok(log.some((r) => r.outcome === "hold-alert" && /owner session \(op@h\) is gone/.test(r.detail)), "a dead owner session raises an alert row");
   });
 
+  it("#5469: a finished batch with only a held issue waits for the expiry, re-admits it, and alerts when the owner is gone", async () => {
+    let saved = null, held = [2], due = false;
+    const store = { load: () => saved, save: (st) => { saved = st; }, log: () => {} };
+    const started = [], log = [];
+    const info = { 2: { owner: "op@h", since: "2026-11-11T00:00:00.000Z", expiresAt: "2026-11-11T04:00:00.000Z" } };
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held, getHoldInfo: () => (held.length ? info : {}), onUpdate: (r) => log.push(r),
+      expireHolds: () => { if (!due) return []; due = false; held = []; return [{ issue: 2, owner: "op@h", since: info[2].since, reason: null, ownerGone: true }]; },
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    try {
+      await until(() => started.includes(1), 3000);
+      await new Promise((r) => setTimeout(r, 60));
+      assert.deepEqual(started, [1], "the batch stays open while the hold has not expired");
+      due = true;
+      await until(() => started.includes(2), 3000);
+    } finally { due = true; held = []; }
+    assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+    assert.ok(log.some((r) => r.outcome === "hold-alert"));
+  });
+
   it("a batch that ends with a held issue names its owner and since; a legacy hold keeps the plain detail", async () => {
     let saved = null;
     const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
