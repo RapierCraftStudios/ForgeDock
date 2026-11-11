@@ -301,7 +301,14 @@ async function verifyClosed({ n, repo, io, state, now, lane }) {
   state.escalation = { ...(state.escalation ?? {}) };
   const done = (state.escalation[n] ??= {});
   if (!done.comment) { await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]); done.comment = true; }
-  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human,workflow:merged-unverified", "--remove-label", "workflow:merged"]); done.label = true; }
+  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human"]); done.label = true; }
+  // #5484: the merged -> merged-unverified swap is best effort and separate, so a repo without the label (or without the
+  // right to create it) still gets needs-human and the reopen. Create first (--force), as parked-relabel.mjs does.
+  if (!done.swap) {
+    try { await io.gh(["label", "create", "workflow:merged-unverified", "-R", repo, "--force", "--color", "FBCA04", "--description", "Pipeline: PR merged but verification failed, needs a human decision. Managed by ForgeDock."]); } catch { /* exists, or no rights: the edit says */ }
+    try { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "workflow:merged-unverified", "--remove-label", "workflow:merged"]); } catch { /* reopen-clean workflow strips workflow:merged where installed */ }
+    done.swap = true;
+  }
   await io.gh(["issue", "reopen", String(n), "-R", repo]);
   delete state.escalation[n];
   settled(); state.merged.push(n); state.unverified.push(n);
