@@ -4,7 +4,8 @@
  * Merge verification for `forgedock issue-watch`: an issue the watch claimed counts as verified only when its result
  * checks out after it closed, not because it closed. Checks, in order: a PR from `feat/issue-<n>-lean` merged into the
  * issue's lane; the PR does not carry `review-degraded`; the issue's latest trusted FORGE:REVIEW passed (enforced
- * `CONFORMS`, shadow `would PASS`, or a `review.trigger` skip; a shadow `would BLOCK` fails); every required check of the
+ * `CONFORMS`, shadow `would PASS`, or a `review.trigger` skip; an enforced NONCONFORMING/BLOCK/FAIL fails; a shadow
+ * `would BLOCK` is advisory, as its label says: the lane merges by design, so it is recorded in the evidence, not reopened); every required check of the
  * lane is green on the merged head; the merge commit is on the lane; no check on the merge commit failed
  * (`forgedock/verify` is report-only; a `cancelled`/`stale` check, superseded by a newer run, is resolved against the newest
  * descendant run of the same check on the lane). A failure reopens the issue with `needs-human` and the evidence; nothing is
@@ -68,11 +69,12 @@ async function resolveSuperseded({ gh, repo, lane, sha, names }) {
   return out;
 }
 
-/** The latest trusted FORGE:REVIEW's verdict: pass | block | null (no review record). An unrecognised verdict is a block. */
+/** The latest trusted FORGE:REVIEW's verdict: pass | shadow-block | block | null (no review record). An unrecognised verdict is a block. */
 export function reviewVerdict(comments = []) {
   const body = String(comments.filter((c) => isTrustedIssueComment(c) && /<!--\s*FORGE:REVIEW\b/.test(String(c?.body ?? ""))).at(-1)?.body ?? "");
   if (!body) return null;
-  if (/would BLOCK|\*\*Verdict:\*\*\s*(?:NON-?CONFORM|BLOCK|FAIL)/i.test(body)) return "block";
+  if (/\*\*Verdict:\*\*\s*(?:NON-?CONFORM|BLOCK|FAIL)/i.test(body)) return "block";
+  if (/would BLOCK/i.test(body)) return "shadow-block";
   if (/\*\*Verdict:\*\*\s*CONFORMS|would PASS|Skipped by `review\.trigger/.test(body)) return "pass";
   return "block";
 }
@@ -94,8 +96,8 @@ export async function verifyMerge({ gh, repo, lane, issue, comments, requiredChe
   if (pr.baseRefName !== lane) return fail(`PR #${pr.number} targets ${pr.baseRefName}, not ${lane}`, { pr: pr.number });
   if (labelNames(pr).has("review-degraded")) return fail(`PR #${pr.number} merged with an incomplete review (review-degraded)`, { pr: pr.number });
   const verdict = reviewVerdict(comments);
-  if (verdict !== "pass") return fail(verdict === "block" ? "the latest FORGE:REVIEW did not pass (a shadow-mode `would BLOCK` merges anyway)" : "no trusted FORGE:REVIEW on the issue", { pr: pr.number });
-  ev.push("FORGE:REVIEW passed");
+  if (verdict !== "pass" && verdict !== "shadow-block") return fail(verdict === "block" ? "the latest FORGE:REVIEW did not pass (enforced NONCONFORMING)" : "no trusted FORGE:REVIEW on the issue", { pr: pr.number });
+  ev.push(verdict === "pass" ? "FORGE:REVIEW passed" : "FORGE:REVIEW shadow `would BLOCK` (advisory: shadow mode does not enforce; see the review comment)");
   let required = [];
   try { required = (await requiredChecks(lane)) ?? []; } catch { required = []; }
   if (required.length && pr.headRefOid) {

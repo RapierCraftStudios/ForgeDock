@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
+import { seqNumber } from "./sequence.mjs";
 import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
@@ -182,13 +183,28 @@ export const isTestPath = (p) => TEST_RE.test(String(p));
 export const isIncidentalPath = (p) => INCIDENTAL_RE.test(String(p));
 const cleanPath = (p) => String(p ?? "").trim().replace(/^\.\//, "");
 const globRe = (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/?/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*")}$`);
-/** True when deliverable `d` (a file, a dir ending in "/", or a glob) covers changed file `f`. */
+const dirOf = (p) => p.slice(0, p.lastIndexOf("/") + 1);
+/**
+ * #5440: `file` with its sequence number replaced by the one in deliverable `p`, when both sit in one directory and both
+ * names start with a (different) sequence number: an in-lane renumber (0637_x -> 0639_x) is an add from the base, so git
+ * rename detection cannot see it. null otherwise.
+ */
+function renumberedAs(p, file) {
+  const was = seqNumber(p.slice(dirOf(p).length)), now = seqNumber(file.slice(dirOf(file).length));
+  if (!was || !now || was === now || dirOf(p) !== dirOf(file)) return null;
+  return `${dirOf(file)}${was}${file.slice(dirOf(file).length + now.length)}`;
+}
+/** True when deliverable `d` (a file, a directory with or without a trailing "/", or a glob) covers changed file `f`. */
 export function pathCovers(d, f) {
   const p = cleanPath(d), file = cleanPath(f);
   if (!p) return false;
   if (p.endsWith("/")) return file.startsWith(p);
-  if (/[*?]/.test(p)) return globRe(p).test(file);
-  return p === file;
+  const hit = (x) => (/[*?]/.test(p) ? globRe(p).test(x) : p === x);
+  // a file and a directory cannot share a path, so a slash-less deliverable that prefixes `file/` is a directory
+  if (!/[*?]/.test(p) && file.startsWith(`${p}/`)) return true;
+  if (hit(file)) return true;
+  const as = renumberedAs(p, file);
+  return as !== null && hit(as);
 }
 /** #5365: explicit coupling map: editing `when` (a deliverable) also puts `also` in scope (a test asserts parity between them). */
 const COUPLED_PATHS = [{ when: "bin/engine/outcome-codes.mjs", also: ["docs/OUTCOME-CODES.md"] }];
@@ -495,6 +511,8 @@ export function testPlanProblems(c, { required = false } = {}) {
   return problems;
 }
 
+/** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
+const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
 export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
@@ -509,12 +527,21 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     if (!inIssue(r?.quote, issueText)) problems.push(quoteMiss(id, r?.quote, issueText));
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
+    if (r?.disposition === "post-deploy" && blank(r?.local_infeasible_why)) problems.push(`${id}: post-deploy needs local_infeasible_why: why a fixture or recorded response cannot check this locally (#5448)`);
+    if (r?.disposition === "post-deploy" && (inLaneDeferral(r) || (bucketKind(r?.bucket) !== "owner" && bucketKind(r?.bucket) !== "host" && DEV_WORK_RE.test(String(r?.quote ?? ""))))) problems.push(`${id}: development work (finding or fixing the signal) is delivered in-lane, never deferred as prod-only; deliver it and keep only the measurement post-deploy (#5448)`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
     for (const m of bucketProblems(r)) problems.push(`${id}: ${m}`);
     if (r?.class != null && !FOLLOWUP_CLASSES.includes(r.class)) problems.push(`${id}: class must be one of ${FOLLOWUP_CLASSES.join("|")}`);
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
     if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
     else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
+  }
+  if (c.regression != null && !Array.isArray(c.regression)) problems.push("regression must be an array of {id, command, covers}");
+  for (const g of Array.isArray(c.regression) ? c.regression : []) {
+    if (!g?.id || blank(g?.command)) { problems.push(`regression entry without id or command: ${JSON.stringify(g ?? null).slice(0, 80)}`); continue; }
+    for (const p of tmpdirInputs(g.command)) problems.push(tmpInputProblem(g.id, p));
+    const syn = shellSyntaxError(g.command);
+    if (syn) problems.push(`${g.id}: the command is not valid shell (bash -n: ${syn})`);
   }
   const dels = Array.isArray(c.deliverables) ? c.deliverables : [];
   if (reqs.some((r) => r?.disposition === "deliver") && !dels.length) problems.push("deliver requirements but no deliverables");
@@ -813,6 +840,8 @@ export function deferChecklessPostDeploy(contract) {
   const converted = [];
   const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
     if (r?.disposition !== "post-deploy" || CHECK_ID_RE.test(String(r?.check ?? ""))) return r;
+    // #5448: only a row that truly needs an owner or read-only prod data is converted; any other check-less prod-only claim stays post-deploy so freeze rejects it
+    if (!EXTERNAL_NEED_RE.test(`${r.bucket ?? ""} ${r.why ?? ""}`) && !READONLY_PROD_RE.test(`${r.bucket ?? ""} ${r.why ?? ""}`)) return r;
     converted.push(r.id);
     return { ...r, disposition: "defer", bucket: String(r.bucket ?? "").startsWith("owner:") ? r.bucket : ORCHESTRATOR_BUCKET, why: r.why ?? "post-deploy action with no registered check: deferred to the orchestrator" };
   });
@@ -1003,7 +1032,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1068,8 +1097,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
     }
   }
+  for (const f of baselineFailures ?? []) failures.push({ code: C.CONFORMANCE_REGRESSION, ...f }); // #5448
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
-  if (repro) failures.push(...reproFailures(contract, repro));
+  if (repro) failures.push(...reproFailures(contract, repro), ...reproQualityFailures(repro));
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
@@ -1116,6 +1146,13 @@ export function reproFailures(contract, { base, head } = {}) {
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)` }];
   return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
     detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
+}
+
+/** #5446: a repro_test every targeted mutation of the fix survived. Only under lean.repro_quality: enforce; patch_echo is the reviewer's call. */
+export function reproQualityFailures({ quality, enforce } = {}) {
+  if (!enforce || quality !== "mutation_survivor") return [];
+  return [{ code: MUTATION_SURVIVED, kind: "repro_mutation_survivor",
+    detail: "repro_test still passes with the fix's changed lines mutated (flipped condition, early return, dropped call): it does not exercise the fix" }];
 }
 
 const DOC_ONLY_RE = /\.(?:md|mdx|txt|rst|adoc)$/i;
