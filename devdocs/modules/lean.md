@@ -28,6 +28,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp; load
    average only when `max_load_per_core` is configured, #4169);
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
+   #5421: free disk is the third GC trigger. `diskLow` (`admission.mjs`) compares `host.freeMb` of the worktree root and `~/.forge`
+   (`host.hygienePaths`) with forge.yaml `hygiene.min_free_gb` (default 5, 0 = off); `nearCeiling({minFreeGb})` counts it, so the
+   orchestrate `beforeAdmit` runs owned GC. `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
+   if still low, refuses the heavy step with `DISK_LOW` (`heavyAcquire` rethrows only that code). `hygiene.schedule` installs a
+   systemd user timer or cron entry (`gc-schedule.mjs`, by `doctor --fix` / `init`) running `gc --apply`. Lanes get
+   `COMPOSE_PROJECT_NAME=forgedock-lane-<issue>`; gc owns compose volumes/containers of that project.
    Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
    promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
    flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).

@@ -42,6 +42,12 @@ If a probe fails, the item is reported. A probe failure never leads to a reclaim
 - Branches that still exist on origin are deleted `GC_PUSH_CHUNK` (50) per `git push origin --delete`. A failed chunk is retried one branch at a time.
 - `applyGc` takes an optional deadline. Orchestrate's preflight and admission GC run with a 60 s budget (`runOwnedGc({budgetMs})`). Items not started in time are returned as `deferred`, and the next `beforeAdmit` interval runs GC again even when the host is not near the ceiling.
 
+## Scheduling, disk pressure and wider ownership (#5421)
+
+- **Triggers:** `hygiene.schedule` (timer or cron running `gc --apply`, owned scope only), and free disk below `hygiene.min_free_gb` on the worktree root or `~/.forge` (counts in `nearCeiling`; heavy steps are refused when GC cannot free enough).
+- **Owned in addition:** docker containers and volumes of a compose project named `forgedock-lane-<issue>`; top-level `~/.forge/tmp` dirs carrying the `.forge-run-owner` marker (run-dir rule); legacy `<repo>/.forge/worktrees/*` dirs only when clean, HEAD on a remote, no live process and past the worktree TTL.
+- **Still report-only:** marker-less `~/.forge/tmp` entries (`wt-*`, `stg*`, `text-*`, `zero-*`: no ForgeDock code that creates them was found), unlabelled foreign volumes, unpushed or uncommitted legacy dirs.
+
 ## Rejected
 
 - **`docker system prune` / `docker volume prune`:** these delete the user's own unlabelled resources.

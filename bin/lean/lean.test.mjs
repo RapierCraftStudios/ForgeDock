@@ -8150,3 +8150,13 @@ describe("#5347 lane: the build opens with its independent reads in one turn", (
     assert.match(buildOpeningNote({ paths: ["src/a.js"], packFiles: pack.files }), /Context pack files \(touched by earlier PRs on these symbols\): src\/b\.js/);
   });
 });
+
+import { diskLow as diskLowAdmission, nearCeiling as nearCeilingDisk } from "./admission.mjs";
+describe("admission disk ceiling (#5421)", () => {
+  const host = (mb) => ({ memAvailableMb: () => 99999, freeMb: async () => mb, hygienePaths: () => ["/wt", "/forge"] });
+  it("disk below hygiene.min_free_gb is near the ceiling; the injected host probe decides", async () => {
+    assert.equal(await nearCeilingDisk({ host: host(2000), minFreeGb: 5 }), true);
+    assert.equal(await nearCeilingDisk({ host: host(20000), minFreeGb: 5 }), false);
+    assert.equal((await diskLowAdmission({ host: host(2000), minFreeGb: 5 })).reasons.length, 2);
+  });
+});

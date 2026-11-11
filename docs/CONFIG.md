@@ -533,6 +533,8 @@ hygiene:
   delete_merged_branches: true
   max_host_load_ratio: 0.8
   auto_gc: true
+  schedule: 6h
+  min_free_gb: 5
 ```
 
 | Field | Type | Default | Description |
@@ -543,6 +545,8 @@ hygiene:
 | `delete_merged_branches` | boolean | `true` | `false`: lane branches of closed issues are reported, never deleted. |
 | `max_host_load_ratio` | number in (0,1] | `0.8` | Near-ceiling trigger relative to the `engine` admission thresholds: load/core at or above ratio × `max_load_per_core`, or free memory/tmp at or below the minimum ÷ ratio. |
 | `auto_gc` | boolean | `true` | `false` disables GC in `forgedock orchestrate`; `forgedock gc` and `forgedock doctor --fix` still work. |
+| `schedule` | duration | unset | e.g. `6h`, `30m`, `2d`. `doctor --fix` and `init` install a systemd user timer (cron fallback) that runs `forgedock gc --apply` (owned scope only) with no batch running. Unset or `auto_gc: false`: no timer. |
+| `min_free_gb` | number | `5` | Free disk (GB) on the worktree root and `~/.forge` below which orchestrate runs GC before an admission and refuses heavy steps (image builds) if GC cannot free enough. `0` = off. Doctor warns below it. |
 
 Invalid values fall back to the default. `forgedock gc --older-than <d>` overrides every TTL for that run. Resources of a live lane (its ledger owner is alive) are always skipped.
 
