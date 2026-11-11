@@ -56,7 +56,19 @@ eq "attr generated" "$(q '[.files[] | .generated]')" '[true,false,false,false]'
 OUT="$(bash "$S" hdr.py late.py)"
 rm -f hdr.py late.py
 eq "header generated" "$(q '[.files[] | [.generated,.excluded]]')" '[[true,true],[false,false]]'
+# #5470: a `generated/` path segment marks the file generated; the same growth in a hand-written file does not
+mkdir -p web/app/docs/generated/hands web/app/docs/hand generated notgenerated
+lines web/app/docs/generated/hands/page.tsx 6607; lines web/app/docs/hand/page.tsx 6607; lines generated/top.ts 2500; lines notgenerated/x.ts 2500
+OUT="$(bash "$S" --base main -- web/app/docs/generated/hands/page.tsx web/app/docs/hand/page.tsx generated/top.ts notgenerated/x.ts)"
+eq "generated/ segment is generated" "$(q '[.files[] | [.generated,.excluded]]')" '[[true,true],[false,false],[true,true],[false,false]]'
+eq "generated/ segment growth reported" "$(q '[.files[0].growth,.files[1].growth]')" '[6607,6607]'
+rm -rf web generated notgenerated
 if [ "$HAVE_YQ" = 1 ]; then
+  # #5470: maintenance.generated is an alias of generated_paths; both merge, duplicates drop
+  printf 'maintenance:\n  generated: ["a.json", "b.json"]\n  generated_paths: ["b.json", "c.json"]\n' > forge.yaml
+  OUT="$(bash "$S" big.py)"; eq "generated key merged" "$(q '.generated_paths')" '["b.json","c.json","a.json"]'
+  printf 'maintenance:\n  generated: nope\n  generated_paths: ["c.json"]\n' > forge.yaml
+  OUT="$(bash "$S" big.py)"; eq "bad generated key falls back" "$(q '.generated_paths')" '["c.json"]'
   printf 'maintenance:\n  hotspot:\n    file_lines: 100\n    growth_lines: 5\n    exclude_globs: ["dist/*", "*.lock"]\n' > forge.yaml
   OUT="$(bash "$S" dist/bundle.js small.py big.py)"
   eq "config thresholds" "$(q '[.file_lines,.growth_lines]')" '[100,5]'

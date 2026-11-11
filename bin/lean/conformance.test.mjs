@@ -789,6 +789,10 @@ describe("hotspot growth precheck (forge#4195)", () => {
     assert.equal(run(hs([big])).ok, false);
     assert.equal(run(hs([{ ...big, generated: true }])).ok, true);
     assert.equal(run(hs([{ ...big, generated: true, excluded: true }])).ok, true);
+    // #5470: a generated/ segment row (generated:true from hotspots.sh) grown by 6k lines passes; hand-written still flags
+    const seg = H({ path: "src/scrape.js", lines: 6607, base_lines: 0, growth: 6607 });
+    assert.equal(run(hs([{ ...seg, generated: true, excluded: true }])).ok, true);
+    assert.equal(run(hs([{ ...seg, generated: false }])).ok, false);
   });
 
   it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
