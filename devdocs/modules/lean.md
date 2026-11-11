@@ -3055,3 +3055,5 @@ path is authorized (#5380).
 ## Entry 2026-11-11 — reopened issues drop workflow:merged (#5443)
 
 `issuewatch.mjs` `verifyClosed`: the failed-verify `gh issue edit` (still one call, one `done.label` step) now also adds `workflow:merged-unverified` and removes `workflow:merged`. `bin/labels.json` defines the new label. `templates/workflows/forgedock-reopen-clean.yml` (scaffoldable, `issues: write` only) removes both labels on any `reopened` event, covering human reopens. `commands/cleanup.md` Phase 1E reports open issues carrying either label. `DEFAULT_SKIP_LABELS` is unchanged. Tests: `issuewatch.test.mjs` "swaps workflow:merged".
+
+`scripts/transition-label.sh` knows the new state too: `merged-unverified` is in `VALID_STATES` and `ensure_label` creates it (yellow `FBCA04`). The `LABEL_TRANSITIONS` table in `bin/hooks/pre-tool-use.mjs` lists it as terminal (no successors), so a human removes it by hand.
