@@ -1463,7 +1463,13 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
-    res = { changed: op === "hold" ? b.holdIssues(issues, meta) : b.releaseIssues(issues) };
+    res = { changed: op === "hold" ? b.holdIssues(issues, meta) : b.releaseIssues(issues), held: null };
+  }
+  if (op === "hold" && !res.changed?.length) { // #5526: nothing newly held: name the issues that already are
+    let held = res.held;
+    if (!Array.isArray(held)) { try { held = (await import("./lean/batch.mjs")).openBatch(root, id).readHeld(); } catch { held = []; } }
+    const already = issues.filter((n) => held.includes(n));
+    if (already.length) { print(`batch ${id}: already held ${already.map((n) => `#${n}`).join(" ")}`); return { ok: true, batch: id, changed: [], alreadyHeld: already }; }
   }
   if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
     const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;

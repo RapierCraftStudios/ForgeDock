@@ -633,14 +633,16 @@ async function summary(a, io) {
   let ciFailing = 1;
   const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket,link"], { env, cwd: io.cwd });
   let checks = ci.code === 0 ? parseChecks(ci.stdout) : null;
-  let warnings = [], ciCancelOnly = false;
+  let warnings = [], ciCancelOnly = false, ciPendingOnly = false;
   if (checks) {
     const read = await requiredChecksRead({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch });
     const required = requiredSet(read, c.extraRequiredChecks);
     const only = cancelOnlyChecks(checks, required);
     if (only.length) checks = await rerunCancelled(io, c, pr, env, checks, only);
     ({ blocking: ciFailing, warnings } = classifyChecks(checks, required));
-    ciCancelOnly = ciFailing > 0 && redChecks(checks, required).blockRows.every((k) => k.bucket === "cancel");
+    const rows = redChecks(checks, required).blockRows;
+    ciCancelOnly = ciFailing > 0 && rows.every((k) => k.bucket === "cancel");
+    ciPendingOnly = ciFailing > 0 && rows.every((k) => k.bucket === "pending");
   }
 
   const acceptanceBlocked = await acceptanceBlock(io, c, pr, tg);
@@ -697,7 +699,7 @@ async function summary(a, io) {
   } catch (e) {
     throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: could not post the Phase 8 summary and gate marker (${e.message})`, BLOCK_DEPLOY]);
   }
-  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, ciCancelOnly, warnings, testGate: tg.verdict, filed: a.filed }));
+  if (a.json) io.out(JSON.stringify({ pr, headSha: head, verdict: v.verdict, why: v.why, marker, ciFailing, ciCancelOnly, ciPendingOnly, warnings, testGate: tg.verdict, filed: a.filed }));
   else io.out([`VERDICT: ${v.verdict} (${v.why})`, ...(warnings.length ? [`WARNING: ${warnings.length} non-required check(s) red, non-blocking: ${warnings.join(", ")}`] : []), `GATE: ${marker} posted on PR #${pr}`, ...(pass ? [] : [BLOCK_DEPLOY])].join("\n"));
   return pass ? 0 : 1;
 }

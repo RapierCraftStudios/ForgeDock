@@ -66,8 +66,9 @@ describe("orphan-PR sweep (#5505)", () => {
 
   it("pattern 3b: the backport merged -> label cleared and the issue closed", async () => {
     const w = world({ labelled: [{ number: 39450, state: "OPEN" }], all: [{ number: 5, state: "MERGED", headRefName: "hotfix/google-mobile-pool-39450" }] });
-    await run(w);
+    const rows = await run(w);
     assert.ok(w.edits.some((a) => a.includes("--remove-label")) && w.edits.some((a) => a[1] === "close"));
+    assert.equal(orphanTelemetry(rows).count, 0);
   });
 
   it("pattern 4: lane PR left behind after decompose, never delivered -> follow-up filed first, then PR closed", async () => {
@@ -117,6 +118,12 @@ describe("orphan-PR sweep (#5505)", () => {
     assert.equal(orphanTelemetry([{ kind: "undelivered", ageMs: 90000000 }]).alert, true);
     assert.match(formatOrphanSummary([{ kind: "undelivered", pr: 4, ageMs: 90000000, closed: true }]), /ALERT oldest 25h/);
     assert.equal(formatOrphanSummary([]), "");
+  });
+
+  it("a backport-merged cleanup row is not an orphan (#5517)", () => {
+    const rows = [{ issue: 7, kind: "backport-merged", detail: "label cleared" }];
+    assert.deepEqual(orphanTelemetry(rows), { count: 0, oldestAgeMs: 0, alert: false });
+    assert.equal(formatOrphanSummary(rows), "");
   });
 });
 

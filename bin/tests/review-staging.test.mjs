@@ -624,6 +624,12 @@ describe("review-staging --summary", () => {
     const d = JSON.parse(w.out.at(-1));
     assert.equal(d.ciFailing, 1);
     assert.equal(d.ciCancelOnly, false);
+    assert.equal(d.ciPendingOnly, true);
+    const mixed = await finalized({ required: ["CI", "lint"], ciFn: () => ({ code: 0, stdout: JSON.stringify([{ name: "CI", bucket: "pending" }, { name: "lint", bucket: "fail" }]), stderr: "" }) });
+    await reviewStagingFromCli(["--summary", "--json"], mixed.io);
+    const dm = JSON.parse(mixed.out.at(-1));
+    assert.equal(dm.ciFailing, 2);
+    assert.equal(dm.ciPendingOnly, false);
   });
 
   it("forge.yaml gate.required_checks adds required checks", () => {
