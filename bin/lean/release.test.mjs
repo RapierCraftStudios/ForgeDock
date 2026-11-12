@@ -208,6 +208,18 @@ describe("release job (#5211)", () => {
     assert.equal(readReleaseConfig("release:\n  publish_workflow: pub.yml\n").publishWorkflow, "pub.yml");
   });
 
+  it("#5550: managed is off by default (config shape unchanged) and then no ledger call or GitHub write is made", async () => {
+    assert.equal("managed" in readReleaseConfig("release:\n  auto_merge: true\n"), false);
+    assert.equal(readReleaseConfig("release:\n  managed: false\n").managed, undefined);
+    assert.equal(readReleaseConfig("release:\n  managed: true\n").managed, true);
+    const apiCalls = [], ghCalls = [], io = { print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async (a) => { ghCalls.push(a); return ""; }, api: async (...a) => { apiCalls.push(a); return {}; } };
+    const ok = async () => ({});
+    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok } });
+    assert.equal(out.status, "done");
+    assert.deepEqual(apiCalls, []);
+    assert.deepEqual(ghCalls, []);
+  });
+
   it("CLI: rejects unknown options and exits 3 on a blocked step, naming the resume command", async () => {
     const root = tmp(), io = fakeIo();
     await assert.rejects(() => releaseFromCli(["--bogus"], { io, env: { FORGEDOCK_RELEASE_DIR: root }, cwd: root, mounts: DISK }), /unknown option/);
