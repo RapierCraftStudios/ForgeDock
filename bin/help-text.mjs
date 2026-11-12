@@ -15,6 +15,7 @@ export const EVERYDAY_COMMANDS = [
   ["orchestrate <issue...>", "Work on several issues at once, in dependency order"],
   ["watch", "Live view of what each agent is doing"],
   ["status", "Show ForgeDock state for this directory"],
+  ["intake", "Pause or resume issue-watch intake from GitHub (every host honours it)"],
   ["release", "Promote staging to your main branch as one reviewed release"],
   ["stats", "Cost, time and quality report from your GitHub history"],
   ["doctor", "Check the installation and fix what it can"],
@@ -100,6 +101,7 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock review-staging [<PR>] [--thorough] [--json]", "Staging->main review pre-dispatch: route marker, open-finding gate, scope, prepare, roster; writes one reviewer brief per domain"],
     ["npx forgedock review-staging [<PR>] --finalize --test-gate-output <file>", "Staging->main review post-dispatch: delivery, test-gate verdict, extract/classify/file-prepare; prints the findings to file"],
     ["npx forgedock review-staging [<PR>] --summary [--filed <N>]...", "Staging->main review Phase 8: verdict and summary comment with the FORGE:GATE_PASS / FORGE:GATE_FAILURE marker"],
+    ["npx forgedock intake pause|resume|status [--reason \"...\"] [--tracker <issue>] [--release <id>] [--repo owner/repo]", "Managed releases (release.managed): write _active.intake and the forge:intake-paused label on the tracker; the issue watch reads it from GitHub, so every host stops claiming (also while a release/*, train/* or hotfix/* PR is open or a ledger entry is active); freeze.intake_auto_resume resumes when the named release ends"],
     ["npx forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | release verify <sha> [--repo owner/repo]", "Staging->default release as one resumable job: preflight, release PR, review, fixes, promotion (stops at GATE_PASS unless --merge or release.auto_merge), post-merge; release.mode: snapshot cuts release/<id> from staging (lanes keep merging, fixes are cherry-picked, FORGE:RELEASE records them); verify checks a release head against that record"],
   ]],
   ["Maintenance and hosting", [

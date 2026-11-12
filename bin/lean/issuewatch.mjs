@@ -567,6 +567,9 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
       state.heartbeat = new Date(io.now()).toISOString(); state.heartbeatEveryMs = intervalMs; // #5313: liveness lives in the state, not a process grep
       state.claude = resolveOnPath("claude", (io.env ?? process.env).PATH); // #5529: what this watcher's lanes inherit; status/doctor warn on null
       let rel = null; try { rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null; } catch { /* unreadable release state: not paused */ }
+      let gp = null; // #5555 (I18): GitHub truth, every host; only for a managed release repo, so defaults make no call
+      if (!rel && watch.release_pause && state.phase === "running") { try { gp = await githubIntake({ io, repo, cwd, state }); } catch (e) { state.pauseError = String(e?.message ?? e).slice(0, 200); } }
+      if (gp) { state.paused = { reason: gp.reason, source: gp.source, since: state.paused?.since ?? state.heartbeat }; writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n"); if (once) break; await io.sleep(intervalMs); continue; }
       if (rel) { // a release job holds staging: no claims, retries or decisions until it ends; the next pass resumes by itself
         state.paused = { reason: `release ${rel.id} in flight${rel.step ? ` (${rel.step})` : ""}`, release: rel.id, since: state.paused?.since ?? state.heartbeat };
         writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
@@ -681,6 +684,22 @@ export function ghRunner(exec, warn = () => {}, { retries = GH_RETRIES, sleep = 
       throw Object.assign(new Error(`gh ${call} failed: ${first}`), { status: e?.status, stderr });
     }
   };
+}
+
+/** #5555: `{reason, source}` when GitHub says intake is paused (null otherwise); auto-resumes a pause whose release ended. */
+async function githubIntake({ io, repo, cwd, state }) {
+  const { readReleaseConfig } = await import("./release.mjs"), { githubPause, ghGet, setIntake } = await import("./intake.mjs");
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* defaults */ }
+  const cfg = readReleaseConfig(raw);
+  if (!cfg.managed) return null;
+  const g = await githubPause({ get: ghGet(io.gh), repo, autoResume: !!cfg.intakeAutoResume });
+  state.pauseError = null;
+  if (g.resume) {
+    const api = io.api ?? (await import("./release.mjs")).realReleaseIo({ env: io.env, cwd }).api;
+    await setIntake({ io: { api }, repo, paused: false, by: "issue-watch", tracker: cfg.tracker ?? null, now: io.now() });
+    return null;
+  }
+  return g.paused ? g : null;
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
