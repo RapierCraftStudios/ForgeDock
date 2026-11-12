@@ -1339,6 +1339,51 @@ describe("#4592: forgedock orchestrate --hold / --release", () => {
     assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
   });
 
+  it("a hold placed while a lane runs skips its recovery lane", async () => {
+    let held = [], free, saved = null;
+    const gate = new Promise((r) => { free = r; });
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], log = [];
+    const done = orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", store, getHeld: () => held, recovery: { maxAttempts: 1 },
+      onUpdate: (r) => log.push(r), decide: () => {},
+      runOne: async (n) => { started.push(n); await gate; return { terminalReason: "needs-human", code: "conformance.omission", detail: "omitted" }; } });
+    await until(() => started.includes(1));
+    held = [1];
+    free();
+    const rows = await done;
+    assert.deepEqual(started, [1], "no recovery lane launched");
+    assert.equal(rows[0].outcome, "needs-human");
+    assert.ok(!log.some((r) => r.outcome === "recovering"), "no recovering row");
+  });
+
+  it("a hold placed while a lane runs is reported held after launch", async () => {
+    let held = [], free;
+    const gate = new Promise((r) => { free = r; });
+    const store = { load: () => null, save: () => {}, log: () => {} };
+    const started = [], log = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held, onUpdate: (r) => log.push(r),
+      runOne: async (n) => { started.push(n); if (n === 1) await gate; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1));
+    await until(() => started.includes(2));
+    held = [1];
+    await until(() => log.some((r) => /held after launch: lane still running/.test(r.detail ?? "")));
+    free();
+    await done;
+  });
+
+  it("a second hold names the already held issues", async () => {
+    const root = tmpDir("batch-hold-twice-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    await quiet(() => orchestrateFromCli(["--hold", "b1", "1"], { batchRoot: root, io }));
+    const lines = []; const l = console.log; console.log = (x) => lines.push(String(x));
+    try { await orchestrateFromCli(["--hold", "b1", "1"], { batchRoot: root, io }); } finally { console.log = l; }
+    assert.ok(lines.some((x) => /already held #1/.test(x)), lines.join("\n"));
+    assert.ok(!lines.some((x) => /held \(none\)/.test(x)));
+  });
+
   it("through the CLI: --hold / --release write the hold file (usage and unknown batch reject); --resume <id> N releases N", async () => {
     const root = tmpDir("batch-hold-cli-");
     const b = openBatch(root, "b1");
