@@ -936,7 +936,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease] [--local]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -983,6 +983,26 @@ export async function runFromCli(argv, deps = {}) {
     return res;
   }
   await assertLaneNotDefault(io, lane, repo);
+  // #5542: placement. A lane already placed (--placement, a batch lane, --adopt, --recover) or forced local runs here; otherwise a
+  // remote or hybrid `execution:` hands the single issue to the same batch placement `orchestrate` uses.
+  if (enginePath !== "full") {
+    const exec = deps.execution !== undefined ? deps.execution : readExecution();
+    const placed = placementWhere || argv.includes("--adopt") || recover || (deps.env ?? process.env).FORGEDOCK_BATCH_ID;
+    const wantsRemote = exec && (exec.mode === "remote" || (exec.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1));
+    if (argv.includes("--local")) console.log("placement: local (--local)");
+    else if (!placed && wantsRemote) {
+      console.log(`placement: ${exec.mode} execution (${exec.provider}); placed by the batch dispatcher`);
+      const res = await orchestrateFromCli([String(issue), "--parallel", "1", "--foreground", ...(repo ? ["--repo", repo] : []), ...(lane ? ["--lane", lane] : []),
+        ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])], deps);
+      const row = res?.rows?.find((r) => r.issue === issue) ?? res?.rows?.[0] ?? {};
+      let laneRes = null; // the lane's own result file carries cost_usd / wall_ms / light* that the benchmarks read
+      try { const bm = await import("./lean/batch.mjs"); laneRes = JSON.parse(readFileSync(bm.openBatch(deps.batchRoot ?? bm.batchRoot(), res.batch).resultFile(issue), "utf8")); } catch { laneRes = null; }
+      const metrics = Object.fromEntries(["cost_usd", "wall_ms", "model_ms", "light", "light_eligibility", "light_upgrade"].filter((k) => row[k] !== undefined).map((k) => [k, row[k]])); // the batch row carries them when no lane file exists (sandbox lanes)
+      const out = { ...metrics, ...(laneRes ?? {}), terminalReason: laneRes?.terminalReason ?? row.outcome ?? "engine-error", ...(row.pr != null && laneRes?.pr == null ? { pr: row.pr } : {}), ...(row.detail && !laneRes?.detail ? { detail: row.detail } : {}), ...(row.code && !laneRes?.code ? { code: row.code } : {}), ...(row.placement ? { placement: row.placement } : {}) };
+      console.log(`issue #${issue} → ${out.terminalReason}`);
+      return report(out);
+    } else if (!placed) console.log(`placement: local (${exec ? `execution mode ${exec.mode}` : "no execution configured"})`);
+  }
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
