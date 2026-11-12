@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { parseSeamForm, roleAnchors, buildSeam, seamContract, renderSeamTest, seamFailures, checkSeam, authMode } from "./seam.mjs";
@@ -104,7 +104,7 @@ describe("seamFailures at lane review and the generated contract test (#5338)", 
     const root = tmpDir("seam-");
     const write = (rel, text) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
     spawnSync("git", ["init", "-q"], { cwd: root });
-    write("contracts/seam-check.mjs", spawnSync("cat", [new URL("../../templates/contracts/seam-check.mjs", import.meta.url).pathname], { encoding: "utf8" }).stdout);
+    write("contracts/seam-check.mjs", readFileSync(new URL("../../templates/contracts/seam-check.mjs", import.meta.url), "utf8"));
     write("contracts/i9-1.contract.test.mjs", renderSeamTest(seamContract(rec)));
     for (const [rel, t] of Object.entries(files)) write(rel, t);
     const run = () => spawnSync(process.execPath, ["--test", "contracts/i9-1.contract.test.mjs"], { cwd: root, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "NODE_TEST_CONTEXT")) });

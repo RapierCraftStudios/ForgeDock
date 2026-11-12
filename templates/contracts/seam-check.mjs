@@ -14,6 +14,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+/** Escape every RegExp metacharacter (backslash included) in an identifier before building a pattern. */
+const reEsc = (s) => String(s).replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
 
 const clean = (a) => String(a).replace(/^\.\//, "").replace(/^\/+/, "");
 const globRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/?/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*")}$`);
@@ -75,7 +77,7 @@ function declaredParams(text) {
 
 /** Definitions of `name` in a source text: [{line, params}]. */
 function definitions(text, name) {
-  const out = [], re = new RegExp(`(?<![\\w$])${name.replace(/[$]/g, "\\$")}\\s*\\(`, "g");
+  const out = [], re = new RegExp(`(?<![\\w$])${reEsc(name)}\\s*\\(`, "g");
   for (let m; (m = re.exec(text));) {
     const open = m.index + m[0].length - 1, close = closeParen(text, open);
     if (close < 0) continue;
@@ -84,7 +86,7 @@ function definitions(text, name) {
       || (/(^|\n)[ \t]*(?:(?:public|private|protected|static|async|export|get|set)\s+)*$/.test(before) && /^\s*(?::[^{;=]*)?\{/.test(after));
     if (def) out.push({ line: lineOf(text, m.index), params: declaredParams(text.slice(open + 1, close)) });
   }
-  const bound = new RegExp(`(?<![\\w$.])${name.replace(/[$]/g, "\\$")}\\s*[:=]\\s*(?:async\\s*)?(?:function\\s*\\*?\\s*[\\w$]*\\s*)?\\(`, "g");
+  const bound = new RegExp(`(?<![\\w$.])${reEsc(name)}\\s*[:=]\\s*(?:async\\s*)?(?:function\\s*\\*?\\s*[\\w$]*\\s*)?\\(`, "g");
   for (let m; (m = bound.exec(text));) {
     const open = m.index + m[0].length - 1, close = closeParen(text, open);
     if (close < 0 || !/^\s*(?::[^=]*)?(=>|\{)/.test(text.slice(close + 1, close + 60))) continue;
@@ -95,7 +97,7 @@ function definitions(text, name) {
 
 /** Call sites of `name` in a source text: [{line, positional, keywords, dynamic}]; definitions and imports are skipped. */
 function calls(text, name) {
-  const out = [], re = new RegExp(`(?<![\\w$])${name.replace(/[$]/g, "\\$")}\\s*\\(`, "g");
+  const out = [], re = new RegExp(`(?<![\\w$])${reEsc(name)}\\s*\\(`, "g");
   for (let m; (m = re.exec(text));) {
     const before = text.slice(Math.max(0, m.index - 24), m.index);
     if (/(\bdef|\bfunction\s*\*?|\bfunc|\bfn|\bnew|\bimport|\bfrom)\s+$/.test(before) || /(^|\n)[ \t]*(?:(?:public|private|protected|static|async|get|set)\s+)*$/.test(before) && /^\s*(?::[^{;=]*)?\{/.test(text.slice(closeParen(text, m.index + m[0].length - 1) + 1).slice(0, 80))) continue;
@@ -195,7 +197,7 @@ function checkPayload(c, provider, consumer) {
   for (const [side, files] of [["provider", provider], ["consumer", consumer]]) {
     const text = files.map((f) => f.text).join("\n");
     for (const field of c.payload.fields) {
-      if (!new RegExp(`(?<![\\w$])${field.replace(/[$]/g, "\\$")}(?![\\w$])`).test(text)) findings.push({ side, file: null, line: null, detail: `payload field "${field}" never appears under the ${side} anchors: it is accepted on one side and dropped on the other` });
+      if (!new RegExp(`(?<![\\w$])${reEsc(field)}(?![\\w$])`).test(text)) findings.push({ side, file: null, line: null, detail: `payload field "${field}" never appears under the ${side} anchors: it is accepted on one side and dropped on the other` });
     }
   }
   return findings;
