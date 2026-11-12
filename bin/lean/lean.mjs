@@ -359,6 +359,33 @@ export async function runCore(o) {
     const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
   };
+  /** #5557: after the plan call, derive the classification record from Affected Files + the base-ref unit map, post FORGE:CLASSIFY and namespaced labels. Fail-open; a no-op without `.forge/release.yaml`. */
+  async function classifyStage() {
+    try {
+      const { parsePolicy, validatePolicy, POLICY_PATH } = await import("./release-config.mjs");
+      const C = await import("./release-classify.mjs");
+      let text; try { text = String(await git(["show", `${base}:${POLICY_PATH}`])); } catch { return; }
+      const { policy } = parsePolicy(text);
+      if (!policy || validatePolicy(policy).length) return;
+      const md = await io.fs.read(`${wt}/${INVESTIGATION_FILE}`).catch(() => "");
+      const { affectedFilesOf } = await import("./fastforward.mjs");
+      const files = affectedFilesOf(md);
+      const texts = {};
+      for (const f of files.filter((x) => /migrations\//.test(x))) texts[f] = String(await io.fs.read(`${wt}/${f}`).catch(() => ""));
+      const facts = C.deriveFacts(policy, files, { texts });
+      let llm = null; try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); } catch { /* text-only below */ }
+      const problems = llm ? C.validateClassification(llm) : ["classification.json missing or unreadable"];
+      if (problems.length) { ev({ event: "CLASSIFY_INVALID", problems }); llm = { type: "chore", severity: "P3", exists_in: "unknown", confidence: 0.3 }; }
+      const live = policy.branches?.release;
+      let liveSha = null; if (live) liveSha = String(await git(["rev-parse", `origin/${live}`]).catch(() => "")).trim() || null;
+      let rec = C.buildRecord(llm, policy, facts, { text: problems.length > 0 });
+      rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha });
+      if (rec.exists_in === "unknown" && rec.lane_hint === "none") rec.lane_hint = "release";
+      await io.fs.write?.(`${wt}/${C.CLASSIFICATION_FILE}`, JSON.stringify(rec, null, 1));
+      await post("FORGE:CLASSIFY", C.renderClassify(rec));
+      for (const l of C.labelsOf(rec)) { try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", l]); } catch { /* label may not exist */ } }
+    } catch (e) { ev({ event: "CLASSIFY_FAILED", error: String(e?.message ?? e).slice(0, 200) }); }
+  }
   /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
   const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
   const postRun = makePostRun({ ev, sleep: sleepFn, now }); // #5437: bookkeeping after RUN_TERMINAL, idempotent and retried
@@ -2181,6 +2208,7 @@ export async function runCore(o) {
           return sq.contract;
         };
         contract = snapContract(contract);
+        await classifyStage();
         let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let misses = missed;

@@ -177,6 +177,8 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### Related Issues
 ### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
 
+Also write ${LEAN_DIR}/classification.json: {"type":"bug|feature|chore|docs|infra|incident","severity":"P0..P3","exists_in":"live|staging-only|unknown","exists_in_evidence":{"cite":"file:line","repro":{"red_on_live":bool,"green_after":bool}},"flag":"present|required|exempt|none","confidence":0-1}. live needs a cited file:line and a repro red on the live release, green after the fix, else unknown. Never write units, migrations or risk (the engine derives them).
+
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.

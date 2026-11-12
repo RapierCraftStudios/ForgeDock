@@ -889,6 +889,10 @@ followups:
   rollup_issue_label: post-deploy  # optional: a repo's own open issue with this label is the post-deploy rollup when no marked one is open
 ```
 
+### `classify` and `risk.rules` in `.forge/release.yaml`
+
+`classify.text_only_cap` (default `0.5`) caps the confidence of a `source: text-only` classification, which is also never trusted for `migrations: none`. `risk.rules` is an ordered list (first match wins) of `{when: {migration, paths, contract, rolled_units_gt, diff_lines_gt}, risk, forces}`; without it the defaults are migration → high (forces release), contract → medium, more than one unit → medium, diff over 400 lines → medium, else low. The lane writes `.forge-lean/classification.json`, posts `FORGE:CLASSIFY` and adds `type:*`, `where:*`, `unit:*`, `mig:*`, `risk:*`, `lane:*` labels (#5557).
+
 ## `rollouts` (OPTIONAL)
 
 ```yaml
