@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { githubPause, setIntake, readActive, intakeFromCli, INTAKE_LABEL } from "./intake.mjs";
 
 const REPO = "o/r";
@@ -83,9 +84,9 @@ describe("intake pause from GitHub (#5555)", () => {
 
 describe("issue-watch pass reads GitHub intake (#5555)", () => {
   const run = async (yaml, g) => {
-    const { mkdtempSync, writeFileSync } = await import("node:fs"), { tmpdir } = await import("node:os"), { join } = await import("node:path");
+    const { writeFileSync } = await import("node:fs"), { join } = await import("node:path");
     const { runWatch, validateWatch } = await import("./issuewatch.mjs");
-    const cwd = mkdtempSync(join(tmpdir(), "intake-")), dir = mkdtempSync(join(tmpdir(), "intake-w-"));
+    const cwd = tmpDir("intake-"), dir = tmpDir("intake-w-");
     writeFileSync(join(cwd, "forge.yaml"), yaml);
     const gh = async (a) => { g.calls.push(`gh ${a.join(" ")}`); if (a[0] === "api") return JSON.stringify(await g.get(a[1])); throw new Error(`unexpected gh ${a.join(" ")}`); };
     const io = { env: { FORGEDOCK_WATCH_DIR: dir, PATH: "" }, gh, now: () => 1_000, sleep: async () => {}, releaseInFlight: () => null };
