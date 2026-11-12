@@ -23,7 +23,15 @@ export const CASES = [
   { name: "help", args: ["help"], file: "help.txt" },
   { name: "doctor", args: ["doctor"], file: "doctor.txt" },
   { name: "errors", args: ["nosuchcommand"], file: "errors.txt" },
+  { name: "no-splash", args: ["--no-splash"], file: "no-splash.txt" },
 ];
+
+// The startup splash lines `npx forgedock` prints (#5312, bin/splash-install.mjs) and doctor's state line (#5532).
+const SPLASH_NO_CLAUDE = /startup splash skipped: claude CLI not found/;
+const SPLASH_OPTED_OUT = /startup splash skipped \(--no-splash\)/;
+const SPLASH_INSTALLED = /startup splash (installed|already installed)\b/;
+const DOCTOR_SPLASH = (state) => new RegExp(`Startup splash\\s+${state}\\b`);
+const splashPlugins = (settings) => { try { return Object.entries(JSON.parse(settings).enabledPlugins ?? {}).filter(([k]) => k.startsWith("forgedock-splash@")); } catch { return []; } };
 
 // Success wording that must not appear while node/git are all a clean machine has (the false banner of 2026-11-10).
 const FALSE_SUCCESS = /(all checks passed|you'?re all set|setup complete|✔\s+(Claude Code|gh\b|GitHub CLI)\b)/i;
@@ -56,6 +64,14 @@ export function assertStage1(results) {
   if (doctor && doctor.code === 0) bad.push(["doctor", "doctor exits 0 on a machine without gh and Claude Code"]);
   if (doctor && !/claude/i.test(doctor.output)) bad.push(["doctor", "doctor output never names Claude Code"]);
   if (doctor && !/\bgh\b|github cli/i.test(doctor.output)) bad.push(["doctor", "doctor output never names the gh CLI"]);
+  const banner = results.cases.banner, nosplash = results.cases["no-splash"];
+  // When setup stops at the not-ready screen (exit 1) it never reaches the splash step: only an install line is wrong then.
+  if (banner && SPLASH_INSTALLED.test(banner.output)) bad.push(["splash", "splash reported installed on a machine without the claude CLI"]);
+  if (banner?.code === 0 && !SPLASH_NO_CLAUDE.test(banner.output)) bad.push(["splash", "setup without the claude CLI never printed the splash skip line"]);
+  if (nosplash && SPLASH_INSTALLED.test(nosplash.output)) bad.push(["splash", "--no-splash still installed the splash"]);
+  if (nosplash?.code === 0 && !SPLASH_OPTED_OUT.test(nosplash.output)) bad.push(["splash", "--no-splash did not report the skip"]);
+  if (nosplash && nosplash.code !== 0 && nosplash.code !== banner?.code) bad.push(["splash", `setup with --no-splash exited ${nosplash.code}, setup without it ${banner?.code}`]);
+  if (doctor && !DOCTOR_SPLASH("not installed").test(doctor.output)) bad.push(["splash", "doctor does not report the splash state as not installed"]);
   const errs = results.cases.errors;
   if (errs && errs.code === 0) bad.push(["errors", "an unknown command exits 0"]);
   for (const [path, content] of Object.entries(results.files)) {
@@ -114,6 +130,7 @@ export async function stage2(ctx) {
   };
   await run("setup", ["demo", dir, "--repo", repo]);
   await run("doctor", ["doctor"]);
+  await splashStage(ctx, dir);
   await run("first-merge", ["demo", dir, "--repo", repo, "--run"]);
   const prs = JSON.parse(await io.gh(["pr", "list", "-R", repo, "--state", "merged", "--json", "number,mergedAt", "--limit", "20"]));
   const merged = prs.map((p) => Date.parse(p.mergedAt)).filter((t) => t >= start).sort((a, b) => a - b)[0];
@@ -121,8 +138,28 @@ export async function stage2(ctx) {
   ctx.ttfmMs = merged - start;
 }
 
+/** Setup with claude available installs forgedock-splash at user scope and doctor reports it; --no-splash installs nothing. Each run gets a throwaway HOME. */
+async function splashStage(ctx, dir) {
+  const { io } = ctx;
+  const go = async (args, home) => {
+    const r = await io.cli(args, { cwd: dir, env: { HOME: home, CLAUDE_CONFIG_DIR: "" } });
+    return { ...r, text: `${r.stdout}\n${r.stderr}`, settings: await io.readFile(join(home, ".claude", "settings.json")) };
+  };
+  const home = await io.mkdir(), bare = await io.mkdir();
+  ctx.homes.push(home, bare);
+  const on = await go([], home);
+  if (!SPLASH_INSTALLED.test(on.text)) fail("splash", `setup with claude available did not report the splash installed: ${scrub(on.text).slice(0, 200)}`);
+  if (!splashPlugins(on.settings).some(([, v]) => v === true)) fail("splash", "forgedock-splash is not enabled at user scope in settings.json after setup");
+  const doc = await io.cli(["doctor"], { cwd: dir, env: { HOME: home, CLAUDE_CONFIG_DIR: "" } });
+  if (!DOCTOR_SPLASH("installed").test(`${doc.stdout}\n${doc.stderr}`)) fail("splash", "doctor does not report the splash as installed");
+  const off = await go(["--no-splash"], bare);
+  if (!SPLASH_OPTED_OUT.test(off.text)) fail("splash", "--no-splash did not report the skip");
+  if (SPLASH_INSTALLED.test(off.text) || splashPlugins(off.settings).length) fail("splash", "--no-splash still installed the splash");
+}
+
 async function cleanup2(ctx, errors) {
   const { io, repo } = ctx;
+  for (const h of ctx.homes) try { await io.rm(h); } catch (e) { errors.push(`remove ${h}: ${String(e.message ?? e).slice(0, 120)}`); }
   if (ctx.dir) try { await io.rm(ctx.dir); } catch (e) { errors.push(`remove ${ctx.dir}: ${String(e.message ?? e).slice(0, 120)}`); }
   if (ctx.startedStage2) {
     try {
@@ -134,7 +171,7 @@ async function cleanup2(ctx, errors) {
 
 /** Run both stages; the first failure stops them, cleanup always runs. */
 export async function runNewUserJourney({ repo, io, snapshotDir = SNAPSHOT_DIR, update = false }) {
-  const ctx = { io, repo, snapshotDir, update, notes: [], prompts: [], ttfmMs: null, dir: null, startedStage2: null };
+  const ctx = { io, repo, snapshotDir, update, notes: [], prompts: [], homes: [], ttfmMs: null, dir: null, startedStage2: null };
   let out = { ok: true, step: null, message: null };
   try {
     await stage1(ctx);
@@ -195,7 +232,8 @@ export function realJourneyIo(env = process.env, { docker } = {}) {
     gh: async (args) => { const r = sh("gh", args); if (r.status !== 0) throw new Error(r.stderr.trim() || `gh exited ${r.status}`); return r.stdout; },
     mkdir: async () => mkdtempSync(join(scratch, "demo-")),
     rm: async (d) => rmSync(d, { recursive: true, force: true }),
-    cli: async (args, { cwd } = {}) => { const r = sh(process.execPath, [cliPath, ...args], { cwd, env, timeout: 45 * 60 * 1000, input: "" }); return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" }; },
+    readFile: async (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } },
+    cli: async (args, { cwd, env: extra } = {}) => { const r = sh(process.execPath, [cliPath, ...args], { cwd, env: { ...env, ...extra }, timeout: 45 * 60 * 1000, input: "" }); return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" }; },
     dispose: () => rmSync(scratch, { recursive: true, force: true }),
   };
 }
