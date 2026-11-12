@@ -115,6 +115,16 @@ describe("release deploy stages (#5560)", () => {
   });
 });
 
+describe("deploy reconcile (#5560)", () => {
+  it("a LIVE_CHECKED phase whose live record moved is re-observed without a dispatch, then re-checked", async () => {
+    const { w, io } = world({ live: [OLD] });
+    const c = mk(io); c.state.deploy = { phase: "LIVE_CHECKED", attempts: 0, reruns: 0, target: { sha: OLD, images: {} }, expected: null, merge: SHA, freezeBefore: "" };
+    const out = await deployStep(c);
+    assert.equal(out.blocked, true); assert.match(out.reason, /LIVE_CHECK failed/);
+    assert.equal(w.gh.filter((g) => g.startsWith("workflow run")).length, 0);
+  });
+});
+
 describe("deploy helpers", () => {
   it("parseLiveRelease reads JSON and a bare sha; liveMatches prefers expected digests", () => {
     assert.deepEqual(parseLiveRelease(`{"sha":"abc1234","images":{"api":"d1"}}`), { sha: "abc1234", images: { api: "d1" } });

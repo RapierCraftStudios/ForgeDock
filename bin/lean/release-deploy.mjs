@@ -126,6 +126,22 @@ async function verify(ctx, d, sha, b) {
   return { ok: true, checks: ids };
 }
 
+/**
+ * reconcile(): re-observe GitHub before acting on a persisted phase (resume after a crash or a moved world).
+ * A LIVE_CHECKED phase whose live record no longer matches goes back to DEPLOYING (the run is observed, never redispatched);
+ * a phase with no recorded run adopts the run GitHub already has for the merge sha.
+ */
+export async function reconcile(ctx, d, pipe, sha) {
+  const { io, repo } = ctx, st = ctx.state.deploy;
+  if (st.phase === "LIVE_CHECKED") {
+    if (!liveMatches(await readTarget(io, d.live_release_command), sha, st.expected)) { st.phase = "DEPLOYING"; ctx.save(); }
+  } else if (st.phase === "DEPLOYING" && !st.runId) {
+    const run = await latestRun({ io, repo, workflow: pipe.workflow, sha });
+    if (run) { st.runId = run.databaseId; ctx.save(); }
+  }
+  return st.phase;
+}
+
 const stageS = (d) => (typeof d.stage_timeout_s === "number" ? d.stage_timeout_s : BOUNDS.defaultStageS);
 
 /** @returns {Promise<{skipped: true}|{live: true, merge, run, reruns, verified}|{blocked: true, reason}|{stopped: true, why}>} */
@@ -158,6 +174,7 @@ export async function deployStep(ctx) {
     ctx.save();
   }
 
+  await reconcile(ctx, d, pipe, sha);
   if (st.phase !== "LIVE_CHECKED" && st.phase !== "LIVE") {
     for (;;) {
       st.phase = "DEPLOYING"; ctx.save();
