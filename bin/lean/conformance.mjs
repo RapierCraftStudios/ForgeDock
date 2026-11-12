@@ -1387,18 +1387,23 @@ export function isE2eCommand(command, e2e = null) {
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
-  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q);
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
 }
+/** #5524: production observation windows without a URL: a metric/alert window, "at the next <weekday>", current volume, a prod host. */
+const PROD_WINDOW_RE = /\b(?:over|for|within|across)\s+(?:the\s+(?:last|next)\s+)?\d+\s*(?:h|hrs?|hours?|d|days?|w|weeks?|min|minutes?)\b|\bat the next (?:mon|tues?|wednes|thurs?|fri|sat(?:ur)?|sun)(?:day)?\b|\bat current (?:volume|traffic|load)\b|\bon (?:OVH|prod(?:uction)?)\b|\b\w*Slo\w*\b|\b(?:does not|doesn't|did not) fire\b/i;
 /**
  * #5468: rewrite production-only e2e/manual rows (deliver or defer; only `only` ids when given) to `post-deploy` with a generated
- * check id. Pure; returns {contract, converted:[{id, check, entry}]}. A row whose quote names no probeable URL is left alone.
+ * check id. Pure; returns {contract, converted:[{id, check, entry}]}. A row with no probeable URL becomes a checkless post-deploy row (check: null).
  */
 export function autoPostDeployE2e(contract, only = null) {
   const converted = [];
   const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
     if (!["deliver", "defer"].includes(r?.disposition) || !wantsE2e(r) || (only && !only.includes(r.id)) || isOutOfBand(r) || !prodOnlyE2e(r.quote)) return r;
     const g = e2eCheckFor(r.id, r.quote);
-    if (!g) return r;
+    if (!g) { // #5524: no probeable URL: a checkless post-deploy row; deferChecklessPostDeploy routes it to the orchestrator
+      converted.push({ id: r.id, check: null, entry: null });
+      return { ...r, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "the observable is a production observation window with no probeable URL", why: "production observation window: read-only production telemetry, no probeable URL (#5524)" };
+    }
     converted.push({ id: r.id, check: g.id, entry: g.entry });
     return { ...r, disposition: "post-deploy", bucket: "post-deploy", check: g.id, local_infeasible_why: "the observable exists only in production (live domain or deploy), so no local fixture can check it", why: "production-only e2e/manual criterion: converted by the engine to a post-deploy check (#5468)" };
   });

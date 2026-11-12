@@ -1809,7 +1809,7 @@ export async function runCore(o) {
       for (const x of r.applied) T.decisions.push(`validate recipe rewrote ${x.id}: \`${x.from}\` -> \`${x.to}\``);
       r.contract = foldRegression(r.contract); // #5448: the blast-radius regression set runs as validate G# entries
       const e = autoPostDeployE2e(r.contract); // #5468: production-only e2e/manual rows become post-deploy with a generated check
-      for (const x of e.converted) { genChecks[x.check] = x.entry; T.decisions.push(`Production-only e2e/manual requirement ${x.id} frozen as post-deploy with generated check ${x.check}`); }
+      for (const x of e.converted) { if (x.check) genChecks[x.check] = x.entry; T.decisions.push(`Production-only e2e/manual requirement ${x.id} frozen as post-deploy with ${x.check ? `generated check ${x.check}` : "no check (production observation window)"}`); }
       r.contract = e.contract;
       const d = deferChecklessPostDeploy(r.contract);
       if (d.converted.length) T.decisions.push(`Post-deploy with no registered check deferred to the orchestrator: ${d.converted.join(", ")}`);
@@ -3116,10 +3116,10 @@ export async function runCore(o) {
         const ids = d.state === "nonconforming" ? loneE2eRows(d.failures) : null;
         const cv = ids ? autoPostDeployE2e(effective, ids) : null;
         if (cv && cv.converted.length === ids.length) {
-          for (const x of cv.converted) genChecks[x.check] = x.entry;
-          effective = cv.contract;
+          for (const x of cv.converted) if (x.check) genChecks[x.check] = x.entry;
+          effective = deferChecklessPostDeploy(cv.contract).contract; // #5524: checkless rows route to the orchestrator
           await persistGenChecks();
-          T.decisions.push(`FORGE:DECISION e2e_unverified on ${ids.join(", ")} converted to post-deploy checks ${cv.converted.map((x) => x.check).join(", ")}: the observable is production-only`);
+          T.decisions.push(`FORGE:DECISION e2e_unverified on ${ids.join(", ")} converted to post-deploy ${cv.converted.map((x) => x.check ?? "checkless").join(", ")}: the observable is production-only`);
           d = { state: "conforms", failures: [], review: d.review ?? review, by: "review" };
         }
       }
