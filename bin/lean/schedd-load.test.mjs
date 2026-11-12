@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { cpus } from "node:os";
+import { cpus, setPriority } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -53,13 +53,15 @@ describe("schedd under CPU load (#5531)", () => {
     const procs = [];
     try {
       await until(() => out.includes("ready") && dispatches(b) > 0, 15000);
-      for (let i = 0; i < hogs; i++) procs.push(spawn(process.execPath, ["-e", "for(;;){}"], { stdio: "ignore" }));
+      // the hogs stand in for lanes: lower class than the daemon, as in production (the unit runs CPUWeight=500, pool/install/unit-hardening.sh)
+      for (let i = 0; i < hogs; i++) { const h = spawn(process.execPath, ["-e", "for(;;){}"], { stdio: "ignore" }); try { setPriority(h.pid, 10); } catch { /* best effort */ } procs.push(h); }
       await new Promise((r) => setTimeout(r, 500));
       const n0 = dispatches(b);
       // a client outside the daemon process, over the real socket
       const sock = await connectDaemon({ dir, spawnDaemon: null });
-      const t0 = Date.now(), st = await request(sock, { op: "status" }, undefined, { timeoutMs: 5000 });
-      const took = Date.now() - t0;
+      const times = []; let st;
+      for (let i = 0; i < 3; i++) { const t0 = Date.now(); st = await request(i ? await connectDaemon({ dir, spawnDaemon: null }) : sock, { op: "status" }, undefined, { timeoutMs: 5000 }); times.push(Date.now() - t0); }
+      const took = Math.max(...times);
       assert.equal(st.type, "status");
       assert.equal(st.pid, daemon.pid, "answered by the spawned daemon");
       assert.ok(st.batches.some((x) => x.id === b.id && x.running), "the batch is hosted");
