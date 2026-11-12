@@ -145,6 +145,13 @@ shadcn/ui; `pnpm build`, lint and unit tests in CI.
 `/api/lists`, `/api/invites`.
 **Rationale**: one route per milestone feature.
 
+## Interfaces
+| Boundary | Signature or schema | Auth mode | Owner issue | Anchors | Consumers |
+|----------|---------------------|-----------|-------------|---------|-----------|
+| web -> lists API | POST /api/lists {name} -> {id} | session cookie | LISTS | `provider:src/app/api/lists/`, `consumer:src/components/lists/` | SHARING |
+
+**Rationale**: the web app and the API agree on one signature before either is built.
+
 ## Credentials
 Resend API key (needs-human); the mock mailer is used until it exists.
 **Rationale**: agents cannot create third-party accounts.

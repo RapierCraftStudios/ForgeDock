@@ -1018,6 +1018,23 @@ export function repoTracks(paths) {
 }
 
 /**
+ * #5338: a changed file under the anchors of an active decision row (architecture choice or spike `Interfaces` row,
+ * engine-authored preserve row) needs the builder's `result.preserve` row for it with status "intact"; a lane that really
+ * changes the interface amends {kind:"decision", decision:{..., supersedes:"<id>"}}, which removes the row. Pure.
+ */
+export function interfaceDecisionFailures(contract, result, changedFiles) {
+  const out = [];
+  for (const p of contract?.preserve ?? []) {
+    if (p?.source !== "decision" || !Array.isArray(p.anchors)) continue;
+    const hit = (changedFiles ?? []).filter((f) => p.anchors.some((a) => anchorMatches(a, f)));
+    if (!hit.length) continue;
+    const ack = (result?.preserve ?? []).find((x) => x?.id === p.id);
+    if (ack?.status !== "intact") out.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, kind: "decision_unsuperseded", detail: `${p.id} (decision ${p.decision}): ${hit.slice(0, 3).join(", ")} changed under its anchors without a supersedes decision; report preserve ${p.id} intact, or amend {kind:"decision", decision:{choice, anchors, supersedes:"${p.decision}"}, why}` });
+  }
+  return out;
+}
+
+/**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
  * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green, repro_env) so callers can
@@ -1032,7 +1049,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1110,6 +1127,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
   failures.push(...(pageFailures ?? [])); // #5428: forge.yaml pages
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
+  failures.push(...interfaceDecisionFailures(contract, result, changedFiles)); // #5338
+  failures.push(...(seamFailures ?? [])); // #5338: a declared interface's provider and consumer no longer agree
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 

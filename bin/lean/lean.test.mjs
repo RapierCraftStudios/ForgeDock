@@ -6,6 +6,7 @@ import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #5338
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -1865,6 +1866,31 @@ describe("conformance shadow mode (the default)", () => {
       assert.equal((await runShadow(ok)).terminalReason, "merged");
       assert.ok(ok.comments.some((c) => c.includes("FORGE:DECISION")), "recorded after the merge");
       assert.equal(readdirSync(dir).length, 1);
+    } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
+  });
+  it("#5338 a merged supersedes decision on an interface reopens its closed consumers, notifies open ones and files one issue per named consumer", async () => {
+    const dir = tmpDir("ifc-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
+    try {
+      const seeded = normaliseDecision({ id: "i40-1", choice: "Interface web -> api: POST /v1/search", anchors: ["src/"], issue: 40, consumers: ["#12", "#13", "search-sdk"], seam: { kind: "payload", auth: "k", payload: { fields: ["q"] }, provider: ["src/"], consumer: ["web/"] } });
+      writeDecisionIndex("o/r", [seeded]);
+      const amendments = [{ kind: "decision", why: "v2", decision: { choice: "Interface web -> api: POST /v2/search", anchors: ["src/db.ts"], supersedes: "i40-1" } }];
+      const w = world({ amendments, issueStates: { 12: "CLOSED", 13: "OPEN" } });
+      const base = w.io.gh, calls = [];
+      w.io.gh = async (a, opts) => {
+        const k = a.slice(0, 2).join(" ");
+        if (k === "issue reopen") { calls.push(a.join(" ")); return ""; }
+        if (k === "issue list") return "[]";
+        if (k === "issue create") { calls.push(a.join(" ")); return "https://github.com/o/r/issues/99\n"; }
+        return base(a, opts);
+      };
+      const r = await runShadow(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.ok(calls.includes("issue reopen 12 -R o/r"), "the closed consumer is reopened");
+      assert.ok(!calls.some((c) => c.startsWith("issue reopen 13")), "an open consumer is only told");
+      assert.ok(calls.some((c) => c.startsWith("issue create") && /Adapt search-sdk to interface change/.test(c)), "one issue for the named consumer");
+      assert.ok(w.comments.some((c) => c.includes("FORGE:INTERFACE_CHANGED") && c.includes("consumer=#12")));
+      assert.ok(w.comments.some((c) => c.includes("FORGE:INTERFACE_CHANGED") && c.includes("consumer=#13")));
+      assert.ok(w.comments.some((c) => /Interface i40-1 superseded by d\S+: #12 reopened #12, #13 notified #13, search-sdk filed #99/.test(c)), "the trajectory records it");
     } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
   });
   it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
