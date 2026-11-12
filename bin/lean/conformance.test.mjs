@@ -2008,7 +2008,7 @@ describe("#5547 live-infra, paid and host-load e2e rows", () => {
   const LOCAL = "The signup page works against the local stack in a browser under load [type:e2e]";
   const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }, { id: "R2", quote, disposition: "deliver" }], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] });
   it("#5547 prodOnlyE2e recognises live-infra shapes, not local rows", () => {
-    for (const q of [Q5541, Q5531, "a paid run of the batch completes [type:manual]", "on computeshare the job finishes [type:e2e]", "a sandbox pool run passes [type:e2e]", "host-level load keeps p99 low [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
+    for (const q of [Q5541, Q5531, "a paid run of the batch completes [type:manual]", "on a rented GPU box the job finishes [type:e2e]", "on the remote cluster the job finishes [type:e2e]", "a sandbox pool run passes [type:e2e]", "host-level load keeps p99 low [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
     for (const q of [LOCAL, "sandbox run over 24h [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
   });
   it("#5547 live-infra rows convert to a post-deploy defer owned by the orchestrator", () => {
@@ -2022,6 +2022,9 @@ describe("#5547 live-infra, paid and host-load e2e rows", () => {
       assert.equal(d.contract.requirements[0].disposition, "deliver");
     }
     assert.equal(autoPostDeployE2e(mk(LOCAL)).converted.length, 0);
+  });
+  it("#5547 the classifier keys on shape, not on host or repo names", () => {
+    for (const q of ["on myhost the job finishes [type:e2e]", "legion of users sign up locally [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
   });
   it("#5547 replay: #5531 R2 unchanged converts at review and the lane conforms", () => {
     const contract = mk(Q5531);
@@ -2043,7 +2046,7 @@ describe("#5547 live-infra, paid and host-load e2e rows", () => {
     const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${R1}` };
     const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: R1, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
     assert.ok(!decide(r, lctx).failures.some((f) => f.kind === "e2e_row"), "no e2e_unverified for a tag mention");
-    assert.deepEqual(autoPostDeployE2e(mk("on legion the benchmark finishes `[type:e2e]`")).converted.map((x) => x.id), ["R2"]);
+    assert.deepEqual(autoPostDeployE2e(mk("on a remote host the live benchmark finishes `[type:e2e]`")).converted.map((x) => x.id), ["R2"]);
   });
   it("#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched", () => {
     const contract = mk(Q5531);
