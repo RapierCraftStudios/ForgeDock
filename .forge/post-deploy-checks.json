@@ -64,5 +64,17 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "30d"
+  },
+  "stats-conformance-outcomes-alterlab-10min": {
+    "run": "timeout 600 npx --no-install forgedock stats --conformance-outcomes --repo RapierCraftStudios/AlterLab --since \"$(date -u -d '35 days ago' +%F)\" --no-cache --json >/dev/null",
+    "pass": "exit 0",
+    "timeout": 660,
+    "for": "7d"
+  },
+  "stats-depth-alterlab-defects": {
+    "run": "timeout 500 npx --no-install forgedock stats --depth --repo RapierCraftStudios/AlterLab --json | jq -e '[.. | objects | select(has(\"defects_n\")) | .defects_n] | add > 0'",
+    "pass": "exit 0",
+    "timeout": 560,
+    "for": "7d"
   }
 }

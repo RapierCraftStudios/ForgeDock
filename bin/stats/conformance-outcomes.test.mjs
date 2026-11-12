@@ -132,6 +132,7 @@ describe("conformance outcomes: 2x2 and conclusion (#5210 R2)", () => {
 function graphqlGh(total, calls = []) {
   return async (args) => {
     calls.push(args);
+    if (args[0] === "api" && args[1] === "graphql" && args.some((a) => /issueOrPullRequest/.test(a))) return JSON.stringify({ data: { repository: {} } }); // #5530 numbers batch
     if (args[0] === "api" && args[1] === "graphql") {
       const after = args.find((a) => a.startsWith("after="));
       const start = after ? Number(after.slice(6)) : 0;
@@ -171,7 +172,7 @@ describe("conformance outcomes: read only (#5210 R3)", () => {
     assert.equal(rep.sources.merged_prs, 120);
     assert.equal(rep.sources.graphql_calls, 2);
     assert.equal(rep.conclusion, OUTCOME_INSUFFICIENT);
-    assert.equal(calls.filter((a) => a[1] === "graphql").length, 2);
+    assert.equal(calls.filter((a) => a[1] === "graphql" && a.some((x) => x.startsWith("q="))).length, 2);
     assert.ok(calls.every((a) => !isWrite(a)), "no GitHub write");
   });
   it("buildReport bounds the crawl and uses min n 20 unless --min-n is passed", async () => {
