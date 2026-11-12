@@ -21,6 +21,7 @@ import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
+import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -51,7 +52,7 @@ export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...optKeys(r), ...snapshotKeys(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...optKeys(r), ...snapshotKeys(r) };
 }
 
 /** `{mode, branchPattern, fixMode}` only when configured (#5276): mode `snapshot` cuts release/<id>; anything else is `freeze`. */
@@ -228,7 +229,16 @@ export const withStubs = (over = {}) => ({ ...STEP_FNS, ...over });
  */
 export async function runRelease({ io, repo, opts = {}, config = {}, branches = {}, root, id, steps = STEP_FNS, mounts }) {
   const rel = openRelease(root, id, mounts);
-  const state = rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
+  // #5550: managed releases read the ledger first (it is authoritative; the local file is a cache); off = no ledger call at all.
+  const lctx = config.managed && io.api ? { io, repo, credential: "driver" } : null;
+  const led = lctx ? await readLedger(lctx, id) : null;
+  if (led?.rejected) return { id, status: "refused", step: "ledger", reason: `ledger of ${id} rejected: ${led.rejected}` };
+  let ledgerHead = led?.head ?? null;
+  const mirror = async (s) => { // best effort: a lost race means another writer owns the release, which stops this run
+    const r = ledgerHead ? await writeRelease(lctx, id, s, ledgerHead) : await createReleaseLedger(lctx, id, s);
+    if (r.ok) ledgerHead = r.sha; else throw new Error(`release ${id}: ledger write lost the race (another writer holds the release)`);
+  };
+  const state = led?.state ?? rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
   state.opts = { merge: !!(opts.merge || state.opts?.merge) };
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.save();
@@ -243,6 +253,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       if (result?.stopped) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; out = { id, status: "stopped", step, reason: result.why }; break; }
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
       ctx.save();
+      if (lctx) await mirror(state);
     }
     out ??= { id, status: "done" };
   } finally {
@@ -250,6 +261,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     await restoreBatches(ctx);
   }
   state.status = out.status; ctx.save();
+  if (lctx) await mirror(state);
   return out;
 }
 
@@ -260,7 +272,11 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
   const mine = (b, repo) => { const r = b.readPlan()?.repo; return !r || r === repo; };
   const unfinished = (repo) => listBatches(root).map((id) => openBatch(root, id)).filter((b) => !b.readReport() && mine(b, repo));
   return {
-    gh: (args) => gh(args), print, now: () => Date.now(),
+    gh: (args) => gh(args), print,
+    api: (method, path, body) => { // JSON in and out for the ledger (#5550); the error carries the HTTP status
+      try { return JSON.parse(String(exec("gh", ["api", "-X", method, path, ...(body ? ["--input", "-"] : [])], { encoding: "utf8", input: body ? JSON.stringify(body) : undefined, maxBuffer: 64 << 20, stdio: ["pipe", "pipe", "pipe"] })) || "null"); }
+      catch (e) { throw Object.assign(new Error(`gh api ${method} ${path} failed: ${String(e?.stderr ?? e?.message ?? e).split("\n")[0]}`), { status: Number(/HTTP (\d{3})/.exec(String(e?.stderr ?? ""))?.[1]) || undefined }); }
+    }, now: () => Date.now(),
     git: (args, { env: extra, input } = {}) => exec("git", args, { cwd, encoding: "utf8", input, env: { ...env, ...extra }, maxBuffer: 64 << 20, stdio: ["pipe", "pipe", "pipe"] }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     run: async (cmd) => { try { exec("sh", ["-c", cmd], { stdio: "ignore", timeout: 120_000 }); return { ok: true }; } catch { return { ok: false }; } },
@@ -293,18 +309,19 @@ export async function releaseFromCli(argv, deps = {}) {
   const resume = flag(argv, "--resume");
   let id = resume ?? newReleaseId(io.now());
   let repo = flag(argv, "--repo");
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
+  const config = readReleaseConfig(raw);
   if (resume) {
     const st = openRelease(root, resume).load();
-    if (!st) throw new Error(`no release ${resume} in ${root}`);
-    repo ??= st.repo;
+    if (!st && !config.managed) throw new Error(`no release ${resume} in ${root}`); // managed: the ledger may hold it (another host)
+    repo ??= st?.repo;
   }
   repo ??= JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
-  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
   const budget = async (since) => { // #5278: the Actions-minutes line (and any auto switch to local-first); never fails the job
     try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
   };
   await budget(null);
-  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config: readReleaseConfig(raw), branches: readBranches(cwd), root, id, mounts: deps.mounts });
+  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
