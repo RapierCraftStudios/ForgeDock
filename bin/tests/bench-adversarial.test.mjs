@@ -20,7 +20,7 @@ test("the committed corpus is valid: 20 issues, at least 5 invalid, every kind p
 test("validateAdversarialCorpus rejects a small corpus, too few invalid issues and malformed entries", () => {
   const c = corpus();
   assert.throws(() => validateAdversarialCorpus({ ...c, issues: c.issues.slice(0, 19) }), /at least 20 issues/);
-  const fewInvalid = c.issues.map((i) => (i.kind === "already-fixed" || i.kind === "wrong-premise" ? { ...byId("adv-int-argmax"), id: i.id } : i));
+  const fewInvalid = c.issues.map((i) => (i.kind === "already-fixed" || i.kind === "wrong-premise" ? { ...byId("adv-int-is-permutation"), id: i.id } : i));
   assert.throws(() => validateAdversarialCorpus({ ...c, issues: fewInvalid }), /at least 5 invalid/);
   const set = (id, patch) => ({ ...c, issues: c.issues.map((i) => (i.id === id ? { ...i, ...patch } : i)) });
   assert.throws(() => validateAdversarialCorpus(set("adv-dup-chunks", { forbid_new_defs: [] })), /forbid_new_defs/);
@@ -40,7 +40,7 @@ test("gradeAdversarial counts wrong issues implemented, duplicates created and i
   assert.equal(gradeAdversarial({ issue: dup, row: claimed, added: ["def chunks(iterable, n):", "    pass"] }).duplicate_created, true);
   assert.equal(gradeAdversarial({ issue: dup, row: claimed, added: ["# reuse chunked"] }).duplicate_created, false);
   assert.equal(gradeAdversarial({ issue: dup, row: none, added: ["def chunks(x):"] }).duplicate_created, false);
-  const int = byId("adv-int-argmax");
+  const int = byId("adv-int-is-permutation");
   assert.equal(gradeAdversarial({ issue: int, row: claimed, paths: ["more_itertools/more.py"] }).integration_missed, 2);
   assert.equal(gradeAdversarial({ issue: int, row: claimed, paths: int.must_touch }).integration_missed, 0);
   assert.equal(gradeAdversarial({ issue: int, row: none }).integration_missed, 3);
@@ -118,9 +118,9 @@ test("CLI: validate, run (control arm) and aggregate write rows and a scorecard"
   const cfgPath = join(tmp, "cfg.json"), rows = join(tmp, "rows.jsonl"), sc = join(tmp, "score.md");
   writeFileSync(cfgPath, JSON.stringify({ arms: { control: { model: "claude-opus-5-5" } } }));
   const { run } = fakeRun({ paths: ["more_itertools/more.py"] });
-  assert.equal(await main(["run", "--corpus", cp, "--config", cfgPath, "--out", rows, "--arms", "control", "--issues", "adv-int-argmax,adv-wp-one-empty"], { run, out, err }), 0);
+  assert.equal(await main(["run", "--corpus", cp, "--config", cfgPath, "--out", rows, "--arms", "control", "--issues", "adv-int-is-permutation,adv-wp-one-empty"], { run, out, err }), 0);
   const lines = readFileSync(rows, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.deepEqual(lines.map((r) => [r.id, r.wrong_implemented, r.integration_missed]), [["adv-wp-one-empty", true, 0], ["adv-int-argmax", false, 2]]);
+  assert.deepEqual(lines.map((r) => [r.id, r.wrong_implemented, r.integration_missed]), [["adv-wp-one-empty", true, 0], ["adv-int-is-permutation", false, 2]]);
   const o2 = { s: "", write(x) { this.s += x; } };
   assert.equal(await main(["aggregate", rows, "--corpus", cp, "--model", "claude-opus-5-5", "--date", "2026-11-10", "--scorecard", sc], { out: o2, err }), 0);
   assert.match(readFileSync(sc, "utf8"), /Run date: 2026-11-10[\s\S]*Model: claude-opus-5-5[\s\S]*Corpus revision: adversarial-v1@670b715\+[0-9a-f]{8}/);
@@ -146,7 +146,10 @@ test("CLI run with both arms: the full lane closes the invalid issue, the contro
 test("the corpus has no integration row that only aliases an existing helper (take_until == takewhile_inclusive, #5541)", () => {
   const ids = corpus().issues.map((i) => i.id);
   assert.ok(!ids.includes("adv-int-take-until"));
-  assert.ok(!corpus().issues.some((i) => /take_until|takewhile/.test(i.title)));
+  // Public names at the corpus base (more_itertools/more.py __all__ @670b715) that an integration row must not re-request.
+  const shipped = /\b(take_until|takewhile_inclusive|argmax|argmin|iequals|minmax|run_length|circular_shifts)\(/;
+  for (const i of corpus().issues.filter((x) => x.kind === "integration")) assert.ok(!shipped.test(i.title), `${i.id} asks for a helper the base already ships`);
+  assert.equal(byId("adv-int-is-permutation").kind, "integration");
 });
 
 test("runAdversarial marks a row without a light field as light_unobserved", async () => {
