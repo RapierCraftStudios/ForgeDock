@@ -19,7 +19,7 @@ const blocked = (reason) => ({ blocked: true, reason });
 const tail = (s, n = 400) => String(s ?? "").trim().slice(-n);
 
 /** `{sha, images}` from the live-release command output: JSON `{sha, images|units: {unit: digest}}` or a bare sha. */
-export function parseLive(out) {
+export function parseLiveRelease(out) {
   const t = String(out ?? "").trim();
   if (!t) return null;
   if (t.startsWith("{")) { try { const o = JSON.parse(t); return o?.sha ? { sha: String(o.sha), images: o.images ?? o.units ?? {} } : null; } catch { return null; } }
@@ -39,7 +39,7 @@ export function liveMatches(live, mergeSha, expected) {
 async function readTarget(io, cmd) {
   if (!cmd) return null;
   const r = await io.rehearse(cmd, { timeout: 120_000 });
-  return r?.ok ? parseLive(r.output) : null;
+  return r?.ok ? parseLiveRelease(r.output) : null;
 }
 
 /** The freeze variable's value ("" when unset or unreadable-as-absent). A gh failure means unset: `gh variable get` exits non-zero for a missing variable. */

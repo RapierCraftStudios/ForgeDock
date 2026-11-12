@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deployStep, parseLive, liveMatches } from "./release-deploy.mjs";
+import { deployStep, parseLiveRelease, liveMatches } from "./release-deploy.mjs";
 import { validatePolicy } from "./release-config.mjs";
 
 const SHA = "a".repeat(40), OLD = "b".repeat(40);
@@ -116,9 +116,9 @@ describe("release deploy stages (#5560)", () => {
 });
 
 describe("deploy helpers", () => {
-  it("parseLive reads JSON and a bare sha; liveMatches prefers expected digests", () => {
-    assert.deepEqual(parseLive(`{"sha":"abc1234","images":{"api":"d1"}}`), { sha: "abc1234", images: { api: "d1" } });
-    assert.equal(parseLive("garbage!"), null);
+  it("parseLiveRelease reads JSON and a bare sha; liveMatches prefers expected digests", () => {
+    assert.deepEqual(parseLiveRelease(`{"sha":"abc1234","images":{"api":"d1"}}`), { sha: "abc1234", images: { api: "d1" } });
+    assert.equal(parseLiveRelease("garbage!"), null);
     assert.equal(liveMatches({ sha: "x".repeat(8), images: { api: "d1" } }, SHA, { api: "d1" }), true);
     assert.equal(liveMatches({ sha: SHA, images: { api: "d0" } }, SHA, { api: "d1" }), false);
   });
