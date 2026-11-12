@@ -151,3 +151,16 @@ export async function heartbeat(ctx, lease) {
   await ctx.io.api("PATCH", `repos/${ctx.repo}/issues/comments/${active.lease.commentId}`, { body: leaseBody(lease) });
   return { ok: true };
 }
+
+/** Read-only `_active` ({lease, epoch, holds, intake, ...} of active.json; `{}` when the branch or a key is missing). */
+export async function readActive(ctx) {
+  const text = await readFile(ctx, ACTIVE, "active.json");
+  try { return JSON.parse(text ?? "{}"); } catch { return {}; }
+}
+
+/** Release ids that have a ledger branch (never `_active`). */
+export async function listLedgers({ io, repo }) {
+  let refs = [];
+  try { refs = (await io.api("GET", `repos/${repo}/git/matching-refs/heads/${LEDGER_PREFIX}`)) ?? []; } catch (e) { if (!isMissing(e)) throw e; }
+  return refs.map((r) => String(r.ref).slice(`refs/heads/${LEDGER_PREFIX}`.length)).filter((id) => id !== ACTIVE && ID_RE.test(id));
+}
