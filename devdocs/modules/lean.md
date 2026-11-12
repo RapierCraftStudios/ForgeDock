@@ -1029,7 +1029,12 @@ retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) inst
 log tail shows a usage limit ends `deferred` `rate_limited` with the reset time, not engine-error (#5095). It tears down after the result is
 in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
-in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
+in tests). `SANDBOX_TEARDOWN.pool` (#5422) does the same through the pool router (endpoint
+`execution.endpoint` or the local router config, token as `provider: pool`); a stale pool entry is first
+classified against the router's live list (`GET /agents` `sandboxes`, probe `poolInventory`): listed =
+orphaned (destroyed), unlisted = already gone (ledger released, no call), a list that cannot be fetched
+= report (fail closed), and an entry whose issue has a live ledger is kept (as #5496). Contract suite:
+`sandbox-provider.contract.test.mjs` (container over a
 fake docker, remote over a fake transport). Rationale:
 `devdocs/decisions/4254-remote-sandbox-provider.md`.
 
