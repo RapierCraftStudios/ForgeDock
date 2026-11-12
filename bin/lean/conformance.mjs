@@ -1390,7 +1390,7 @@ export function prodOnlyE2e(quote) {
   return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
 }
 /** #5524: production observation windows without a URL: a metric/alert window, "at the next <weekday>", current volume, a prod host. */
-const PROD_WINDOW_RE = /\b(?:over|for|within|across)\s+(?:the\s+(?:last|next)\s+)?\d+\s*(?:h|hrs?|hours?|d|days?|w|weeks?|min|minutes?)\b|\bat the next (?:mon|tues?|wednes|thurs?|fri|sat(?:ur)?|sun)(?:day)?\b|\bat current (?:volume|traffic|load)\b|\bon (?:OVH|prod(?:uction)?)\b|\b\w*Slo\w*\b|\b(?:does not|doesn't|did not) fire\b/i;
+const PROD_WINDOW_RE = /\b(?:over|for|within|across)\s+(?:the\s+(?:last|next)\s+)?\d+\s*(?:h|hrs?|hours?|d|days?|w|weeks?|min|minutes?)\b|\bat the next (?:mon|tues?|wednes|thurs?|fri|sat(?:ur)?|sun)(?:day)?\b|\bat current (?:volume|traffic|load)\b|\bon (?:OVH|prod(?:uction)?)\b|\b\w*Slo\w*Burn\w*\b|\bSLO\b|\b(?:does not|doesn't|did not) fire\b/i;
 /**
  * #5468: rewrite production-only e2e/manual rows (deliver or defer; only `only` ids when given) to `post-deploy` with a generated
  * check id. Pure; returns {contract, converted:[{id, check, entry}]}. A row with no probeable URL becomes a checkless post-deploy row (check: null).
