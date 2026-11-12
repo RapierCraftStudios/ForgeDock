@@ -29,9 +29,10 @@ export function classifyOrphanPr(pr, ctx) {
   return { kind: "undelivered", detail: `the change is not on \`${ctx.base}\`` };
 }
 
-/** `{ count, oldestAgeMs, alert }` over rows with an `ageMs`; alert when any orphan is older than 24h. Kept PRs (backport-pending) do not count. */
+/** `{ count, oldestAgeMs, alert }` over rows with an `ageMs`; alert when any orphan is older than 24h. Kept PRs (backport-pending) and cleanup rows (backport-merged) do not count. */
+const NOT_ORPHAN_KINDS = new Set(["backport-pending", "backport-merged"]);
 export function orphanTelemetry(rows) {
-  const r = (rows ?? []).filter((x) => x.kind && x.kind !== "backport-pending");
+  const r = (rows ?? []).filter((x) => x.kind && !NOT_ORPHAN_KINDS.has(x.kind));
   const oldestAgeMs = r.reduce((m, x) => Math.max(m, x.ageMs ?? 0), 0);
   return { count: r.length, oldestAgeMs, alert: r.length > 0 && oldestAgeMs > ALERT_AGE_MS };
 }

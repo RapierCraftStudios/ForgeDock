@@ -35,6 +35,7 @@ function world() {
     readFile: () => "brief",
     markLaunched: (_f, domains) => { w.launched = domains; },
     saveTestGate: () => "/sd/gate.txt",
+    testGatePlan: async () => ({ clusters: 1, skill: "test-gate" }),
     runAgent: async ({ role }) => { w.agents.push(role); return { text: "FORGE:TEST_GATE:RESULT=PASS" }; },
     finalize: async () => ({ code: 0, lines: [], data: { head: sha(w.head), notes: ["- nit"], toFile: w.fixed ? [] : [{ title: "leak", severity: "HIGH" }] } }),
     fileIssue: async ({ item }) => { w.issues.push(item.title); return 100 + w.issues.length; },

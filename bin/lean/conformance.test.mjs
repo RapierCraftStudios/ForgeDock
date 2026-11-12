@@ -1951,3 +1951,45 @@ describe("interface decisions at precheck (#5338)", () => {
     assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [] }, result: res, changedFiles: [] }).failures.some((x) => x.kind === "decision_unsuperseded"), false);
   });
 });
+describe("#5524 URL-less production-only e2e/manual rows", () => {
+  const Q40655 = "On OVH after deploy, a Monday report closed during the day is not re-created (verified at the next Monday) [type:manual]";
+  const Q40662 = "T1 succeeded slow ratio < 0.05 over 24h, and `JobTurnaroundSloSlowBurn` does not fire at current volume for 7 days [type:manual]";
+  const Q40486 = "Re-run the #38833 R3 probe after deploy [type:manual]";
+  const LQ = "The signup page works against the local stack in a browser over 24h [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote, disposition: "deliver" }, C.requirements[1]] });
+  it("#5524 prodOnlyE2e recognises observation windows", () => {
+    for (const q of [Q40655, Q40662, Q40486, "ratio stays low over 24h [type:manual]", "no alert for 7 days [type:manual]", "restored at the next Tuesday [type:manual]", "holds at current volume [type:manual]", "runs on OVH [type:manual]"]) assert.equal(prodOnlyE2e(q), true, q);
+    for (const q of [LQ, "works on staging for 7 days [type:e2e]", "sandbox run over 24h [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5524 URL-less production-only rows convert to checkless post-deploy", () => {
+    for (const q of [Q40655, Q40662, Q40486]) {
+      const out = autoPostDeployE2e(mk(q));
+      assert.equal(out.converted.length, 1);
+      assert.equal(out.converted[0].check, null);
+      assert.equal(out.contract.requirements[0].disposition, "post-deploy");
+      const d = deferChecklessPostDeploy(out.contract);
+      assert.deepEqual(d.converted, ["R1"]);
+      assert.equal(d.contract.requirements[0].disposition, "defer");
+      assert.equal(d.contract.requirements[0].bucket, "owner:orchestrator");
+      assert.equal(d.contract.requirements[1].disposition, "deliver");
+    }
+  });
+  it("#5524 replay: URL rows keep a check id and a local-only quote stays deliver", () => {
+    const out = autoPostDeployE2e(mk("`https://store.alterlab.io/x` returns 200 after deploy [type:e2e]"));
+    assert.match(out.contract.requirements[0].check, /^e2e-r1-/);
+    assert.equal(autoPostDeployE2e(mk(LQ)).converted.length, 0);
+    assert.equal(autoPostDeployE2e(mk(LQ)).contract.requirements[0].disposition, "deliver");
+  });
+  it("#5524 review converts URL-less lone e2e_unverified", () => {
+    const contract = { ...mk(Q40655), validate: [{ id: "V1", command: "pytest tests/test_x.py" }] };
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${Q40655}` };
+    const r = { ...good, issue_coverage: [{ quote: Q40655, status: "covered" }, ...good.issue_coverage.slice(1)] };
+    const d = decide(r, lctx);
+    assert.equal(d.state, "nonconforming");
+    const ids = loneE2eRows(d.failures);
+    assert.deepEqual(ids, ["R1"]);
+    const cv = autoPostDeployE2e(contract, ids);
+    assert.equal(cv.converted.length, ids.length);
+    assert.equal(deferChecklessPostDeploy(cv.contract).contract.requirements[0].disposition, "defer");
+  });
+});
