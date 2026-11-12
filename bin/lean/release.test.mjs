@@ -46,6 +46,18 @@ function fakeIo(world = {}) {
 }
 const ok = async () => ({ ok: true });
 
+describe("unmanaged release carries no epoch (#5553)", () => {
+  it("promotion merges with the plain argv and makes no ledger call", async () => {
+    const mod = await import("./release.mjs");
+    const io = fakeIo();
+    io.api = async () => { throw new Error("no ledger call expected"); };
+    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    assert.equal(out.status, "done");
+    const merge = io.calls.find((a) => a[0] === "pr" && a[1] === "merge");
+    assert.deepEqual(merge, ["pr", "merge", "7", "--repo", REPO, "--merge", "--match-head-commit", HEAD]);
+  });
+});
+
 describe("release job (#5211)", () => {
   const promote = async (world, { opts = {}, config = {} } = {}) => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();
