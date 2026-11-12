@@ -89,3 +89,12 @@ describe("decisions (#4695)", () => {
     assert.deepEqual(interfaceDecisions("## Interfaces\nnone", { issue: 1 }), []);
   });
 });
+import { parseRequirementDecision } from "./decisions.mjs";
+describe("#5547 requirement decisions", () => {
+  it("parses a post-deploy requirement decision and ignores anchored, prose and other dispositions", () => {
+    assert.deepEqual(parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy","why":"paid run"} -->\nx'), { requirement: "R2", disposition: "post-deploy", why: "paid run" });
+    assert.equal(parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R2","disposition":"deliver"} -->'), null);
+    assert.equal(parseRequirementDecision('<!-- FORGE:DECISION {"choice":"x","anchors":["a.js"]} -->'), null);
+    assert.equal(parseRequirementDecision("FORGE:DECISION prose"), null);
+  });
+});

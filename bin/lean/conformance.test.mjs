@@ -2001,3 +2001,50 @@ describe("#5524 URL-less production-only e2e/manual rows", () => {
     assert.equal(deferChecklessPostDeploy(cv.contract).contract.requirements[0].disposition, "defer");
   });
 });
+import { applyRequirementDecisions } from "./conformance.mjs";
+describe("#5547 live-infra, paid and host-load e2e rows", () => {
+  const Q5541 = "re-run `bench-adversarial.mjs run … --arms full,control` on legion, ≤ 1.3× control cost [type:e2e]";
+  const Q5531 = "Under a synthetic load of 4× nproc CPU hogs, `schedd status` answers in < 1 s [type:e2e]";
+  const LOCAL = "The signup page works against the local stack in a browser under load [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }, { id: "R2", quote, disposition: "deliver" }], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] });
+  it("#5547 prodOnlyE2e recognises live-infra shapes, not local rows", () => {
+    for (const q of [Q5541, Q5531, "a paid run of the batch completes [type:manual]", "on computeshare the job finishes [type:e2e]", "a sandbox pool run passes [type:e2e]", "host-level load keeps p99 low [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
+    for (const q of [LOCAL, "sandbox run over 24h [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5547 live-infra rows convert to a post-deploy defer owned by the orchestrator", () => {
+    for (const q of [Q5541, Q5531]) {
+      const out = autoPostDeployE2e(mk(q));
+      assert.deepEqual(out.converted.map((x) => x.id), ["R2"]);
+      const d = deferChecklessPostDeploy(out.contract);
+      assert.deepEqual(d.converted, ["R2"]);
+      assert.equal(d.contract.requirements[1].disposition, "defer");
+      assert.equal(d.contract.requirements[1].bucket, "owner:orchestrator");
+      assert.equal(d.contract.requirements[0].disposition, "deliver");
+    }
+    assert.equal(autoPostDeployE2e(mk(LOCAL)).converted.length, 0);
+  });
+  it("#5547 replay: #5531 R2 unchanged converts at review and the lane conforms", () => {
+    const contract = mk(Q5531);
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${Q5531}` };
+    const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: Q5531, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
+    const d = decide(r, lctx);
+    assert.equal(d.state, "nonconforming");
+    const ids = loneE2eRows(d.failures);
+    assert.deepEqual(ids, ["R2"]);
+    const eff = deferChecklessPostDeploy(autoPostDeployE2e(contract, ids).contract).contract;
+    assert.equal(eff.requirements[1].disposition, "defer");
+    const d2 = decide({ ...r, requirements: [good.requirements[0], { id: "R2", status: "deferred", evidence: "-", deferral_ok: true }] }, { ...lctx, contract: eff });
+    assert.equal(d2.state, "conforms", JSON.stringify(d2.failures));
+  });
+  it("#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched", () => {
+    const contract = mk(Q5531);
+    const dec = (j) => ({ body: `<!-- FORGE:DECISION ${JSON.stringify(j)} -->\n## Decision` });
+    const out = applyRequirementDecisions(contract, [{ body: "<!-- FORGE:CONTRACT -->\n{}" }, dec({ requirement: "R2", disposition: "post-deploy" }), { body: "FORGE:DECISION prose" }]);
+    assert.deepEqual(out.applied, ["R2"]);
+    assert.equal(out.contract.requirements[1].disposition, "post-deploy");
+    assert.equal(deferChecklessPostDeploy(out.contract).contract.requirements[1].bucket, "owner:orchestrator");
+    assert.equal(out.contract.requirements[0].disposition, "deliver");
+    assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "deliver" })]).applied.length, 0);
+    assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "post-deploy" }), { body: "<!-- FORGE:CONTRACT -->\n{}" }]).applied.length, 0, "a decision older than the contract is ignored");
+  });
+});

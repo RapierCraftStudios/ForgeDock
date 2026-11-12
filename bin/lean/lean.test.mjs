@@ -7749,6 +7749,13 @@ describe("resume digest in builder prompts (#4400)", () => {
       assert.doesNotMatch(p, /untrusted override|older decision/);
     });
 
+    it("#5547 a structured post-deploy decision after the freeze amends the recovered frozen contract", async () => {
+      const sd = { body: `<!-- FORGE:DECISION ${JSON.stringify({ requirement: CONTRACT.requirements[0].id, disposition: "post-deploy" })} -->\n## Decision\npaid run`, ...BOT };
+      const w = withDecisions([CONTRACT_C, sd, { body: factsRec, ...BOT }]);
+      await run(w);
+      assert.match(traj(w).join("\n"), new RegExp(`FORGE:DECISION applied to the frozen contract: ${CONTRACT.requirements[0].id} tracked post-deploy`));
+    });
+
     it("context_pack off still passes the decision", async () => {
       const w = withDecisions([CONTRACT_C, dec("deliver the nightly timer")]);
       await run(w, { contextPack: { mode: "off" } });
