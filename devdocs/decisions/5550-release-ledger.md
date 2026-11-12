@@ -20,7 +20,7 @@ The release record was the host-local `~/.forge/releases/<id>/state.json`: anoth
 
 ## Q4 (org rulesets)
 
-Not answerable from a lane: it needs an org admin to confirm that rulesets allow driver-only pushes to `forge-ledger/*` and non-forced ref updates. Probe: as the driver credential, create and delete a scratch `forge-ledger/_probe` ref via `createLedger`'s ref call. Fallback if refused: a private satellite ledger repo, with the same module pointed at that repo (another permission surface). Tracked as a deferred owner action.
+Not answerable from a lane: it needs an org admin to confirm that rulesets allow driver-only pushes to `forge-ledger/*` and non-forced ref updates. Probe: as the driver credential, create and delete a scratch `forge-ledger/_probe` ref via `createReleaseLedger`'s ref call. Fallback if refused: a private satellite ledger repo, with the same module pointed at that repo (another permission surface). Tracked as a deferred owner action.
 
 ## Not in this change
 

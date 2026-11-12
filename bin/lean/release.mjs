@@ -21,7 +21,7 @@ import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
-import { createLedger, writeRelease, readLedger } from "./release-ledger.mjs";
+import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -235,7 +235,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   if (led?.rejected) return { id, status: "refused", step: "ledger", reason: `ledger of ${id} rejected: ${led.rejected}` };
   let ledgerHead = led?.head ?? null;
   const mirror = async (s) => { // best effort: a lost race means another writer owns the release, which stops this run
-    const r = ledgerHead ? await writeRelease(lctx, id, s, ledgerHead) : await createLedger(lctx, id, s);
+    const r = ledgerHead ? await writeRelease(lctx, id, s, ledgerHead) : await createReleaseLedger(lctx, id, s);
     if (r.ok) ledgerHead = r.sha; else throw new Error(`release ${id}: ledger write lost the race (another writer holds the release)`);
   };
   const state = led?.state ?? rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };

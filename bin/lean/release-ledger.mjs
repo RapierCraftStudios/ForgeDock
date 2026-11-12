@@ -68,7 +68,7 @@ export async function commitFiles(ctx, branch, files, message, parent) {
 const json = (o) => JSON.stringify(redactDeep(o), null, 2) + "\n";
 
 /** Create `forge-ledger/<id>` with the first state; `{lost}` when the release already has a ledger. */
-export const createLedger = (ctx, id, state) => commitFiles(ctx, ledgerBranch(id), { "state.json": json(state) }, `ledger: create ${id}`, null);
+export const createReleaseLedger = (ctx, id, state) => commitFiles(ctx, ledgerBranch(id), { "state.json": json(state) }, `ledger: create ${id}`, null);
 
 /** Write the next state of release `id` on top of `head` (the sha the caller read); `{lost}` means another writer moved it. */
 export const writeRelease = (ctx, id, state, head) => commitFiles(ctx, ledgerBranch(id), { "state.json": json(state) }, `ledger: ${id} ${state.status ?? "update"}`, head);

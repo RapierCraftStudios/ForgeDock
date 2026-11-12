@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { createLedger, writeRelease, readLedger, updateActive, acquireLease, heartbeat, acceptWrite, redactDeep, ACTIVE, ACTIVE_RETRIES } from "./release-ledger.mjs";
+import { createReleaseLedger, writeRelease, readLedger, updateActive, acquireLease, heartbeat, acceptWrite, redactDeep, ACTIVE, ACTIVE_RETRIES } from "./release-ledger.mjs";
 import { runRelease } from "./release.mjs";
 
 const REPO = "o/r", ID = "r20261112-101500-42", DISK = [{ mount: "/", type: "ext4" }];
@@ -37,19 +37,19 @@ const ctxOf = (g, credential = "driver") => ({ io: { api: g.api }, repo: REPO, c
 const POLICY = { allowlist: [1], driverIds: [1] };
 
 describe("release ledger (#5550)", () => {
-  it("createLedger makes an orphan branch; a second create loses; the head is read back", async () => {
+  it("createReleaseLedger makes an orphan branch; a second create loses; the head is read back", async () => {
     const g = fakeGh(), c = ctxOf(g);
-    const a = await createLedger(c, ID, { v: 1, id: ID, steps: {} });
+    const a = await createReleaseLedger(c, ID, { v: 1, id: ID, steps: {} });
     assert.ok(a.ok);
     assert.deepEqual(g.commits.get(a.sha).parents, []);
-    assert.ok((await createLedger(c, ID, { v: 1 })).lost);
+    assert.ok((await createReleaseLedger(c, ID, { v: 1 })).lost);
     assert.deepEqual((await readLedger(c, ID, POLICY)).state, { v: 1, id: ID, steps: {} });
     assert.equal(await readLedger(c, "r20261112-101500-43"), null);
   });
 
   it("writeRelease is compare-and-swap: a stale head loses", async () => {
     const g = fakeGh(), c = ctxOf(g);
-    const a = await createLedger(c, ID, { n: 1 });
+    const a = await createReleaseLedger(c, ID, { n: 1 });
     assert.ok((await writeRelease(c, ID, { n: 2 }, a.sha)).ok);
     assert.ok((await writeRelease(c, ID, { n: 3 }, a.sha)).lost);
     assert.equal((await readLedger(c, ID)).state.n, 2);
@@ -109,14 +109,14 @@ describe("release ledger (#5550)", () => {
 
   it("forged writes are rejected: lane credential, unverified commit, non-allowlisted actor", async () => {
     const g = fakeGh();
-    await assert.rejects(() => createLedger(ctxOf(g, "lane"), ID, {}), /driver credential/);
+    await assert.rejects(() => createReleaseLedger(ctxOf(g, "lane"), ID, {}), /driver credential/);
     assert.equal(g.refs.size, 0);
     const c = ctxOf(g);
-    g.meta.verified = false; await createLedger(c, ID, { a: 1 });
+    g.meta.verified = false; await createReleaseLedger(c, ID, { a: 1 });
     assert.match((await readLedger(c, ID, POLICY)).rejected, /unverified/);
-    const g2 = fakeGh({ id: 7 }); await createLedger(ctxOf(g2), ID, { a: 1 });
+    const g2 = fakeGh({ id: 7 }); await createReleaseLedger(ctxOf(g2), ID, { a: 1 });
     assert.match((await readLedger(ctxOf(g2), ID, POLICY)).rejected, /not allowlisted/);
-    const g3 = fakeGh({ id: 2 }); await createLedger(ctxOf(g3), ID, { a: 1 });
+    const g3 = fakeGh({ id: 2 }); await createReleaseLedger(ctxOf(g3), ID, { a: 1 });
     assert.match((await readLedger(ctxOf(g3), ID, { allowlist: [1, 2], driverIds: [1] })).rejected, /not the driver credential/);
     assert.ok(acceptWrite({ author: { id: 1 }, commit: { verification: { verified: true } } }, POLICY).ok);
   });
@@ -124,7 +124,7 @@ describe("release ledger (#5550)", () => {
   it("I21: seeded secret-shaped strings never reach a commit", async () => {
     const g = fakeGh(), c = ctxOf(g);
     const tok = "ghp_" + "a".repeat(30);
-    await createLedger(c, ID, { note: `pushed with ${tok}`, env: { API_KEY: "hunter2hunter2" }, line: "GITHUB_TOKEN=abc123def456" });
+    await createReleaseLedger(c, ID, { note: `pushed with ${tok}`, env: { API_KEY: "hunter2hunter2" }, line: "GITHUB_TOKEN=abc123def456" });
     await updateActive(c, ["pause"], () => ({ patch: { pause: tok }, control: { why: `Bearer ${"z".repeat(20)}` } }));
     assert.ok(g.trees.size >= 2);
     for (const files of g.trees.values()) assert.doesNotMatch(JSON.stringify(files), /ghp_a|hunter2|abc123def456|zzzzzzzzzz/);
