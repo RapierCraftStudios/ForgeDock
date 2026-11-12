@@ -21,7 +21,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
@@ -2184,17 +2184,21 @@ export async function runCore(o) {
         let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let misses = missed;
-        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
-          const problems = [...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)];
-          T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
+        const correctContract = async (problems, note) => {
+          T.decisions.push(`Contract rejected (${problems[0]}); ${note}`);
           await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
           contract = freezeRewrites(dropScope(await readContract()));
           await persistGenChecks();
           await refreshIssue("contract validation");
           contract = snapContract(contract);
           vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
+        };
+        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
+          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
           if (missed.length) misses = await preflightValidates(contract);
         }
+        if (!vc.ok && sessionId && onlyTestPlanProblems(vc.problems)) await correctContract(vc.problems, "test-plan rules only, resumed a second time"); // #5587
+        if (!vc.ok) ev({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }), await emit({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }); // #5587: per-rule counts for the batch false-park rate
         planMisses = misses;
         if (missed.length) {
           ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });

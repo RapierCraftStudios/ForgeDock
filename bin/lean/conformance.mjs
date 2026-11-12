@@ -506,6 +506,17 @@ export function mockedDeliverable(reason, deliverables) {
   }
   return null;
 }
+const TEST_PLAN_RULES = [["test_plan.mock", /level_reason mocks /], ["test_plan.echo", /proof restates a deliverable/], ["test_plan.proof", /test_plan proof /], ["test_plan.level", /test_plan level/], ["test_plan.repro", /test_plan (?:repro|no-repro)/], ["test_plan.command", /test_plan (?:needs the exact command|command)/], ["test_plan.row", /test_plan (?:needs a row|row |must be an array)/]];
+/** #5587: the rule id of a contract problem for `contract.invalid` telemetry: a test_plan rule, else "other". Pure. */
+export const contractRuleId = (problem) => TEST_PLAN_RULES.find(([, re]) => re.test(String(problem)))?.[0] ?? "other";
+/** #5587: {ruleId: count} over contract problems. Pure. */
+export function contractRuleCounts(problems) {
+  const out = {};
+  for (const p of problems ?? []) { const k = contractRuleId(p); out[k] = (out[k] ?? 0) + 1; }
+  return out;
+}
+/** #5587: true when every problem is a test_plan rule (not scope or safety), so a second correction round is allowed. Pure. */
+export const onlyTestPlanProblems = (problems) => (problems ?? []).length > 0 && problems.every((p) => contractRuleId(p) !== "other");
 /**
  * #5445: problems with the frozen test plan `test_plan: [{requirement, proof, level, level_reason, repro, reason, regression, env, command}]`.
  * Shape is checked whenever present; `required` (a bug lane with repro on) also needs one row per deliver requirement.
@@ -522,13 +533,13 @@ export function testPlanProblems(c, { required = false } = {}) {
     if (blank(t.proof)) problems.push(`${id}: test_plan proof must name the root-cause observable that shows the cause is fixed`);
     else {
       const echo = proofEchoDetail(t.proof, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
-      if (echo && echo.ratio >= 0.7) problems.push(`${id}: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable ${echo.id} (${echo.pct}%); phrase it as the wrong behaviour observed on base`);
+      if (echo && echo.ratio >= 0.7) problems.push(`${id}: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable ${echo.id} (${echo.pct}%); phrase it as the wrong behaviour observed on base (symptom observed today → assertion that fails on base and passes on head, e.g. \"www.reddit.com listing .json returns 403 today → assert the fetch returns 200 JSON\")`);
     }
     if (!TEST_LEVELS.includes(t.level)) problems.push(`${id}: test_plan level must be one of ${TEST_LEVELS.join("|")}`);
     if (blank(t.level_reason)) problems.push(`${id}: test_plan level needs a level_reason (why the cheapest level that observes the cause)`);
     else {
       const mocked = mockedDeliverable(t.level_reason, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
-      if (mocked) problems.push(`${id}: test_plan level_reason mocks \"${mocked.phrase}\", which is in deliverable ${mocked.id}; level_reason must not contain the words mock/stub/fake unless negated or aimed outside the deliverables; describe the real component exercised and where the I/O boundary is`);
+      if (mocked) problems.push(`${id}: test_plan level_reason mocks \"${mocked.phrase}\", which is in deliverable ${mocked.id}; level_reason must not contain the words mock/stub/fake unless negated or aimed outside the deliverables; describe the real component exercised and where the I/O boundary is; allowed: a real instance of ${mocked.id}'s component, with stubs only at its I/O boundary (clock, network, browser factory) and, for DB code, a real database session`);
     }
     if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason`);
     else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject`);

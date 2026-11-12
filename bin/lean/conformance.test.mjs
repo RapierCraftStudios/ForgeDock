@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail } from "./conformance.mjs";
+import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -1844,6 +1844,17 @@ describe("test plan frozen with the contract (#5445)", () => {
     assert.equal(testPlanProblems(K([row("R1", { level_reason: "no mocks needed, real fixture" })])).length, 0);
     assert.match(testPlanProblems(K([row("R1", { command: "" })])).join(), /exact command/);
     assert.match(testPlanProblems({ ...C, test_plan: "x" }).join(), /must be an array/);
+  });
+  it("#5587: rule ids are counted, the corrections carry the allowed level and the worked example, and only test-plan problems earn a second round", () => {
+    const mock = testPlanProblems(K([row("R1", { level_reason: "mock the listing URL rewrite" }), row("R2", { proof: "the listing json URL is rewritten", command: "" })]));
+    assert.match(mock.join("\n"), /real instance of D1's component, with stubs only at its I\/O boundary \(clock, network, browser factory\) and, for DB code, a real database session/);
+    assert.deepEqual(contractRuleCounts(mock), { "test_plan.mock": 1, "test_plan.command": 1 });
+    const echo = testPlanProblems(K([row("R1", { proof: "the listing json URL is rewritten to old.reddit.com" })]));
+    assert.match(echo.join(), /symptom observed today → assertion that fails on base and passes on head, e\.g\./);
+    assert.deepEqual(contractRuleCounts(echo), { "test_plan.echo": 1 });
+    assert.equal(onlyTestPlanProblems(mock), true);
+    assert.equal(onlyTestPlanProblems([...mock, "R1: quote is not verbatim"]), false);
+    assert.equal(onlyTestPlanProblems([]), false);
   });
   it("applyValidateRecipes rewrites test_plan commands", () => {
     const r = applyValidateRecipes(K([row("R1")]), [{ match: "^node --test", replace: "npx node --test" }]);
