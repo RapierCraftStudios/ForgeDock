@@ -7,7 +7,8 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildCard, renderCardMarkdown, renderCardPng, renderCardSvg } from "./card.mjs";
-import { parseArgs, runStats } from "./index.mjs";
+import { parseArgs, readAttribution, runStats } from "./index.mjs";
+import { writeFileSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const TITLE = "SECRET-TITLE-do-not-leak", REPO = "secret-org/private-repo";
@@ -88,5 +89,21 @@ describe("stats card (forge#5291)", () => {
     assert.equal(png.readUInt32BE(16), 900);
     assert.ok(!png.includes(Buffer.from(TITLE)));
     assert.match(stdout, /last 30 days/);
+  });
+  it("--json card output is aggregate-only by default and names the repo only when opted in", async () => {
+    const run = async (extra) => {
+      const realOut = process.stdout.write; let out = "";
+      process.stdout.write = (c) => { out += c; return true; };
+      try { assert.equal(await runStats(["--card", "--json", "--repo", REPO, "--no-cache", "--no-local", ...extra], { gh: () => "[]", env: {}, releaseTimes: [], onProgress: () => {} }), 0); } finally { process.stdout.write = realOut; }
+      return out;
+    };
+    assert.ok(!(await run([])).includes("private-repo"));
+    assert.ok(!(await run(["--week"])).includes(TITLE));
+  });
+  it("readAttribution honours branding.show_attribution in forge.yaml", () => {
+    td = tmpDir("card-attr-");
+    assert.equal(readAttribution(td), true);
+    writeFileSync(join(td, "forge.yaml"), "branding:\n  show_attribution: false\n");
+    assert.equal(readAttribution(td), false);
   });
 });
