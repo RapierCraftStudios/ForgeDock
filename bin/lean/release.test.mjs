@@ -469,3 +469,19 @@ describe("snapshot releases (#5276)", () => {
     assert.deepEqual((await step(undefined)).pushes, []);
   });
 });
+
+
+describe("release control routing (#5556)", () => {
+  it("`release hold` and `release control hold` share one implementation and refuse without --reason", async () => {
+    for (const argv of [["hold", "r20260101-000000-1"], ["control", "hold", "r20260101-000000-1"]]) {
+      const out = [];
+      const io = { print: (l) => out.push(l), gh: async () => JSON.stringify({ nameWithOwner: "o/r" }), api: async () => { throw new Error("no api"); }, git: () => { throw new Error("none"); }, now: () => 1 };
+      assert.equal(await releaseFromCli([...argv, "--json"], { io, cwd: tmp() }), 1);
+      assert.match(out[0], /forgedock.release.control\/v1/);
+      assert.match(out[0], /--reason is required/);
+    }
+  });
+  it("an unknown control verb is an error", async () => {
+    await assert.rejects(releaseFromCli(["control", "nope"], { io: { print() {}, gh: async () => "" }, cwd: tmp() }), /unknown control verb/);
+  });
+});

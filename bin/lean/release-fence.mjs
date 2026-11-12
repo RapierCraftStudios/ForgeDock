@@ -8,6 +8,7 @@
  * A host that cannot read `_active` performs nothing. Without a fence (unmanaged release) the effect just runs.
  */
 import { readActive } from "./release-ledger.mjs";
+import { holdCheck } from "./release-control.mjs";
 
 export const epochTrailer = (epoch) => `Forge-Epoch: ${epoch}`;
 export const epochMarker = (epoch) => `<!-- FORGE:EPOCH ${epoch} -->`;
@@ -20,6 +21,13 @@ export async function fenceCheck(ctx, lease) {
   return { ok: true, epoch: lease.epoch };
 }
 
+/** fenceCheck, then the hold flag of the lease's release (#5556, I24): `{refused}` or null. */
+async function gate(ctx, lease) {
+  const c = await fenceCheck(ctx, lease);
+  if (!c.ok) return refusal(c, lease);
+  try { const h = await holdCheck(ctx, lease.release); return h ? `refused: ${h}` : null; } catch (e) { return refusal({ unreadable: String(e?.message ?? e) }, lease); }
+}
+
 const refusal = (c, lease) => (c.unreadable ? `refused: cannot read _active (${c.unreadable})` : `refused: fenced (epoch ${lease.epoch} is not current, ${c.current ?? "unknown"} is)`);
 
 /**
@@ -30,12 +38,12 @@ const refusal = (c, lease) => (c.unreadable ? `refused: cannot read _active (${c
 export async function fenced(fence, { action, key }, effect) {
   if (!fence) return { ok: true, value: await effect(null) };
   const { lctx, lease } = fence;
-  let c = await fenceCheck(lctx, lease);
-  if (!c.ok) return { refused: refusal(c, lease) };
+  let why = await gate(lctx, lease);
+  if (why) return { refused: why };
   const intent = { key, action, epoch: lease.epoch, holder: lease.holder, at: fence.now() };
   await fence.record(intent);
-  c = await fenceCheck(lctx, lease); // the window between the first read and the intent write is where a takeover can slip in
-  if (!c.ok) return { refused: refusal(c, lease) };
+  why = await gate(lctx, lease); // the window between the first read and the intent write is where a takeover can slip in
+  if (why) return { refused: why };
   const value = await effect(lease.epoch);
   await fence.record({ ...intent, done: true });
   return { ok: true, value };

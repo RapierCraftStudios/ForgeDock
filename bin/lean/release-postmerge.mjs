@@ -10,6 +10,7 @@
 
 import { cleanupSnapshot } from "./release-snapshot.mjs";
 import { fenced } from "./release-fence.mjs";
+import { buildDispatchArgs } from "./release-control.mjs";
 
 const BOUNDS = {
   publishPolls: 6, publishPollMs: 10_000, // wait for a run to appear (bot merges never trigger one)
@@ -44,7 +45,7 @@ async function publishRun(ctx, sha, b) {
   let run = await poll(io, b.publishPolls, b.publishPollMs, look);
   let dispatched = false;
   if (!run) {
-    const f = await fenced(ctx.fence, { action: "dispatch", key: `dispatch:${sha}` }, (epoch) => io.gh(["workflow", "run", workflow, "--repo", repo, "--ref", ctx.def, ...(epoch != null ? ["-f", `forge_epoch=${epoch}`] : [])]));
+    const f = await fenced(ctx.fence, { action: "dispatch", key: `dispatch:${sha}` }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: epoch != null ? { forge_epoch: epoch } : {} })));
     if (f.refused) return { err: `dispatch ${f.refused}` };
     dispatched = true;
     run = await poll(io, b.publishPolls, b.publishPollMs, look);

@@ -58,6 +58,15 @@ describe("release fence (#5553)", () => {
     assert.equal(ran, 0);
   });
 
+  it("#5556 I24: a held release performs no irreversible action", async () => {
+    let ran = 0;
+    const a = cell({ ...act("A", 1), holds: { r1: { reason: "incident" } } });
+    const f = mkFence(a); f.lease = { holder: "A", epoch: 1, release: "r1" };
+    const r = await fenced(f, { action: "merge", key: "k" }, async () => { ran++; });
+    assert.match(r.refused, /held \(incident\)/);
+    assert.equal(ran, 0);
+  });
+
   it("without a fence (unmanaged release) the effect just runs with no epoch", async () => {
     assert.deepEqual(await fenced(null, { action: "merge", key: "k" }, async (e) => e), { ok: true, value: null });
   });

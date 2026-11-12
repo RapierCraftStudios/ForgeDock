@@ -23,6 +23,7 @@ import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
+import { holdCheck, VERBS as CONTROL_VERBS } from "./release-control.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -261,6 +262,10 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     for (const step of RELEASE_STEPS) {
       if (state.steps[step]?.done) continue;
       if (lctx && !ctx.fence && state.steps["release-pr"]?.done) { const why = await takeLease(); if (why) { out = { id, status: "refused", step: "lease", reason: why }; break; } }
+      if (ctx.fence) { // #5556 (I24): a hold stops the run before the next step; an unreadable _active already ends it above
+        const held = await holdCheck(lctx, id).catch(() => null);
+        if (held) { out = { id, status: "refused", step, reason: held }; break; }
+      }
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
@@ -316,7 +321,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`)";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -327,6 +332,14 @@ export async function releaseFromCli(argv, deps = {}) {
     const { checkConfigFromCli, initFromCli } = await import("./release-config.mjs");
     return (argv[0] === "init" ? initFromCli : checkConfigFromCli)(argv.slice(1), { io, cwd });
   }
+  const cv = argv[0] === "control" ? argv[1] : argv[0]; // #5556: one implementation, the bare verbs are aliases
+  if (CONTROL_VERBS.includes(cv)) {
+    const { controlFromCli } = await import("./release-control.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const policy = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
+    return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
+  }
+  if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
   const root = releaseRoot(env);
