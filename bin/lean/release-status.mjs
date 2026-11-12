@@ -109,6 +109,7 @@ export async function explainIssue({ io, repo, number, state, watch = {}, skipLa
   trace.push(rule("priority", "issue_watch.watches.<name>.immediate", prio !== null, prio ? `priority ${prio}` : "no P0-P3 label (weighs as P3)"));
   const theme = classifyTheme(issue, watch.theme_map ?? {});
   trace.push(rule("theme", "issue_watch.watches.<name>.theme_map", !!theme, theme ? `theme ${theme.theme} via ${theme.via}` : "no theme rule matches"));
+  trace[trace.length - 1].evidence = { title: issue.title ?? "", labels: names.slice().sort() };
   const byNum = new Map(open.map((i) => [i.number, i])); byNum.set(issue.number, issue);
   const prereq = closure(issue, byNum).filter((i) => i.number !== issue.number).map((i) => i.number);
   trace.push(rule("depends_on", "release.managed", prereq.length === 0, prereq.length ? `open prerequisites ${prereq.map((n) => `#${n}`).join(", ")} must ship first` : "no open prerequisite"));
@@ -143,6 +144,8 @@ export async function explainPr({ io, repo, pr, gateState }) {
 export function renderExplain(e) {
   const lines = [e.kind === "issue" ? `#${e.issue}  lane=${e.lane}` : e.kind === "pr" ? `PR #${e.pr}  head ${e.head}  decision=${e.decision}` : `${e.id}  status=${e.status}`];
   e.trace.forEach((t, i) => lines.push(`  ${i + 1}. ${t.pass === null ? "n/a " : t.pass ? "pass" : "FAIL"}  ${t.rule}  [${t.config_key}]  ${t.detail}`));
+  const ev = e.trace.find((t) => t.evidence)?.evidence;
+  if (ev) lines.push(`  classification evidence: title "${ev.title}" labels [${ev.labels.join(", ")}]`);
   if (e.would_change?.length) lines.push("  would change:", ...e.would_change.map((w) => `    - ${w}`));
   lines.push("  next:", ...e.next_actions.map((a) => `    ${a}`));
   return lines.join("\n");

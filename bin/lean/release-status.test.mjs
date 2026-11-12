@@ -86,6 +86,7 @@ describe("release status / explain (#5554)", () => {
     assert.deepEqual(e.trace.map((t) => t.pass), [false, true, true, false, false, null]);
     assert.ok(e.trace.every((t) => t.config_key));
     assert.equal(e.lane, "excluded");
+    assert.deepEqual(e.trace[2].evidence, { title: "fix(api): x", labels: ["P1", "needs-human"] });
     assert.match(e.trace[3].detail, /#41/);
     assert.ok(e.would_change.some((w) => w.includes("needs-human")));
   });
