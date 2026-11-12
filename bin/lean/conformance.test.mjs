@@ -2036,6 +2036,15 @@ describe("#5547 live-infra, paid and host-load e2e rows", () => {
     const d2 = decide({ ...r, requirements: [good.requirements[0], { id: "R2", status: "deferred", evidence: "-", deferral_ok: true }] }, { ...lctx, contract: eff });
     assert.equal(d2.state, "conforms", JSON.stringify(d2.failures));
   });
+  it("#5547 a quote that only mentions the tag in a mid-sentence code span is not an e2e row; a trailing backticked tag still is", () => {
+    const R1 = "An `[type:e2e]`/`[type:manual]` row whose quote names a live benchmark, a paid run, remote infra (legion, computeshare, a sandbox pool) or host-level load is converted to a tracked `post-deploy` defer";
+    assert.equal(autoPostDeployE2e(mk(R1)).converted.length, 0, "the mention is not converted to post-deploy");
+    const contract = mk(R1);
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${R1}` };
+    const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: R1, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
+    assert.ok(!decide(r, lctx).failures.some((f) => f.kind === "e2e_row"), "no e2e_unverified for a tag mention");
+    assert.deepEqual(autoPostDeployE2e(mk("on legion the benchmark finishes `[type:e2e]`")).converted.map((x) => x.id), ["R2"]);
+  });
   it("#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched", () => {
     const contract = mk(Q5531);
     const dec = (j) => ({ body: `<!-- FORGE:DECISION ${JSON.stringify(j)} -->\n## Decision` });

@@ -1388,7 +1388,9 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 
 
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
-const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? ""));
+/** #5547: a tag inside a mid-sentence code span (`` `[type:e2e]` row whose ... ``) is a mention of the tag, not the tag; a trailing backticked tag still counts. */
+const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
 // #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
 const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
