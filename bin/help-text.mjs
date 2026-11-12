@@ -15,7 +15,6 @@ export const EVERYDAY_COMMANDS = [
   ["orchestrate <issue...>", "Work on several issues at once, in dependency order"],
   ["watch", "Live view of what each agent is doing"],
   ["status", "Show ForgeDock state for this directory"],
-  ["intake", "Pause or resume issue-watch intake from GitHub (every host honours it)"],
   ["release", "Promote staging to your main branch as one reviewed release"],
   ["stats", "Cost, time and quality report from your GitHub history"],
   ["doctor", "Check the installation and fix what it can"],
