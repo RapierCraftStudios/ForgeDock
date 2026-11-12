@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { createReleaseLedger, writeRelease, readLedger, updateActive, acquireLease, heartbeat, acceptWrite, redactDeep, ACTIVE, ACTIVE_RETRIES } from "./release-ledger.mjs";
-import { runRelease } from "./release.mjs";
+import { runRelease, withStubs } from "./release.mjs";
 
 const REPO = "o/r", ID = "r20261112-101500-42", DISK = [{ mount: "/", type: "ext4" }];
 const err = (status, m) => Object.assign(new Error(m ?? `HTTP ${status}`), { status });
@@ -63,6 +63,7 @@ describe("release ledger (#5550)", () => {
     assert.match(loser.refused, /lease held by/);
     const win = out.find((r) => r.ok).lease;
     assert.equal(win.epoch, 1);
+    assert.equal(win.expires, g.now + 120_000); // #5553: {holder, epoch, expires}
     assert.ok(win.commentId);
   });
 
@@ -135,7 +136,7 @@ describe("release ledger (#5550)", () => {
     const g = fakeGh(), seen = [];
     const mkIo = () => ({ print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async () => { throw new Error("no gh"); }, api: g.api });
     const step = (name, die) => async () => { if (die) throw new Error("kill -9"); seen.push(name); return {}; };
-    const all = (dieAt) => ({ preflight: step("preflight"), "host-preflight": async () => ({ skipped: true }), "release-pr": step("release-pr", dieAt === "release-pr"), review: step("review"), fixes: step("fixes"), "mark-ready": async () => ({ skipped: true }), rehearsal: async () => ({ skipped: true }), promotion: step("promotion"), "post-merge": step("post-merge") });
+    const all = (dieAt) => ({ preflight: step("preflight"), "host-preflight": async () => ({ skipped: true }), "release-pr": async () => { if (dieAt === "release-pr") throw new Error("kill -9"); seen.push("release-pr"); return { pr: 7 }; }, review: step("review"), fixes: step("fixes"), "mark-ready": async () => ({ skipped: true }), rehearsal: async () => ({ skipped: true }), promotion: step("promotion"), "post-merge": step("post-merge") });
     const run = (io, dieAt, root) => runRelease({ io, repo: REPO, root, mounts: DISK, id: ID, opts: {}, config: { managed: true }, branches: {}, steps: all(dieAt) });
     await assert.rejects(() => run(mkIo(), "release-pr", tmpDir("ledgerA-")), /kill -9/);
     assert.deepEqual(seen, ["preflight"]);
@@ -150,3 +151,62 @@ async function commitHead(g) { // a foreign writer commits on top of the current
   g.commits.set(sha, { tree: g.commits.get(g.refs.get(ACTIVE)).tree, parents: [g.refs.get(ACTIVE)], author: 1, verified: true });
   return sha;
 }
+
+describe("release fencing through the job (#5553)", () => {
+  const HEAD = "a".repeat(40);
+  const mkIo = (g, holder, calls) => ({ holder, print() {}, now: () => 1_700_000_000_000, sleep: async () => {}, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, api: g.api,
+    gh: async (a) => {
+      const j = a.join(" ");
+      if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: calls.some((c) => c[1] === "merge") ? "MERGED" : "OPEN", mergeCommit: calls.some((c) => c[1] === "merge") ? { oid: "m".repeat(40) } : null, headRefOid: HEAD, comments: [{ body: "FORGE:GATE_PASS" }] });
+      if (a[0] === "api") return JSON.stringify([{ name: "forge/deploy-gate", conclusion: "success" }]);
+      if (a[0] === "pr" && a[1] === "merge") { calls.push(a); return ""; }
+      throw new Error(`unexpected gh ${j}`);
+    } });
+  const skip = async () => ({ skipped: true }), ok = async () => ({});
+  const steps = (over = {}) => withStubs({ preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok, ...over });
+  const go = (io, st, root) => runRelease({ io, repo: REPO, root, mounts: DISK, id: ID, opts: { merge: true }, config: { managed: true }, branches: { staging: "staging", default: "main" }, steps: st ?? steps() });
+
+  it("the job takes the lease after release-pr and the merge carries the Forge-Epoch trailer and a write-ahead intent", async () => {
+    const g = fakeGh(), calls = [];
+    const out = await go(mkIo(g, "hostA", calls), null, tmpDir("fa-"));
+    assert.equal(out.status, "done");
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].slice(-2), ["--body", "Forge-Epoch: 1"]);
+    const st = (await readLedger(ctxOf(g), ID)).state;
+    assert.deepEqual(st.intents.map((i) => [i.action, i.epoch, i.done]), [["merge", 1, true]]);
+  });
+
+  it("I7 zombie: a host paused after takeover wakes and is refused; no merge is issued", async () => {
+    const g = fakeGh(), calls = [];
+    let takeover = false;
+    const zombie = steps({ review: async () => { // host A "pauses" here; host B takes the lease over while it sleeps
+      g.now += 600_000; takeover = (await acquireLease(ctxOf(g), { holder: "hostB", release: ID, issue: 7, now: g.now })).ok; return {}; } });
+    const out = await go(mkIo(g, "hostA", calls), zombie, tmpDir("fz-"));
+    assert.ok(takeover);
+    assert.equal(out.status, "refused");
+    assert.match(out.reason, /fenced/);
+    assert.equal(calls.length, 0);
+  });
+
+  it("I5: when _active cannot be read, the merge is not issued", async () => {
+    const g = fakeGh(), calls = [];
+    const io = mkIo(g, "hostA", calls);
+    let armed = false;
+    const base = g.api;
+    io.api = async (m, path, b) => { if (armed && /contents\/active\.json/.test(path)) throw new Error("network partition"); return base(m, path, b); };
+    const out = await go(io, steps({ review: async () => { armed = true; return {}; } }), tmpDir("fp-"));
+    assert.equal(out.status, "refused");
+    assert.match(out.reason, /cannot read _active/);
+    assert.equal(calls.length, 0);
+  });
+
+  it("kill -9 at the step boundary after the merge: the resumed run does not merge again", async () => {
+    const g = fakeGh(), calls = [];
+    const die = steps({ "post-merge": async () => { throw new Error("kill -9"); } });
+    await assert.rejects(() => go(mkIo(g, "hostA", calls), die, tmpDir("fk1-")), /kill -9/);
+    assert.equal(calls.length, 1);
+    const out = await go(mkIo(g, "hostA", calls), null, tmpDir("fk2-")); // same host or another: the PR is observed MERGED
+    assert.equal(out.status, "done");
+    assert.equal(calls.length, 1);
+  });
+});

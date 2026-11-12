@@ -9,6 +9,7 @@
  */
 
 import { cleanupSnapshot } from "./release-snapshot.mjs";
+import { fenced } from "./release-fence.mjs";
 
 const BOUNDS = {
   publishPolls: 6, publishPollMs: 10_000, // wait for a run to appear (bot merges never trigger one)
@@ -43,7 +44,8 @@ async function publishRun(ctx, sha, b) {
   let run = await poll(io, b.publishPolls, b.publishPollMs, look);
   let dispatched = false;
   if (!run) {
-    await io.gh(["workflow", "run", workflow, "--repo", repo, "--ref", ctx.def]);
+    const f = await fenced(ctx.fence, { action: "dispatch", key: `dispatch:${sha}` }, (epoch) => io.gh(["workflow", "run", workflow, "--repo", repo, "--ref", ctx.def, ...(epoch != null ? ["-f", `forge_epoch=${epoch}`] : [])]));
+    if (f.refused) return { err: `dispatch ${f.refused}` };
     dispatched = true;
     run = await poll(io, b.publishPolls, b.publishPollMs, look);
     if (!run) return { err: `no ${workflow} run for ${sha.slice(0, 8)} after a dispatch on ${ctx.def}; check the Actions tab, then resume` };
@@ -103,7 +105,10 @@ async function versionSync(ctx, sha, b) {
     pr = { number: n };
   }
   const warn = (why) => ({ pr: pr.number, merged: false, warning: `version-sync PR #${pr.number} ${why}; merge it by hand so ${staging} reaches ${version}` });
-  try { await io.gh(["pr", "merge", String(pr.number), "--repo", repo, "--merge", "--auto"]); } catch (e) { return warn(`could not enable auto-merge (${String(e.message).split("\n")[0]})`); }
+  try {
+    const f = await fenced(ctx.fence, { action: "merge", key: `sync-merge:${pr.number}` }, () => io.gh(["pr", "merge", String(pr.number), "--repo", repo, "--merge", "--auto"]));
+    if (f.refused) return { err: `version-sync merge ${f.refused}` };
+  } catch (e) { return warn(`could not enable auto-merge (${String(e.message).split("\n")[0]})`); }
   const end = await poll(io, b.autoPolls, b.autoPollMs, async () => {
     const st = json(await io.gh(["pr", "view", String(pr.number), "--repo", repo, "--json", "state"]))?.state;
     return st === "MERGED" || st === "CLOSED" ? st : null;
