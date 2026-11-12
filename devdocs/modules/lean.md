@@ -715,6 +715,10 @@ they end `held` (`drift: <dir> flagged`). The flags are in memory, so a
 resumed batch holds nothing until the next merge. With no config, only the
 summary is written. `/milestone drift <slug>` prints the script's text report.
 
+## Intake pause (#5555)
+
+`bin/lean/intake.mjs`: `intake pause|resume|status` writes `_active.intake` (via `updateActive`, audit line) plus the `forge:intake-paused` tracker label; `githubPause` is read by `runWatch` (`issuewatch.mjs`, next to `releaseInFlight`) when `release.managed` is on: intake flag, active ledger entry, open `release|train|hotfix/*` PR heads. Read errors fail open (`state.pauseError`). `freeze.intake_auto_resume` clears a pause naming an ended release.
+
 ## Other files
 
 `apishape.mjs` (public-API-shape change detector for the light lane, #4449; see its entry below),

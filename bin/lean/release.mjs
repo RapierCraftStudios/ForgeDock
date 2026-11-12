@@ -55,7 +55,7 @@ export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...managedKeys(raw, r), ...optKeys(r), ...snapshotKeys(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...managedKeys(raw, r), ...freezeKeys(raw, r), ...optKeys(r), ...snapshotKeys(r) };
 }
 
 /** `{nightly, budget}` (#5569) only when `release.managed` is on: the forge.yaml `nightly:` and `budget:` blocks. */
@@ -92,6 +92,13 @@ export async function managedGate({ io, repo, config, lane, root }) {
   }
   return {};
 }
+
+/** `{intakeAutoResume, tracker}` only when configured (#5555): forge.yaml `freeze.intake_auto_resume`, `release.tracker`. */
+const freezeKeys = (raw, r) => {
+  let f = {}; try { f = parseForgeYaml(String(raw ?? ""))?.freeze ?? {}; } catch { f = {}; }
+  const on = f.intake_auto_resume !== undefined && !["false", "off", "no", "0", ""].includes(String(f.intake_auto_resume).trim().toLowerCase());
+  return { ...(on ? { intakeAutoResume: true } : {}), ...(r.tracker ? { tracker: r.tracker } : {}) };
+};
 
 /** `{mode, branchPattern, fixMode}` only when configured (#5276): mode `snapshot` cuts release/<id>; anything else is `freeze`. */
 const snapshotKeys = (r) => {
