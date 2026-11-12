@@ -10,7 +10,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runHostPreflight } from "./release-preflight.mjs";
@@ -68,6 +68,41 @@ const sessionFailure = (e) => {
 const failureNote = (failures) => (failures.size ? `; session failures: ${[...failures].map(([d, f]) => `${d} (${f})`).join("; ")}` : "");
 const headMoved = (lines) => /head moved since/.test((lines ?? []).join("\n"));
 
+/** #5516: commands/test-gate.md missing-config guard output, verbatim markers (consumed by review-staging-post.sh test-gate). */
+export const TEST_GATE_SKIP_NO_TESTS = "ADVISORY: verification.integration_tests is not configured in forge.yaml.\nNo tests to run. Emitting SKIP verdict.\n<!-- FORGE:TEST_GATE:SKIP|reason=no-tests-configured -->\n<!-- FORGE:TEST_GATE:RESULT=SKIP -->\n";
+/** #5516: the gate session's prompt names the exact Skill to invoke (prefixed on a plugin install). */
+export const testGatePrompt = (skill, bundle, def) =>
+  `Invoke the Skill "${skill}" with args: --prs "${(bundle ?? []).join(" ")}" --base ${def}\n\nPrint the complete gate output, ending with its FORGE:TEST_GATE:RESULT= marker. If the Skill cannot be invoked, say so and print no marker.`;
+/** #5516: count of `verification.integration_tests` entries in forge.yaml text; null when it cannot be read (the gate session then runs). */
+export function integrationTestCount(raw) {
+  const lines = String(raw ?? "").split("\n");
+  const v = lines.findIndex((l) => /^verification:\s*(#.*)?$/.test(l));
+  if (v < 0) return 0;
+  let n = null;
+  for (let i = v + 1; i < lines.length && !/^\S/.test(lines[i]); i++) {
+    const m = /^(\s+)integration_tests:\s*(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const inline = m[2].replace(/#.*$/, "").trim();
+    if (inline === "[]" || inline === "null" || inline === "~") return 0;
+    if (inline) return null; // a flow sequence or anchor: not parsed here
+    n = 0;
+    for (let j = i + 1; j < lines.length; j++) {
+      const l = lines[j];
+      if (!l.trim() || /^\s*#/.test(l)) continue;
+      const ind = /^(\s*)/.exec(l)[1].length;
+      if (ind <= m[1].length && !/^\s*-/.test(l)) break;
+      if (ind < m[1].length) break;
+      if (/^\s*-\s/.test(l) && ind <= m[1].length + 2) n++;
+    }
+    return n;
+  }
+  return n ?? 0;
+}
+/** #5516: `forgedock:<name>` when ForgeDock is installed as a Claude Code plugin under `configDir`, else the bare name. */
+export function resolveSkillName(name, { configDir, read = (p) => readFileSync(p, "utf8") } = {}) {
+  try { return /"forgedock(@[^"]*)?"\s*:/.test(read(join(configDir, "plugins", "installed_plugins.json"))) ? `forgedock:${name}` : name; } catch { return name; }
+}
+
 /** One review round at the current head: dispatch, test gate, head check, finalize. @returns {{moved: string}|{fail}|{ok}} */
 async function reviewRound({ seam, pr, def, delta }) {
   const pre = await seam.pre({ pr, delta });
@@ -85,7 +120,11 @@ async function reviewRound({ seam, pr, def, delta }) {
   const failures = new Map();
   const attempt = (domain, note) => send(domain, note).catch((e) => { failures.set(domain, sessionFailure(e)); return null; });
   await Promise.all(agents.map((a) => attempt(a.domain)));
-  const gate = await seam.runAgent({ role: "release-test-gate", issue: pr, prompt: `/test-gate --prs "${(m.bundle ?? []).join(" ")}" --base ${def}\n\nPrint the complete gate output, ending with its FORGE:TEST_GATE:RESULT= marker.` });
+  // #5516: the missing-config guard of commands/test-gate.md is deterministic, so no session decides it; otherwise the gate
+  // session gets a full tool set (Skill, Task, Bash) and the resolved skill name, never a bare `/test-gate`.
+  const plan = await seam.testGatePlan();
+  const gate = plan.clusters === 0 ? { text: TEST_GATE_SKIP_NO_TESTS }
+    : await seam.runAgent({ role: "release-test-gate", issue: pr, fullSession: true, prompt: testGatePrompt(plan.skill, m.bundle, def) });
   const gateFile = seam.saveTestGate(pr, gate?.text ?? "");
 
   // The head moved while the panel ran: finalize would refuse, and must never run at the moved head. Delta from what was reviewed.
@@ -211,10 +250,16 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), ma
     readFile: (p) => readFileSync(p, "utf8"),
     markLaunched: (file, domains, head) => { appendFileSync(file, domains.map((d) => `${d}\n`).join("")); writeFileSync(`${file}.head`, `${head}\n`); },
     saveTestGate: (pr, text) => { mkdirSync(sd, { recursive: true }); const f = join(sd, `${pr}_test_gate_output.txt`); writeFileSync(f, text); return f; },
-    runAgent: async ({ role, issue, prompt }) => {
+    runAgent: async ({ role, issue, prompt, fullSession = false }) => {
       runner ??= makeRunner ? makeRunner() : (await import("./effects.mjs")).makeLeanRunner();
-      // not readOnly: each reviewer posts its own PR comment
-      return runner({ role, issue, cwd, env: pinnedEnv(), prompt, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+      // not readOnly: each reviewer posts its own PR comment; the test gate (#5516) needs Skill/Task, so a full session
+      return runner({ role, issue, cwd, env: pinnedEnv(), prompt, fullSession, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+    },
+    testGatePlan: async () => {
+      let raw = null;
+      try { raw = readFileSync(env.FORGE_CONFIG || join(cwd, "forge.yaml"), "utf8"); } catch { raw = null; }
+      const clusters = raw == null ? null : integrationTestCount(raw);
+      return { clusters, skill: resolveSkillName("test-gate", { configDir: env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude") }) };
     },
     // closed by a merged fix: state CLOSED with the workflow:merged label (a read failure is "not merged", so the lane runs)
     issueMerged: async (issue) => {
