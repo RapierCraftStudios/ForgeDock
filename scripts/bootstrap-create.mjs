@@ -33,6 +33,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { validatePlan, formatErrors, resolvePlaceholders, isNeedsHuman, isSkeleton } from "./bootstrap-validate.mjs";
 import { milestoneSlug } from "../bin/lean/lane.mjs";
+import { checkInterfaces, seedDecisions, INTERFACES_SECTION } from "../bin/lean/interfaces.mjs";
 
 const SELF_DIR = fileURLToPath(new URL(".", import.meta.url));
 const DEFAULT_SPIKE_DOC = "docs/engineering/technical-spike.md";
@@ -45,6 +46,7 @@ export const SPIKE_SECTIONS = [
   "Stack", "Repo layout", "Runtime topology", "Data model", "Security and privacy",
   "Design system and quality gates", "Route/API map", "Credentials", "Milestone plan",
 ];
+export { INTERFACES_SECTION }; // #5338: required (like SPIKE_SECTIONS) once the spike's Milestone plan lists two or more slices
 
 /** `## ` sections of a markdown text, fenced code ignored: [{ heading, lines }]. */
 function h2Sections(text) {
@@ -72,6 +74,8 @@ export function checkSpikeDoc(text) {
     if (!s) missing.push(name);
     else if (!s.lines.some((l) => /\*\*Rationale\*\*:/.test(l))) noRationale.push(name);
   }
+  const ifc = checkInterfaces(text, { kind: "spike" }); // #5338
+  if (!ifc.ok) (ifc.hasSection ? noRationale : missing).push(INTERFACES_SECTION);
   return { ok: missing.length === 0 && noRationale.length === 0, missing, noRationale };
 }
 
@@ -205,7 +209,7 @@ const parseIssueNumber = (out) => {
  *   io.sh(cmd, args, input?) -> stdout string (bash helpers: transition-label.sh, trusted-comments.sh)
  * @returns {object} result for handoffText (spike, issues, milestones, notes)
  */
-export function createBacklog(plan, { io, repo, config = {}, base }) {
+export function createBacklog(plan, { io, repo, config = {}, base, spikeText = null }) {
   const spikeKey = plan.spike ?? "SPIKE";
   const spikePlan = plan.issues.find((it) => it.key === spikeKey);
   if (!spikePlan) throw new Error(`plan has no spike issue with key ${spikeKey}`);
@@ -308,6 +312,8 @@ export function createBacklog(plan, { io, repo, config = {}, base }) {
   const attribution = String(config.branding?.show_attribution ?? "true") !== "false";
   if (!trusted("^<!-- FORGE:BOOTSTRAP_PLAN -->")) gh(["issue", "comment", String(spikeNo), "-R", repo, "--body-file", "-"], bootstrapPlanComment(plan));
   if (!trusted("^<!-- FORGE:DECOMPOSED -->")) gh(["issue", "comment", String(spikeNo), "-R", repo, "--body-file", "-"], decomposedComment(plan, numbers, { attribution }));
+  // #5338: the spike's Interfaces rows and anchored architecture choices enter the decision register (once per id).
+  seedDecisions({ text: spikeText, issue: spikeNo, repo, comments: JSON.parse(comments || "[]").map((c) => c?.body), post: (body) => gh(["issue", "comment", String(spikeNo), "-R", repo, "--body-file", "-"], body) });
   if (!records.get(spikeKey).labels.includes("workflow:decomposed")) {
     io.sh("bash", [`${SELF_DIR}transition-label.sh`, String(spikeNo), "-R", repo, "decomposed"]);
   }
@@ -380,7 +386,7 @@ export function main(argv, { io = defaultIo, out = process.stdout, err = process
   repo ||= config.project?.owner && config.project?.repo ? `${config.project.owner}/${config.project.repo}` : "";
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) { err.write("bootstrap-create: no target repository: pass --repo OWNER/NAME or a forge.yaml with project.owner/project.repo\n"); return 2; }
   let result;
-  try { result = createBacklog(plan, { io, repo, config, base }); } catch (e) {
+  try { result = createBacklog(plan, { io, repo, config, base, spikeText }); } catch (e) {
     err.write(`bootstrap-create: GitHub error: ${String(e?.stderr || e?.message || e).trim().slice(0, 500)}\nRe-run the same command to resume; existing issues are reused.\n`);
     return 3;
   }

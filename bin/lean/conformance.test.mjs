@@ -1928,3 +1928,26 @@ describe("#5468 production-only e2e/manual criteria become post-deploy checks", 
     assert.equal(o.a.run, "x"); assert.equal(o.b.run, "z");
   });
 });
+
+import { interfaceDecisionFailures } from "./conformance.mjs";
+describe("interface decisions at precheck (#5338)", () => {
+  const row = { id: "H1", what: "Interface api -> worker", source: "decision", decision: "i7-2", anchors: ["worker/refund.py", "api/"] };
+  const c = { requirements: [], preserve: [row] };
+  it("flags a changed anchored file without an intact preserve report", () => {
+    const f = interfaceDecisionFailures(c, {}, ["worker/refund.py"]);
+    assert.deepEqual(f.map((x) => x.kind), ["decision_unsuperseded"]);
+    assert.match(f[0].detail, /supersedes:"i7-2"/);
+    assert.equal(interfaceDecisionFailures(c, { preserve: [{ id: "H1", status: "violated" }] }, ["api/x.py"]).length, 1);
+  });
+  it("passes when acknowledged, superseded (row removed), or no anchored file changed", () => {
+    assert.deepEqual(interfaceDecisionFailures(c, { preserve: [{ id: "H1", status: "intact" }] }, ["api/x.py"]), []);
+    assert.deepEqual(interfaceDecisionFailures({ preserve: [] }, {}, ["api/x.py"]), []);
+    assert.deepEqual(interfaceDecisionFailures(c, {}, ["web/a.ts"]), []);
+    assert.deepEqual(interfaceDecisionFailures({ preserve: [{ ...row, anchors: ["db/"] }] }, {}, ["api/x.py"]), []);
+  });
+  it("precheck surfaces it and stays ok without interface rows", () => {
+    const res = { requirements: [], validation: [] };
+    assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [row] }, result: res, changedFiles: ["api/x.py"], ignore: ["api/x.py"] }).failures.some((x) => x.kind === "decision_unsuperseded"), true);
+    assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [] }, result: res, changedFiles: [] }).failures.some((x) => x.kind === "decision_unsuperseded"), false);
+  });
+});

@@ -14,6 +14,7 @@ import {
   checkSpikeDoc, injectGuardrails, subIssueOrder, planPreview, bootstrapPlanComment, decomposedComment,
   handoffText, createBacklog, preflight, priorityLabel, main, SPIKE_SECTIONS, DEFAULT_ISSUE_COST_USD,
 } from "../../scripts/bootstrap-create.mjs";
+import { parseDecisionComment, readDecisionIndex } from "../lean/decisions.mjs";
 import { runBootstrap } from "../bootstrap.mjs";
 import { validatePlan, isNeedsHuman } from "../../scripts/bootstrap-validate.mjs";
 
@@ -172,6 +173,41 @@ describe("bootstrap-create preflight: nothing is written for an invalid plan or 
       assert.equal(s.calls.length, 0);
       assert.equal(main([], { io, ...sink }), 2);
     } finally { process.chdir(cwd); }
+  });
+});
+
+describe("bootstrap-create: Interfaces (#5338)", () => {
+  const withoutInterfaces = () => spikeText().replace(/## Interfaces[\s\S]*?(?=## Credentials)/, "");
+  const table = (rows) => spikeText().replace(/\| \{web -> api\}.*\n/, rows);
+  const ROW = "| web -> api | POST /v1/refund {id, amount} -> {ok} | API key only | API | `src/api/`, `src/web/refund.ts` |\n";
+
+  test("two or more slices and no Interfaces section fails validation; a single slice does not", () => {
+    assert.deepEqual(checkSpikeDoc(withoutInterfaces()), { ok: false, missing: ["Interfaces"], noRationale: [] });
+    assert.deepEqual(preflight(samplePlan(), withoutInterfaces()), ["(spike): [missing-section] Interfaces"]);
+    const one = withoutInterfaces().replace(/2\. \{next milestone\}\n/, "");
+    assert.deepEqual(checkSpikeDoc(one), { ok: true, missing: [], noRationale: [] });
+    const noWhy = spikeText().replace(/(## Interfaces[\s\S]*?)\*\*Rationale\*\*:[^\n]*/, "$1");
+    assert.deepEqual(checkSpikeDoc(noWhy).noRationale, ["Interfaces"]);
+  });
+
+  test("createBacklog registers each interface row once as an anchored FORGE:DECISION on the spike issue", () => {
+    const dir = tmpDir("iface-reg");
+    process.env.FORGEDOCK_DECISIONS_DIR = dir;
+    try {
+      const text = table(ROW);
+      const { s, io } = fakeGitHub();
+      const r = createBacklog(samplePlan(), { io, repo: REPO, config: CONFIG, spikeText: text });
+      const decisions = s.comments.get(r.spike.number).map((c) => c.body).filter((b) => b.startsWith("<!-- FORGE:DECISION {"));
+      assert.equal(decisions.length, 1);
+      const rec = parseDecisionComment(decisions[0]);
+      assert.deepEqual(rec.anchors, ["src/api/", "src/web/refund.ts"]);
+      assert.match(rec.choice, /^Interface web -> api: POST \/v1\/refund .*auth API key only; owner API/);
+      assert.equal(rec.issue, r.spike.number);
+      assert.equal(readDecisionIndex(REPO).length, 1);
+      const before = s.calls.length;
+      createBacklog(samplePlan(), { io, repo: REPO, config: CONFIG, spikeText: text });
+      assert.deepEqual(mutating(s.calls.slice(before)), []);
+    } finally { delete process.env.FORGEDOCK_DECISIONS_DIR; }
   });
 });
 
