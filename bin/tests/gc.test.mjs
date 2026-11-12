@@ -183,6 +183,89 @@ describe("forgedock gc simulated lane crash (#4180)", () => {
     assert.ok(w.calls.git.some((g) => g.startsWith("worktree prune")));
     assert.equal(existsSync(path), false, "ledger cleared once every entry is reclaimed");
   });
+  describe("pool sandbox (#5422)", () => {
+    const poolLedger = (w, over = {}) => writeLedger(w, { resources: [{ kind: "sandbox", value: "fdrsbx-1", provider: "pool", registered: NOW - 2 * H }], ...over });
+    // An injected pool transport: destroy and inventory are the router calls gc makes.
+    const transport = ({ destroy = () => true, inventory = () => [{ id: "fdrsbx-1", issue: 77 }] } = {}) => {
+      const calls = { destroy: [], inventory: 0 };
+      return { calls, destroy: async (id) => { calls.destroy.push(id); return destroy(id); }, inventory: async () => { calls.inventory++; return inventory(); } };
+    };
+    const planned = async (w) => find(await planGc({ probes: w.probes, now: NOW }), "sandbox", "fdrsbx-1");
+    it("a stale pool sandbox the router still lists is orphaned: reclaimed (not 'unknown sandbox provider'), destroyed with --apply, ledger released", async () => {
+      const w = world(); const t = transport(); w.probes.sandboxTransport = t;
+      const path = poolLedger(w);
+      const it1 = await planned(w);
+      assert.equal(it1.action, "reclaim", it1.reason); assert.match(it1.reason, /orphaned at the pool router/); assert.doesNotMatch(it1.reason, /unknown sandbox provider/);
+      const r = await run(w, ["--apply"]);
+      assert.equal(r.code, 0, r.out); assert.deepEqual(t.calls.destroy, ["fdrsbx-1"]); assert.equal(existsSync(path), false);
+    });
+    it("a sandbox the router no longer lists is already gone: no destroy call, ledger entry released", async () => {
+      const w = world(); const t = transport({ inventory: () => [] }); w.probes.sandboxTransport = t;
+      const path = poolLedger(w);
+      const it1 = await planned(w);
+      assert.equal(it1.action, "reclaim"); assert.equal(it1.gone, true); assert.match(it1.reason, /already gone at the pool router/);
+      assert.equal((await run(w, ["--apply"])).code, 0); assert.deepEqual(t.calls.destroy, []); assert.equal(existsSync(path), false);
+    });
+    it("a destroy that fails is never a false reclaim: the ledger entry stays and gc exits non-zero", async () => {
+      const w = world(); const t = transport({ destroy: () => { throw new Error("router unreachable"); } }); w.probes.sandboxTransport = t;
+      const path = poolLedger(w);
+      const r = await run(w, ["--apply"]);
+      assert.deepEqual(t.calls.destroy, ["fdrsbx-1"]); assert.ok(existsSync(path), r.out); assert.notEqual(r.code, 0);
+    });
+    it("fail closed: a live list that cannot be fetched (throw, null, malformed) leaves the entry as report, with no destroy", async () => {
+      for (const inventory of [() => { throw new Error("HTTP 503"); }, () => null, () => ({ not: "a list" })]) {
+        const w = world(); const t = transport({ inventory }); w.probes.sandboxTransport = t;
+        const path = poolLedger(w);
+        const it1 = await planned(w);
+        assert.equal(it1.action, "report"); assert.match(it1.reason, /live list unavailable/);
+        const plan = await planGc({ probes: w.probes, now: NOW }); assert.ok(plan.notes.some((n) => /pool live sandbox list unavailable/.test(n)));
+        await run(w, ["--apply"]); assert.deepEqual(t.calls.destroy, []); assert.ok(existsSync(path));
+      }
+    });
+    it("fail closed: no reachable pool router (no endpoint, no router config) keeps the entry", async () => {
+      const w = world(); w.probes.env = { COMPUTESHARE_CONFIG: join(w.base, "none.json") };
+      const path = poolLedger(w);
+      assert.equal((await planned(w)).action, "report");
+      await run(w, ["--apply"]); assert.ok(existsSync(path));
+    });
+    it("live-lane protection: a live ledger's pool sandbox is report-only and the router is never asked or called", async () => {
+      const w = world(); const t = transport({ inventory: () => [] }); w.probes.sandboxTransport = t; w.alive.add(5000);
+      const path = poolLedger(w, { pid: 5000 });
+      const r = await run(w, ["--apply"]);
+      assert.deepEqual(t.calls.destroy, []); assert.equal(t.calls.inventory, 0); assert.ok(existsSync(path)); assert.match(r.out, /live lane/);
+    });
+    it("live-lane protection (as #5496): a stale entry whose issue has a live ledger is kept even when the router lists it", async () => {
+      const w = world(); const t = transport(); w.probes.sandboxTransport = t; w.alive.add(5000);
+      const path = poolLedger(w);
+      writeLedger(w, { batch: "b2", lane: "lean-77-resumed", pid: 5000 });
+      const it1 = await planned(w);
+      assert.equal(it1.action, "report"); assert.match(it1.reason, /issue 77 has a live ledger/);
+      await run(w, ["--apply"]); assert.deepEqual(t.calls.destroy, []); assert.ok(existsSync(path));
+    });
+    it("the real router transport: inventory is GET /agents, destroy is DELETE with the router token bearer; 404 is reclaimed, 500 keeps the entry, a bad /agents keeps it", async () => {
+      const cases = [["ok-404", 404, { sandboxes: { "fdrsbx-1": { issue: 77 } } }, false], ["ok-500", 500, { sandboxes: { "fdrsbx-1": { issue: 77 } } }, true], ["gone", 200, { sandboxes: {} }, false], ["bad", 200, { agents: [] }, true]];
+      for (const [name, delStatus, agents, kept] of cases) {
+        const w = world(); const dir = join(w.base, `router-${name}`); mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "router.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 7777 } }));
+        writeFileSync(join(dir, "forgedock.token"), "tok-xyz\n");
+        w.probes.env = { COMPUTESHARE_CONFIG: join(dir, "router.json") };
+        const seen = []; const realFetch = globalThis.fetch;
+        globalThis.fetch = async (url, init) => {
+          seen.push([url, init.method, init.headers.authorization]);
+          const status = init.method === "DELETE" ? delStatus : 200, body = init.method === "DELETE" ? "" : JSON.stringify(agents);
+          return { status, ok: status < 300, text: async () => body, headers: { get: () => null } };
+        };
+        try {
+          const path = poolLedger(w);
+          await run(w, ["--apply"]);
+          assert.deepEqual(seen[0], ["http://127.0.0.1:7777/agents", "GET", "Bearer tok-xyz"], name);
+          if (name === "ok-404" || name === "ok-500") assert.deepEqual(seen[1], ["http://127.0.0.1:7777/sandboxes/fdrsbx-1", "DELETE", "Bearer tok-xyz"], name);
+          else assert.equal(seen.length, 1, name);
+          assert.equal(existsSync(path), kept, name);
+        } finally { globalThis.fetch = realFetch; }
+      }
+    });
+  });
   it("#4432: a dead-owner repo-keyed ledger (owner__repo__lane.json) is released and removed by --apply", async () => {
     const w = world();
     const runTmp = join(w.tmpRoot, "runs", "77-2"); mkdirSync(runTmp, { recursive: true });
