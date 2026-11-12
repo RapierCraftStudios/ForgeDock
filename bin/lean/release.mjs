@@ -25,7 +25,9 @@ import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFr
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
-import { holdCheck, VERBS as CONTROL_VERBS } from "./release-control.mjs";
+import { holdCheck, exemptionsSection, VERBS as CONTROL_VERBS } from "./release-control.mjs";
+import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
+import { readActive } from "./release-ledger.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -170,7 +172,7 @@ async function snapshotPrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", branch, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch };
   const list = state.releaseBundle ?? [];
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list)])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx)])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   state.steps["release-pr"] = { done: false, result: { pr: n } }; // writeRecord reads the PR number from here
@@ -185,11 +187,17 @@ async function releasePrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", staging, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true };
   const list = await bundleList({ io, repo, head: staging, base: def });
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
   return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length };
+}
+
+/** The live operator exemptions as a PR-body section (#5568, I20); "" when unmanaged, none, or `_active` is unreadable. */
+async function exemptionBody({ io, repo, config }) {
+  if (!config.managed || !io.api) return "";
+  try { return exemptionsSection((await readActive({ io, repo, credential: "driver" })).exemptions, io.now?.()); } catch { return ""; }
 }
 
 /** GATE_PASS marker on the PR and the `forge/deploy-gate` conclusion at `head`. */
@@ -221,6 +229,36 @@ async function retriggerGate({ io, repo, head, fence }) {
   } catch { return null; /* a run still in progress cannot be rerun, and it re-reads the markers anyway: just wait */ }
 }
 
+/**
+ * #5568 (5.5): `rerun --failed` once per job for failed runs on `head` whose failures all carry a known infra signature, inside
+ * `ci.rerun_budget_min`; every decision (rerun or not, and why) is recorded in `flakes.json`. Best effort: never throws.
+ * @returns {{reran: string[], skipped: object[]}}
+ */
+export async function rerunInfraFlakes({ io, repo, head, fence, policy }) {
+  const out = { reran: [], skipped: [] };
+  try {
+    const cfg = parseFlakeConfig(policy);
+    if (!fence?.lctx || !(cfg.rerunBudgetMin > 0)) return out;
+    const prior = await readFlakes(fence.lctx), done = prior.filter((f) => f.rerun).map((f) => `${f.sha}:${f.check}`);
+    const runs = json(await io.gh(["run", "list", "--repo", repo, "--commit", head, "--status", "failure", "--json", "databaseId,name", "--limit", "20"])) ?? [];
+    const at = new Date(io.now?.() ?? Date.now()).toISOString(), entries = [];
+    let spentMin = 0;
+    for (const r of runs) {
+      const log = String(await io.gh(["run", "view", String(r.databaseId), "--repo", repo, "--log-failed"]).catch(() => "")).slice(-20_000);
+      const c = classifyFailure(log);
+      const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class }], done, spentMin, budgetMin: cfg.rerunBudgetMin });
+      if (d.rerun) {
+        const f = await fenced(fence, { action: "rerun", key: `rerun-failed:${r.databaseId}` }, () => io.gh(["run", "rerun", String(r.databaseId), "--repo", repo, "--failed"]));
+        if (f.refused) { out.skipped.push({ name: r.name, why: f.refused }); continue; }
+        out.reran.push(r.name);
+      } else out.skipped.push({ name: r.name, why: d.why });
+      entries.push(flakeEntry({ check: r.name, signature: c.signature, kind: c.class === "infra" ? "infra" : "decision", sha: head, runIds: [r.databaseId], at, rerun: d.rerun }));
+    }
+    await recordFlakes(fence.lctx, entries.filter((e) => e.kind === "infra"));
+  } catch { /* best effort */ }
+  return out;
+}
+
 /** Re-trigger the gate, then poll (bounded) until `forge/deploy-gate` is success or failure; @returns the last gateState. */
 async function awaitGate({ io, repo, pr, head, gate, fence }) {
   const refused = await retriggerGate({ io, repo, head, fence });
@@ -248,6 +286,11 @@ async function promotionStep(ctx) {
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
   if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate, fence: ctx.fence });
   if (gate.fenced) return { refused: gate.fenced, head };
+  if (gate.deployGate === "failure" && ctx.config.managed && io.git) { // #5568: policy loaded lazily (release-config imports this module)
+    const { readPolicy } = await import("./release-config.mjs");
+    const policy = readPolicy({ io, defaultBranch: ctx.def }).policy;
+    await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+  }
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }
   if (gate.deployGate !== "success") return { stopped: true, why: `forge/deploy-gate is ${gate.deployGate ?? "absent"}, not success${gate.deployGate === "failure" ? "" : ` after ${GATE_POLLS} polls`}`, head, gate };
