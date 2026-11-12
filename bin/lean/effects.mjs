@@ -510,8 +510,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
       try {
-        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
-        return m ? { base: m[1], head: m[2] } : null;
+        const m = /BASE=(\w+) HEAD=(\w+)(?: PRISTINE=(\w+))?/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
+        return m ? { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}) } : null; // #5544: pristine only when the base's own test version failed
       } catch { return null; }
     },
     /**

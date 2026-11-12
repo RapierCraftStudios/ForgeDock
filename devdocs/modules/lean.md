@@ -2677,7 +2677,7 @@ Tests: `review-roster.test.sh` "forge#5077" block (not-found.tsx in small/medium
 
 ## Entry 2026-11-04 — Already-fixed close, source-deliverable rule, host block routing (#5080)
 
-- `reproFailures`: `BASE=RAN HEAD=RAN` is `repro_base_green`. With no source change in the diff, `alreadyFixedOnBase` closes the issue as completed, citing the base commit (lean.mjs, finish `already-fixed`).
+- `reproFailures`: `BASE=RAN HEAD=RAN` is `repro_base_green`. With no source change in the diff, `alreadyFixedOnBase` closes the issue as completed, citing the base commit (lean.mjs, finish `already-fixed`). #5544: `acceptance-red-green.sh` reruns a `BASE=RAN` base with the base's own version of each modified test file and appends `PRISTINE=FAILED` when that fails; `reproFailures` then drops `repro_base_green` (the test was the bug), so a test-only fix goes to review and merge instead of closing already-fixed.
 - `precheck` adds `source_deliverable_untouched`: a diff of only test files cannot close an issue whose contract names a source deliverable (`conformance.unimplemented`).
 - A credentials block naming only read-only production access (`READONLY_PROD_RE`, no `EXTERNAL_NEED_RE` match) is host work: on a remote lane `env.capability_remote` (recovered on the host); on a local lane it ends `host-task` (label `host-task`, comment `FORGE:HOST_TASK`, never `needs-human`); `splitEscalation` kind `host`; `prod_monitor` matches `prod_monitor` and read-only production telemetry, and `hostCapabilityBlock` accepts it when no capabilities are declared.
 - `formatProbeSummary` prints the cause of an `error` row; `scripts/issue-dedup.sh` needs at least 2 shared tokens.
