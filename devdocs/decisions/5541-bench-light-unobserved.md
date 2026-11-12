@@ -1,6 +1,6 @@
 # 5541: bench flags lanes with no `light` field
 
-- **Cause.** `light` was null on the valid bench lanes because the sandbox ran at the default `lean.light.mode: shadow` (or no result file was read), so the fast path never engaged. Not an eligibility verdict.
+- **Cause (events).** The engine always writes a boolean `light` into the result (`bin/lean/lean.mjs:563`, `let light = false` at :424), so a `null` in the bench row means the result file was not read (no `--result-file`) or an older engine wrote none. It is not an eligibility verdict. When the file is read, `light:false` on a valid lane has these event traces: `lean.light.mode: off` emits no eligibility event (`lean.mjs:2067` gates on mode); the default `shadow` emits `LIGHT_ELIGIBILITY` (`lean.mjs:2065`, text source) or, with `lean.light.source: investigation`, `FASTFORWARD_ELIGIBILITY` with `shadow: true` (`lean.mjs:2156`, `bin/lean/fastforward.mjs:92`) and runs the normal full lane; only `mode: on` fast-forwards. A bench lane with no FASTFORWARD_ELIGIBILITY event therefore ran with mode off, or with source `text`; one with `shadow: true` ran in shadow. Read them with `stats --depth` (`bin/stats/depth.mjs:62`).
 - **Change.** `bench-lightlane.mjs` marks `light_unobserved`; `bench-adversarial.mjs` counts it per arm in the scorecard. Engine and the duplicate rule are unchanged.
 - **Corpus.** `adv-int-take-until` aliased the existing `takewhile_inclusive`, so closing it was correct; replaced by `adv-int-argmax`.
 - **Deferred.** The ≤ 1.3× cost re-run on legion with `lean.light.mode: on`.
