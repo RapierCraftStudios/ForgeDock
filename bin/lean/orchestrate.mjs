@@ -1017,7 +1017,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { gone = (await dispatchCheck(n)) ?? null; } catch { gone = null; }
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
-      await null; // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
+      // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
       if (!cancelled && !halted) { refreshHeld(); if (opHeld.has(n)) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
