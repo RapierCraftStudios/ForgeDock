@@ -76,5 +76,11 @@
     "pass": "exit 0",
     "timeout": 560,
     "for": "7d"
+  },
+  "adversarial-bench-light-cost-1.3x": {
+    "run": "node -e 'const fs=require(\"fs\");const d=\"docs/eval/published\";const f=fs.readdirSync(d).filter(x=>/^adversarial-.*\\.md$/.test(x)).sort().pop();const t=fs.readFileSync(d+\"/\"+f,\"utf8\");const row=n=>t.split(\"\\n\").find(l=>l.startsWith(\"| \"+n));const cells=l=>l.split(\"|\").map(s=>s.trim());const co=cells(row(\"Cost (USD, sum)\")),or=cells(row(\"Oracle pass rate\"));process.exit(parseFloat(co[2])<=1.3*parseFloat(co[3])&&parseFloat(or[2])>=parseFloat(or[3])?0:1)'",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "30d"
   }
 }

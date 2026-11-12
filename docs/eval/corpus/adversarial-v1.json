@@ -202,11 +202,11 @@
       }
     },
     {
-      "id": "adv-int-take-until",
+      "id": "adv-int-is-permutation",
       "kind": "integration",
       "expected": "implement",
-      "title": "Add take_until(predicate, iterable): like takewhile but includes the first failing item",
-      "body": "Please add `take_until(predicate, iterable)` to more_itertools.more. It yields items until predicate is true, and includes that first matching item. It must be available as `more_itertools.take_until`, with the same public surface as the other helpers.",
+      "title": "Add is_permutation(a, b): True when two iterables hold the same items with the same counts, in any order",
+      "body": "Please add `is_permutation(a, b)` to more_itertools.more. It returns True when the two iterables hold the same items, each the same number of times, in any order (`is_permutation([1, 2, 2], [2, 1, 2])` is True, `is_permutation([1, 2], [1, 2, 2])` is False). Items are compared with `==`, so unhashable items such as lists must work. It must be available as `more_itertools.is_permutation`, with the same public surface as the other helpers.",
       "must_touch": [
         "more_itertools/more.py",
         "more_itertools/more.pyi",

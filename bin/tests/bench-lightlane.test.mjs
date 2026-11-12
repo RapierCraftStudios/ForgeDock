@@ -70,7 +70,7 @@ test("runArm light: runs run-issue with the result file, reads true cost/wall/mo
     assert.ok(suiteAt >= 0 && oracleAt > suiteAt, "own suite runs before the oracle overlay");
     assert.equal(shapes[0].base, c.base);
     assert.deepEqual(row, { arm: "light", id: issue.id, cost_usd: 0.41, wall_ms: 200000, model_ms: 180000, harness_wall_ms: 1000, claimed_fix: true, oracle_pass: true, suite_pass: true,
-      api_shape: { status: "none", changes: [] }, light: true, light_eligibility: "eligible", light_upgrade: null, terminal: "merged" });
+      api_shape: { status: "none", changes: [] }, light: true, light_unobserved: false, light_eligibility: "eligible", light_upgrade: null, terminal: "merged" });
   });
 });
 
