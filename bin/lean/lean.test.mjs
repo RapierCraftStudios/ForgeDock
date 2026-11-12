@@ -8654,3 +8654,23 @@ describe("classification record in the plan prompt (#5557)", () => {
     assert.match(p, /Never write units, migrations or risk/);
   });
 });
+
+describe("FORGE:CLASSIFY wiring (#5557)", () => {
+  const POLICY = "schema: 1\nbranches: {default: main}\nunits:\n  foo: {paths: [\"src/**\"]}\n";
+  const CLS = JSON.stringify({ type: "bug", severity: "P2", exists_in: "unknown", flag: "none", confidence: 0.8, units: ["LLM-LIED"] });
+  const withPolicy = (w) => { const g = w.io.git; w.io.git = async (a, o) => (a[0] === "show" && /\.forge\/release\.yaml$/.test(a.at(-1)) ? POLICY : g(a, o)); };
+  it("posts FORGE:CLASSIFY with code-derived units and namespaced labels when a release policy exists", async () => {
+    const w = world(); withPolicy(w); const rd = w.io.fs.read; w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? CLS : rd(p));
+    await run(w);
+    const c = w.comments.find((x) => x.includes("FORGE:CLASSIFY"));
+    assert.ok(c, "FORGE:CLASSIFY posted");
+    assert.match(c, /"units": \[\s*"foo"\s*\]/); assert.doesNotMatch(c, /LLM-LIED/);
+    assert.ok(w.edits.some((e) => e.includes("unit:foo")) && w.edits.some((e) => e.includes("type:bug")), "namespaced labels added");
+  });
+  it("is a no-op without .forge/release.yaml", async () => {
+    const w = world();
+    await run(w);
+    assert.ok(!w.comments.some((x) => x.includes("FORGE:CLASSIFY")));
+    assert.ok(!w.edits.some((e) => e.some((x) => /^(type|unit|where|mig|risk):/.test(String(x)))));
+  });
+});

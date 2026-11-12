@@ -360,7 +360,7 @@ export async function runCore(o) {
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
   };
   /** #5557: after the plan call, derive the classification record from Affected Files + the base-ref unit map, post FORGE:CLASSIFY and namespaced labels. Fail-open; a no-op without `.forge/release.yaml`. */
-  async function classifyStage() {
+  async function classifyStage(correct) {
     try {
       const { parsePolicy, validatePolicy, POLICY_PATH } = await import("./release-config.mjs");
       const C = await import("./release-classify.mjs");
@@ -374,7 +374,11 @@ export async function runCore(o) {
       for (const f of files.filter((x) => /migrations\//.test(x))) texts[f] = String(await io.fs.read(`${wt}/${f}`).catch(() => ""));
       const facts = C.deriveFacts(policy, files, { texts });
       let llm = null; try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); } catch { /* text-only below */ }
-      const problems = llm ? C.validateClassification(llm) : ["classification.json missing or unreadable"];
+      let problems = llm ? C.validateClassification(llm) : ["classification.json missing or unreadable"];
+      if (problems.length && correct) { // one correction, as for the contract; a second failure falls back to text-only
+        await correct(problems);
+        try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); problems = C.validateClassification(llm); } catch { llm = null; problems = ["classification.json missing or unreadable"]; }
+      }
       if (problems.length) { ev({ event: "CLASSIFY_INVALID", problems }); llm = { type: "chore", severity: "P3", exists_in: "unknown", confidence: 0.3 }; }
       const live = policy.branches?.release;
       let liveSha = null; if (live) liveSha = String(await git(["rev-parse", `origin/${live}`]).catch(() => "")).trim() || null;
@@ -2208,7 +2212,7 @@ export async function runCore(o) {
           return sq.contract;
         };
         contract = snapContract(contract);
-        await classifyStage();
+        await classifyStage(sessionId ? (problems) => builder(++attemptN, `${contractCorrectionPrompt(problems)}\nThis concerns .forge-lean/classification.json: fix only the invalid fields.`, sessionId, false, planPrompt, { trigger: "contract_correction" }) : null);
         let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let misses = missed;
