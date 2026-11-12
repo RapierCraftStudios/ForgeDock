@@ -196,6 +196,12 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       fs.chmodSync(dp, fs.statSync(sp).mode & 0o7777);
     }
   }
+  /**
+   * Package-manager state at the top of a node_modules tree (pnpm's .modules.yaml, .pnpm/lock.yaml, workspace state; npm's and
+   * yarn's hidden lockfiles) that the repair pass rewrites in place (#5574): lanes get a writable copy, never the read-only
+   * shared inode, or the open-for-write fails with EACCES and the lane falls back to a full install.
+   */
+  const mutableState = (rel, name) => (rel === "" && /^\.(modules\.yaml|pnpm-workspace-state.*\.json|package-lock\.json|yarn-state\.yml)$/.test(name)) || (rel === ".pnpm" && name === "lock.yaml");
   /** Hardlink `src` into `dst` (copy on EXDEV); symlinks recreated; files in bin dirs that name `from` are copied with `to` instead. */
   function linkTree(src, dst, { from = null, to = null, binDir = () => false } = {}) {
     const re = from && to && from !== to ? boundary(from) : null;
@@ -215,7 +221,10 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
               continue;
             }
           }
-          linkOrCopy(sp, dp);
+          if (mutableState(rel, ent.name)) {
+            fs.copyFileSync(sp, dp);
+            fs.chmodSync(dp, fs.statSync(sp).mode & 0o7777 | 0o200);
+          } else linkOrCopy(sp, dp);
         }
       }
     };
