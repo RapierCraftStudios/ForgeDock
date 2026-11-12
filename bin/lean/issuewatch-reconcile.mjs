@@ -26,7 +26,35 @@ export function classifyClaim(row) {
     return code && classifyNeedsHuman(row) !== "human" && code !== "unclassified" ? { kind: "parked", code } : { kind: "needs-human", code };
   }
   if (outcome === "" || outcome === "pending" || outcome === "running") return { kind: "running", code: null };
-  return { kind: "stranded", code: outcome };
+  // #5529: a lane that could not start its CLI (unit without the lane PATH) is environmental: retried once the watcher resolves it
+  const why = String(row.detail ?? row.reason ?? row.error ?? "");
+  return MISSING_EXECUTABLE.test(why) ? { kind: "stranded", code: outcome, reason: "missing-executable" } : { kind: "stranded", code: outcome };
+}
+
+/** #5529: the lane's error text when its CLI was not on PATH ("Failed to find executable claude", spawn ENOENT, sh "not found"). */
+export const MISSING_EXECUTABLE = /Failed to find executable|spawn \S+ ENOENT|command not found|claude: not found/i;
+/** #5529: re-drives per stranded claim before it stays failed. */
+export const REDRIVES = 2;
+
+/**
+ * #5529: a stranded claim is re-driven, not only counted: `redrive(n)` (requeue into the batch, or release the claim) at most `max`
+ * times per issue; a `missing-executable` one only once `resolved()` says the watcher can find the CLI again. A re-driven claim's
+ * outcome is cleared so `claimCounts` stops counting it. @returns {number[]} the issues re-driven.
+ */
+export function redriveStep({ state, now, resolved, redrive, max = REDRIVES }) {
+  state.redriven ??= {};
+  const out = [];
+  for (const [n, o] of Object.entries(state.outcomes ?? {})) {
+    if (o.kind !== "stranded") continue;
+    const r = state.redriven[n] ?? { count: 0 };
+    if (r.count >= max) continue;
+    if (o.reason === "missing-executable" && !resolved()) continue;
+    if (!redrive(Number(n), o)) continue;
+    state.redriven[n] = { count: r.count + 1, at: now, reason: o.reason ?? o.code };
+    delete state.outcomes[n];
+    out.push(Number(n));
+  }
+  return out;
 }
 
 /**

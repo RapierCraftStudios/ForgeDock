@@ -59,6 +59,23 @@
 
 **Rationale**: {why}
 
+## Interfaces
+
+One row per boundary between slices (required when the milestone plan has two or more items; a feature epic carries the
+same section). Anchors are the paths that implement or call the boundary, in backticks; bootstrap-create registers each
+row as an anchored decision so every lane touching those paths gets it as a preserve row, and changing one needs a
+`supersedes` decision. Prefix an anchor `provider:` or `consumer:` to say which side it is. When the signature is
+machine-readable (`POST /v1/x`, `refund(job_id, amount_micro)` or `queue q {field, field}`) and both sides are anchored,
+`npx forgedock interfaces contract` generates a contract test (`node --test contracts/*.contract.test.mjs`) both sides run against the real source. Consumers
+(`#issue` numbers or names) are reopened or get one filed issue when the interface is superseded. To record an
+architecture choice the same way, add an `**Anchors**: \`path/\`` line to its section above.
+
+| Boundary | Signature or schema | Auth mode | Owner issue | Anchors | Consumers |
+|----------|---------------------|-----------|-------------|---------|-----------|
+| {web -> api} | {POST /v1/x {body} -> {response}} | {API key only, no session cookie} | {issue key} | `{provider:src/api/}`, `{consumer:web/}` | {#issue or name} |
+
+**Rationale**: {why these contracts; rejected alternative}
+
 ## Credentials
 
 | Credential or account | Env var(s) | needs-human issue | Mock in dev/CI |

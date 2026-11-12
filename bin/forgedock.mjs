@@ -998,11 +998,12 @@ async function batchHealthSection(c, batchId) {
 /** #5465: issue-watch health; a dead watch is flagged and alerted once (events.webhook_url). */
 async function watchHealthSection(c) {
   try {
-    const [{ listWatches, alertDeadWatches }, { watchRoot }, { makeEventEmitter }, { readEvents }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs"), import("./engine/events.mjs"), import("./engine-cli.mjs")]);
+    const [{ listWatches, alertDeadWatches, watchEnvWarnings }, { watchRoot }, { makeEventEmitter }, { readEvents }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs"), import("./engine/events.mjs"), import("./engine-cli.mjs")]);
     const rows = listWatches(watchRoot());
     if (!rows.length) return;
     await alertDeadWatches({ root: watchRoot(), emit: (type, data, ctx) => makeEventEmitter({ repo: ctx.repo, config: readEvents(c.cwd) }).emitEvent(type, data, ctx) });
-    c.stdout.write(`  issue-watch\n${rows.map((w) => `    ${w.name} (${w.repo}): ${w.live.state === "dead" ? "DEAD" : w.live.state}${["dead", "exited"].includes(w.live.state) ? ` - ${w.live.reason}` : ""}`).join("\n")}\n\n`);
+    const envWarn = watchEnvWarnings(rows).map((l) => `    WARNING ${l}`); // #5529
+    c.stdout.write(`  issue-watch\n${[...rows.map((w) => `    ${w.name} (${w.repo}): ${w.live.state === "dead" ? "DEAD" : w.live.state}${["dead", "exited"].includes(w.live.state) ? ` - ${w.live.reason}` : ""}`), ...envWarn].join("\n")}\n\n`);
   } catch { /* status never fails on watch health */ }
 }
 
@@ -3162,6 +3163,15 @@ async function doctor(fix = false, verbose = false) {
   // ── Startup splash plugin (informational, #5312): never a failure ─────────
   pass("Startup splash", splashState({ home: HOME }) + ` (${SPLASH_PLUGIN}; install: npx forgedock, skip: --no-splash)`);
 
+  // ── issue-watch environment (#5529, informational): a running watcher that cannot resolve claude builds nothing ──
+  try {
+    const [{ listWatches, watchEnvWarnings }, { watchRoot }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs")]);
+    const rows = listWatches(watchRoot()), lines = watchEnvWarnings(rows);
+    if (!rows.length) pass("issue-watch environment", "no watches");
+    else if (!lines.length) pass("issue-watch environment", `${rows.length} watch(es); claude resolves where recorded`);
+    else for (const l of lines) warn("issue-watch environment", l);
+  } catch { /* doctor never fails on watch state */ }
+
   // ── Check 8: FORGE_HOME environment variable (informational) ──────────────
   // The journey-based install never exports FORGE_HOME — it isn't required
   // for the pipeline to run. It only affects orchestrate's legacy
@@ -3972,7 +3982,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "docs", "review-staging", "release", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4400,6 +4410,17 @@ switch (command) {
     const { ciFromCli } = await import("./lean/ci-budget.mjs");
     try {
       exitCode = await ciFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "interfaces": {
+    // Architecture and interface contracts (#5338): `forgedock interfaces check|register|contract`.
+    const { interfacesFromCli } = await import("./lean/interfaces.mjs");
+    try {
+      exitCode = await interfacesFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
