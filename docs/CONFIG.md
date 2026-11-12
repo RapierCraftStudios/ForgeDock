@@ -805,6 +805,34 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `branch_pattern` | string | No | Snapshot branch name; `{date}` is `YYYYMMDD`, `{n}` counts the day's release PRs. Default `release/{date}-{n}`. Everything under the pattern's prefix before `{` counts as a release in flight. |
 | `fix_mode` | `cherry-pick` \| `recut` | No | Snapshot mode only. `cherry-pick` (default): after a fix lane merges to staging, the merged commits of PRs labelled `release-blocker`, or closing a `release-blocker` issue or the blocking issue the job filed, are cherry-picked onto `release/<id>` (a clean pick only; a conflict blocks the job) and appended to `FORGE:RELEASE`. `recut`: the branch is moved to the current staging tip and the picks start over. |
 
+### Managed release: nightly and budget (#5569)
+
+Both blocks are read only when `release.managed` is on; otherwise no nightly, minutes or budget call is made. Before the first step `forgedock release [--lane release|train|p0]` (default `release`) reads the latest nightly run and applies the budget.
+
+```yaml
+nightly:
+  workflow: nightly.yml      # workflow file of the nightly run
+  branch: staging            # integration branch
+  block_release: true
+  t0_t2_hours: 24            # T0-T2 cadence; results older than twice this are stale and never block
+  t3_t4_hours: 168           # T3-T4 cadence (weekly)
+  t3_jobs: "hands e2e"       # comma list of job-name substrings that are T3 (a leading "T<n>" in a job name wins)
+  t4_jobs: "trivy"
+  unskippable: "migration"   # job-name substrings that block a release whatever their tier
+budget:
+  on_exceed: local-first     # local-first | hold | proceed
+  ignore: false              # true: budget never blocks this repo
+```
+
+| Key | Description |
+|-----|-------------|
+| `nightly.block_release` | Default `true`. A red T0-T2 job (an unclassified job counts as T2) or an `unskippable` job blocks `lane: release` with status blocked at step `gate`. T3/T4 reds never block; `train` and `p0` are never blocked. Any red files one open `nightly-red` issue (an existing one has its body edited). |
+| `budget.on_exceed` | Applied at the gate when the forecast (median of the lane's last 5 recorded releases) exceeds the month's remaining minutes (`ci.monthly_minutes` less the reserve, less month-to-date). `local-first` records `ciMode` in the release state, `hold` blocks, `proceed` continues. `p0` always proceeds. Unknown forecast or usage proceeds. |
+
+`forgedock release report` prints the model (`budget.model_release_minutes`, default 500, per release) against the measured minutes of the first 3 recorded releases and says whether they are within 25%; outside it, `budget.on_exceed` and the nightly cadence are the levers.
+
+The release state (and so the ledger) records `lane` and `minutes: {runs, total}`, where total is the sum of ceil(job minutes) of the Actions runs created since the release started, read from the jobs API.
+
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
 
 Repos that set `preflight_command` should skip their Actions CI while the release PR is a draft, so the paid run happens once, on the final head:
@@ -858,6 +886,7 @@ issue_watch:
 | `trust_app_labels` | list | No | Needs `trust_app`: an App-authored issue must carry one of these labels. |
 | `skip_labels` | list | No | Issues carrying any of these labels are skipped. Default for `mode: batch`: `epic, needs-human, post-deploy, workflow:merged, awaiting-promotion, host-task`; `[]` for the other modes and to switch it off. |
 | `release_pause` | boolean | No | Pause the watch while a `forgedock release` job is in flight; it resumes by itself. Default true in `mode: batch`. |
+| `freeze.intake_auto_resume` / `release.tracker` | boolean / issue number | No | With `release.managed` (#5555): `freeze.intake_auto_resume: true` lets the issue watch clear a `forgedock intake pause --release <id>` once release `<id>` has ended in the ledger; `release.tracker` is the issue that gets the `forge:intake-paused` label. Default off. |
 | `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
 | `sweep_needs_human` | boolean | No | Also settle `needs-human` escalations that predate the watch (the backlog). Default false; `forgedock issue-watch run --dry-run` classifies them first and writes nothing. |
 | `max_launches` | integer | No | Total lane launches (claims plus requeues by the decision engine); at N the watch drains. Default: none. Decision-stage issues also count against `max_issues`. |
