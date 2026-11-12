@@ -344,7 +344,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -356,6 +356,10 @@ export async function releaseFromCli(argv, deps = {}) {
     return 0;
   }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
+  if (argv[0] === "check-config" || argv[0] === "init") { // #5551: policy file, loaded lazily (release-config imports this module)
+    const { checkConfigFromCli, initFromCli } = await import("./release-config.mjs");
+    return (argv[0] === "init" ? initFromCli : checkConfigFromCli)(argv.slice(1), { io, cwd });
+  }
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
   const root = releaseRoot(env);
