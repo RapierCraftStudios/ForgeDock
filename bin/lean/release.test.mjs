@@ -226,7 +226,7 @@ describe("release job (#5211)", () => {
     assert.equal(readReleaseConfig("release:\n  managed: true\n").managed, true);
     const apiCalls = [], ghCalls = [], io = { print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async (a) => { ghCalls.push(a); return ""; }, api: async (...a) => { apiCalls.push(a); return {}; } };
     const ok = async () => ({});
-    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok } });
+    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok, deploy: async () => ({ skipped: true }) } });
     assert.equal(out.status, "done");
     assert.deepEqual(apiCalls, []);
     assert.deepEqual(ghCalls, []);
