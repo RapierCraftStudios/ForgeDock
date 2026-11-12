@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { globToRegExp, resolvePath } from "./release-unitmap.mjs";
+import { unitGlobToRegExp, resolvePath } from "./release-unitmap.mjs";
 
 const policy = {
   units: { api: { paths: ["services/api/**"] }, worker: { paths: ["services/worker/**"] }, web: { paths: ["web/*.js"] } },
@@ -11,13 +11,13 @@ const policy = {
   forces: [{ paths: ["infra/migrations/**"], pipeline: "full", reason: "migrations" }, { paths: ["docker-compose*.yml"], pipeline: "full", reason: "deploy-mechanics" }],
 };
 
-describe("globToRegExp", () => {
+describe("unitGlobToRegExp", () => {
   it("** crosses directories, * does not, ? is one char", () => {
-    assert.ok(globToRegExp("a/**").test("a/b/c.txt"));
-    assert.ok(globToRegExp("**/x.json").test("x.json") && globToRegExp("**/x.json").test("a/b/x.json"));
-    assert.ok(globToRegExp("a/*.js").test("a/b.js") && !globToRegExp("a/*.js").test("a/b/c.js"));
-    assert.ok(globToRegExp("a?.js").test("ab.js") && !globToRegExp("a?.js").test("a/.js"));
-    assert.ok(!globToRegExp("a.js").test("axjs"));
+    assert.ok(unitGlobToRegExp("a/**").test("a/b/c.txt"));
+    assert.ok(unitGlobToRegExp("**/x.json").test("x.json") && unitGlobToRegExp("**/x.json").test("a/b/x.json"));
+    assert.ok(unitGlobToRegExp("a/*.js").test("a/b.js") && !unitGlobToRegExp("a/*.js").test("a/b/c.js"));
+    assert.ok(unitGlobToRegExp("a?.js").test("ab.js") && !unitGlobToRegExp("a?.js").test("a/.js"));
+    assert.ok(!unitGlobToRegExp("a.js").test("axjs"));
   });
 });
 

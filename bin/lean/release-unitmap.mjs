@@ -3,7 +3,7 @@
 /** Unit/coupling/contract/force resolver for `.forge/release.yaml` (#5551): every path resolves to a unit or "none". */
 
 /** Glob to RegExp: `**` any depth (a trailing `/**` also matches the directory's files), `*` within a segment, `?` one char. */
-export function globToRegExp(glob) {
+export function unitGlobToRegExp(glob) {
   let re = "";
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
@@ -17,7 +17,7 @@ export function globToRegExp(glob) {
   return new RegExp(`^${re}$`);
 }
 
-export const matchesAny = (globs, path) => (globs ?? []).some((g) => globToRegExp(String(g)).test(path));
+export const matchesAny = (globs, path) => (globs ?? []).some((g) => unitGlobToRegExp(String(g)).test(path));
 
 /**
  * @returns {{path, unit: string|"none", units: string[], affects: string[], contracts: object[], forces: object[]}}
