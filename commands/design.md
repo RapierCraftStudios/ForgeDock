@@ -27,6 +27,8 @@ end to end.
 it does not reimplement them. The only executable helper in the chain is the deterministic linter
 `scripts/design-system-lint.mjs` (#884).
 
+**Auto-routing (forge#5330, opt-in).** With forge.yaml `design.routes` set, a lane that would build a page under it is routed here (blocked with `design.gate: blocking`) until a `FORGE:DESIGN_SPEC` or the `design.spec_label` label exists; see `docs/CONFIG.md` `design`.
+
 ---
 
 ## Universal Stage Dispatcher

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Fixed comment templates for the core work-on. Pure functions, no model calls. Missing fields read "not reported". */
 
+import { visualSection } from "./ui-quality.mjs";
+
 export const NR = "not reported";
 export const MAX_COMMENT_CHARS = 60000;
 
@@ -192,7 +194,7 @@ export function renderPrBody({ issue, investigation, contract, implementation, r
   // #4404: requirements measured outside the lane; the change delivers their instrumentation, the named job the result
   const oob = (contract?.requirements ?? []).filter((r) => r?.verify === "out_of_band");
   const outOfBand = oob.length ? `\n\n## Verified out of band\n${oob.map((r) => `- ${escl(r.id)}: ${escl(r.quote)} (job ${r.evidence ? `\`${escl(r.evidence).replace(/`/g, "'")}\`` : "not named"})`).join("\n")}` : "";
-  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}\n\nCloses #${issue}`;
+  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}${visualSection(implementation)}\n\nCloses #${issue}`;
 }
 
 // ---- trajectory ----

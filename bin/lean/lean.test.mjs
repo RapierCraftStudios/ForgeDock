@@ -8603,3 +8603,38 @@ describe("#5469: --adopt takes over a hand-built open PR", () => {
     assert.equal(r.terminalReason, "merged");
   });
 });
+
+describe("design gate routing in the lane (#5330 R11, R13, R15)", () => {
+  const PAGE = "web/app/hands/page.tsx";
+  const pageContract = { ...CONTRACT, deliverables: [{ id: "D1", path: PAGE, change: "new hands page", requirements: ["R1"] }] };
+  const dg = (gate = "blocking") => ({ system: [], routes: ["web/app/**/page.tsx"], exclude: [], gate, specLabel: "design:approved", neededLabel: "design:needed", viewports: [390, 1440], requireVisual: true });
+  const mk = (o = {}) => world({ contract: pageContract, changed: [PAGE, "test/foo.test.js"], reviews: [conf({}, pageContract, [PAGE, "test/foo.test.js"])], ...o });
+
+  it("blocking: a predicted new page under design.routes with no FORGE:DESIGN_SPEC stops pending /design, before any build", async () => {
+    const w = mk(), r = await run(w, { designConfig: dg("blocking") });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && /Run \/design/.test(c) && c.includes(PAGE)));
+    assert.equal(builders(w).length, 1, "only the plan call ran; the implement call never started");
+  });
+
+  it("the design:approved label lifts the hold: the lane builds", async () => {
+    const w = mk({ labels: [{ name: "design:approved" }] }), r = await run(w, { designConfig: dg("blocking") });
+    assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(builders(w).length >= 2);
+  });
+
+  it("advisory: routed to /design in the implement prompt, never blocked", async () => {
+    const w = mk(), r = await run(w, { designConfig: dg("advisory") });
+    assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(builders(w).some((c) => /Design gate: page web\/app\/hands\/page\.tsx/.test(c[4])));
+  });
+
+  it("opt-in: with no design.routes the lane is today's (no design prompt, no block)", async () => {
+    for (const extra of [{}, { designConfig: { ...dg(), routes: [] } }]) {
+      const w = mk(), r = await run(w, extra);
+      assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+      assert.ok(!builders(w).some((c) => /Design gate:/.test(c[4])));
+    }
+  });
+});

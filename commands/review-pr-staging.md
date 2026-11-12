@@ -242,6 +242,11 @@ On for repos with `app/**/page.*` files unless `pages.enabled: false`. List ever
 
 ---
 
+### 1I: Visual Gate (opt-in `design.routes`; BLOCKING with `design.gate: blocking`, forge#5330, #5369)
+Unset `design.routes` = skip. Otherwise follow [docs/design/visual-gate.md](../docs/design/visual-gate.md): `scripts/visual-gate.mjs --list` names the bundle's new or changed routes; render each at every `design.viewports` width, run `design-render-critique-loop` against its spec, then post the script's `FORGE:VISUAL_GATE` comment (screenshots, verdict). Exit 1 (missing spec or screenshots, failed critique) is a BLOCKER: `FORGE:GATE_FAILURE`.
+
+---
+
 ### 1G: Docs Gate (BLOCKING when `docs.required_for` is set, forge#5419)
 `git diff --name-only origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH` lists the bundle's changes. When forge.yaml sets `docs.required_for`, list every user-facing change in it (public API endpoint, MCP tool, dashboard page, CLI command, SDK method; `docs.surfaces` globs) that has no docs change under `docs.paths`/`docs.registries` and no `docs` justification: each is a BLOCKER (`Docs: <path> has no user docs`). Every `/docs/...` link the bundle adds must resolve (`docs.link_check`). Unset = skip. A blocker here makes the gate fail (`FORGE:GATE_FAILURE`).
 
