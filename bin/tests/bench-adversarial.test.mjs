@@ -20,7 +20,7 @@ test("the committed corpus is valid: 20 issues, at least 5 invalid, every kind p
 test("validateAdversarialCorpus rejects a small corpus, too few invalid issues and malformed entries", () => {
   const c = corpus();
   assert.throws(() => validateAdversarialCorpus({ ...c, issues: c.issues.slice(0, 19) }), /at least 20 issues/);
-  const fewInvalid = c.issues.map((i) => (i.kind === "already-fixed" || i.kind === "wrong-premise" ? { ...byId("adv-int-take-until"), id: i.id } : i));
+  const fewInvalid = c.issues.map((i) => (i.kind === "already-fixed" || i.kind === "wrong-premise" ? { ...byId("adv-int-argmax"), id: i.id } : i));
   assert.throws(() => validateAdversarialCorpus({ ...c, issues: fewInvalid }), /at least 5 invalid/);
   const set = (id, patch) => ({ ...c, issues: c.issues.map((i) => (i.id === id ? { ...i, ...patch } : i)) });
   assert.throws(() => validateAdversarialCorpus(set("adv-dup-chunks", { forbid_new_defs: [] })), /forbid_new_defs/);
@@ -40,7 +40,7 @@ test("gradeAdversarial counts wrong issues implemented, duplicates created and i
   assert.equal(gradeAdversarial({ issue: dup, row: claimed, added: ["def chunks(iterable, n):", "    pass"] }).duplicate_created, true);
   assert.equal(gradeAdversarial({ issue: dup, row: claimed, added: ["# reuse chunked"] }).duplicate_created, false);
   assert.equal(gradeAdversarial({ issue: dup, row: none, added: ["def chunks(x):"] }).duplicate_created, false);
-  const int = byId("adv-int-take-until");
+  const int = byId("adv-int-argmax");
   assert.equal(gradeAdversarial({ issue: int, row: claimed, paths: ["more_itertools/more.py"] }).integration_missed, 2);
   assert.equal(gradeAdversarial({ issue: int, row: claimed, paths: int.must_touch }).integration_missed, 0);
   assert.equal(gradeAdversarial({ issue: int, row: none }).integration_missed, 3);
@@ -59,7 +59,7 @@ test("aggregateAdversarial and renderScorecard report the five metrics per arm w
   ];
   const meta = { run_date: "2026-11-10", model: "claude-opus-5-5", corpus_revision: "adversarial-v1@670b715+abcd1234" };
   const a = aggregateAdversarial(rows, meta);
-  assert.deepEqual(a.arms.full, { n: 4, invalid_n: 2, wrong_implemented: 0, duplicate_created: 0, integration_missed: 1, oracle_n: 1, oracle_pass_rate: 1, cost_usd: 5, wall_ms: 40 });
+  assert.deepEqual(a.arms.full, { n: 4, invalid_n: 2, wrong_implemented: 0, duplicate_created: 0, integration_missed: 1, oracle_n: 1, oracle_pass_rate: 1, cost_usd: 5, wall_ms: 40, light_unobserved: 0 });
   assert.deepEqual([a.arms.control.wrong_implemented, a.arms.control.duplicate_created, a.arms.control.integration_missed, a.arms.control.oracle_pass_rate, a.arms.control.cost_usd], [2, 1, 3, 0, 6]);
   const md = renderScorecard(a);
   for (const s of ["2026-11-10", "claude-opus-5-5", "adversarial-v1@670b715+abcd1234", "Wrong issues implemented", "Duplicate implementations", "Integration points missed", "Oracle pass rate", "Cost", "Wall time", "| full | control |"]) assert.ok(md.includes(s), s);
@@ -118,9 +118,9 @@ test("CLI: validate, run (control arm) and aggregate write rows and a scorecard"
   const cfgPath = join(tmp, "cfg.json"), rows = join(tmp, "rows.jsonl"), sc = join(tmp, "score.md");
   writeFileSync(cfgPath, JSON.stringify({ arms: { control: { model: "claude-opus-5-5" } } }));
   const { run } = fakeRun({ paths: ["more_itertools/more.py"] });
-  assert.equal(await main(["run", "--corpus", cp, "--config", cfgPath, "--out", rows, "--arms", "control", "--issues", "adv-int-take-until,adv-wp-one-empty"], { run, out, err }), 0);
+  assert.equal(await main(["run", "--corpus", cp, "--config", cfgPath, "--out", rows, "--arms", "control", "--issues", "adv-int-argmax,adv-wp-one-empty"], { run, out, err }), 0);
   const lines = readFileSync(rows, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.deepEqual(lines.map((r) => [r.id, r.wrong_implemented, r.integration_missed]), [["adv-wp-one-empty", true, 0], ["adv-int-take-until", false, 2]]);
+  assert.deepEqual(lines.map((r) => [r.id, r.wrong_implemented, r.integration_missed]), [["adv-wp-one-empty", true, 0], ["adv-int-argmax", false, 2]]);
   const o2 = { s: "", write(x) { this.s += x; } };
   assert.equal(await main(["aggregate", rows, "--corpus", cp, "--model", "claude-opus-5-5", "--date", "2026-11-10", "--scorecard", sc], { out: o2, err }), 0);
   assert.match(readFileSync(sc, "utf8"), /Run date: 2026-11-10[\s\S]*Model: claude-opus-5-5[\s\S]*Corpus revision: adversarial-v1@670b715\+[0-9a-f]{8}/);
@@ -141,4 +141,24 @@ test("CLI run with both arms: the full lane closes the invalid issue, the contro
   assert.equal(lines[0].terminal, "closed-invalid", "the full row came from the result file");
   assert.equal(await main(["aggregate", rows, "--corpus", cp, "--model", "claude-opus-5-5", "--date", "2026-11-10", "--scorecard", sc], { out, err }), 0);
   assert.match(readFileSync(sc, "utf8"), /Wrong issues implemented[^\n]*\| 0 of 1 invalid \| 1 of 1 invalid \|/);
+});
+
+test("the corpus has no integration row that only aliases an existing helper (take_until == takewhile_inclusive, #5541)", () => {
+  const ids = corpus().issues.map((i) => i.id);
+  assert.ok(!ids.includes("adv-int-take-until"));
+  assert.ok(!corpus().issues.some((i) => /take_until|takewhile/.test(i.title)));
+});
+
+test("runAdversarial marks a row without a light field as light_unobserved", async () => {
+  const tmp = tmpDir("bench-adv-light-"), c = corpus();
+  const n = Object.fromEntries(c.issues.map((i, k) => [i.id, k + 1]));
+  const cfg = { arms: { full: { repo: "acme/sandbox", issues: n } } };
+  const full = { [n["adv-valid-1293"]]: { terminalReason: "merged", cost_usd: 0.5, wall_ms: 1, model_ms: 1 }, [n["adv-valid-1304"]]: { terminalReason: "merged", light: false, cost_usd: 0.5, wall_ms: 1, model_ms: 1 } };
+  const { run } = fakeRun({ full });
+  const rows = await runAdversarial({ corpus: c, cfg, arms: ["full"], issues: ["adv-valid-1293", "adv-valid-1304"], run, tmp });
+  assert.deepEqual(rows.map((r) => [r.id, r.light, r.light_unobserved]), [["adv-valid-1293", null, true], ["adv-valid-1304", false, false]]);
+  const sc = aggregateAdversarial(rows, { run_date: "2026-11-12", model: "m", corpus_revision: "r" });
+  assert.equal(sc.arms.full.light_unobserved, 1);
+  assert.equal(sc.arms.control.light_unobserved, 0);
+  assert.match(renderScorecard(sc), /light_unobserved/);
 });

@@ -17,6 +17,8 @@
  *   light, full: `forgedock run-issue <n> --repo <sandbox> --result-file <f>` on a sandbox repo whose forge.yaml sets
  *     lean.light.mode on (light) or off (full). Cost is the run result's cost_usd (the sum of the #4407 per-session
  *     deltas); model time is model_ms (summed session time, #4451).
+ *     A light-lane cost target needs the sandbox forge.yaml at lean.light.mode: on (default is shadow, which never fast-forwards)
+ *     and a result file; a row without a boolean `light` is flagged light_unobserved (#5541).
  *   control: `claude -p <prompt> --output-format json --model <model>` in a fresh clone at the base; cost is
  *     total_cost_usd, wall and model time are duration_ms (one session).
  *
@@ -137,7 +139,7 @@ async function grade({ run, src, head, base, corpus, issue, tmp, tag, apiShape }
 export async function runArm({ arm, issue, corpus, cfg, run = benchDefaultRun, tmp, now = () => Date.now(), apiShape = detectApiShape }) {
   const tag = `${arm}-${issue.id}`, a = cfg.arms[arm];
   const row = { arm, id: issue.id, cost_usd: null, wall_ms: null, model_ms: null, harness_wall_ms: null, claimed_fix: false, oracle_pass: false, suite_pass: null,
-    api_shape: null, light: null, light_eligibility: null, light_upgrade: null, terminal: null };
+    api_shape: null, light: null, light_unobserved: false, light_eligibility: null, light_upgrade: null, terminal: null };
   const t0 = now();
   let src = null, head = null, base = corpus.base, claimed = false;
   if (arm === "control") {
@@ -164,6 +166,7 @@ export async function runArm({ arm, issue, corpus, cfg, run = benchDefaultRun, t
     row.terminal = res?.terminalReason ?? `exit ${r.code}`;
     row.cost_usd = num(res?.cost_usd); row.wall_ms = num(res?.wall_ms); row.model_ms = num(res?.model_ms);
     row.light = typeof res?.light === "boolean" ? res.light : null;
+    row.light_unobserved = row.light === null; // #5541: no result file (or no `light` field), so the lane's depth is unknown, not false
     row.light_eligibility = res?.light_eligibility ?? null;
     row.light_upgrade = Array.isArray(res?.light_upgrade) ? res.light_upgrade : null;
     claimed = CLAIMED_REASONS.has(row.terminal);
