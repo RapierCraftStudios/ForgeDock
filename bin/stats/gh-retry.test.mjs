@@ -7,7 +7,9 @@ import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { defaultGh, fetchGithubRecords, isReadOnlyGh } from "./github-source.mjs";
+import * as source from "./github-source.mjs";
+
+const { defaultGh, fetchGithubRecords } = source;
 import { gatherDefects } from "./depth.mjs";
 import { gatherCompounding } from "./compounding.mjs";
 
@@ -97,6 +99,7 @@ test("writes are never retried, even on a 5xx (#5530 write)", async () => {
   plan({ failures: [{ match: "^pr comment", times: 9, stderr: "HTTP 504: Gateway Timeout" }] });
   await assert.rejects(defaultGh(["pr", "comment", "5", "-R", "o/r", "--body", "x"]), /504/);
   assert.equal(calls().length, 1);
+  const { isReadOnlyGh } = source;
   assert.equal(isReadOnlyGh(["api", "-X", "POST", "repos/o/r/issues"]), false);
   assert.equal(isReadOnlyGh(["api", "repos/o/r/issues/1/comments", "-f", "body=x"]), false);
   assert.equal(isReadOnlyGh(["api", "graphql", "-f", "query=mutation { x }"]), false);
