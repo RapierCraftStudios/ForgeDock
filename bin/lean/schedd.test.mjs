@@ -1057,6 +1057,8 @@ describe("schedd scans stay off the loop (#5531)", () => {
       assert.equal(calls.length, 0, "nothing ready: not re-hosted");
       const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
       assert.deepEqual(st.abandoned, [blocked.id]);
+      const again = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.deepEqual(again.abandoned, [], "status reports an abandoned batch once");
     } finally { await d.close(); }
   });
 
@@ -1071,6 +1073,9 @@ describe("schedd scans stay off the loop (#5531)", () => {
       await new Promise((r) => setTimeout(r, 300));
       assert.deepEqual(calls[0], ["--resume", ready.id]);
       assert.equal(ready.readCancel(), null);
+      const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.deepEqual(st.rehosted, [ready.id]);
+      assert.deepEqual((await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" })).rehosted, [], "reported once");
     } finally { await d.close(); }
   });
 });

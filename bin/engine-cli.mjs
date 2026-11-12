@@ -2432,6 +2432,7 @@ export async function scheddFromCli(argv, deps = {}) {
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
     if (st.orphaned?.length) console.log(`schedd: ${st.orphaned.length} orphaned batch(es) (not hosted, pending issues, idle over 7 days): ${st.orphaned.slice(0, 3).map((o) => o.id).join(" ")}${st.orphaned.length > 3 ? " …" : ""} (forgedock orchestrate --gc-orphans cancels them)`);
     if (st.abandoned?.length) console.log(`schedd: abandoned ${st.abandoned.length} batch(es) not hosted and idle past the abandon age: ${st.abandoned.slice(0, 3).join(" ")}${st.abandoned.length > 3 ? " …" : ""} (forgedock orchestrate --resume <id> reopens one)`); // #5531
+    if (st.rehosted?.length) console.log(`schedd: re-hosted ${st.rehosted.length} batch(es) not hosted and idle past the abandon age: ${st.rehosted.slice(0, 3).join(" ")}${st.rehosted.length > 3 ? " …" : ""}`); // #5531
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }

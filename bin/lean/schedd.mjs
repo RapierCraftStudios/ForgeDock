@@ -216,7 +216,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   let lastTick = Date.now();
   let lastPhase = { name: "idle", at: Date.now() };
   const phase = (name) => { lastPhase = { name, at: Date.now() }; };
-  const abandoned = new Set(); // #5531: batches this daemon abandoned (reported once; the batch carries a cancel file with reason "abandoned")
+  // #5531: long-unhosted batches this daemon abandoned (cancel reason "abandoned") or re-hosted; the next `status` reports each once
+  const lateReport = { abandoned: [], rehosted: [] };
 
   /** Run one batch here. Resolves with {id, dir} once the batch exists, rejects when it fails before that. */
   const host = ({ argv, cwd, env, keepBreaker = false }, first = null) => new Promise((resolve, reject) => {
@@ -321,7 +322,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       phase("status");
       const { unhosted, orphaned } = await unhostedBatches(Date.now());
       let host = null; try { host = hostLoad?.() ?? null; } catch { host = null; } // #5174
-      return send({ type: "status", pid, lastTick, batches: await statusBatches(), unhosted, orphaned, abandoned: [...abandoned], host }, true);
+      return send({ type: "status", pid, lastTick, batches: await statusBatches(), unhosted, orphaned, abandoned: lateReport.abandoned.splice(0), rehosted: lateReport.rehosted.splice(0), host }, true);
     }
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
@@ -517,7 +518,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const last = b.lastProgressMs();
         if (!isHosted && !cancelled && !reported && state?.pending?.length && last !== null && now - last > abandonMs && (!stall || rehostedStall.get(id) === sig)) {
           b.requestCancel({ reason: "abandoned" }); // #5531: idle past N days and not re-hostable: marked once (the cancel file ends the scan for it)
-          abandoned.add(id);
+          lateReport.abandoned.push(id);
           log(`schedd: batch ${id} abandoned (not hosted, ${state.pending.length} pending, no progress for ${Math.round((now - last) / 86400_000)} days)`);
           continue;
         }
@@ -525,6 +526,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         if (!isHosted && rehostedStall.get(id) !== sig) {
           rehostedStall.set(id, sig);
           log(`schedd: re-hosting batch ${id} (${stall.detail})`);
+          if (last !== null && now - last > abandonMs) lateReport.rehosted.push(id); // #5531
           const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
           starting.set(id, started);
           started.catch((e) => { log(`schedd: re-host ${id} failed: ${e?.message ?? e}`); recordStallAlert(b, stall); }).finally(() => starting.delete(id));
