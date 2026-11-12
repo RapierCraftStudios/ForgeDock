@@ -159,5 +159,7 @@ describe("#5447 declaredEnv", () => {
     assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", { tool: "uv" }, "bad name"] } }), ["pytest", "uv"]);
     assert.deepEqual(declaredEnv({ test_plan: [{ requirement: "R1", env: "pytest, uv" }, { requirement: "R2" }] }), ["pytest", "uv"]);
     assert.deepEqual(declaredEnv({}), []);
+    // #5590: fixtures and libraries are not executables
+    assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", "caplog", "FakeRedis", "tmp_path", "node", "psql"] } }), ["pytest", "node", "psql"]);
   });
 });

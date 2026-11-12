@@ -2230,7 +2230,7 @@ export async function runCore(o) {
         if (designRoute.blocked) return await needsHuman(`Design gate (forge.yaml design.gate: blocking): ${designRoute.reason}.\n\nRun /design on #${issue}; a FORGE:DESIGN_SPEC comment or the \`${designConfig.specLabel}\` label lifts the hold.`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue} (${designRoute.pages.slice(0, 3).join(", ")})` });
       }
       { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
-        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t}`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
         if (envMiss.length) {
           try {

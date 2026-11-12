@@ -306,5 +306,12 @@ export function declaredEnv(contract) {
   const plan = contract?.test_plan;
   const raw = Array.isArray(plan) ? plan.map((r) => r?.env) : [plan?.env];
   const names = raw.flatMap((e) => (Array.isArray(e) ? e : typeof e === "string" ? e.split(",") : [])).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim());
-  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t)))];
+  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t) && isExecutableName(t)))];
+}
+
+/** #5590: pytest's built-in fixtures, never host executables. */
+const PYTEST_FIXTURES = new Set(["caplog", "capsys", "capfd", "capsysbinary", "capfdbinary", "monkeypatch", "tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory", "request", "recwarn", "pytestconfig", "mocker", "doctest_namespace", "cache", "testdir"]);
+/** #5590: `env` lists executables only; CamelCase (a class such as FakeRedis), snake_case and pytest-fixture names are libraries/fixtures that come from the lockfile. Pure. */
+export function isExecutableName(t) {
+  return !/[A-Z]/.test(t) && !t.includes("_") && !PYTEST_FIXTURES.has(t);
 }
