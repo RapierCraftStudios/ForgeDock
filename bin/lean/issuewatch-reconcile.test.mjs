@@ -28,3 +28,24 @@ test("stuckClaims lists only old unmerged claims with the reason", () => {
   assert.deepEqual(rows.map((r) => r.issue), [1]);
   assert.match(formatStuck(rows), /#1 claimed 100h ago, no merged PR: running in its lane/);
 });
+
+test("#5529 classifyClaim marks a lane that could not find its CLI as missing-executable; other engine-errors unchanged", () => {
+  const row = { outcome: "engine-error", detail: "claude CLI exited with status 1. Output: Failed to find executable claude: No such file or directory" };
+  assert.deepEqual(classifyClaim(row), { kind: "stranded", code: "engine-error", reason: "missing-executable" });
+  assert.deepEqual(classifyClaim({ outcome: "engine-error", detail: "lane pid 4 exited without a result" }), { kind: "stranded", code: "engine-error" });
+});
+
+test("#5529 redriveStep waits for claude on a missing-executable claim, re-drives others, and respects the budget", async () => {
+  const { redriveStep } = await import("./issuewatch-reconcile.mjs");
+  const state = { outcomes: { 1: { kind: "stranded", code: "engine-error", reason: "missing-executable" }, 2: { kind: "stranded", code: "engine-error" }, 3: { kind: "parked", code: "ci.red" } } };
+  const driven = [];
+  let ok = false;
+  assert.deepEqual(redriveStep({ state, now: 1, resolved: () => ok, redrive: (n) => (driven.push(n), true) }), [2]);
+  assert.equal(claimCounts({ ...state, inflight: [] }).stranded, 1);
+  ok = true;
+  assert.deepEqual(redriveStep({ state, now: 2, resolved: () => ok, redrive: (n) => (driven.push(n), true) }), [1]);
+  assert.equal(claimCounts({ ...state, inflight: [] }).stranded, 0);
+  for (let i = 0; i < 3; i++) { state.outcomes[2] = { kind: "stranded", code: "engine-error" }; redriveStep({ state, now: 3 + i, resolved: () => true, redrive: (n) => (driven.push(n), true) }); }
+  assert.equal(driven.filter((n) => n === 2).length, 2, "budget of 2 re-drives");
+  assert.equal(state.outcomes[3].kind, "parked");
+});

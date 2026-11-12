@@ -998,11 +998,12 @@ async function batchHealthSection(c, batchId) {
 /** #5465: issue-watch health; a dead watch is flagged and alerted once (events.webhook_url). */
 async function watchHealthSection(c) {
   try {
-    const [{ listWatches, alertDeadWatches }, { watchRoot }, { makeEventEmitter }, { readEvents }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs"), import("./engine/events.mjs"), import("./engine-cli.mjs")]);
+    const [{ listWatches, alertDeadWatches, watchEnvWarnings }, { watchRoot }, { makeEventEmitter }, { readEvents }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs"), import("./engine/events.mjs"), import("./engine-cli.mjs")]);
     const rows = listWatches(watchRoot());
     if (!rows.length) return;
     await alertDeadWatches({ root: watchRoot(), emit: (type, data, ctx) => makeEventEmitter({ repo: ctx.repo, config: readEvents(c.cwd) }).emitEvent(type, data, ctx) });
-    c.stdout.write(`  issue-watch\n${rows.map((w) => `    ${w.name} (${w.repo}): ${w.live.state === "dead" ? "DEAD" : w.live.state}${["dead", "exited"].includes(w.live.state) ? ` - ${w.live.reason}` : ""}`).join("\n")}\n\n`);
+    const envWarn = watchEnvWarnings(rows).map((l) => `    WARNING ${l}`); // #5529
+    c.stdout.write(`  issue-watch\n${[...rows.map((w) => `    ${w.name} (${w.repo}): ${w.live.state === "dead" ? "DEAD" : w.live.state}${["dead", "exited"].includes(w.live.state) ? ` - ${w.live.reason}` : ""}`), ...envWarn].join("\n")}\n\n`);
   } catch { /* status never fails on watch health */ }
 }
 
@@ -3161,6 +3162,15 @@ async function doctor(fix = false, verbose = false) {
 
   // ── Startup splash plugin (informational, #5312): never a failure ─────────
   pass("Startup splash", splashState({ home: HOME }) + ` (${SPLASH_PLUGIN}; install: npx forgedock, skip: --no-splash)`);
+
+  // ── issue-watch environment (#5529, informational): a running watcher that cannot resolve claude builds nothing ──
+  try {
+    const [{ listWatches, watchEnvWarnings }, { watchRoot }] = await Promise.all([import("./lean/issuewatch-parity.mjs"), import("./lean/issuewatch.mjs")]);
+    const rows = listWatches(watchRoot()), lines = watchEnvWarnings(rows);
+    if (!rows.length) pass("issue-watch environment", "no watches");
+    else if (!lines.length) pass("issue-watch environment", `${rows.length} watch(es); claude resolves where recorded`);
+    else for (const l of lines) warn("issue-watch environment", l);
+  } catch { /* doctor never fails on watch state */ }
 
   // ── Check 8: FORGE_HOME environment variable (informational) ──────────────
   // The journey-based install never exports FORGE_HOME — it isn't required

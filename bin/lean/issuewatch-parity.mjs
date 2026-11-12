@@ -5,9 +5,9 @@
  * the default skip labels, issues with an open closing PR, release awareness (pause while a `forgedock release` job runs)
  * and the heartbeat liveness read by `issue-watch status` and doctor. No LLM calls; gh and the clock are injected.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { writeAtomic } from "./batch.mjs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { RELEASE_STEPS } from "./release.mjs";
 
 export const DEFAULT_SKIP_LABELS = ["epic", "needs-human", "post-deploy", "workflow:merged", "awaiting-promotion", "host-task"];
@@ -92,3 +92,13 @@ export async function alertDeadWatches({ root, now = Date.now(), emit }) {
   }
   return dead;
 }
+
+/** #5529: the first executable `name` on `PATH` (a PATH string), or null. `isExec` defaults to a real X_OK check. */
+export function resolveOnPath(name, PATH, { isExec = (p) => { try { accessSync(p, constants.X_OK); return statSync(p).isFile(); } catch { return false; } } } = {}) {
+  for (const d of String(PATH ?? "").split(delimiter)) if (d && isExec(join(d, name))) return join(d, name);
+  return null;
+}
+
+/** #5529: one warning per watch whose running watcher recorded that it cannot resolve `claude` (status.json `claude: null`). */
+export const watchEnvWarnings = (rows) => rows.filter((w) => w.status && "claude" in w.status && w.status.claude === null && !["done", "exited"].includes(w.live?.state))
+  .map((w) => `watch ${w.name} (${w.repo}): cannot resolve claude on the watcher PATH; its lanes fail 'Failed to find executable claude' (reinstall: forgedock issue-watch install --name ${w.name})`);
