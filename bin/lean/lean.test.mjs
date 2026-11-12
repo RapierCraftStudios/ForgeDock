@@ -2307,6 +2307,14 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
   });
 
+  it("#5544 test-only fix whose base version fails is merged, not already-fixed", async () => {
+    const contract = { ...CONTRACT, repro_test: RT, deliverables: [{ id: "D1", path: "test/foo.test.js", change: "fix the test", requirements: ["R1"] }] }; // the bug is in the test itself
+    const w = rworld([{ base: "RAN", head: "RAN", pristine: "FAILED" }], { changed: ["test/foo.test.js"], contract });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.merges.length, 1);
+    assert.equal(w.closed.some((c) => /Already fixed on the base/.test(c.join(" "))), false, "not closed as already fixed");
+  });
+
   it("a repro test the harness cannot run on head (or no harness result) is env.repro_unrunnable: recoverable, no resume, no reviewer (#4334)", async () => {
     for (const conformance of ["enforce", "shadow"]) {
       for (const rg of [{ base: "SKIPPED", head: "UNRUNNABLE" }, null]) {

@@ -88,3 +88,14 @@ check "workspace node_modules and .venv linked into base; new nested test overla
 
 echo "$PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]
+
+# 9. #5544 test-only fix: the base's own version of the test fails, head's passes, source unchanged
+R5="$TMP/r5"; make_repo "$R5"; mkdir -p "$R5/tests"; printf 'test "$(bash app.sh)" = good && echo "1 passed"\n' > "$R5/tests/t.sh"
+git -C "$R5" add -A; git -C "$R5" commit -qm "bad test"; git -C "$R5" update-ref refs/remotes/origin/main HEAD
+printf 'test "$(bash app.sh)" = bad && echo "1 passed"\n' > "$R5/tests/t.sh"; git -C "$R5" add -A; git -C "$R5" commit -qm "fix test"
+check "test-only fix: base version of the test fails (#5544)" "BASE=RAN HEAD=RAN PRISTINE=FAILED" "$R5" "bash tests/t.sh"
+# 10. modified test passes on base in both versions: no PRISTINE word
+R6="$TMP/r6"; make_repo "$R6"; mkdir -p "$R6/tests"; printf 'echo "1 passed"\n' > "$R6/tests/t.sh"
+git -C "$R6" add -A; git -C "$R6" commit -qm t; git -C "$R6" update-ref refs/remotes/origin/main HEAD
+printf 'echo "2 passed"\n' > "$R6/tests/t.sh"; git -C "$R6" add -A; git -C "$R6" commit -qm t2
+check "modified test passing on base in both versions has no PRISTINE word (#5544)" "BASE=RAN HEAD=RAN" "$R6" "bash tests/t.sh"

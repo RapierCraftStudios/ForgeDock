@@ -842,6 +842,14 @@ describe("repro_test on bug lanes (#4271)", () => {
     assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
     assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
   });
+  it("#5544 BASE=RAN HEAD=RAN PRISTINE=FAILED is a test-only fix: no repro_base_green, not already fixed", () => {
+    const k = { ...C, repro_test: RT };
+    const testOnly = ["test/leak.test.js"];
+    const pc = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "RAN", head: "RAN", pristine: "FAILED" } });
+    assert.equal(pc.failures.some((f) => f.kind === "repro_base_green"), false);
+    assert.equal(alreadyFixedOnBase(pc.failures, testOnly), false);
+    assert.deepEqual(reproFailures(k, { base: "RAN", head: "RAN", pristine: "RAN" }).map((f) => f.kind), ["repro_base_green"]);
+  });
   it("#5080 repro_base_green: BASE=RAN HEAD=RAN is its own kind, and a test-only diff with a source deliverable is never the fix", () => {
     const k = { ...C, repro_test: RT };
     const green = precheck({ contract: k, result: res, changedFiles: files, repro: { base: "RAN", head: "RAN" } });

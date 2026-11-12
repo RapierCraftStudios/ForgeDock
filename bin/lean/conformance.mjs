@@ -1151,8 +1151,10 @@ function frozenAmendedFiles(frozen, contract, outside, creep) {
  * #4334: HEAD=UNRUNNABLE or no words (the harness could not run the test) is env.repro_unrunnable, kind repro_env: an
  * environment error, never a builder resume.
  */
-export function reproFailures(contract, { base, head } = {}) {
+export function reproFailures(contract, { base, head, pristine } = {}) {
   if (head === "RAN" && base === "FAILED") return [];
+  // #5544: head's test passes on base source but the base's own version of it fails: a test-only fix, not already fixed
+  if (head === "RAN" && base === "RAN" && pristine === "FAILED") return [];
   const t = contract?.repro_test ?? {};
   const name = [t.path, t.id].filter((x) => !blank(x)).join(" ") || "repro_test";
   if (!head || head === "UNRUNNABLE") {
