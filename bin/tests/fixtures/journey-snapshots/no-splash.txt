@@ -1,0 +1,43 @@
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+        ▄▄██████████████████
+     ▄█████████████▀▀▀▀▀▀▀▀▀
+   ▄██████████▀▀
+    ▀▀▀▀▀  ▄▄███████▀
+        ▄████████▀
+      ▄██████▀
+       ▀▀▀▀
+
+  F O R G E D O C K
+  ──── An AI engineering team that ships to production ────────────────────
+
+  ✔ Node              <ver>
+  ✔ git               <ver>
+  ✖ Claude Code       <path> not found
+╭───────────────────────── fix ─────────────────────────╮
+│  Install Claude Code: https://claude.com/claude-code  │
+╰───────────────────────────────────────────────────────╯
+
+  ✖ GitHub CLI        not found
+╭───────────────── fix ─────────────────╮
+│  Install gh: https://cli.github.com/  │
+╰───────────────────────────────────────╯
+
+  ✖ yq                not found
+╭───────────────────────────────────────── fix ─────────────────────────────────────────╮
+│  Install yq (mikefarah, not the python one): https://github.com/mikefarah/yq#install  │
+╰───────────────────────────────────────────────────────────────────────────────────────╯
+
+  ✔ Platform          Linux (WSL) (unknown)
+  ✔ WSL               detected
+  ✔ Shell             unknown
+
+  Not ready yet: 3 things to install
+
+  1. Claude Code — <path> not found
+       Install Claude Code: https://claude.com/claude-code
+  2. GitHub CLI — not found
+       Install gh: https://cli.github.com/
+  3. yq — not found
+       Install yq (mikefarah, not the python one): https://github.com/mikefarah/yq#install
+
+  Re-run `npx forgedock` when done.

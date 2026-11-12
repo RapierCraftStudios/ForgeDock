@@ -21,7 +21,7 @@ import { makeLedger, ledgerRoot as defaultLedgerRoot, LEDGER_TTL_MS } from "./le
 import { makeRunTmp, procsInDir, killLedgerPid } from "./lean/effects.mjs";
 import { readBranches } from "./lean/lane.mjs";
 import { makeDepCache } from "./lean/depcache.mjs";
-import { parseExecution, remoteTransportFor } from "./lean/execution.mjs";
+import { parseExecution, remoteTransportFor, poolRouterConfig } from "./lean/execution.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 
 const pexec = promisify(execFile);
@@ -279,6 +279,27 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
     }
   }
 
+  // ---- 1b. pool sandboxes (#5422): classify stale entries against the router's live list, failing closed ----
+  // Same rule as #5496's compose containers: anything tied to a live lane (a live ledger, here by issue) is kept.
+  const poolItems = items.filter((i) => i.type === "sandbox" && i.provider === "pool" && i.action === "reclaim");
+  if (poolItems.length) {
+    let live = null, why = "", diskMb = new Map();
+    try {
+      const l = await (P.poolInventory ?? (() => remoteTransport(P, true)?.inventory?.()))();
+      if (Array.isArray(l)) live = new Map(l.map((x) => [String(x?.id ?? x), x?.issue ?? null])), diskMb = new Map(l.map((x) => [String(x?.id ?? x), x?.disk_used_mb ?? null]));
+      else why = "no inventory from the pool router";
+    } catch (e) { why = errText(e); }
+    if (!live) notes.push(`pool live sandbox list unavailable: ${why}; pool sandboxes left as report`);
+    for (const it of poolItems) {
+      it.diskUsedMb = diskMb.get(it.id) ?? null; // #5535: null = the agent did not report it (printed as unknown)
+      if (!live) { it.action = "report"; it.reason = "pool live list unavailable (cannot verify)"; continue; }
+      if (!live.has(it.id)) { it.gone = true; it.reason += ", already gone at the pool router"; continue; }
+      const issue = String(live.get(it.id) ?? it.handle?.issue ?? "");
+      if (issue && liveLaneIssues.has(issue)) { it.action = "report"; it.reason = `live lane (issue ${issue} has a live ledger)`; }
+      else it.reason += ", orphaned at the pool router";
+    }
+  }
+
   // ---- 2. docker: labelled forgedock.owner=1 is owned; everything else is "not owned" ----
   if (want("container") || want("volume")) {
     let psOut = null, psErr = null;
@@ -494,11 +515,18 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
  * forge.yaml `execution` of the checkout and its remote transport (#4254): `P.sandboxTransport` when injected, else the
  * HTTP transport with the credential from the env or keychain. null when unconfigured or refused (never throws).
  */
-const remoteTransport = (P) => {
+const remoteTransport = (P, pool = false) => {
   if (P.sandboxTransport) return P.sandboxTransport;
   try {
-    const sec = parseForgeYaml(nodeFs.readFileSync(join(P.cwd, "forge.yaml"), "utf8"))?.execution;
-    return remoteTransportFor(parseExecution(sec && typeof sec === "object" ? sec : {}), { env: P.env ?? process.env });
+    const env = P.env ?? process.env;
+    let sec; try { sec = parseForgeYaml(nodeFs.readFileSync(join(P.cwd, "forge.yaml"), "utf8"))?.execution; } catch { sec = undefined; }
+    const exec = parseExecution(sec && typeof sec === "object" ? sec : {});
+    // #5422: `pool` is `remote` with the endpoint and token defaulted to the local router (execution.mjs providerByName).
+    if (pool) {
+      const endpoint = exec.endpoint ?? poolRouterConfig({ env })?.endpoint;
+      return endpoint ? remoteTransportFor({ ...exec, provider: "pool", endpoint }, { env }) : null;
+    }
+    return remoteTransportFor(exec, { env });
   } catch { return null; }
 };
 
@@ -506,6 +534,7 @@ const remoteTransport = (P) => {
 const SANDBOX_TEARDOWN = {
   container: async (P, h) => { try { await P.docker(["rm", "-f", h.id]); return true; } catch (e) { return /no such container/i.test(errText(e)); } },
   local: async () => true,
+  pool: async (P, h) => { const t = remoteTransport(P, true); if (!t) return false; try { return (await t.destroy(h.id)) !== false; } catch { return false; } }, // #5422: 404 = gone = reclaimed (httpTransport.destroy)
   remote: async (P, h) => { const t = remoteTransport(P); if (!t) return false; try { return (await t.destroy(h.id)) !== false; } catch { return false; } },
 };
 const defaultSandboxTeardown = (P) => async (provider, handle) => (SANDBOX_TEARDOWN[provider] ? SANDBOX_TEARDOWN[provider](P, handle) : false);
@@ -531,7 +560,7 @@ export async function applyGc(plan, probes, { deadline = null, now = () => Date.
       switch (it.type) {
         case "container": await P.docker(["rm", "-f", it.id]); break;
         case "volume": await P.docker(["volume", "rm", it.id]); break;
-        case "sandbox": if (!(await (P.sandboxTeardown ?? defaultSandboxTeardown(P))(it.provider, it.handle))) throw new Error("sandbox teardown failed"); break;
+        case "sandbox": if (!it.gone && !(await (P.sandboxTeardown ?? defaultSandboxTeardown(P))(it.provider, it.handle))) throw new Error("sandbox teardown failed"); break;
         case "process": if (P.alive(Number(it.id)) && !(await P.killPid(Number(it.id), it.marker))) throw new Error("kill refused"); break;
         case "tmp":
           if (!isInside(P.forgeTmpRoot, it.id)) throw new Error("outside ForgeDock tmp");
@@ -599,7 +628,8 @@ export function formatGcReport(plan, { applied = null } = {}) {
   }
   for (const it of plan.items) {
     const tag = !it.owned ? "not owned" : it.action === "reclaim" ? (applied ? (applied.failed.some((f) => f.type === it.type && f.id === it.id) ? "FAILED" : "reclaimed") : "reclaim") : "report";
-    L.push(`  ${tag.padEnd(9)} ${it.type.padEnd(9)} ${fmtSize(it.sizeBytes).padStart(7)} ${fmtAge(it.ageMs).padStart(5)}  ${it.id}  (${it.reason})`);
+    const size = it.provider === "pool" ? (Number.isFinite(it.diskUsedMb) ? fmtSize(it.diskUsedMb * 1048576) : "unknown") : fmtSize(it.sizeBytes); // #5535
+    L.push(`  ${tag.padEnd(9)} ${it.type.padEnd(9)} ${size.padStart(7)} ${fmtAge(it.ageMs).padStart(5)}  ${it.id}  (${it.reason})`);
   }
   for (const n of plan.notes) L.push(`  note: ${n}`);
   for (const f of applied?.failed ?? []) L.push(`  failed: ${f.type} ${f.id}: ${f.error}`);
@@ -668,4 +698,11 @@ export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygi
   let detail = bits.join("; ");
   if (!applied && reclaimable > 0) detail += ". Run: npx forgedock doctor --fix  (or: npx forgedock gc --apply)";
   return { status, detail, reclaimable, stale, lowDisk: low, ownedBytes };
+}
+
+/** #5535: doctor's pool agent disk lines. `agents` is [{name, disk_free_gb|null}]; warns when any is below minFreeGb (> 0). */
+export function poolDiskCheck(agents, minFreeGb) {
+  const low = (a) => Number.isFinite(a.disk_free_gb) && Number.isFinite(minFreeGb) && minFreeGb > 0 && a.disk_free_gb < minFreeGb;
+  const detail = agents.map((a) => `${a.name} ${Number.isFinite(a.disk_free_gb) ? `${a.disk_free_gb.toFixed(1)} GB free${low(a) ? ` < ${minFreeGb} GB (hygiene.min_free_gb)` : ""}` : "free disk unknown"}`).join("; ");
+  return { status: agents.some(low) ? "warn" : "pass", detail: detail || "no pool agents" };
 }

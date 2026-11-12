@@ -11,7 +11,9 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { emptyCache, loadCache, saveCache } from "./cache.mjs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { cacheDir, emptyCache, loadCache, saveCache } from "./cache.mjs";
 import { unflattenPhases } from "../lean/phaseledger.mjs";
 
 export const MARKER_RE = /^<!-- FORGE:TELEMETRY v1( part=(\d+))? -->/;
@@ -20,10 +22,38 @@ export const isValidRepo = (r) => typeof r === "string" && OWNER_REPO_RE.test(r)
 
 const execFileAsync = promisify(execFile);
 
-/** Async `gh` runner (concurrency needs it). A test stub may stay synchronous: every call site awaits the result. */
+const GH_TRIES = 4;
+const WRITE_FLAGS = new Set(["-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"]);
+/** True for a gh invocation that only reads (#5530): safe to repeat. Writes (comments, edits, -X/-f calls) never are. */
+export function isReadOnlyGh(args = []) {
+  const [a, b] = args;
+  if (a === "api") {
+    if (b === "graphql") { const q = args.find((x) => typeof x === "string" && x.startsWith("query=")); return Boolean(q) && !/^query=\s*mutation\b/.test(q); }
+    return !args.some((x) => WRITE_FLAGS.has(x) || /^(--method=|-X.)/.test(String(x)));
+  }
+  return a === "search" || b === "list" || b === "view";
+}
+const TRANSIENT_RE = /HTTP 5\d\d|\b50[234]\b|bad gateway|gateway time|timed? ?out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|secondary rate limit|abuse/i;
+/** A 5xx, timeout, connection reset or secondary rate limit (#5530). Reads stderr when present: the message embeds the argv. */
+export const isTransientGhError = (err) => Boolean(err?.killed) || TRANSIENT_RE.test(err?.stderr ? String(err.stderr) : String(err?.message ?? err));
+
+/**
+ * Async `gh` runner (concurrency needs it). A test stub may stay synchronous: every call site awaits the result.
+ * #5530: a read-only call that fails transiently is retried up to GH_TRIES times with exponential backoff (base
+ * FORGE_STATS_GH_RETRY_MS, default 1000 ms, doubling); any other failure, and every write, is thrown at once.
+ */
 export async function defaultGh(args) {
-  const { stdout } = await execFileAsync("gh", args, { encoding: "utf8", timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
-  return stdout;
+  const tries = isReadOnlyGh(args) ? GH_TRIES : 1;
+  for (let i = 1; ; i++) {
+    try {
+      const { stdout } = await execFileAsync("gh", args, { encoding: "utf8", timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
+      return stdout;
+    } catch (err) {
+      if (i >= tries || !isTransientGhError(err)) throw err;
+      const base = Number(process.env.FORGE_STATS_GH_RETRY_MS ?? 1000);
+      await new Promise((r) => setTimeout(r, (Number.isFinite(base) && base >= 0 ? base : 1000) * 2 ** (i - 1)));
+    }
+  }
 }
 
 /** `gh api --paginate` prints one JSON array per page; join them into one flat array. */
@@ -238,23 +268,126 @@ async function scanWindowComments(call, repo, from, env, onPage) {
 
 /**
  * Targeted crawl (#5363): only the given issue/PR numbers are read (metadata plus all comments), with no repo-wide comments
- * scan and no issue listing. Coverage is partial, so the cache is neither read nor written (its watermark would lie).
+ * scan and no issue listing. Coverage is partial, so cache.json is neither read nor written (its watermark would lie);
+ * #5530: numbers are read in GraphQL batches and kept in a per-number cache (numbers.json) keyed by updatedAt instead.
  */
-async function fetchNumbers({ repo, numbers, gh, env, onProgress, concurrency, now }) {
+async function fetchNumbers({ repo, numbers, gh, env, onProgress, now, useCache = false, refresh = false }) {
   const list = [...new Set(numbers.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
-  const items = [], t0 = now();
+  const byNumber = new Map(), t0 = now();
   let apiCalls = 0, done = 0;
+  const call = async (args) => { apiCalls++; return gh(args); };
   const eta = () => (done > 0 && done < list.length ? Math.round(((now() - t0) / done) * (list.length - done)) : 0);
-  await pool(list, concurrency, async (n) => {
-    const [it] = parsePages(await gh(["api", `repos/${repo}/issues/${n}`]));
-    const records = parseTelemetryComments(parsePages(await gh(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])), env);
-    apiCalls += 2;
-    if (it && Number.isInteger(it.number)) items.push({ ...meta(it), records });
-    onProgress({ phase: "telemetry", done: ++done, total: list.length, etaMs: eta() });
+  const tick = () => onProgress({ phase: "telemetry", done: ++done, total: list.length, etaMs: eta() });
+  // #5530: per-number cache keyed by updatedAt (no watermark, so a partial crawl cannot under-report). Only closed items are
+  // reused: a telemetry comment edited in place does not bump updatedAt, and edits happen while the lane is still open.
+  const cache = useCache && !refresh ? loadNumbersCache(repo, env) : { v: NUMBERS_CACHE_V, items: {} };
+  let todo = list;
+  if (useCache && !refresh && list.some((n) => cache.items[n])) {
+    const fresh = await updatedAtOf(call, repo, list);
+    todo = list.filter((n) => {
+      const c = cache.items[n];
+      if (!c || !c.item?.closedAt || fresh.get(n) == null || c.updatedAt !== fresh.get(n)) return true;
+      byNumber.set(n, { ...c.item, records: c.records });
+      tick();
+      return false;
+    });
+  }
+  const fetched = new Map();
+  const batches = [];
+  for (let i = 0; i < todo.length; i += GQL_BATCH) batches.push(todo.slice(i, i + GQL_BATCH));
+  await pool(batches, GQL_CONCURRENCY, async (batch) => {
+    for (const { n, item, records } of await fetchBatch(call, repo, batch, env)) {
+      if (item) { byNumber.set(n, { ...item, records }); fetched.set(n, { updatedAt: item.updatedAt, item, records }); }
+      tick();
+    }
   });
+  if (useCache) {
+    for (const [n, e] of fetched) cache.items[n] = e;
+    saveNumbersCache(repo, env, cache);
+  }
+  const items = list.filter((n) => byNumber.has(n)).map((n) => byNumber.get(n));
   const seen = new Set(), records = [];
   for (const it of items) for (const r of it.records) if (!seen.has(r.eid)) { seen.add(r.eid); records.push(r); }
   return { items, records, fetched: list.length, fromCache: false, apiCalls, coveredFrom: null };
+}
+
+const GQL_BATCH = 20;
+const GQL_MIN_BATCH = 5;
+const GQL_CONCURRENCY = 4;
+const GQL_LIGHT_BATCH = 100;
+const NUMBERS_CACHE_V = 1;
+const ITEM_FIELDS = "number createdAt closedAt updatedAt milestone { title } labels(first: 50) { nodes { name } } author { __typename login } "
+  + "comments(first: 100) { pageInfo { hasNextPage } nodes { body authorAssociation author { __typename login } } }";
+const ownerName = (repo) => { const [owner, name] = repo.split("/"); return ["-f", `owner=${owner}`, "-f", `name=${name}`]; };
+const gqlQuery = (nums, fields) => `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${
+  nums.map((n) => `i${n}: issueOrPullRequest(number: ${n}) { __typename ... on Issue { ${fields} } ... on PullRequest { ${fields} } }`).join(" ")} } }`;
+
+/** gh exits non-zero when any alias is NOT_FOUND but still prints the data for the rest: keep it, as the REST path skipped a missing item's peers. */
+async function gql(call, repo, nums, fields) {
+  let raw;
+  try { raw = await call(["api", "graphql", "-f", `query=${gqlQuery(nums, fields)}`, ...ownerName(repo)]); } catch (err) {
+    let partial = null;
+    try { partial = JSON.parse(String(err?.stdout ?? "")); } catch { /* none */ }
+    if (!partial?.data?.repository) throw err;
+    raw = err.stdout;
+  }
+  const data = typeof raw === "string" ? JSON.parse(raw.trim() || "{}") : raw;
+  if (!data?.data?.repository) throw new Error(`GraphQL: ${(data?.errors ?? []).map((e) => e?.message).join("; ") || "no repository in response"}`);
+  return data.data.repository;
+}
+
+/** A GraphQL issue/PR node in the REST shapes meta(), parseTelemetryComments() and isTrusted() read. */
+export function restOfNode(node) {
+  const user = (a) => ({ type: a?.__typename ?? null, login: a?.login ?? null });
+  return {
+    item: { number: node.number, ...(node.__typename === "PullRequest" ? { pull_request: {} } : {}), created_at: node.createdAt ?? null, closed_at: node.closedAt ?? null,
+      updated_at: node.updatedAt ?? null, milestone: node.milestone ?? null, labels: (node.labels?.nodes ?? []).map((l) => ({ name: l?.name })), user: user(node.author) },
+    comments: (node.comments?.nodes ?? []).map((c) => ({ body: c?.body ?? "", author_association: c?.authorAssociation ?? null, user: user(c?.author) })),
+    moreComments: Boolean(node.comments?.pageInfo?.hasNextPage),
+  };
+}
+
+/** One batch of numbers -> [{n, item, records}]; a transient failure that survives gh's retries halves the batch (down to GQL_MIN_BATCH). */
+async function fetchBatch(call, repo, nums, env) {
+  let repoData;
+  try { repoData = await gql(call, repo, nums, ITEM_FIELDS); } catch (err) {
+    if (nums.length <= GQL_MIN_BATCH || !isTransientGhError(err)) throw err;
+    const half = Math.ceil(nums.length / 2);
+    return [...await fetchBatch(call, repo, nums.slice(0, half), env), ...await fetchBatch(call, repo, nums.slice(half), env)];
+  }
+  const out = [];
+  for (const n of nums) {
+    const node = repoData[`i${n}`];
+    if (!node || !Number.isInteger(node.number)) { out.push({ n, item: null, records: [] }); continue; }
+    const { item, comments, moreComments } = restOfNode(node);
+    const all = moreComments ? parsePages(await call(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])) : comments;
+    out.push({ n, item: meta(item), records: parseTelemetryComments(all, env) });
+  }
+  return out;
+}
+
+/** Map number -> updatedAt in one light GraphQL call per GQL_LIGHT_BATCH numbers. */
+async function updatedAtOf(call, repo, list) {
+  const out = new Map();
+  for (let i = 0; i < list.length; i += GQL_LIGHT_BATCH) {
+    const nums = list.slice(i, i + GQL_LIGHT_BATCH), data = await gql(call, repo, nums, "updatedAt");
+    for (const n of nums) if (data[`i${n}`]?.updatedAt) out.set(n, data[`i${n}`].updatedAt);
+  }
+  return out;
+}
+
+const numbersCachePath = (repo, env) => join(cacheDir(repo, env), "numbers.json");
+function loadNumbersCache(repo, env) {
+  try { const c = JSON.parse(readFileSync(numbersCachePath(repo, env), "utf8")); if (c?.v === NUMBERS_CACHE_V && c.items && typeof c.items === "object") return c; } catch { /* refetch */ }
+  return { v: NUMBERS_CACHE_V, items: {} };
+}
+function saveNumbersCache(repo, env, c) {
+  try {
+    mkdirSync(cacheDir(repo, env), { recursive: true });
+    const tmp = `${numbersCachePath(repo, env)}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(c));
+    renameSync(tmp, numbersCachePath(repo, env));
+  } catch { /* a cache never fails the report */ }
 }
 
 /**
@@ -269,7 +402,7 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
   onProgress = () => {}, concurrency = DEFAULT_CONCURRENCY, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now,
   rateCheck = gh === defaultGh, numbers = null } = {}) {
   if (!isValidRepo(repo)) throw new Error(`invalid repo: ${repo}`);
-  if (Array.isArray(numbers)) return fetchNumbers({ repo, numbers, gh, env, onProgress, concurrency, now });
+  if (Array.isArray(numbers)) return fetchNumbers({ repo, numbers, gh, env, onProgress, now, useCache, refresh });
   const cache = useCache && !refresh ? loadCache(repo, env) : emptyCache();
   const start = since ?? null;
   const hasCover = cache.watermark != null;

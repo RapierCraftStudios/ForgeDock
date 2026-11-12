@@ -47,6 +47,7 @@ export function isActionsEndpoint(endpoint) {
  * (`token` is a string, or a function called per request, #5144).
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
  * Optional `POST /sandboxes/:id/stop` (#4612) asks the pool to SIGTERM the lane so its teardown checkpoints and it reports `deferred run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (never a DELETE fallback).
+ * `GET /agents -> {sandboxes}` is the router's live sandbox list (#5422, `inventory()`; malformed or any error throws).
  * Optional relay (#4778): `GET /sandboxes/:id/relay -> {requests: [{rid, argv}]}` lists a sandbox's pending read-only capability
  * requests (404/405 or malformed = none, an older router) and `POST /sandboxes/:id/relay/:rid` `{rc, stdout, stderr}` answers one.
  * Optional `GET /status -> {free: N, online?, total?}` is the pool's free slots (#4540); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
@@ -94,6 +95,21 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
+    /** #5422: the sandboxes the router knows (`GET /agents` -> `sandboxes`, id -> {agent, issue, batch}) as [{id, issue}]. Anything but a well-formed answer throws: an unknown list is never an empty one. */
+    async inventory() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("inventory", r);
+      const m = r.data?.sandboxes;
+      if (!m || typeof m !== "object" || Array.isArray(m)) throw new Error("sandbox inventory: malformed router answer");
+      return Object.entries(m).map(([id, x]) => ({ id, issue: x?.issue ?? null, disk_used_mb: Number.isFinite(x?.disk_used_mb) ? x.disk_used_mb : null })); // #5535: null = old agent
+    },
+    /** #5535: each pool agent's free disk from `GET /agents` -> `agents[]` as [{name, disk_free_gb|null}]; a bad answer throws. */
+    async agentDisk() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("agent disk", r);
+      if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
+      return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
+    },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
     async capacity() {

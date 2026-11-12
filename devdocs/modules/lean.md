@@ -1029,7 +1029,12 @@ retried after Retry-After or 60s and capped by `max_deferrals`, forge#5095) inst
 log tail shows a usage limit ends `deferred` `rate_limited` with the reset time, not engine-error (#5095). It tears down after the result is
 in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
-in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
+in tests). `SANDBOX_TEARDOWN.pool` (#5422) does the same through the pool router (endpoint
+`execution.endpoint` or the local router config, token as `provider: pool`); a stale pool entry is first
+classified against the router's live list (`GET /agents` `sandboxes`, probe `poolInventory`): listed =
+orphaned (destroyed), unlisted = already gone (ledger released, no call), a list that cannot be fetched
+= report (fail closed), and an entry whose issue has a live ledger is kept (as #5496). Contract suite:
+`sandbox-provider.contract.test.mjs` (container over a
 fake docker, remote over a fake transport). Rationale:
 `devdocs/decisions/4254-remote-sandbox-provider.md`.
 
@@ -2954,7 +2959,7 @@ trigger configured the skip is a trajectory decision; on a `review.risk_paths` h
 
 ## Entry 2026-11-10 — New-user journey selftest (#5305)
 
-`selftest-journey.mjs` (`forgedock selftest --journey`, routed from `selftestFromCli`) runs stage 1 (packed tarball via `npx --package`, in Docker or a node+git-only PATH; cases banner, help, doctor, unknown command; assertions for false success wording, doctor exit and wording, jargon errors, placeholder `forge.yaml` values; scrubbed output compared with `bin/tests/fixtures/journey-snapshots`) and stage 2 (sandbox repo: `demo`, `doctor`, `demo --run` to a merged PR; records time to first merge and prompts; always cleans up; skipped when gh or claude is unavailable). All process access goes through `io`. `selftest-gate.mjs` adds the separate `FORGE:JOURNEY` marker, posted with `--pr`; `review-staging` does not read it, so it never replaces the `FORGE:SELFTEST` gate result. Snapshots are regenerated with `--update-snapshots`. Docs: `docs/SELFTEST.md`.
+`selftest-journey.mjs` (`forgedock selftest --journey`, routed from `selftestFromCli`) runs stage 1 (packed tarball via `npx --package`, in Docker or a node+git-only PATH; cases banner, help, doctor, unknown command, `--no-splash` setup; assertions for false success wording, the `forgedock-splash` lines (#5532: skip line when setup completes without claude, `--no-splash` skip, no install, doctor `Startup splash  not installed`), doctor exit and wording, jargon errors, placeholder `forge.yaml` values; scrubbed output compared with `bin/tests/fixtures/journey-snapshots`) and stage 2 (sandbox repo: setup under a throwaway HOME asserts `forgedock-splash` enabled at user scope in `settings.json` and doctor reporting `installed`, plus a `--no-splash` setup that installs nothing; `demo`, `doctor`, `demo --run` to a merged PR; records time to first merge and prompts; always cleans up; skipped when gh or claude is unavailable). All process access goes through `io`. `selftest-gate.mjs` adds the separate `FORGE:JOURNEY` marker, posted with `--pr`; `review-staging` does not read it, so it never replaces the `FORGE:SELFTEST` gate result. Snapshots are regenerated with `--update-snapshots`. Docs: `docs/SELFTEST.md`.
 Cite: #5305.
 
 ## Entry 2026-11-10 — production parity beyond ingress (#5284)
@@ -3172,6 +3177,10 @@ R3/R5/R7 follow-up (#5450): image sandboxes join a per-lane network `forge-sbx-<
 ### Hold honoured at recovery and launch (#5526)
 
 `orchestrate.mjs` re-reads the operator hold (`refreshHeld`) in the lane-finish path and just before `runOne`: a held issue's `needs-human`/`ci-pending`/`budget-exceeded` outcome starts no recovery lane (a `decision` row says why), and an issue held since the pass read goes back to pending with no lane. A hold that arrives while the lane runs does not stop it; it is reported as a `hold` row `#N held after launch: lane still running`. `--hold` on an already-held issue prints `batch X: already held #N` (not `held (none)`); `schedd.mjs`'s hold/release reply carries `held: b.readHeld()` for it.
+
+### Pool disk reporting (#5535)
+
+`sandbox-remote.mjs` `inventory()` rows gain `disk_used_mb` (null when the agent did not report it), and `agentDisk()` reads `GET /agents` `agents[]` as `[{name, disk_free_gb|null}]` (a non-array answer throws; the inventory fail-closed rule for a malformed list is unchanged). The fields come from `bin/pool/agent.mjs` (`disk_free_gb`, `sandbox_disk_mb`, walked at most every 60s) merged by the router. `gc.mjs` prints the disk used per pool entry (`unknown` when absent, never a failure); `poolDiskCheck` backs doctor's "Pool disk" line, warning below `hygiene.min_free_gb`.
 
 ## Entry 2026-11-12 — UI lane quality rules, design routing and the visual gate (#5330, #5369)
 
