@@ -10,11 +10,12 @@
  */
 import { hostname } from "node:os";
 import { readActive, readLedger, updateActive } from "./release-ledger.mjs";
+import { UNSKIPPABLE, isUnskippable, parseFlakeConfig, canQuarantine } from "./release-flakes.mjs";
 
 export const CONTROL_SCHEMA = "forgedock.release.control/v1";
 export const CONTROL_MARKER = "FORGE:CONTROL";
 export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze"];
-export const UNSKIPPABLE = ["migration", "security", "rollback", "backup-restore", "secrets"];
+export { UNSKIPPABLE };
 export const EXEMPT_MAX_H = { skip: 24, quarantine: 14 * 24 };
 export const LANES = ["train", "release", "p0", "exclude"];
 const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze"];
@@ -24,6 +25,13 @@ const BREAK_GLASS = /^(override_freeze|acknowledge_hotfix_revert|override_.*|ack
 export function buildDispatchArgs({ workflow, repo, ref, inputs = {} }) {
   for (const k of Object.keys(inputs)) if (BREAK_GLASS.test(k)) throw new Error(`dispatch input ${k} is a human break-glass input; the engine never sets it (I26)`);
   return ["workflow", "run", workflow, "--repo", repo, "--ref", ref, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])];
+}
+
+/** The release-PR-body section listing live exemptions (I20: a demoted check appears in the PR body); "" when none. */
+export function exemptionsSection(exemptions, now = Date.now()) {
+  const live = Object.entries(exemptions ?? {}).filter(([, e]) => e?.until && Date.parse(e.until) > now);
+  if (!live.length) return "";
+  return `\n\n<!-- FORGE:EXEMPT -->\n### Exempted checks\n${live.map(([c, e]) => `- \`${c}\` (${e.mode}) until ${e.until}, issue #${e.issue}, by ${e.actor}: ${e.reason}`).join("\n")}\n`;
 }
 
 /** Why release `id` must not act (held or cancelled), else null. Throws when `_active` cannot be read (callers refuse, I5). */
@@ -88,12 +96,23 @@ export async function runControl(verb, argv, ctx) {
     if (!/^#?\d+$/.test(issue ?? "")) return fail("exempt: --issue N is required");
     if (hours == null) return fail("exempt: --until <Nh|Nd> is required");
     if (hours > EXEMPT_MAX_H[mode]) return fail(`exempt: ${mode} expires in at most ${EXEMPT_MAX_H[mode]}h (got ${hours}h)`);
-    const blocked = [...UNSKIPPABLE, ...(policy?.ci?.unskippable ?? [])];
-    if (blocked.some((c) => check === c || check.startsWith(`${c}:`) || check.startsWith(`${c}/`))) return fail(`exempt: ${check} is an unskippable class (${blocked.join(", ")}) (I20)`);
+    const cfg = parseFlakeConfig(policy);
+    if (isUnskippable(check, cfg.unskippable)) return fail(`exempt: ${check} is an unskippable class (${cfg.unskippable.join(", ")}) (I20)`);
     const trusted = policy?.trust?.actors ?? [];
     if (trusted.length && !trusted.includes(actor)) return fail(`exempt: actor ${actor} is not trusted (policy trust.actors)`);
-    const entry = { mode, issue: String(issue).replace("#", ""), reason, actor, at, until: new Date((ctx.now ?? Date.now()) + hours * 3_600_000).toISOString() };
-    apply = (a) => ({ patch: { exemptions: { ...(a.exemptions ?? {}), [check]: entry } }, before: a.exemptions?.[check] ?? null, after: entry });
+    const num = String(issue).replace("#", "");
+    let iv = null;
+    try { iv = JSON.parse(String(await io.gh(["issue", "view", num, "--repo", repo, "--json", "number,state,labels"]))); } catch { /* unreadable: refused below */ }
+    if (!iv || String(iv.number) !== num) return fail(`exempt: issue #${num} does not exist or is unreadable`);
+    const nowMs = ctx.now ?? Date.now(), labels = (iv.labels ?? []).map((l) => l.name ?? l);
+    const entry = { mode, issue: num, reason, actor, at, until: new Date(nowMs + hours * 3_600_000).toISOString() };
+    apply = (a) => {
+      if (mode === "quarantine") {
+        const q = canQuarantine({ target: check, exemptions: a.exemptions, issueLabels: labels, issueOpen: String(iv.state).toUpperCase() === "OPEN", cfg, now: nowMs });
+        if (!q.ok) return { refuse: `exempt: ${q.why}` };
+      }
+      return { patch: { exemptions: { ...(a.exemptions ?? {}), [check]: entry } }, before: a.exemptions?.[check] ?? null, after: entry };
+    };
   } else { // freeze | unfreeze: the repo's own deploy variable (6.4), not a second mechanism
     const name = policy?.deploy?.freeze_variable;
     if (!name) return fail(`${verb}: policy deploy.freeze_variable is not set`);
@@ -103,6 +122,7 @@ export async function runControl(verb, argv, ctx) {
   let line;
   const r = await updateActive(lctx, OWNED, (a) => {
     const o = apply(a);
+    if (o.refuse) return { refuse: o.refuse };
     after = o.after;
     line = { at, actor, host, verb, reason, before: o.before ?? null, after: o.after ?? null, epoch: a.epoch ?? null };
     return { patch: o.patch, control: line };
