@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { createReleaseLedger, writeRelease, readLedger, updateActive, acquireLease, heartbeat, acceptWrite, redactDeep, ACTIVE, ACTIVE_RETRIES } from "./release-ledger.mjs";
-import { runRelease, withStubs } from "./release.mjs";
+import { runRelease, withStubs, RELEASE_STEPS } from "./release.mjs";
 
 const REPO = "o/r", ID = "r20261112-101500-42", DISK = [{ mount: "/", type: "ext4" }];
 const err = (status, m) => Object.assign(new Error(m ?? `HTTP ${status}`), { status });
@@ -208,5 +208,19 @@ describe("release fencing through the job (#5553)", () => {
     const out = await go(mkIo(g, "hostA", calls), null, tmpDir("fk2-")); // same host or another: the PR is observed MERGED
     assert.equal(out.status, "done");
     assert.equal(calls.length, 1);
+  });
+  it("kill -9 at every step boundary: the resumed run repeats no completed step and merges exactly once", async () => {
+    for (const dieAt of RELEASE_STEPS) {
+      const g = fakeGh(), calls = [], ran = [];
+      const track = (name, fn) => async (...a) => { if (name === dieAt && !ran.includes(`die:${name}`)) { ran.push(`die:${name}`); throw new Error("kill -9"); } ran.push(name); return fn(...a); };
+      const base = { preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok };
+      const wrapped = withStubs(Object.fromEntries(Object.entries(withStubs(base)).map(([k, fn]) => [k, track(k, fn)])));
+      await assert.rejects(() => go(mkIo(g, "hostA", calls), wrapped, tmpDir("fe1-")), /kill -9/, dieAt);
+      const out = await go(mkIo(g, "hostB", calls), wrapped, tmpDir("fe2-")); // another host, empty disk
+      assert.equal(out.status, "done", dieAt);
+      assert.equal(calls.length, 1, `${dieAt}: one merge`);
+      const done = ran.filter((r) => !r.startsWith("die:") && !["host-preflight", "mark-ready", "rehearsal"].includes(r)); // unconfigured steps leave no trace and may re-run
+      assert.equal(new Set(done).size, done.length, `${dieAt}: no step ran twice (${done})`);
+    }
   });
 });
