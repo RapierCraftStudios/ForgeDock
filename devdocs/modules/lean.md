@@ -3083,6 +3083,10 @@ path is authorized (#5380).
 - **Lane.** `pagegate.mjs` `pageFailures` beside `docsFailures`; `precheck` blocks `page_*` rows (design spec, 390/1440 screenshots, metadata, canonical, structured data, sitemap, forbidden patterns, links, lint). 0 LLM calls.
 - **Review.** `design` and `seo-geo` domains (`pathDomains(files, {pages})`, `DOMAIN_CHECKS`); `/review-pr-staging` Phase 1H blocks. GSC baseline capture is owner work.
 
+## Entry 2026-11-12 — page gate exclusions (#5585)
+
+`pagegate.mjs`: forge.yaml `pages.exclude` globs and noindex pages (`robots: { index: false }` / `noindex` in the page or an ancestor `layout.*`, detected only when a `readFile` is passed: `validateContract` option and `pageFailures`) are no longer public pages; `pages.design_only` globs (`designOnlyFiles`) skip SEO/GEO but keep `design_spec` and the 390/1440 screenshots. `pageFiles(files, cfg, {readFile})`; `review-trigger.mjs` stays path-only. Cost: 0 LLM calls.
+
 ## Entry 2026-11-11 — issue-watch batch intake cap, slow batch start and pass errors (#5425)
 
 `issuewatch.mjs`: in `mode: batch` `max_inflight` defaults to `parallel` (others 4). `tick` first `--add`s claims to a running batch of the same repo and lane (`io.batch.running`: plan.json repo and `--lane`, state.json present, no report.json or cancel), else `io.batch.start`; a throwing start (real io attaches `before`, the batch ids seen) no longer escapes: claims stay and `state.pendingStart {issues, at, before, error}` holds new claims while later passes adopt the batch via `io.batch.find(before)`, or after `PENDING_START_MS` (10 min) `releaseClaims` drops them from the registry. `runWatch` wraps each pass in try/catch: `state.passError` is saved to `status.json`, logged, shown by `formatStatus`, and the loop continues (`--once` rethrows after saving). Tests: `issuewatch.test.mjs` "#5425" (6). Cost: 0 LLM calls.
