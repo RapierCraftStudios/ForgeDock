@@ -641,6 +641,8 @@ resolves; no pin, no shim or a failed toolchain step means the host PATH); `forg
 
 `depcache.mjs` `linkOrCopy` (#4909) copies a file when the hardlink fails with EXDEV, so a cache on another filesystem is still a `hit`. `capwait.mjs` holds a lane refused for capacity (`sandbox.capacity`) until the pool reports `free > 0` and banks the wait as `waits.queue`.
 
+`depcache.mjs` `linkTree` (#5574) copies, rather than hardlinks, the package-manager state the repair pass rewrites in place (`.modules.yaml`, `.pnpm-workspace-state*.json`, `.package-lock.json`, `.yarn-state.yml` directly under a `node_modules`, and `.pnpm/lock.yaml`) with the owner-write bit set, so pnpm's offline repair no longer fails with EACCES and falls back to a fresh install. The snapshot inode stays read-only and package files stay hardlinks.
+
 Warm sandboxes (#4912, default off): `execution.warm_sandboxes` N adds `warm: N` to the remote launch spec, and `sandbox-remote.mjs` tries `transport.claim` (`POST /sandboxes/claim`) before `launch`, falling back cold on none, error or a transport without `claim`. The pool agent side is `bin/pool/warm.mjs` (wired in `agent.mjs`; router `claim` forwards): N prepared sandboxes per repo, a claim file in `/claim` hands over the lane, `pool/image/warm-refresh.sh` fetches the lane's ref incrementally. See `decisions/4912-warm-sandbox-pool.md`.
 
 ## FORGE:STATE lease
