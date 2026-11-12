@@ -77,7 +77,9 @@ const VISUAL = /<(?:img|svg|video|picture|canvas|iframe|Image|Lottie)\b|bg-(?:gr
 
 /** Findings [{id, severity: "block"|"warn", detail}] for one page's markup/JSX source. Heuristic floor; the rendered critique is the vision judge. */
 export function critiqueMarkup(src) {
-  const code = String(src ?? "").replace(/\{\/\*[\s\S]*?\*\/\}|<!--[\s\S]*?-->/g, "");
+  // Comments are stripped for analysis only (never emitted); repeat until stable so nested/overlapping markers leave nothing behind.
+  let code = String(src ?? ""), prev;
+  do { prev = code; code = code.replace(/\{\/\*[\s\S]*?\*\/\}|<!--[\s\S]*?-->/g, ""); } while (code !== prev);
   const out = [];
   let empties = 0;
   for (const m of code.matchAll(new RegExp(`<(${BOX_TAGS})\\b([^>]*?)(?:/>|>\\s*</\\1\\s*>)`, "g"))) {

@@ -4,8 +4,8 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,7 +18,7 @@ let root;
 const put = (rel, text) => { const p = join(root, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); return p; };
 
 before(() => {
-  root = mkdtempSync(join(tmpdir(), "vgate-"));
+  root = tmpDir("vgate-");
   put("forge.yaml", CONF); put("web/app/hands/page.tsx", BAD); put("web/app/pricing/page.tsx", GOOD);
   put("ev-ok.json", JSON.stringify({ "/pricing": { screenshots: ["p-390.png", "p-1440.png"], verdict: "PASS" } }));
   put("ev-bad.json", JSON.stringify({ "/hands": { screenshots: ["h-390.png", "h-1440.png"], verdict: "PASS" } }));
