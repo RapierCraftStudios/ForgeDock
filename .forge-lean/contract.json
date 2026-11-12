@@ -1,0 +1,188 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "`forgedock intake pause|resume|status [--reason]` writes `_active.intake.paused` and the label `forge:intake-paused` on the tracker.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "The watcher reads that signal from GitHub, so every host honours it; an open `release/*|train/*|hotfix/*` PR or an active ledger entry also pauses claims with no local state (I18).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "`freeze.intake_auto_resume` resumes at WAVE_DONE.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "A test reproduces the 2026-11-12 case and the watcher pauses within one poll; `intake pause` stops claims on a second host.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "zero behaviour change and zero new GitHub writes with defaults",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "every control writes an audit entry",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Q4/Q7 answered in writing.",
+   "disposition": "defer",
+   "why": "Org ruleset (Q4) and App merge-to-main (Q7) need owner/org settings, not code in this issue",
+   "bucket": "owner:answer Q4 ruleset and Q7 App merge-to-main in the epic #5549"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/intake.mjs",
+   "change": "New: setIntake (updateActive owning intake, audit control line, label forge:intake-paused on tracker), intakeStatus, githubPause (intake.paused | active ledger entry | open release/|train/|hotfix/ PR heads), intakeFromCli, autoResume helper",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/issuewatch.mjs",
+   "change": "At the pass loop (~:569) pause also on githubPause when release.managed; record state.paused reason; resume via auto-resume; give io an api",
+   "requirements": [
+    "R2",
+    "R3",
+    "R4",
+    "R5"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/release.mjs",
+   "change": "readReleaseConfig: parse freeze.intake_auto_resume (and tracker if needed); unchanged shape when unset",
+   "requirements": [
+    "R3",
+    "R5"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/forgedock.mjs",
+   "change": "Add `intake` command to the command list and dispatch case",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/help-text.mjs",
+   "change": "Document intake pause|resume|status",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/lean/intake.test.mjs",
+   "change": "New tests: 11-12 case, second host, active ledger entry, resume, defaults no api call, audit line, auto-resume",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "docs/ISSUE-WATCH.md",
+   "change": "Document GitHub-read pause and intake commands",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "docs/CONFIG.md",
+   "change": "Document freeze.intake_auto_resume",
+   "requirements": [
+    "R3"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "devdocs/modules/lean.md",
+   "change": "Note intake.mjs in the lean dossier",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "releaseInFlight local pause behaviour and its tests in bin/lean/issuewatch-parity.mjs / issuewatch-parity.test.mjs"
+  },
+  {
+   "id": "P2",
+   "what": "updateActive/acquireLease semantics in bin/lean/release-ledger.mjs (no edits to that file)"
+  },
+  {
+   "id": "P3",
+   "what": "Unmanaged repos (no release.managed): watcher loop in bin/lean/issuewatch.mjs makes no new gh/api calls"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/intake.test.mjs bin/lean/issuewatch.test.mjs bin/lean/issuewatch-parity.test.mjs bin/lean/release-ledger.test.mjs bin/lean/release.test.mjs"
+  },
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/issuewatch-reconcile.test.mjs bin/lean/issuewatch-release.test.mjs",
+   "regression": true
+  }
+ ],
+ "regression": [
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/issuewatch-reconcile.test.mjs bin/lean/issuewatch-release.test.mjs",
+   "covers": "watcher neighbours"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Gate the GitHub pause on release.managed",
+   "justification": "release-ledger.mjs:12 says ledger is off unless release.managed; release.mjs:233 gates ctx the same way; keeps zero writes/calls by default",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Treat WAVE_DONE as the end of the release job (release state status set) since no WAVE_DONE symbol exists in the repo",
+   "justification": "grep finds none; releaseInFlight (issuewatch-parity.mjs:40) already defines job end by state.status",
+   "source": "precedent"
+  },
+  {
+   "id": "K3",
+   "choice": "Fail open on GitHub read errors, record state.pauseError",
+   "justification": "matches the local read at issuewatch.mjs:569 (catch: not paused)",
+   "source": "precedent"
+  }
+ ]
+}
