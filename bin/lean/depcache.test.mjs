@@ -38,7 +38,7 @@ const FIXTURES = {
 const LOCKFILE = { pnpm: "pnpm-lock.yaml", npm: "package-lock.json", uv: "uv.lock", poetry: "poetry.lock" };
 
 /** Fake package managers: write what a real install leaves behind, including the absolute paths that need rewriting. */
-function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0 } = {}) {
+function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0, rewriteState = false } = {}) {
   const calls = [];
   const venv = (cwd, lock) => {
     const v = join(cwd, ".venv");
@@ -69,12 +69,18 @@ function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0 
         // pnpm prints its errors on stdout; execFile's error then carries an empty stderr (#4522).
         throw Object.assign(new Error("Command failed: pnpm install --frozen-lockfile --offline"), { stderr: "", stdout: "Lockfile is up to date\n ERR_PNPM_TEST_REPAIR  some cause\n" });
       }
-      if (args.includes("--offline")) return ""; // warm repair pass: nothing to do
+      if (args.includes("--offline")) {
+        // The real repair rewrites its state files in place (#5574); a read-only hardlinked inode fails with EACCES.
+        if (rewriteState) for (const f of ["node_modules/.modules.yaml", "node_modules/.pnpm/lock.yaml", "packages/a/node_modules/.modules.yaml"]) if (existsSync(join(cwd, f))) writeFileSync(join(cwd, f), "layoutVersion: 5\nrepaired: true\n");
+        return ""; // warm repair pass: nothing else to do
+      }
       const lock = readFileSync(join(cwd, "pnpm-lock.yaml"), "utf8");
       put(join(cwd, "node_modules/.pnpm/lodash@4/node_modules/lodash/index.js"), `module.exports = ${JSON.stringify(lock)};\n`);
       symlinkSync(".pnpm/lodash@4/node_modules/lodash", join(cwd, "node_modules/lodash"));
       put(join(cwd, "node_modules/.bin/lodash"), `#!/bin/sh\nexport NODE_PATH="${cwd}/node_modules/.pnpm/node_modules"\nexec node "$basedir/../lodash/cli.js"\n`, 0o755);
       put(join(cwd, "node_modules/.modules.yaml"), "layoutVersion: 5\n");
+      put(join(cwd, "node_modules/.pnpm/lock.yaml"), "lockfileVersion: 9\n");
+      put(join(cwd, "packages/a/node_modules/.modules.yaml"), "layoutVersion: 5\n");
       mkdirSync(join(cwd, "packages/a/node_modules"), { recursive: true });
       symlinkSync("../../../node_modules/.pnpm/lodash@4/node_modules/lodash", join(cwd, "packages/a/node_modules/lodash"));
       return "";
@@ -225,6 +231,28 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
     const [r] = await s2.cache.prepare({ wt, repoKey: "r" });
     assert.equal(r.status, "miss-installed");
     assert.equal(r.published, true, "the stale lock was replaced");
+  });
+
+  it("#5574 state files the repair rewrites in place are writable copies; the snapshot and package files stay read-only", async () => {
+    const s = setup("pnpm");
+    const f2 = fakeExec({ rewriteState: true });
+    const cache = makeDepCache({ root: s.root, exec: f2.exec, env: {}, pollMs: 5 });
+    const [ra] = await cache.prepare({ wt: s.lane("a"), repoKey: "r" });
+    assert.equal(ra.status, "miss-installed", ra.reason);
+    const [snap] = snapDirs(s.root, "pnpm");
+    const before = snapshotOf(snap);
+    const wt = s.lane("b");
+    const [rb] = await cache.prepare({ wt, repoKey: "r" });
+    assert.equal(rb.status, "hit", rb.reason);
+    for (const f of ["node_modules/.modules.yaml", "node_modules/.pnpm/lock.yaml", "packages/a/node_modules/.modules.yaml"]) {
+      assert.match(readFileSync(join(wt, f), "utf8"), /repaired: true/, f);
+      assert.notEqual(statSync(join(wt, f)).ino, statSync(join(snap, f)).ino, `${f} is a copy, not the snapshot inode`);
+    }
+    const after = snapshotOf(snap);
+    delete before["last-used"]; delete after["last-used"];
+    assert.deepEqual(after, before, "the snapshot is untouched");
+    const pkg = join(wt, "node_modules/.pnpm/lodash@4/node_modules/lodash/index.js");
+    assert.equal(statSync(pkg).ino, statSync(join(snap, "node_modules/.pnpm/lodash@4/node_modules/lodash/index.js")).ino, "package files stay hardlinks");
   });
 
   it("#4522 a snapshot whose repair fails falls back to a fresh install outside the lock, keeps the snapshot and records pnpm's stdout error", async () => {
