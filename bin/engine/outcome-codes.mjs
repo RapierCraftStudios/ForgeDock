@@ -68,6 +68,7 @@ export const OUTCOME_CODES = Object.freeze({
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
+  DESIGN_SPEC_REQUIRED: "design.spec_required", // forge#5330: a page under forge.yaml design.routes has no FORGE:DESIGN_SPEC and design.gate is blocking; needs-human until /design approves a spec
   DESIGN_INVALIDATED: "design.invalidated", // forge#5342: a lane found the plan wrong; one spike amendment filed, siblings held; the rework-share rollup counts it
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   DEPENDENCY_BLOCKED: "dependency.blocked",

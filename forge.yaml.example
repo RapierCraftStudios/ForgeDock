@@ -1478,3 +1478,13 @@ branches:
 #     postgres: { image: postgres:16, init: "make migrate DB_URL=$SANDBOX_URL", ttl: 30m }
 #     redis: { image: redis:7 }
 #     http-replay: { fixtures: tests/fixtures/http/, for: integration }
+
+# design:                      # #5330: UI lanes read design.system first; design.routes opts in the design gate (a repo without it behaves as before)
+#   system: [docs/design-system.md, web/styles/tokens.css]
+#   routes: ["web/app/**/page.tsx"]   # user-visible route globs: a page here needs a /design spec (FORGE:DESIGN_SPEC or the spec_label label)
+#   exclude: ["web/app/api/**"]
+#   gate: advisory             # blocking | advisory: blocking stops the lane, fails the precheck and fails review-pr-staging (GATE_FAILURE)
+#   spec_label: design:approved
+#   needed_label: design:needed
+#   viewports: [390, 1440]     # the staging visual gate renders every route at each width
+#   require_visual_check: true # screenshots at every viewport and a render-critique verdict per route

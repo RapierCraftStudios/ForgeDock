@@ -1411,6 +1411,43 @@ services:
 
 ---
 
+## `design` (OPTIONAL)
+
+UI lanes and the visual gate (forge#5330, forge#5369). Everything is opt-in: a repo with no `design.routes` is never routed or gated and behaves as before. `design.system` is read independently by every UI lane.
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `system` | design-system docs, token files or component dirs (list or comma-separated). A UI lane reads them first, reuses their components, tokens, spacing and type, and gives a new surface its empty, loading and error states | `[]` |
+| `routes` | globs of user-visible route files, e.g. `web/src/app/(site)/**/page.tsx`. **Setting it turns the design gate on** | unset = off |
+| `exclude` | globs removed from `routes` (e.g. `web/src/app/(site)/api/**`) | `[]` |
+| `gate` | `blocking` or `advisory`. Blocking turns a finding into a failed lane precheck (`conformance.unimplemented`) and a `GATE_FAILURE` at `review-pr-staging`; advisory reports the same findings and never fails | `advisory` |
+| `spec_label` | the label that counts as an approved design (besides a non-draft `FORGE:DESIGN_SPEC` comment) | `design:approved` |
+| `needed_label` | the label that marks an issue waiting for `/design` | `design:needed` |
+| `directions_param` | query parameter that selects a design direction when `/design` renders variants of a route | unset |
+| `viewports` | widths (px) every route is rendered at | `[390, 1440]` |
+| `require_visual_check` | the staging visual gate requires a screenshot at every viewport and a render-critique verdict per route | `true` |
+
+What the keys drive:
+
+- **Routing (lane time).** When the frozen contract's deliverables include a page entry (`page.tsx|jsx`, `.vue`, `.svelte`) under `routes` and the issue has neither a `FORGE:DESIGN_SPEC` comment nor the `spec_label` label, the lane is routed to `/design` instead of being built from a functional spec. With `gate: blocking` the lane stops before the implement call (`needs-human`, outcome code `design.spec_required`) until a spec exists; with `advisory` the implement prompt tells the builder to reference a `/design` spec.
+- **Lane precheck (blocking only).** The same visual gate that runs at staging runs over the lane's diff with the deterministic source critique and the spec check, so a plain-text hero page with empty boxes fails before it reaches a PR. Rendered screenshots are not required here: lanes never install a browser and record `not rendered: <reason>` under `### Visual Check`.
+- **`review-pr-staging` Phase 1I.** `scripts/visual-gate.mjs` lists every new or changed route (`--list`), the reviewer renders each at every viewport, runs `design-render-critique-loop` against the route's spec, and the script judges the evidence, posts a `FORGE:VISUAL_GATE` comment (routes, screenshot paths, critique verdict) and exits 1 on a blocking finding. A changed route also adds the Frontend review persona (`review-roster.sh --design-routes true`).
+- **Deterministic critique floor** (`critiqueMarkup`, 0 LLM calls): empty or label-only boxes, placeholder copy or null samples, and a text-only page (an `h1` with no component, media or background) block; a page whose only calls to action are bare links warns.
+
+```yaml
+design:
+  system: [docs/design-system.md, web/styles/tokens.css]
+  routes: ["web/app/**/page.tsx", "web/app/**/layout.tsx"]   # opt-in: setting this turns the design gate on
+  exclude: ["web/app/api/**"]
+  gate: blocking            # blocking | advisory (default advisory)
+  spec_label: design:approved
+  needed_label: design:needed
+  viewports: [390, 1440]
+  require_visual_check: true
+```
+
+---
+
 ## `review` (OPTIONAL)
 
 Context injected into review agent prompts. Helps the 9-agent review system give relevant, project-specific feedback.

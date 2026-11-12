@@ -11,7 +11,7 @@
 #          [--source-severity SEV] [--source-domain DOMAIN] [--contract-flags "HIGH_RISK CONTRACT_AUTH ..."]
 #          [--churn true|false] [--danger-zone true|false] [--thorough true|false] [--milestone true|false]
 #          [--scraping-configured true|false] [--database-container true|false] [--spec-cli true|false]
-#          [--review-depth STANDARD|EXTENDED]
+#          [--review-depth STANDARD|EXTENDED] [--design-routes true|false]
 # Output (stdout): SELECTED_AGENTS=<canonical marker domains, space separated>  TIER=<tier>  REASON=<text>
 # Exit: 0 always for a parseable call; 2 on an unknown flag (callers fall back to the full union, never a narrower roster).
 #
@@ -36,7 +36,7 @@ set -u
 
 S_AUTH=0; S_BILLING=0; S_CONCURRENCY=0; S_DATABASE=0; S_INFRA=0; S_SCRAPING=0; S_FRONTEND=0; S_API=0
 LINES=""; NFILES=""; FILES_FILE=""; FIX_PR=false; SRC_SEV=""; SRC_DOM=""; CFLAGS=""
-DEPTH=STANDARD; CHURN=false; DANGER=false; THOROUGH=false; MILESTONE=false; SCRAPING_ON=false; DB_CONTAINER=false; SPEC_CLI=false
+DEPTH=STANDARD; DESIGN_ROUTES=false; CHURN=false; DANGER=false; THOROUGH=false; MILESTONE=false; SCRAPING_ON=false; DB_CONTAINER=false; SPEC_CLI=false
 
 num() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
 agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); case "$l" in infrastructure) l=infra ;; scraping) l=scraper ;; web) l=frontend ;; esac; printf '%s' "$l"; }
@@ -73,6 +73,7 @@ while [ $# -gt 0 ]; do
         --scraping-configured) SCRAPING_ON="${2:-false}"; shift 2 ;;
         --database-container) DB_CONTAINER="${2:-false}"; shift 2 ;;
         --spec-cli) SPEC_CLI="${2:-false}"; shift 2 ;;
+        --design-routes) DESIGN_ROUTES="${2:-false}"; shift 2 ;;
         --review-depth) [ "${2:-}" = "EXTENDED" ] && DEPTH=EXTENDED; shift 2 ;;
         *) echo "review-roster: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -202,6 +203,8 @@ hit '(^|/)app/(.*/)?route\.[cm]?[jt]sx?$|(^|/)pages/api/' && { add_agent Infra; 
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }
 hit '(^|/)(web|app)/|\.(tsx|jsx)$|(^|/)next\.config\.[a-z]+$|(^|/)middleware\.(ts|js)$' && { add_agent Frontend; trig frontend-path; }
+# forge#5330: the diff changes a user-visible route under forge.yaml design.routes (scripts/visual-gate.mjs --list is non-empty): the frontend persona judges the rendered result, in every tier
+[ "$DESIGN_ROUTES" = "true" ] && { add_agent Frontend; trig design-route; }
 hit '^bin/engine' && { add_agent Concurrency; trig bin-engine; }
 if [ "$SPEC_CLI" = "true" ]; then
     hit '^bin/' && { add_agent spec-cli; trig bin; }
