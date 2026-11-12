@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam, withIntegrityMarker } from "./release-review.mjs";
+import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam, withIntegrityMarker, TEST_GATE_SKIP_NO_TESTS, testGatePrompt, integrationTestCount, resolveSkillName } from "./release-review.mjs";
 import { readFileSync } from "node:fs";
 import { reviewStagingJson } from "../review-staging.mjs";
 
@@ -11,19 +11,20 @@ const manifest = (head, delta = null) => ({ pr: 7, headSha: head, bundle: [1, 2]
 const fin = (extra = {}) => ({ code: 0, data: { head: H1, toFile: [], notes: [], ...extra }, lines: [] });
 
 /** Seam fake: `heads` is what headOf answers in turn; `fins` what finalize answers in turn. */
-function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [] } = {}) {
-  const log = [], agents = [];
+function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], gatePlan = { clusters: 1, skill: "forgedock:test-gate" } } = {}) {
+  const log = [], agents = [], gateSaved = [], agentCalls = [];
   let h = 0, f = 0, l = 0, n = 100;
   return {
-    log, agents,
+    log, agents, gateSaved, agentCalls,
     pre: async (a) => { log.push(["pre", a.delta]); return { code: 0, data: manifest(a.delta ? heads[heads.length - 1] : H1, a.delta ? { from: a.delta, files: ["x"] } : null), lines: [] }; },
     finalize: async () => { log.push(["finalize"]); return fins[Math.min(f++, fins.length - 1)]; },
     summary: async (a) => { log.push(["summary", a.filed]); return summary ?? { code: 0, data: { verdict: "APPROVE FOR DEPLOY", marker: "FORGE:GATE_PASS", ciFailing: 0 }, lines: [] }; },
     headOf: async () => heads[Math.min(h++, heads.length - 1)],
     readFile: (p) => `brief ${p}`,
     markLaunched: (file, domains) => log.push(["launched", domains]),
-    saveTestGate: () => "/sd/7_test_gate_output.txt",
-    runAgent: async (a) => { agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
+    saveTestGate: (pr, text) => { gateSaved.push(text); return "/sd/7_test_gate_output.txt"; },
+    testGatePlan: async () => gatePlan,
+    runAgent: async (a) => { agentCalls.push(a); agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
     fileCiIssue: async () => { log.push(["ci-issue"]); return n++; },
     issueMerged: async () => false,
@@ -53,7 +54,7 @@ describe("reviewStep", () => {
 
   it("realSeam exposes every effect the steps use, matching the fake seam", () => {
     const real = Object.keys(realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp" })).sort();
-    assert.deepEqual(real, Object.keys(fakeSeam()).filter((k) => k !== "log" && k !== "agents").sort());
+    assert.deepEqual(real, Object.keys(fakeSeam()).filter((k) => !["log", "agents", "gateSaved", "agentCalls"].includes(k)).sort());
   });
 
   it("runs the briefs and the spec panel in parallel, then test gate, finalize and summary in order", async () => {
@@ -327,5 +328,63 @@ describe("withIntegrityMarker (filing release findings through issue-create.sh)"
     const out = withIntegrityMarker("a <!-- FORGE:BODY-INTEGRITY:1 -->\nb <!-- FORGE:BODY-INTEGRITY:2 -->", "fix: auto-spawned schedd (review finding)");
     assert.equal(count(out), 1);
     assert.match(out, /FORGE:BODY-INTEGRITY:fix-auto-spawned-schedd-review-finding -->/);
+  });
+});
+
+describe("#5516 release test gate", () => {
+  it("no integration_tests configured: no gate session, and the saved output carries the guard's SKIP marker", async () => {
+    const s = fakeSeam({ gatePlan: { clusters: 0, skill: "forgedock:test-gate" } });
+    await reviewStep(ctx(s));
+    assert.ok(!s.agents.includes("release-test-gate"), "no session decides a deterministic SKIP");
+    assert.equal(s.gateSaved.length, 1);
+    assert.match(s.gateSaved[0], /FORGE:TEST_GATE:RESULT=SKIP/);
+    assert.match(s.gateSaved[0], /reason=no-tests-configured/);
+  });
+  it("before the fix the gate output had no marker (finalize failed closed); the SKIP output has exactly one RESULT marker", () => {
+    assert.equal((TEST_GATE_SKIP_NO_TESTS.match(/FORGE:TEST_GATE:RESULT=(BLOCK|PASS|SKIP)/g) ?? []).length, 1);
+  });
+  it("clusters configured: the gate runs in a full session and the prompt names the resolved skill", async () => {
+    const s = fakeSeam({ gatePlan: { clusters: 2, skill: "forgedock:test-gate" } });
+    await reviewStep(ctx(s));
+    const g = s.agentCalls.find((a) => a.role === "release-test-gate");
+    assert.ok(g && g.fullSession === true, "Skill/Task/Bash available to the gate session");
+    assert.match(g.prompt, /Invoke the Skill "forgedock:test-gate" with args: --prs "1 2" --base main/);
+    assert.ok(!/^\/test-gate/.test(g.prompt));
+    const reviewers = s.agentCalls.filter((a) => a.role !== "release-test-gate");
+    assert.ok(reviewers.every((a) => !a.fullSession), "reviewers keep the lean session");
+  });
+  it("an unreadable config (clusters null) still runs the gate session, never a SKIP", async () => {
+    const s = fakeSeam({ gatePlan: { clusters: null, skill: "test-gate" } });
+    await reviewStep(ctx(s));
+    assert.ok(s.agents.includes("release-test-gate"));
+  });
+  it("integrationTestCount reads the verification block", () => {
+    assert.equal(integrationTestCount("project:\n  repo: x\n"), 0);
+    assert.equal(integrationTestCount("verification:\n  integration_tests: []\n"), 0);
+    assert.equal(integrationTestCount("verification:\n  test_gate:\n    posture: blocking\n"), 0);
+    assert.equal(integrationTestCount("verification:\n  integration_tests:\n    - cluster: api\n      command: pytest\n    - cluster: web\n      command: npm test\n  test_services:\n    api: c\n"), 2);
+    assert.equal(integrationTestCount("verification:\n  integration_tests: [{cluster: a}]\n"), null);
+  });
+  it("resolveSkillName: prefixed on a plugin install, bare otherwise", () => {
+    assert.equal(resolveSkillName("test-gate", { configDir: "/c", read: () => '{"plugins":{"forgedock@forgedock":[{}]}}' }), "forgedock:test-gate");
+    assert.equal(resolveSkillName("test-gate", { configDir: "/c", read: () => '{"plugins":{}}' }), "test-gate");
+    assert.equal(resolveSkillName("test-gate", { configDir: "/c", read: () => { throw new Error("ENOENT"); } }), "test-gate");
+  });
+  it("testGatePrompt", () => {
+    assert.match(testGatePrompt("test-gate", [5, 6], "main"), /Skill "test-gate" with args: --prs "5 6" --base main/);
+  });
+});
+
+describe("#5516 makeLeanRunner fullSession", () => {
+  it("fullSession drops the lean minimal flags (slash commands/Skill stay available); the default keeps them", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    const seen = [];
+    const runCli = async (o) => { seen.push(o.sessionFlags); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+    const base = { role: "release-test-gate", issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
+    await makeLeanRunner({ runCli, probe: () => false })({ ...base });
+    await makeLeanRunner({ runCli, probe: () => false })({ ...base, fullSession: true });
+    const [lean, full] = seen;
+    assert.deepEqual(full, [], "no --disable-slash-commands / tool restriction for the gate session");
+    if (lean.length) assert.ok(lean.some((f) => /slash|tools|mcp/i.test(f)), `lean flags restrict the session: ${lean.join(" ")}`);
   });
 });
