@@ -378,7 +378,7 @@ export async function runCore(o) {
       if (problems.length) { ev({ event: "CLASSIFY_INVALID", problems }); llm = { type: "chore", severity: "P3", exists_in: "unknown", confidence: 0.3 }; }
       const live = policy.branches?.release;
       let liveSha = null; if (live) liveSha = String(await git(["rev-parse", `origin/${live}`]).catch(() => "")).trim() || null;
-      let rec = C.buildRecord(llm, policy, facts, { text: problems.length > 0 });
+      let rec = C.buildClassifyRecord(llm, policy, facts, { text: problems.length > 0 });
       rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha });
       if (rec.exists_in === "unknown" && rec.lane_hint === "none") rec.lane_hint = "release";
       await io.fs.write?.(`${wt}/${C.CLASSIFICATION_FILE}`, JSON.stringify(rec, null, 1));

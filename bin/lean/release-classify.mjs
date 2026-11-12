@@ -88,7 +88,7 @@ export function validateClassification(rec) {
 }
 
 /** Overwrites every derived field; the LLM's units, migrations and risk are never kept. */
-export function buildRecord(llm, policy, facts, { text = false } = {}) {
+export function buildClassifyRecord(llm, policy, facts, { text = false } = {}) {
   const r = riskOf(policy, facts);
   const { units: _u, shared_modules: _s, migrations: _m, risk: _r, ...kept } = llm ?? {};
   const rec = { ...kept, units: facts.units, shared_modules: facts.shared_modules, migrations: facts.migrations, contract_changed: facts.contract, risk: r.risk, risk_rule: r.rule,

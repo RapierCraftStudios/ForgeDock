@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deriveFacts, riskOf, verifyExistsIn, buildRecord, applySourceRules, validateClassification, labelsOf, renderClassify } from "./release-classify.mjs";
+import { deriveFacts, riskOf, verifyExistsIn, buildClassifyRecord, applySourceRules, validateClassification, labelsOf, renderClassify } from "./release-classify.mjs";
 
 const policy = {
   units: { api: { paths: ["services/api/**"] }, web: { paths: ["web/**"] } },
@@ -63,15 +63,15 @@ describe("text-only and record building", () => {
     const o = applySourceRules({ source: "text-only", confidence: 0.9, migrations: "none" }, policy);
     assert.equal(o.confidence, 0.5); assert.notEqual(o.migrations, "none");
   });
-  it("buildRecord ignores LLM-typed units and migrations and forces release on a migration", () => {
+  it("buildClassifyRecord ignores LLM-typed units and migrations and forces release on a migration", () => {
     const f = deriveFacts(policy, ["infra/migrations/1.sql"]);
-    const r = buildRecord({ type: "bug", severity: "P2", exists_in: "unknown", units: ["web"], migrations: "none", risk: "low" }, policy, f);
+    const r = buildClassifyRecord({ type: "bug", severity: "P2", exists_in: "unknown", units: ["web"], migrations: "none", risk: "low" }, policy, f);
     assert.deepEqual(r.units, []); assert.equal(r.migrations, "breaking"); assert.equal(r.risk, "high"); assert.equal(r.lane_hint, "release");
   });
   it("validates enums, builds namespaced labels and a comment body", () => {
     assert.ok(validateClassification({ type: "x", severity: "P9", exists_in: "live" }).length >= 2);
     assert.deepEqual(validateClassification({ type: "bug", severity: "P2", exists_in: "unknown" }), []);
-    const r = buildRecord({ type: "bug", severity: "P2", exists_in: "unknown" }, policy, deriveFacts(policy, ["web/a.js"]));
+    const r = buildClassifyRecord({ type: "bug", severity: "P2", exists_in: "unknown" }, policy, deriveFacts(policy, ["web/a.js"]));
     assert.deepEqual(labelsOf(r), ["type:bug", "where:unknown", "unit:web", "mig:none", "risk:low"]);
     assert.match(renderClassify(r), /"units"/);
   });
