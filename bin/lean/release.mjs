@@ -19,7 +19,9 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
-import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
+import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
+import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
+import { parseBudgetConfig, applyOnExceed, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
@@ -52,7 +54,42 @@ export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...optKeys(r), ...snapshotKeys(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...managedKeys(raw, r), ...optKeys(r), ...snapshotKeys(r) };
+}
+
+/** `{nightly, budget}` (#5569) only when `release.managed` is on: the forge.yaml `nightly:` and `budget:` blocks. */
+const managedKeys = (raw, r) => {
+  if (r.managed === undefined || off2(r.managed)) return {};
+  let y = {}; try { y = parseForgeYaml(String(raw ?? "")) ?? {}; } catch { y = {}; }
+  return { nightly: parseNightlyConfig(y.nightly), budget: parseBudgetConfig(y.budget) };
+};
+const off2 = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
+
+/**
+ * Managed gate before the first step (#5569; there is no APPROVED state, so this is where it applies): a red nightly blocks only
+ * `lane: release` (T0-T2 reds and unskippable classes), and a forecast over the month's remaining minutes applies `budget.on_exceed`
+ * (p0 never). Every read is best effort: unreadable facts proceed. @returns {{blocked?, reason?, ciMode?}}
+ */
+export async function managedGate({ io, repo, config, lane, root }) {
+  if (config.nightly) {
+    try {
+      const n = await readNightly({ gh: (a) => io.gh(a), repo, cfg: config.nightly, now: io.now() });
+      if (n?.reds.length) await fileNightlyRed({ gh: (a) => io.gh(a), repo, reds: n.reds, run: n.run });
+      const hit = blocksRelease({ lane, reds: n?.reds ?? [], cfg: config.nightly });
+      if (hit.length) return { blocked: true, reason: `nightly is red: ${hit.map((r) => r.name).join(", ")}` };
+    } catch { /* best effort */ }
+  }
+  if (config.budget) {
+    try {
+      const forecast = trailingMedian(historyFromRoot(root), lane);
+      const facts = await detectBudget({ gh: (a) => io.gh(a), repo, policy: config.ciPolicy, now: io.now() });
+      const remaining = facts.budget != null && facts.mtd != null ? facts.budget * (1 - (config.ciPolicy?.reservePct ?? 10) / 100) - facts.mtd : null;
+      const r = applyOnExceed({ lane, forecast, remaining, cfg: config.budget });
+      if (r.action === "hold") return { blocked: true, reason: `budget hold: ${r.why}` };
+      if (r.action === "local-first") return { ciMode: "local-first", why: r.why };
+    } catch { /* best effort */ }
+  }
+  return {};
 }
 
 /** `{mode, branchPattern, fixMode}` only when configured (#5276): mode `snapshot` cuts release/<id>; anything else is `freeze`. */
@@ -240,6 +277,14 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   };
   const state = led?.state ?? rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
   state.opts = { merge: !!(opts.merge || state.opts?.merge) };
+  if (lctx) {
+    state.lane = opts.lane || state.lane || "release";
+    if (!Object.values(state.steps).some((x) => x?.done)) {
+      const g = await managedGate({ io, repo, config, lane: state.lane, root });
+      if (g.blocked) return { id, status: "blocked", step: "gate", reason: g.reason };
+      if (g.ciMode) { state.ciMode = g.ciMode; io.print?.(`release ${id}: ${g.why}; host checks run before paid CI`); }
+    }
+  }
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.save();
   let out;
@@ -259,6 +304,9 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   } finally {
     // A stop at GATE_PASS ends the release hold as well: nothing else is waiting on the batches.
     await restoreBatches(ctx);
+  }
+  if (lctx) { // #5569: Actions minutes of this release (sum of ceil per job), mirrored to the ledger below
+    try { const m = await releaseMinutes({ gh: (a) => io.gh(a), repo, sinceMs: Date.parse(state.startedAt) }); if (m) state.minutes = { runs: m.runs, total: m.minutes }; } catch { /* best effort */ }
   }
   state.status = out.status; ctx.save();
   if (lctx) await mirror(state);
@@ -303,7 +351,7 @@ export async function releaseFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env;
   const io = deps.io ?? realReleaseIo({ env, cwd });
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
-  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo"));
+  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
   const root = releaseRoot(env);
   const resume = flag(argv, "--resume");
@@ -311,6 +359,7 @@ export async function releaseFromCli(argv, deps = {}) {
   let repo = flag(argv, "--repo");
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
   const config = readReleaseConfig(raw);
+  if (config.managed) config.ciPolicy = readCiPolicy(cwd);
   if (resume) {
     const st = openRelease(root, resume).load();
     if (!st && !config.managed) throw new Error(`no release ${resume} in ${root}`); // managed: the ledger may hold it (another host)
@@ -321,7 +370,7 @@ export async function releaseFromCli(argv, deps = {}) {
     try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
   };
   await budget(null);
-  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts });
+  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge"), lane: flag(argv, "--lane") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
