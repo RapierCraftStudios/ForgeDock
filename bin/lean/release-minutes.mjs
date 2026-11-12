@@ -17,7 +17,7 @@ const json = (s) => { try { return JSON.parse(String(s)); } catch { return null;
 export function parseBudgetConfig(sec) {
   const s = sec && typeof sec === "object" ? sec : {};
   const v = String(s.on_exceed ?? "").trim().toLowerCase();
-  return { onExceed: ON_EXCEED.includes(v) ? v : "local-first", ignore: String(s.ignore ?? "").trim().toLowerCase() === "true" };
+  return { onExceed: ON_EXCEED.includes(v) ? v : "local-first", modelPerRelease: Number(s.model_release_minutes) > 0 ? Number(s.model_release_minutes) : 500, ignore: String(s.ignore ?? "").trim().toLowerCase() === "true" };
 }
 
 /** Sum of ceil(minutes) over the jobs of a jobs-API payload (jobs without both timestamps count 0). */
@@ -81,4 +81,12 @@ export function monthlyModel(items) {
     lines: items.map((i) => `${i.name}: model ${i.model} min, measured ${i.measured ?? "n/a"}`),
     model, measured, within: done.length > 0 && withinTolerance(comparable, measured),
   };
+}
+
+/** Report over the first 3 recorded releases (the managed waves of 5.8): model = `model_release_minutes` each (default 500) vs measured. */
+export function waveReport(records, cfg = parseBudgetConfig(null)) {
+  const waves = records.filter((r) => (r.lane ?? "release") === "release").slice(0, 3);
+  const m = monthlyModel(waves.map((w, i) => ({ name: `release wave ${i + 1}`, model: cfg.modelPerRelease, measured: w.minutes })));
+  const verdict = waves.length < 3 ? `${waves.length}/3 waves measured` : m.within ? "within 25% of the model" : "OUTSIDE 25% of the model: tune budget.on_exceed and the nightly cadence";
+  return { ...m, waves: waves.length, lines: [...m.lines, `total: model ${m.model} min, measured ${m.measured} min (${verdict})`] };
 }

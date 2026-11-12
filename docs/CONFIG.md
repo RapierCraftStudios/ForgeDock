@@ -822,6 +822,8 @@ budget:
 | `nightly.block_release` | Default `true`. A red T0-T2 job (an unclassified job counts as T2) or an `unskippable` job blocks `lane: release` with status blocked at step `gate`. T3/T4 reds never block; `train` and `p0` are never blocked. Any red files one open `nightly-red` issue (an existing one has its body edited). |
 | `budget.on_exceed` | Applied at the gate when the forecast (median of the lane's last 5 recorded releases) exceeds the month's remaining minutes (`ci.monthly_minutes` less the reserve, less month-to-date). `local-first` records `ciMode` in the release state, `hold` blocks, `proceed` continues. `p0` always proceeds. Unknown forecast or usage proceeds. |
 
+`forgedock release report` prints the model (`budget.model_release_minutes`, default 500, per release) against the measured minutes of the first 3 recorded releases and says whether they are within 25%; outside it, `budget.on_exceed` and the nightly cadence are the levers.
+
 The release state (and so the ledger) records `lane` and `minutes: {runs, total}`, where total is the sum of ceil(job minutes) of the Actions runs created since the release started, read from the jobs API.
 
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.

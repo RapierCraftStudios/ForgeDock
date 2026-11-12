@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseBudgetConfig, jobMinutes, releaseMinutes, trailingMedian, applyOnExceed, withinTolerance, monthlyModel, historyFromRoot } from "./release-minutes.mjs";
-import { runRelease, readReleaseConfig, newReleaseId } from "./release.mjs";
+import { parseBudgetConfig, jobMinutes, releaseMinutes, trailingMedian, applyOnExceed, withinTolerance, monthlyModel, historyFromRoot, waveReport } from "./release-minutes.mjs";
+import { runRelease, readReleaseConfig, newReleaseId, releaseFromCli } from "./release.mjs";
 
 const job = (s, e) => ({ started_at: `2026-11-12T10:00:${s}Z`, completed_at: `2026-11-12T10:0${e}`, billable_ms: 0 });
 const T = (m, s = "00") => ({ started_at: "2026-11-12T10:00:00Z", completed_at: `2026-11-12T10:${String(m).padStart(2, "0")}:${s}Z` });
@@ -49,6 +49,21 @@ describe("release minutes (#5569)", () => {
     mkdirSync(join(root, "b")); writeFileSync(join(root, "b", "state.json"), "{}");
     assert.deepEqual(historyFromRoot(root), [{ lane: "release", minutes: 480 }]);
     assert.deepEqual(historyFromRoot(join(root, "none")), []);
+  });
+});
+
+describe("release report (#5569)", () => {
+  it("compares the first 3 waves with the model and says when it is outside 25%", () => {
+    const rec = (...m) => m.map((minutes) => ({ lane: "release", minutes }));
+    assert.match(waveReport(rec(480, 520, 560)).lines.at(-1), /within 25%/);
+    assert.match(waveReport(rec(900, 900, 900)).lines.at(-1), /OUTSIDE 25%/);
+    assert.match(waveReport(rec(500)).lines.at(-1), /1\/3 waves/);
+  });
+  it("`forgedock release report` prints it", async () => {
+    const root = tmpDir("rep"), cwd = tmpDir("repcwd"), out = [];
+    mkdirSync(join(root, "a")); writeFileSync(join(root, "a", "state.json"), JSON.stringify({ minutes: { total: 500 } }));
+    const code = await releaseFromCli(["report"], { cwd, env: { FORGEDOCK_RELEASE_DIR: root }, io: { print: (l) => out.push(l) } });
+    assert.equal(code, 0); assert.match(out.join("\n"), /release wave 1: model 500 min, measured 500/);
   });
 });
 

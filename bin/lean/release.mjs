@@ -21,7 +21,7 @@ import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
-import { parseBudgetConfig, applyOnExceed, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
+import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
@@ -344,12 +344,17 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo]";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env;
   const io = deps.io ?? realReleaseIo({ env, cwd });
+  if (argv[0] === "report") { // #5569: monthly model vs measured minutes of the first 3 managed waves
+    let y = {}; try { y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {}; } catch { /* defaults */ }
+    for (const l of waveReport(historyFromRoot(releaseRoot(env)), parseBudgetConfig(y.budget)).lines) io.print(l);
+    return 0;
+  }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
