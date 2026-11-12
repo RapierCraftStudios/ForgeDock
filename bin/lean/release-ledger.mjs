@@ -116,7 +116,14 @@ export async function updateActive(ctx, owned, fn) {
   return { lost: true, attempts: ACTIVE_RETRIES };
 }
 
-const leaseBody = (l) => `<!-- ${LEASE_MARKER} -->\nholder: ${l.holder}\nepoch: ${l.epoch}\nrelease: ${l.release}\n`;
+const leaseBody = (l) => `<!-- ${LEASE_MARKER} -->\nholder: ${l.holder}\nepoch: ${l.epoch}\nrelease: ${l.release}\n${l.expires ? `expires: ${new Date(l.expires).toISOString()}\n` : ""}`;
+
+/** Parsed `_active/active.json`; throws when it cannot be read (a fence must treat that as "no irreversible action", I5). */
+export async function readActive(ctx) {
+  const text = await readFile(ctx, ACTIVE, "active.json");
+  if (text == null) throw new Error("_active has no active.json");
+  return JSON.parse(text);
+}
 
 /**
  * Take the lease for release `release` as `holder`: refused while another holder's `FORGE:LEASE` comment (on `issue`) was
@@ -131,7 +138,7 @@ export async function acquireLease(ctx, { holder, release, issue, ttlS = 120, no
       if (c && now - Date.parse(c.updated_at) < (l.ttlS ?? ttlS) * 1000) return { refuse: `lease held by ${l.holder} (epoch ${l.epoch})` };
     }
     const epoch = (active.epoch ?? 0) + 1;
-    return { patch: { epoch, lease: { holder, release, issue, ttlS, epoch, commentId: l?.holder === holder ? l.commentId : undefined } }, control: { at: new Date(now).toISOString(), verb: "lease", holder, release, epoch } };
+    return { patch: { epoch, lease: { holder, release, issue, ttlS, epoch, expires: now + ttlS * 1000, commentId: l?.holder === holder ? l.commentId : undefined } }, control: { at: new Date(now).toISOString(), verb: "lease", holder, release, epoch } };
   });
   if (!r.ok) return r;
   let lease = r.active.lease;

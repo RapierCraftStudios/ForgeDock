@@ -23,7 +23,8 @@ import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
 import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
-import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
+import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
+import { fenced, epochTrailer } from "./release-fence.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -203,16 +204,19 @@ export async function gateState({ io, repo, pr, head }) {
 const GATE_POLLS = 12, GATE_POLL_MS = 10_000;
 
 /** Re-run the newest gate-marker-check run on `head`: the bot's GATE_PASS comment never triggers it, so the status would stay pending. */
-async function retriggerGate({ io, repo, head }) {
+async function retriggerGate({ io, repo, head, fence }) {
   try {
     const runs = json(await io.gh(["run", "list", "--repo", repo, "--workflow", "gate-marker-check.yml", "--commit", head, "--json", "databaseId", "--limit", "1"])) ?? [];
-    if (runs[0]?.databaseId) await io.gh(["run", "rerun", String(runs[0].databaseId), "--repo", repo]);
-  } catch { /* a run still in progress cannot be rerun, and it re-reads the markers anyway: just wait */ }
+    if (!runs[0]?.databaseId) return null;
+    const f = await fenced(fence, { action: "rerun", key: `rerun:${runs[0].databaseId}` }, () => io.gh(["run", "rerun", String(runs[0].databaseId), "--repo", repo]));
+    return f.refused ?? null; // #5553: a fenced host stops here
+  } catch { return null; /* a run still in progress cannot be rerun, and it re-reads the markers anyway: just wait */ }
 }
 
 /** Re-trigger the gate, then poll (bounded) until `forge/deploy-gate` is success or failure; @returns the last gateState. */
-async function awaitGate({ io, repo, pr, head, gate }) {
-  await retriggerGate({ io, repo, head });
+async function awaitGate({ io, repo, pr, head, gate, fence }) {
+  const refused = await retriggerGate({ io, repo, head, fence });
+  if (refused) return { ...gate, fenced: refused };
   for (let i = 0; i < GATE_POLLS && gate.deployGate !== "success" && gate.deployGate !== "failure"; i++) {
     await io.sleep(GATE_POLL_MS);
     gate = await gateState({ io, repo, pr, head });
@@ -234,11 +238,13 @@ async function promotionStep(ctx) {
   }
   let gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
-  if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate });
+  if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate, fence: ctx.fence });
+  if (gate.fenced) return { refused: gate.fenced, head };
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }
   if (gate.deployGate !== "success") return { stopped: true, why: `forge/deploy-gate is ${gate.deployGate ?? "absent"}, not success${gate.deployGate === "failure" ? "" : ` after ${GATE_POLLS} polls`}`, head, gate };
-  await io.gh(["pr", "merge", String(pr), "--repo", repo, "--merge", "--match-head-commit", head]);
+  const f = await fenced(ctx.fence, { action: "merge", key: `merge:${pr}:${head}` }, (epoch) => io.gh(["pr", "merge", String(pr), "--repo", repo, "--merge", "--match-head-commit", head, ...(epoch != null ? ["--body", epochTrailer(epoch)] : [])]));
+  if (f.refused) return { refused: f.refused, head, gate };
   return { merged: true, head, gate };
 }
 
@@ -285,12 +291,21 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       if (g.ciMode) { state.ciMode = g.ciMode; io.print?.(`release ${id}: ${g.why}; host checks run before paid CI`); }
     }
   }
+  const holder = io.holder ?? `host-${process.pid}`;
+  const takeLease = async () => { // #5553: the epoch fences every irreversible effect; the release PR carries the heartbeat comment
+    const l = await acquireLease(lctx, { holder, release: id, issue: state.steps["release-pr"].result.pr, ttlS: config.leaseTtlS ?? 120, now: io.now() });
+    if (!l.ok) return l.refused ?? "lease lost the race";
+    const record = async (rec) => { const a = (state.intents ??= []); const i = a.findIndex((x) => x.key === rec.key); if (i < 0) a.push(rec); else a[i] = rec; ctx.save(); await mirror(state); };
+    ctx.fence = { lctx, lease: l.lease, record, now: () => new Date(io.now()).toISOString() };
+    return null;
+  };
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.save();
   let out;
   try {
     for (const step of RELEASE_STEPS) {
       if (state.steps[step]?.done) continue;
+      if (lctx && !ctx.fence && state.steps["release-pr"]?.done) { const why = await takeLease(); if (why) { out = { id, status: "refused", step: "lease", reason: why }; break; } }
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
@@ -299,6 +314,11 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
       ctx.save();
       if (lctx) await mirror(state);
+      if (lctx && !ctx.fence && step === "release-pr") { const why = await takeLease(); if (why) { out = { id, status: "refused", step: "lease", reason: why }; break; } }
+      if (ctx.fence) { // an unreadable _active ends the run too (I5): the next irreversible step would refuse anyway
+        const hb = await heartbeat(lctx, ctx.fence.lease).catch((e) => ({ unreadable: e.message }));
+        if (hb.fenced || hb.unreadable) { out = { id, status: "refused", step, reason: hb.fenced ? "fenced: another host took over the release lease" : `cannot read _active (${hb.unreadable})` }; break; }
+      }
     }
     out ??= { id, status: "done" };
   } finally {

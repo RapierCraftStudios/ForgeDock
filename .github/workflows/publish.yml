@@ -38,6 +38,11 @@ on:
       - 'package.json'
       - '.github/workflows/publish.yml'
   workflow_dispatch:  # Manual retrigger for bot-token merges
+    inputs:
+      forge_epoch:
+        description: 'Lease epoch of the dispatching release driver (#5553); a value below the current epoch is rejected'
+        required: false
+        default: ''
 
 jobs:
   publish:
@@ -50,6 +55,16 @@ jobs:
       pull-requests: write  # staging version back-sync opens a PR (staging is protected)
 
     steps:
+      - name: Reject a stale forge_epoch
+        if: ${{ inputs.forge_epoch != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORGE_EPOCH: ${{ inputs.forge_epoch }}
+        run: |
+          # #5553: the ledger control branch is `_active` (release-ledger.mjs ACTIVE). A release driver that lost its lease must not publish. Unreadable ledger = refuse (I5).
+          cur=$(gh api "repos/$GITHUB_REPOSITORY/contents/active.json?ref=_active" --jq .content | base64 -d | jq -r .epoch) || cur=""
+          case "$cur$FORGE_EPOCH" in *[!0-9]*|'') echo "::error::cannot verify forge_epoch=$FORGE_EPOCH against forge-ledger/_active (epoch '$cur')"; exit 1;; esac
+          if [ "$FORGE_EPOCH" -lt "$cur" ]; then echo "::error::stale forge_epoch $FORGE_EPOCH < current $cur"; exit 1; fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0  # Full history needed for git describe --tags (path-guard check)
