@@ -89,7 +89,7 @@ export function depthRows(events, { repo = null, sinceMs = null, issue = null } 
 const lines = (raw) => String(raw ?? "").split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 
 const DEFECT_CACHE_V = 2;
-const CONCURRENCY = 4;
+const CONCURRENCY = 8; // #5530: was 4
 const defectCachePath = (repo, env) => join(cacheDir(repo, env), "depth-defects.json");
 function loadDefectCache(repo, env) {
   try { const c = JSON.parse(readFileSync(defectCachePath(repo, env), "utf8")); if (c?.v === DEFECT_CACHE_V) return { v: DEFECT_CACHE_V, defects: c.defects ?? {}, shas: c.shas ?? {} }; } catch { /* refetch */ }
