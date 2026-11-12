@@ -20,6 +20,25 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fx = (f) => join(here, "fixtures", f);
 const load = (f) => JSON.parse(readFileSync(fx(f), "utf8"));
 const ENV = { FORGE_TRAIL_TRUSTED_ASSOCIATIONS: "OWNER,MEMBER,COLLABORATOR" };
+/** #5530: numbers mode reads aliased GraphQL batches; answer one from per-number REST stub replies (issues/N, issues/N/comments). */
+async function gqlBatch(args, rest) {
+  const q = args.find((a) => typeof a === "string" && a.startsWith("query=")) ?? "";
+  const user = (u) => (u ? { __typename: u.type === "Bot" ? "Bot" : "User", login: u.login ?? null } : null);
+  const repository = {};
+  for (const [, n] of q.matchAll(/i(\d+): issueOrPullRequest/g)) {
+    const raw = await rest(["api", `repos/o/r/issues/${n}`]);
+    const it = raw ? (typeof raw === "string" ? JSON.parse(raw || "null") : raw) : null;
+    const item = Array.isArray(it) ? it[0] : it;
+    if (!item || !Number.isInteger(item.number)) { repository[`i${n}`] = null; continue; }
+    const cr = await rest(["api", "--paginate", `repos/o/r/issues/${n}/comments`]);
+    const comments = (typeof cr === "string" ? JSON.parse(cr || "[]") : cr) ?? [];
+    repository[`i${n}`] = { __typename: item.pull_request ? "PullRequest" : "Issue", number: item.number, createdAt: item.created_at ?? null, closedAt: item.closed_at ?? null,
+      updatedAt: item.updated_at ?? null, milestone: item.milestone ?? null, labels: { nodes: (item.labels ?? []).map((l) => ({ name: typeof l === "string" ? l : l?.name })) }, author: user(item.user),
+      comments: { pageInfo: { hasNextPage: false }, nodes: comments.map((c) => ({ body: c.body, authorAssociation: c.author_association ?? null, author: user(c.user) })) } };
+  }
+  return JSON.stringify({ data: { repository } });
+}
+const isBatch = (args) => args[0] === "api" && args[1] === "graphql" && args.some((a) => typeof a === "string" && /issueOrPullRequest/.test(a));
 
 // A fake `gh`: lists the fixture issues (honouring `since`), serves comments per number. Counts every call.
 function fakeGh() {
@@ -398,7 +417,8 @@ describe("cache", () => {
     const comments = [telemetryComment(2, "e1", "x", ts(2)), telemetryComment(4, "e2", "x", ts(3))];
     const h = storeGh(mkItems(50), { comments });
     const events = [];
-    const r = await fetchGithubRecords({ repo: "o/r", gh: h.gh, env, numbers: [4, 2, 2], onProgress: (e) => events.push(e) });
+    const gh = (args) => (isBatch(args) ? gqlBatch(args, h.gh) : h.gh(args));
+    const r = await fetchGithubRecords({ repo: "o/r", gh, env, numbers: [4, 2, 2], onProgress: (e) => events.push(e) });
     assert.deepEqual(r.items.map((i) => i.number).sort((a, b) => a - b), [2, 4]);
     assert.equal(r.records.length, 2);
     assert.ok(h.calls.every((c) => /issues\/(2|4)(\/comments)?$/.test(c)), h.calls.join(","));
@@ -408,6 +428,7 @@ describe("cache", () => {
   it("--conformance-outcomes crawls only the joined PR and closing-issue numbers (#5363)", async () => {
     const calls = [];
     const gh = (args) => {
+      if (isBatch(args)) return gqlBatch(args, gh);
       calls.push(args.join(" "));
       if (/issues\/\d+\/comments/.test(args.join(" "))) return "[]";
       const m = /issues\/(\d+)$/.exec(args.join(" "));
@@ -419,10 +440,17 @@ describe("cache", () => {
     const crawl = calls.filter((c) => /issues/.test(c));
     assert.ok(crawl.length > 0 && crawl.every((c) => /issues\/(3|4|9)(\/comments)?$/.test(c)), crawl.join(","));
   });
-  it("budget: AlterLab-scale conformance crawl costs two calls per joined issue, no comments scan or listing (#5363, R1 instrumentation)", async () => {
+  it("budget: AlterLab-scale conformance crawl costs one GraphQL call per 20 joined issues, no comments scan or listing (#5363, #5530, R1 instrumentation)", async () => {
     let n = 0;
+    const rest = (args) => {
+      const a = args.join(" ");
+      if (/issues\/\d+\/comments/.test(a)) return "[]";
+      const m = /issues\/(\d+)$/.exec(a);
+      return m ? JSON.stringify({ number: Number(m[1]), state: "closed", labels: [], created_at: ts(1), updated_at: ts(2) }) : null;
+    };
     const gh = (args) => {
       const a = args.join(" "); n++;
+      if (isBatch(args)) return gqlBatch(args, rest);
       if (/issues\/\d+\/comments/.test(a)) return "[]";
       const m = /issues\/(\d+)$/.exec(a);
       if (m) return JSON.stringify({ number: Number(m[1]), state: "closed", labels: [], created_at: ts(1), updated_at: ts(2) });
@@ -431,7 +459,7 @@ describe("cache", () => {
     const prs = Array.from({ length: 400 }, (_, i) => ({ number: 5000 + i, closingIssues: [{ number: 100 + i }] }));
     await buildReport({ repo: "o/r", conformanceOutcomes: true, local: false, cache: false, minN: 10, since: "2026-10-01" },
       { gh, env: ENV, releaseTimes: [], gatherConformanceOutcomes: async () => ({ prs }), now: () => Date.UTC(2026, 10, 10), git: null });
-    assert.ok(n <= 2 * 800, `calls ${n}`);
+    assert.ok(n <= Math.ceil(800 / 20), `calls ${n}`);
   });
   it("progress printer shows an ETA when one is known (#5363)", () => {
     const out = [];

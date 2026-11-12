@@ -314,7 +314,11 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("POST", "/sandboxes/:id/stop"), fd(async ({ id }) => forward(id, "POST", `/sandboxes/${encodeURIComponent(id)}/stop`))], // #5274
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, DESTROY_TIMEOUT_MS))],
     [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
-    [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
+    [route("GET", "/agents"), fd(async () => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
+      const caps = await capacities(), byName = new Map(caps.map((c) => [c.name, c])), out = {};
+      for (const [id, s] of Object.entries(sbx())) { const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
+      return { status: 200, body: { agents: caps, sandboxes: out } };
+    })],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
     [route("GET", "/agent/creds/claude"), { fn: async (_p, _b, _u, req) => claudeToken(req), auth: "agent" }],
