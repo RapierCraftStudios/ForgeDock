@@ -779,6 +779,13 @@ release:
 
 `forgedock release verify <sha> [--repo owner/repo]` reads the `FORGE:RELEASE` record from the PR that contains `<sha>` and exits 0 only when `<sha>` is the snapshot plus recorded picks, each a clean cherry-pick of a `branches.staging` commit (same tree as `git cherry-pick`), so a repo workflow that trusted `head.ref == staging` can call it instead.
 
+### `.forge/release.yaml` (#5551)
+
+Nested release policy (`schema: 1`) lives in a committed `.forge/release.yaml`, not in the host-local forge.yaml. It is read from the default branch with `git show origin/<default>:.forge/release.yaml`, never from the PR head or the worktree, so a PR cannot weaken its own gates. The flat `release.*` keys above stay the fallback when the file is absent there. Sections: `branches`, `trust`, `state`, `units`, `couplings`, `contracts`, `forces`, `classify`, `risk`, `plan`, `lanes`, `merge`, `ci`, `preflight`, `deploy`, `verify`, `rollback`, `controls`.
+
+- `forgedock release check-config [--ref <git ref>]` parses it with the vendored, pinned YAML parser and fails (exit 1) on unknown keys, wrong types, duplicate keys, unreachable lanes (unknown pipeline, `base: integration` with no `branches.integration`, `ci_tier` not in `ci.tiers`) and keys deferred to a later phase (`plan.auto_if`, `retention_days`, `ci.forbid_per_issue_steps`, `couplings[].refine`, `ci.provider: command`, `risk.weights`).
+- `forgedock release init` writes the zero-config profile (`schema: 1`, `branches.default: main`, `plan.approval: wait`, `lanes.release.pipeline: existing`, `merge.approval: confirm`) to `.forge/release.yaml` and nothing else; it never overwrites.
+
 The forge.yaml reader handles two levels, so the rehearsal block is written as the flat keys `rehearsal_command`, `rehearsal_timeout` and `rehearsal_blocking`.
 
 | Key | Type | Required | Description |
