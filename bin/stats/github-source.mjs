@@ -316,7 +316,7 @@ const GQL_MIN_BATCH = 5;
 const GQL_CONCURRENCY = 4;
 const GQL_LIGHT_BATCH = 100;
 const NUMBERS_CACHE_V = 1;
-const ITEM_FIELDS = "number createdAt closedAt updatedAt milestone { title } labels(first: 100) { nodes { name } } author { __typename login } "
+const ITEM_FIELDS = "number createdAt closedAt updatedAt milestone { title } labels(first: 50) { nodes { name } } author { __typename login } "
   + "comments(first: 100) { pageInfo { hasNextPage } nodes { body authorAssociation author { __typename login } } }";
 const ownerName = (repo) => { const [owner, name] = repo.split("/"); return ["-f", `owner=${owner}`, "-f", `name=${name}`]; };
 const gqlQuery = (nums, fields) => `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${

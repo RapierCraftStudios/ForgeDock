@@ -17,7 +17,7 @@ const BIN = String.raw`#!/usr/bin/env node
 const fs = require("fs"), path = require("path");
 const dir = __dirname, args = process.argv.slice(2), line = args.join(" ");
 fs.appendFileSync(path.join(dir, "calls.log"), JSON.stringify(args) + "\n");
-const plan = JSON.parse(fs.readFileSync(path.join(dir, "plan.json"), "utf8"));
+const plan = JSON.parse(process.env.FAKE_GH_PLAN || "{}");
 const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l).join(" "));
 for (const f of plan.failures ?? []) {
   if (!new RegExp(f.match).test(line)) continue;
@@ -43,19 +43,20 @@ const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 const T0 = Date.UTC(2026, 9, 1);
 let dir, saved;
-const plan = (p) => { writeFileSync(join(dir, "plan.json"), JSON.stringify(p)); writeFileSync(join(dir, "calls.log"), ""); };
+const plan = (p) => { process.env.FAKE_GH_PLAN = JSON.stringify(p); writeFileSync(join(dir, "calls.log"), ""); }; // per-test behaviour via env
 const calls = () => readFileSync(join(dir, "calls.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
 before(() => {
   dir = tmpDir("gh-retry-");
   writeFileSync(join(dir, "gh"), BIN);
   chmodSync(join(dir, "gh"), 0o755);
-  saved = { PATH: process.env.PATH, RETRY: process.env.FORGE_STATS_GH_RETRY_MS };
+  saved = { PATH: process.env.PATH, RETRY: process.env.FORGE_STATS_GH_RETRY_MS, PLAN: process.env.FAKE_GH_PLAN };
   process.env.PATH = `${dir}${delimiter}${process.env.PATH}`;
   process.env.FORGE_STATS_GH_RETRY_MS = "1";
 });
 after(() => {
   process.env.PATH = saved.PATH;
+  if (saved.PLAN === undefined) delete process.env.FAKE_GH_PLAN; else process.env.FAKE_GH_PLAN = saved.PLAN;
   if (saved.RETRY === undefined) delete process.env.FORGE_STATS_GH_RETRY_MS; else process.env.FORGE_STATS_GH_RETRY_MS = saved.RETRY;
 });
 beforeEach(() => plan({}));
