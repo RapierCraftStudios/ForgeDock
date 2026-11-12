@@ -115,6 +115,7 @@ export async function explainIssue({ io, repo, number, state, watch = {}, skipLa
   const members = state ? issueNumbers(state) : [];
   const member = members.includes(issue.number);
   trace.push(rule("release_set", "release.mode", member, state ? (member ? `in the recorded release set of ${state.id}` : `not in the recorded release set of ${state.id}`) : "no release recorded"));
+  trace.push(rule("wave_planner", "release.planner", null, "absent: the wave planner rules are not in this build (a later issue); only the rules above decide"));
   const lane = member ? "release" : skip.length ? "excluded" : "pool";
   const would = [];
   if (skip.length) would.push(`remove label ${skip.join(", ")}`);
@@ -141,7 +142,7 @@ export async function explainPr({ io, repo, pr, gateState }) {
 
 export function renderExplain(e) {
   const lines = [e.kind === "issue" ? `#${e.issue}  lane=${e.lane}` : e.kind === "pr" ? `PR #${e.pr}  head ${e.head}  decision=${e.decision}` : `${e.id}  status=${e.status}`];
-  e.trace.forEach((t, i) => lines.push(`  ${i + 1}. ${t.pass ? "pass" : "FAIL"}  ${t.rule}  [${t.config_key}]  ${t.detail}`));
+  e.trace.forEach((t, i) => lines.push(`  ${i + 1}. ${t.pass === null ? "n/a " : t.pass ? "pass" : "FAIL"}  ${t.rule}  [${t.config_key}]  ${t.detail}`));
   if (e.would_change?.length) lines.push("  would change:", ...e.would_change.map((w) => `    - ${w}`));
   lines.push("  next:", ...e.next_actions.map((a) => `    ${a}`));
   return lines.join("\n");

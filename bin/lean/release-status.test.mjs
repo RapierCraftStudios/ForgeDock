@@ -82,12 +82,19 @@ describe("release status / explain (#5554)", () => {
   it("R2: explain #N gives an ordered rule trace, lane and what would change it", async () => {
     const issues = { 40: { number: 40, title: "fix(api): x", body: "Depends on #41", labels: [{ name: "P1" }, { name: "needs-human" }] }, 41: { number: 41, title: "y", body: "", labels: [] } };
     const e = await explainIssue({ io: fakeIo({ issues }), repo: REPO, number: 40, state: { id: ID, release: { issues: [12] } }, watch: { theme_map: { api: ["scope:api"] } } });
-    assert.deepEqual(e.trace.map((t) => t.rule), ["skip_labels", "priority", "theme", "depends_on", "release_set"]);
-    assert.deepEqual(e.trace.map((t) => t.pass), [false, true, true, false, false]);
+    assert.deepEqual(e.trace.map((t) => t.rule), ["skip_labels", "priority", "theme", "depends_on", "release_set", "wave_planner"]);
+    assert.deepEqual(e.trace.map((t) => t.pass), [false, true, true, false, false, null]);
     assert.ok(e.trace.every((t) => t.config_key));
     assert.equal(e.lane, "excluded");
     assert.match(e.trace[3].detail, /#41/);
     assert.ok(e.would_change.some((w) => w.includes("needs-human")));
+  });
+
+  it("R2: explain #N for an included issue has lane=release and every present rule passing", async () => {
+    const issues = { 12: { number: 12, title: "fix(api): z", body: "", labels: [{ name: "P2" }] } };
+    const e = await explainIssue({ io: fakeIo({ issues }), repo: REPO, number: 12, state: { id: ID, release: { issues: [12] } }, watch: { theme_map: { api: ["scope:api"] } } });
+    assert.equal(e.lane, "release");
+    assert.deepEqual(e.trace.map((t) => t.pass), [true, true, true, true, true, null]);
   });
 
   it("R2: explain <PR> reports the gate decision and the failing check", async () => {
