@@ -4,7 +4,7 @@
 import { resolvePath, matchesAny } from "./release-unitmap.mjs";
 
 export const CLASSIFICATION_FILE = ".forge-lean/classification.json";
-export const TYPES = ["bug", "feature", "chore", "docs", "infra", "incident"];
+export const ReleaseClassifyTYPES = ["bug", "feature", "chore", "docs", "infra", "incident"];
 export const SEVERITIES = ["P0", "P1", "P2", "P3"];
 export const EXISTS_IN = ["live", "staging-only", "unknown"];
 export const FLAGS = ["present", "required", "exempt", "none"];
@@ -81,7 +81,7 @@ export function validateClassification(rec) {
   const p = [];
   const en = (k, vals) => { if (!vals.includes(rec?.[k])) p.push(`${k}: must be one of ${vals.join("|")}`); };
   if (!rec || typeof rec !== "object") return ["classification must be an object"];
-  en("type", TYPES); en("severity", SEVERITIES); en("exists_in", EXISTS_IN);
+  en("type", ReleaseClassifyTYPES); en("severity", SEVERITIES); en("exists_in", EXISTS_IN);
   if (rec.flag !== undefined) en("flag", FLAGS);
   if (rec.severity === "P0" && !(rec.severity_evidence ?? rec.production_evidence)) p.push("severity: P0 needs production-impacting evidence cited");
   return p;
