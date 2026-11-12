@@ -102,16 +102,55 @@ function serviceLocks(fs, wt) {
 }
 
 const JS = new Set(["pnpm", "npm", "yarn"]);
+const PY = new Set(["uv", "poetry"]);
+/** Files a finished install leaves at the top of node_modules (npm, yarn classic, yarn berry, pnpm). */
+const JS_MARKERS = [".package-lock.json", ".yarn-integrity", ".yarn-state.yml", ".modules.yaml"];
+
+/** #5590: the project's declared Python range (`[project] requires-python` / `[tool.poetry.dependencies] python`), null when absent. */
+export function pyRange(text, eco) {
+  let section = "", poetry = null, pep = null;
+  for (const raw of String(text).split("\n")) {
+    const line = raw.trim();
+    const h = /^\[([^\]]+)\]$/.exec(line);
+    if (h) { section = h[1].trim(); continue; }
+    let m;
+    if (section === "project" && (m = /^requires-python\s*=\s*["']([^"']+)["']/.exec(line))) pep = m[1];
+    else if (section === "tool.poetry.dependencies" && (m = /^python\s*=\s*["']([^"']+)["']/.exec(line))) poetry = m[1];
+  }
+  return eco === "poetry" ? poetry ?? pep : pep ?? poetry;
+}
+const cmpVer = (a, b) => { for (let i = 0; i < 3; i++) { const d = (a[i] ?? 0) - (b[i] ?? 0); if (d) return d; } return 0; };
+const prefixOf = (v, n) => n.every((x, i) => v[i] === x);
+function clauseOk(clause, v) {
+  const m = /^(\^|~=|~|==|!=|>=|<=|>|<)?v?(\d+(?:\.\d+)*)(\.\*)?$/.exec(clause);
+  if (!m) return true; // unparseable: never constrain
+  const op = m[1] ?? "==", n = m[2].split(".").map(Number), wild = Boolean(m[3]) || (op === "==" && n.length < 3) || (op === "!=" && n.length < 3);
+  switch (op) {
+    case "==": return wild ? prefixOf(v, n) : cmpVer(v, n) === 0;
+    case "!=": return wild ? !prefixOf(v, n) : cmpVer(v, n) !== 0;
+    case ">=": return cmpVer(v, n) >= 0;
+    case ">": return cmpVer(v, n) > 0;
+    case "<=": return cmpVer(v, n) <= 0;
+    case "<": return cmpVer(v, n) < 0;
+    case "^": { let i = n.findIndex((x) => x !== 0); if (i < 0) i = n.length - 1; const up = n.slice(0, i + 1); up[i] += 1; return cmpVer(v, n) >= 0 && cmpVer(v, up) < 0; }
+    default: { const up = (op === "~=" ? n.length === 2 : n.length === 1) ? [n[0] + 1] : [n[0], (n[1] ?? 0) + 1]; return cmpVer(v, n) >= 0 && cmpVer(v, up) < 0; } // ~ / ~=
+  }
+}
+/** #5590: does version `v` ([major, minor, patch]) satisfy the PEP 440 / poetry range `spec` ("||" alternatives, comma or space joined clauses)? */
+export function pySatisfies(spec, v) {
+  return String(spec).split("||").some((grp) => grp.replace(/(\^|~=|~|==|!=|>=|<=|>|<)\s+/g, "$1").split(/[,\s]+/).filter(Boolean).every((c) => clauseOk(c, v)));
+}
 /** Full frozen install on a miss, and the warm no-op repair pass on a hit (null: nothing path-dependent to repair). */
-function commands(d) {
+function commands(d, py = null) {
+  const use = py ? [["poetry", ["env", "use", py.cmd]]] : [];
   switch (d.eco) {
     case "pnpm": return { install: [["pnpm", ["install", "--frozen-lockfile"]]], repair: [["pnpm", ["install", "--frozen-lockfile", "--offline"]]] };
     // npm/yarn node_modules hold only relative links; npm's hidden lockfile is rewritten in place, which the read-only
     // snapshot (correctly) refuses, so they get no repair pass.
     case "npm": return { install: [["npm", ["ci", "--no-audit", "--no-fund"]]], repair: null };
     case "yarn": return { install: [["yarn", ["install", d.berry ? "--immutable" : "--frozen-lockfile"]]], repair: null };
-    case "uv": return { install: [["uv", ["venv", "--relocatable", ".venv"]], ["uv", ["sync", "--frozen"]]], repair: [["uv", ["sync", "--frozen"]]] };
-    case "poetry": return { install: [["poetry", ["install", "--sync"]]], repair: [["poetry", ["install", "--sync"]]] };
+    case "uv": return { install: [["uv", ["venv", "--relocatable", ...(py ? ["--python", py.cmd] : []), ".venv"]], ["uv", ["sync", "--frozen"]]], repair: [["uv", ["sync", "--frozen"]]] };
+    case "poetry": return { install: [...use, ["poetry", ["install", "--sync"]]], repair: [...use, ["poetry", ["install", "--sync"]]] };
     default: return null;
   }
 }
@@ -147,10 +186,39 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return ["package.json"];
   }
 
-  async function keyOf(wt, d, pkgs) {
+  /**
+   * #5590: for a Python project whose pyproject declares a range the host's default python3 is outside of, the interpreter that
+   * does satisfy it ({cmd, version}: pythonX.Y on PATH, then `uv python find`); null keeps the default (no range, default in range, none found).
+   */
+  async function pythonFor(wt, d) {
+    if (!PY.has(d.eco)) return null;
+    let range = null;
+    try { range = pyRange(String(fs.readFileSync(join(wt, "pyproject.toml"))), d.eco); } catch { /* no pyproject */ }
+    if (!range) return null;
+    const probe = async (cmd) => {
+      try {
+        const version = String(await exec(cmd, ["--version"], { timeoutMs: 30000 })).trim();
+        const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(version);
+        return m ? { cmd, version, v: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] } : null;
+      } catch { return null; }
+    };
+    const def = await probe("python3");
+    if (def && pySatisfies(range, def.v)) return null;
+    const minors = [14, 13, 12, 11, 10, 9, 8];
+    for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return c; }
+    for (const x of minors) {
+      let path = "";
+      try { path = String(await exec("uv", ["python", "find", `3.${x}`], { timeoutMs: 30000 })).trim().split("\n")[0]; } catch { break; } // no uv
+      const c = path ? await probe(path) : null;
+      if (c && pySatisfies(range, c.v)) return c;
+    }
+    return null;
+  }
+
+  async function keyOf(wt, d, pkgs, py = null) {
     const h = createHash("sha256").update(`v1\0${d.eco}\0${process.platform}-${process.arch}\0`);
     if (d.dir) h.update(`${d.dir}\0`);
-    h.update(await runtime(JS.has(d.eco) ? "node" : "python3")).update("\0");
+    h.update(py ? py.version : await runtime(JS.has(d.eco) ? "node" : "python3")).update("\0");
     const files = JS.has(d.eco) ? [d.lock, ...pkgs, "pnpm-workspace.yaml", ".npmrc", ".yarnrc.yml"] : [d.lock, "pyproject.toml", ".python-version"];
     for (const f of files) {
       h.update(`${f}\0`);
@@ -243,6 +311,20 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   const binDirFor = (d) => (JS.has(d.eco) ? (rel) => rel.split("/").includes(".bin") : (rel) => rel === "bin");
   const rmTrees = (wt, trees) => { for (const t of trees) { try { fs.rmSync(join(wt, t), { recursive: true, force: true }); } catch { /* best effort */ } } };
 
+  /** #5590: the existing trees an install did not finish (no marker, a declared dependency missing, a venv without a working python). */
+  function brokenTrees(wt, d, trees) {
+    return trees.filter((t) => {
+      const p = join(wt, t);
+      try {
+        if (!JS.has(d.eco)) return !fs.existsSync(join(p, "pyvenv.cfg")) || !fs.existsSync(join(p, "bin", "python"));
+        if (!JS_MARKERS.some((m) => fs.existsSync(join(p, m)))) return true;
+        const pj = JSON.parse(String(fs.readFileSync(join(wt, dirname(t), "package.json"))));
+        return Object.keys({ ...pj.dependencies, ...pj.devDependencies }).some((n) => !fs.existsSync(join(p, n)));
+      } catch { return true; }
+    });
+  }
+  const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+
   function publish(wt, d, key, trees, snap) {
     const tmp = `${snap}.tmp-${pid}`;
     try {
@@ -264,15 +346,23 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
 
   async function prepareOne(wt, keyRoot, d, laneEnv) {
     const t0 = now();
-    const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? null, ...(extra.published === undefined ? {} : { published: extra.published }) });
+    let repaired = null;
+    const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? repaired, ...(extra.published === undefined ? {} : { published: extra.published }) });
     if (d.skip) return done("skipped", { reason: d.skip });
     const pkgs = JS.has(d.eco) ? await manifests(wt) : [];
-    const key = await keyOf(wt, d, pkgs);
+    const py = await pythonFor(wt, d);
+    const key = await keyOf(wt, d, pkgs, py);
     const snap = join(keyRoot, `${d.eco}-${key}`);
-    const cmds = commands(d);
+    const cmds = commands(d, py);
     const expected = JS.has(d.eco) ? [...new Set(pkgs.map((p) => (dirname(p) === "." ? "node_modules" : `${dirname(p)}/node_modules`)))] : [".venv"];
-    const existing = expected.filter((t) => fs.existsSync(join(wt, t)));
-    if (existing.length) return done("skipped", { key, reason: `${existing[0]} already exists in the worktree` });
+    const existing = expected.filter((t) => present(join(wt, t)));
+    if (existing.length) {
+      const broken = brokenTrees(wt, d, existing);
+      if (!broken.length) return done("skipped", { key, reason: `${existing[0]} already exists in the worktree` });
+      // #5590: an interrupted or borrowed install is rebuilt, not trusted (the trees go together: a snapshot links all of them).
+      rmTrees(wt, existing);
+      repaired = `repaired incomplete ${broken[0]}`;
+    }
     fs.mkdirSync(keyRoot, { recursive: true, mode: 0o700 });
 
     const materialize = async () => {

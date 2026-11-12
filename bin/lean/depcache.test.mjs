@@ -38,7 +38,7 @@ const FIXTURES = {
 const LOCKFILE = { pnpm: "pnpm-lock.yaml", npm: "package-lock.json", uv: "uv.lock", poetry: "poetry.lock" };
 
 /** Fake package managers: write what a real install leaves behind, including the absolute paths that need rewriting. */
-function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0, rewriteState = false } = {}) {
+function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0, rewriteState = false, pythons = null } = {}) {
   const calls = [];
   const venv = (cwd, lock) => {
     const v = join(cwd, ".venv");
@@ -59,6 +59,12 @@ function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0,
       walk(cwd);
       return out.join("\0");
     }
+    if (pythons && /^python/.test(cmd)) {
+      if (args[0] === "--version" && pythons[cmd]) return `Python ${pythons[cmd]}\n`;
+      throw Object.assign(new Error(`spawn ${cmd} ENOENT`), { code: "ENOENT" });
+    }
+    if (cmd === "uv" && args[0] === "python") throw Object.assign(new Error("spawn uv ENOENT"), { code: "ENOENT" });
+    if (cmd === "poetry" && args[0] === "env") return "";
     if (args[0] === "--version") return cmd === "node" ? "v22.1.0\n" : "Python 3.12.3\n";
     const full = (cmd === "pnpm" && args.includes("--frozen-lockfile") && !args.includes("--offline")) || (cmd === "npm" && args[0] === "ci")
       || (cmd === "uv" && args[0] === "venv") || (cmd === "poetry" && !existsSync(join(cwd, ".venv")));
@@ -337,7 +343,7 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
     assert.deepEqual((await s.cache.prepare({ wt: empty, repoKey: "r" })).map((r) => [r.status, r.reason]), [["skipped", "no lockfile"]]);
     const y = join(s.base, "yarn"); put(join(y, "package.json"), "{}"); put(join(y, "yarn.lock"), "# yarn"); put(join(y, ".yarnrc.yml"), "yarnPath: x\n");
     assert.equal((await s.cache.prepare({ wt: y, repoKey: "r" }))[0].status, "skipped");
-    const pre = s.lane("pre"); put(join(pre, "node_modules/keep.js"), "mine");
+    const pre = s.lane("pre"); put(join(pre, "node_modules/keep.js"), "mine"); put(join(pre, "node_modules/.modules.yaml"), "layoutVersion: 5\n"); // a finished install (#5590)
     const [r] = await s.cache.prepare({ wt: pre, repoKey: "r" });
     assert.equal(r.status, "skipped");
     assert.equal(readFileSync(join(pre, "node_modules/keep.js"), "utf8"), "mine");
@@ -497,5 +503,58 @@ describe("depcache (#5423): nested JS lockfiles", () => {
     put(join(wt, "web/package-lock.json"), "{}");
     const [r] = await cache.prepare({ wt, repoKey: "repo-web2" });
     assert.equal(r.reason, "no lockfile");
+  });
+});
+
+describe("depcache (#5590): incomplete installs are repaired, Python follows the project's range", () => {
+  it("a truncated node_modules is rebuilt; a complete one is still skipped", async () => {
+    const { cache, base, f } = setup("pnpm");
+    const wt = join(base, "wt", "trunc");
+    mkdirSync(wt, { recursive: true });
+    FIXTURES.pnpm(wt);
+    put(join(wt, "package.json"), '{"name":"web","devDependencies":{"vitest":"1"}}');
+    put(join(wt, "node_modules/.modules.yaml"), "layoutVersion: 5\n"); // marker but vitest never landed
+    const [r] = await cache.prepare({ wt, repoKey: "repo-trunc" });
+    assert.notEqual(r.status, "skipped", JSON.stringify(r));
+    assert.match(r.reason ?? "", /repaired incomplete node_modules/);
+    assert.ok(f.installs().length > 0, "a repair pass or install ran");
+    assert.ok(existsSync(join(wt, "node_modules/lodash")), "tree rebuilt");
+    put(join(wt, "node_modules/vitest/package.json"), "{}");
+    const calls = f.installs().length;
+    const [r2] = await cache.prepare({ wt, repoKey: "repo-trunc" });
+    assert.equal(r2.status, "skipped", JSON.stringify(r2));
+    assert.equal(f.installs().length, calls, "a complete tree runs nothing");
+  });
+  it("a venv with a dangling python is rebuilt", async () => {
+    const { cache, base } = setup("poetry");
+    const wt = join(base, "wt", "venv");
+    mkdirSync(wt, { recursive: true });
+    FIXTURES.poetry(wt);
+    put(join(wt, ".venv/pyvenv.cfg"), "home = /gone\n");
+    mkdirSync(join(wt, ".venv/bin"), { recursive: true });
+    symlinkSync("/nonexistent/python3", join(wt, ".venv/bin/python"));
+    const [r] = await cache.prepare({ wt, repoKey: "repo-venv" });
+    assert.notEqual(r.status, "skipped", JSON.stringify(r));
+    assert.ok(existsSync(join(wt, ".venv/bin/python")));
+  });
+  it("poetry uses the pythonX.Y that satisfies the range, before install, and the key follows it", async () => {
+    const pythons = { python3: "3.9.18", "python3.12": "3.12.3" };
+    const a = setup("poetry", { pythons }), b = setup("poetry", { pythons: { python3: "3.9.18", "python3.11": "3.11.8" } });
+    const res = [];
+    for (const s of [a, b]) {
+      const wt = s.lane("x");
+      put(join(wt, "pyproject.toml"), '[tool.poetry.dependencies]\npython = "^3.11"\n');
+      res.push((await s.cache.prepare({ wt, repoKey: "repo-py" }))[0]);
+    }
+    const cmds = a.f.installs().map((c) => `${c.cmd} ${c.args.join(" ")}`);
+    assert.deepEqual(cmds.slice(0, 2), ["poetry env use python3.12", "poetry install --sync"]);
+    assert.notEqual(res[0].key, res[1].key, "the chosen interpreter is part of the key");
+  });
+  it("a default python3 inside the range, or no declared range, changes nothing", async () => {
+    const { cache, lane, f } = setup("poetry", { pythons: { python3: "3.12.3" } });
+    const wt = lane("in");
+    put(join(wt, "pyproject.toml"), '[project]\nrequires-python = ">=3.11,<3.13"\n');
+    await cache.prepare({ wt, repoKey: "repo-in" });
+    assert.ok(!f.calls.some((c) => c.args[0] === "env"));
   });
 });
