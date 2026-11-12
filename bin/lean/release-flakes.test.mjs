@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseFlakeConfig, classifyFailure, detectSameShaFlip, flakeEntry, planRerun, repeatedFlakes, fileFlakeIssue, canQuarantine, activeQuarantines, shouldWriteMarker, isUnskippable, recordFlakes, UNSKIPPABLE } from "./release-flakes.mjs";
+import { parseFlakeConfig, classifyFailure, detectSameShaFlip, flakeEntry, planRerun, repeatedFlakes, fileFlakeIssue, canQuarantine, activeQuarantines, shouldWriteMarker, isUnskippable, recordFlakes, UNSKIPPABLE_CLASSES } from "./release-flakes.mjs";
 import { rerunInfraFlakes } from "./release.mjs";
 
 const NOW = Date.parse("2026-11-12T00:00:00Z"), DAY = 86_400_000;
@@ -53,7 +53,7 @@ describe("release flakes (#5568)", () => {
     assert.equal(canQuarantine(base).ok, true);
     assert.match(canQuarantine({ ...base, issueLabels: [] }).why, /flake/);
     assert.equal(canQuarantine({ ...base, issueOpen: false }).ok, false);
-    for (const c of UNSKIPPABLE) assert.equal(canQuarantine({ ...base, target: `${c}:x` }).ok, false, c);
+    for (const c of UNSKIPPABLE_CLASSES) assert.equal(canQuarantine({ ...base, target: `${c}:x` }).ok, false, c);
     const live = (i) => [`t${i}`, { mode: "quarantine", at: new Date(NOW - DAY).toISOString(), until: new Date(NOW + DAY).toISOString() }];
     const full = Object.fromEntries(Array.from({ length: 15 }, (_, i) => live(i)));
     assert.match(canQuarantine({ ...base, exemptions: full }).why, /cap 15/);

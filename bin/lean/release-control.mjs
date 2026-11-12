@@ -10,12 +10,12 @@
  */
 import { hostname } from "node:os";
 import { readActive, readLedger, updateActive } from "./release-ledger.mjs";
-import { UNSKIPPABLE, isUnskippable, parseFlakeConfig, canQuarantine } from "./release-flakes.mjs";
+import { UNSKIPPABLE_CLASSES, isUnskippable, parseFlakeConfig, canQuarantine } from "./release-flakes.mjs";
 
 export const CONTROL_SCHEMA = "forgedock.release.control/v1";
 export const CONTROL_MARKER = "FORGE:CONTROL";
 export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze"];
-export { UNSKIPPABLE };
+export { UNSKIPPABLE_CLASSES as UNSKIPPABLE };
 export const EXEMPT_MAX_H = { skip: 24, quarantine: 14 * 24 };
 export const LANES = ["train", "release", "p0", "exclude"];
 const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze"];

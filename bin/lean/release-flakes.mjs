@@ -10,7 +10,7 @@ import { readActive, updateActive } from "./release-ledger.mjs";
 
 export const FLAKE_LABEL = "flake";
 export const FLAKE_MARKER = "FORGE:FLAKE";
-export const UNSKIPPABLE = ["migration", "security", "rollback", "backup-restore", "secrets"];
+export const UNSKIPPABLE_CLASSES = ["migration", "security", "rollback", "backup-restore", "secrets"];
 const DAY_MS = 86_400_000;
 const json = (s) => { try { return JSON.parse(String(s)); } catch { return null; } };
 const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d; };
@@ -28,12 +28,12 @@ export function parseFlakeConfig(policy) {
   const ci = policy?.ci ?? {}, f = ci.flake ?? {}, q = policy?.quarantine ?? {};
   return {
     rerunBudgetMin: num(ci.rerun_budget_min, 0), quarantineAfter: num(f.quarantine_after, 3), windowDays: num(f.window_days, 14),
-    quarantineDays: num(q.days, 14), quarantineMax: num(q.max, 15), unskippable: [...UNSKIPPABLE, ...(Array.isArray(ci.unskippable) ? ci.unskippable : [])],
+    quarantineDays: num(q.days, 14), quarantineMax: num(q.max, 15), unskippable: [...UNSKIPPABLE_CLASSES, ...(Array.isArray(ci.unskippable) ? ci.unskippable : [])],
   };
 }
 
 /** True when `check` is, or is under (`class:x`, `class/x`), an unskippable class; the one matcher for exempt and quarantine. */
-export const isUnskippable = (check, classes = UNSKIPPABLE) => classes.some((c) => check === c || check.startsWith(`${c}:`) || check.startsWith(`${c}/`));
+export const isUnskippable = (check, classes = UNSKIPPABLE_CLASSES) => classes.some((c) => check === c || check.startsWith(`${c}:`) || check.startsWith(`${c}/`));
 
 /** @returns {{class: "infra"|"unknown", signature: string|null}} from failure text (log tail or annotations). */
 export function classifyFailure(text) {
