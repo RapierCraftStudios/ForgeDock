@@ -266,6 +266,14 @@ describe("forgedock gc simulated lane crash (#4180)", () => {
       }
     });
   });
+  it("#5535: gc prints the pool entry's disk used, or unknown when the agent does not report it, and never fails", async () => {
+    for (const [inv, want] of [[{ id: "fdrsbx-1", issue: 77, disk_used_mb: 512 }, /512\.0M/], [{ id: "fdrsbx-1", issue: 77 }, /unknown/]]) {
+      const w = world(); w.probes.sandboxTransport = { destroy: async () => true, inventory: async () => [inv] };
+      writeLedger(w, { resources: [{ kind: "sandbox", value: "fdrsbx-1", provider: "pool", registered: NOW - 2 * H }] });
+      const r = await run(w, []);
+      assert.equal(r.code, 0, r.out); assert.match(r.out.split("\n").find((l) => l.includes("fdrsbx-1")), want);
+    }
+  });
   it("#4432: a dead-owner repo-keyed ledger (owner__repo__lane.json) is released and removed by --apply", async () => {
     const w = world();
     const runTmp = join(w.tmpRoot, "runs", "77-2"); mkdirSync(runTmp, { recursive: true });
@@ -743,5 +751,24 @@ describe("scheduled and disk-pressure hygiene, wider ownership (#5421)", () => {
     const d = tmpDir("mark-"); markOwned(d, { now: () => 5, host: "h" });
     const own = JSON.parse(readFileSync(join(d, ".forge-run-owner"), "utf8"));
     assert.equal(own.created, 5); assert.equal(own.host, "h"); assert.equal(own.pid, process.pid);
+  });
+});
+
+import { poolDiskCheck } from "../gc.mjs";
+import { remoteTransportFor } from "../lean/execution.mjs";
+describe("pool agent disk (#5535)", () => {
+  it("poolDiskCheck warns below min_free_gb, says unknown when absent, passes otherwise", () => {
+    const w = poolDiskCheck([{ name: "a", disk_free_gb: 2 }, { name: "b", disk_free_gb: null }], 5);
+    assert.equal(w.status, "warn"); assert.match(w.detail, /a 2\.0 GB free < 5 GB/); assert.match(w.detail, /b free disk unknown/);
+    assert.equal(poolDiskCheck([{ name: "a", disk_free_gb: 20 }], 5).status, "pass");
+    assert.equal(poolDiskCheck([{ name: "a", disk_free_gb: 1 }], 0).status, "pass");
+    assert.equal(poolDiskCheck([{ name: "b", disk_free_gb: null }], 5).status, "pass");
+  });
+  it("transport inventory/agentDisk read the optional fields; a malformed answer throws", async () => {
+    const mk = (data) => remoteTransportFor({ provider: "pool", endpoint: "http://r:1" }, { env: { COMPUTESHARE_TOKEN: "t" }, credentials: () => "t", fetchFn: async () => new Response(JSON.stringify(data), { status: 200 }) });
+    const t = mk({ agents: [{ name: "a", disk_free_gb: 7.5 }, { name: "old" }], sandboxes: { s1: { issue: 1, disk_used_mb: 9 }, s2: { issue: 2 } } });
+    assert.deepEqual(await t.agentDisk(), [{ name: "a", disk_free_gb: 7.5 }, { name: "old", disk_free_gb: null }]);
+    assert.deepEqual((await t.inventory()).map((x) => x.disk_used_mb), [9, null]);
+    await assert.rejects(mk({ sandboxes: {} }).agentDisk(), /malformed/);
   });
 });

@@ -3370,6 +3370,24 @@ async function doctor(fix = false, verbose = false) {
     }
   }
 
+  // ── Check 13b: Pool agent free disk (#5535) ─────────────────────────────────
+  // Per agent from the router's GET /agents; warns below hygiene.min_free_gb. Skipped without a pool router; never a failure.
+  {
+    try {
+      const { poolRouterConfig, remoteTransportFor } = await import("./lean/execution.mjs");
+      const endpoint = poolRouterConfig({ env: process.env })?.endpoint;
+      if (endpoint) {
+        const gc = await import("./gc.mjs");
+        const t = remoteTransportFor({ provider: "pool", endpoint }, { env: process.env });
+        const r = gc.poolDiskCheck(await t.agentDisk(), gc.readHygiene(process.cwd()).min_free_gb);
+        if (r.status === "pass") pass("Pool disk", r.detail);
+        else warn("Pool disk", r.detail);
+      }
+    } catch (e) {
+      warn("Pool disk", `could not read pool agent disk: ${String(e?.message ?? e).slice(0, 160)}`);
+    }
+  }
+
   // ── Check 14: Router/schedd restarts (#4673) ───────────────────────────────
   // A restart in the last hour usually means an OOM killer or SIGTERM took the coordinator and dropped in-flight lanes. Warn only.
   {

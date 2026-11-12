@@ -101,7 +101,14 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!r.ok) throw fail("inventory", r);
       const m = r.data?.sandboxes;
       if (!m || typeof m !== "object" || Array.isArray(m)) throw new Error("sandbox inventory: malformed router answer");
-      return Object.entries(m).map(([id, x]) => ({ id, issue: x?.issue ?? null }));
+      return Object.entries(m).map(([id, x]) => ({ id, issue: x?.issue ?? null, disk_used_mb: Number.isFinite(x?.disk_used_mb) ? x.disk_used_mb : null })); // #5535: null = old agent
+    },
+    /** #5535: each pool agent's free disk from `GET /agents` -> `agents[]` as [{name, disk_free_gb|null}]; a bad answer throws. */
+    async agentDisk() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("agent disk", r);
+      if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
+      return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
     },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
