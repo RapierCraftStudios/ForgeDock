@@ -343,7 +343,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const changed = req.op === "hold" ? b.holdIssues(req.issues ?? [], req.meta ?? null) : b.releaseIssues(req.issues ?? []);
-      return send({ type: "ok", changed, hosted: hosted.has(req.id) }, true);
+      return send({ type: "ok", changed, held: b.readHeld(), hosted: hosted.has(req.id) }, true);
     }
     if (req.op === "gc-orphans") { // #5469: cancel every orphaned batch (unhosted, pending issues, idle past the threshold)
       const { orphaned } = unhostedBatches(Date.now(), Number.isFinite(req.minAgeMs) ? req.minAgeMs : ORPHAN_AGE_MS);

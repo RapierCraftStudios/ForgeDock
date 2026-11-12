@@ -915,7 +915,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
       }
     }
-    if (recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
+    // #5526: the hold is re-read here (it is only read once per pass): a held issue's terminal outcome starts no recovery lane.
+    const heldNow = recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && (refreshHeld(), opHeld.has(n));
+    if (heldNow) decided({ issue: n, what: `no recovery lane for #${n}: ${heldByOperator(n)}`, why: firstLine(row.detail) || row.outcome, alternative: "recover while the operator holds it" });
+    if (recoveryMax && !heldNow && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
       let isConflicting = false;
       if (row.outcome === "ci-pending" && typeof conflicting === "function" && Number.isInteger(row.pr)) {
         try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
@@ -1014,6 +1017,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { gone = (await dispatchCheck(n)) ?? null; } catch { gone = null; }
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
+      // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
+      if (!cancelled && !halted) { refreshHeld(); if (opHeld.has(n)) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
@@ -1264,6 +1269,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const fmt = (ns) => ns.map((n) => `#${n}`).join(", ");
     const held = [...next].filter((n) => !opHeld.has(n)), freed = [...opHeld].filter((n) => !next.has(n));
     opHeld = next;
+    for (const n of held) if (running.has(n)) update({ issue: n, outcome: "hold", detail: `#${n} held after launch: lane still running` }); // #5526
     if (held.length) {
       decided({ issue: null, what: `held ${fmt(held)} (forgedock orchestrate --hold)`, why: "operator request", alternative: "cancel the batch" });
       update({ issue: null, outcome: "hold", detail: fmt(held) });
