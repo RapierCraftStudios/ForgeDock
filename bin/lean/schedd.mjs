@@ -52,6 +52,7 @@ import { schedDir, pidAlive } from "./sched.mjs";
 import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, evaluateDispatchStall, firstHourReport, recordStallAlert, writeFirstHour } from "./batch-health.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
+import { killTrackedChildren } from "./effects.mjs";
 import { applySetExecution } from "./live-execution.mjs";
 import { liveOverload } from "./hostload.mjs";
 
@@ -74,17 +75,26 @@ export const REQUEST_MS = 15 * 1000; // #4775: default bound of a control/status
  */
 export function findUnhosted(root, { isHosted = () => false, now = Date.now(), minAgeMs = ORPHAN_AGE_MS } = {}) {
   const unhosted = [], orphaned = [];
-  for (const id of listBatches(root)) {
-    if (isHosted(id)) continue;
-    try {
-      const b = openBatch(root, id), pending = b.pendingIssues();
-      if (!pending.length || b.readCancel()) continue;
-      const last = b.lastProgressMs();
-      (last !== null && now - last > minAgeMs ? orphaned : unhosted).push({ id, pending });
-    } catch { /* advisory */ }
-  }
+  for (const id of listBatches(root)) classifyUnhosted(root, id, { isHosted, now, minAgeMs, unhosted, orphaned });
   return { unhosted, orphaned };
 }
+function classifyUnhosted(root, id, { isHosted, now, minAgeMs, unhosted, orphaned }) {
+  if (isHosted(id)) return;
+  try {
+    const b = openBatch(root, id), pending = b.pendingIssues();
+    if (!pending.length || b.readCancel()) return;
+    const last = b.lastProgressMs();
+    (last !== null && now - last > minAgeMs ? orphaned : unhosted).push({ id, pending });
+  } catch { /* advisory */ }
+}
+export const yieldLoop = () => new Promise((r) => setImmediate(r));
+/** #5531: `findUnhosted` that yields to the event loop after every batch, so a long history never occupies one loop turn. */
+export async function findUnhostedAsync(root, { isHosted = () => false, now = Date.now(), minAgeMs = ORPHAN_AGE_MS } = {}) {
+  const unhosted = [], orphaned = [];
+  for (const id of listBatches(root)) { classifyUnhosted(root, id, { isHosted, now, minAgeMs, unhosted, orphaned }); await yieldLoop(); }
+  return { unhosted, orphaned };
+}
+export const ABANDON_AGE_MS = 14 * 24 * 3600 * 1000; // #5531: an unhosted batch with pending issues and no progress for this long is re-hosted (when ready) or abandoned
 export const ORPHAN_AGE_MS = 7 * 24 * 3600 * 1000; // #5469: an unhosted batch idle this long with pending issues is orphaned
 export const UNIT = "forgedock-schedd";
 export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
@@ -180,6 +190,7 @@ function takeLock(lock, pid, alive) {
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
   lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
+  abandonMs = (Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) > 0 ? Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) * 24 * 3600 * 1000 : ABANDON_AGE_MS), killChildren = killTrackedChildren,
   hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined } = {}) {
   const p = scheddPaths(dir);
   // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
@@ -203,6 +214,9 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   let lastActive = Date.now();
   const touch = () => { lastActive = Date.now(); };
   let lastTick = Date.now();
+  let lastPhase = { name: "idle", at: Date.now() };
+  const phase = (name) => { lastPhase = { name, at: Date.now() }; };
+  const abandoned = new Set(); // #5531: batches this daemon abandoned (reported once; the batch carries a cancel file with reason "abandoned")
 
   /** Run one batch here. Resolves with {id, dir} once the batch exists, rejects when it fails before that. */
   const host = ({ argv, cwd, env, keepBreaker = false }, first = null) => new Promise((resolve, reject) => {
@@ -282,12 +296,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const hostBounded = (args, first = null, what = "batch") => bound(host(args, first), what);
 
   /** #4775: per batch id, last progress and pending adds: every hosted batch, plus any daemon batch holding adds it never took. */
-  const statusBatches = () => {
+  const statusBatches = async () => {
     const now = Date.now(), out = [];
     const ids = new Set(hosted.keys());
     for (const id of starting.keys()) ids.add(id);
-    try { for (const id of listBatches(root)) if (!ids.has(id) && openBatch(root, id).readPlan()?.daemon) ids.add(id); } catch { /* unreadable root */ }
+    try { for (const id of listBatches(root)) { if (!ids.has(id)) { const b = openBatch(root, id); if (!b.isTerminal() && b.readPlan()?.daemon) ids.add(id); await yieldLoop(); } } } catch { /* unreadable root */ }
     for (const id of [...ids].sort()) {
+      await yieldLoop();
       const isHosted = hosted.has(id) || starting.has(id);
       let last = null, pending = [], pend = [];
       try { const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); pend = b.pendingIssues(); } catch { /* a half-written batch */ }
@@ -297,15 +312,16 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     return out;
   };
 
-  const unhostedBatches = (now, minAgeMs = ORPHAN_AGE_MS) => findUnhosted(root, { isHosted: (id) => hosted.has(id) || starting.has(id), now, minAgeMs });
+  const unhostedBatches = (now, minAgeMs = ORPHAN_AGE_MS) => findUnhostedAsync(root, { isHosted: (id) => hosted.has(id) || starting.has(id), now, minAgeMs });
 
   const handle = async (req, send) => {
     if (req.op === "status") {
       // #4917: a batch dir that still holds pending issues but is not hosted (finalised early, or never resumed)
       // #5469: ones idle longer than ORPHAN_AGE_MS collapse into `orphaned` (one line; `orchestrate --gc-orphans` cancels them)
-      const { unhosted, orphaned } = unhostedBatches(Date.now());
+      phase("status");
+      const { unhosted, orphaned } = await unhostedBatches(Date.now());
       let host = null; try { host = hostLoad?.() ?? null; } catch { host = null; } // #5174
-      return send({ type: "status", pid, lastTick, batches: statusBatches(), unhosted, orphaned, host }, true);
+      return send({ type: "status", pid, lastTick, batches: await statusBatches(), unhosted, orphaned, abandoned: [...abandoned], host }, true);
     }
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
@@ -425,6 +441,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     for (const t of rehostTimers) clearTimeout(t);
     if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
+    try { const n = killChildren?.(); if (n) log(`schedd: killed ${n} child process(es) of its own`); } catch { /* best effort */ } // #5531: lanes survive, the daemon's own gh/script children do not
     const stopping = [...runs.keys()];
     for (const ac of runs.values()) ac.abort();
     let timer;
@@ -468,27 +485,43 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const lagTimer = setInterval(() => {
     const now = Date.now(), lag = now - lagAt - 1000;
     lagAt = now;
-    if (lag >= lagMs && now - lagLogged >= 60_000) { lagLogged = now; log(`schedd: event loop stalled ${Math.round(lag / 1000)}s (host overloaded?)`); }
+    if (lag >= lagMs && now - lagLogged >= 60_000) { lagLogged = now; log(`schedd: event loop stalled ${Math.round(lag / 1000)}s (host overloaded?; last phase: ${lastPhase.name}, started ${Math.round((now - lastPhase.at) / 1000)}s ago)`); }
   }, 1000);
   lagTimer.unref?.();
   // #5314: a batch with ready issues, free lanes and no dispatch for `stallMin` is re-hosted once per ready set, else one needs-you
   // alert is recorded (health.json, status, sched show); every batch also gets its first-hour report once, without operator action.
   const rehostedStall = new Map();
-  const watchBatches = () => {
-    if (closing) return;
+  let watching = false;
+  const watchBatches = async () => {
+    if (closing || watching) return;
+    watching = true;
+    phase("watch");
+    try { await watchPass(); } finally { watching = false; phase("idle"); }
+  };
+  const watchPass = async () => {
     const now = Date.now();
     for (const id of listBatches(root)) {
+      await yieldLoop(); // #5531: one batch per loop turn, so status and dispatch are never starved by a long history
+      if (closing) return;
       try {
         const b = openBatch(root, id), plan = b.readPlan();
         if (!plan?.daemon) continue;
-        const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.load(), created = Date.parse(plan.created ?? "");
-        const isHosted = hosted.has(id) || starting.has(id);
+        const created = Date.parse(plan.created ?? "");
+        if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
+        const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
         const stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported });
         if (Number.isFinite(created) && (reported || now - created >= FIRST_HOUR_MIN * 60_000) && !existsSync(join(b.dir, FIRST_HOUR_FILE)) && now - created < 24 * 3600_000) {
           if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), holdInfo: b.readHoldInfo?.() ?? null, stall }))) log(`schedd: first-hour report written for batch ${id}`);
         }
+        const sig = stall ? stall.ready.join(",") : "";
+        const last = b.lastProgressMs();
+        if (!isHosted && !cancelled && !reported && state?.pending?.length && last !== null && now - last > abandonMs && (!stall || rehostedStall.get(id) === sig)) {
+          b.requestCancel({ reason: "abandoned" }); // #5531: idle past N days and not re-hostable: marked once (the cancel file ends the scan for it)
+          abandoned.add(id);
+          log(`schedd: batch ${id} abandoned (not hosted, ${state.pending.length} pending, no progress for ${Math.round((now - last) / 86400_000)} days)`);
+          continue;
+        }
         if (!stall) continue;
-        const sig = stall.ready.join(",");
         if (!isHosted && rehostedStall.get(id) !== sig) {
           rehostedStall.set(id, sig);
           log(`schedd: re-hosting batch ${id} (${stall.detail})`);
@@ -499,7 +532,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       } catch { /* advisory: one unreadable batch never stops the watchdog */ }
     }
   };
-  const stallTimer = setInterval(watchBatches, stallCheckMs);
+  const stallTimer = setInterval(() => { watchBatches().catch(() => {}); }, stallCheckMs);
   stallTimer.unref?.();
 
   // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.

@@ -80,6 +80,21 @@ export function scrubEnv(env) {
 }
 
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
+/** #5531: parses done by the cached reader (tests assert a scan parses each batch state once). */
+export const scanStats = { parses: 0 };
+const jsonCache = new Map();
+/** #5531: `readJson` keyed by the file's mtime, size and inode (atomic writes change the inode); callers must treat the value as read-only. */
+const readJsonCached = (file) => {
+  let st;
+  try { st = statSync(file); } catch { jsonCache.delete(file); return null; }
+  const key = `${st.mtimeMs}:${st.size}:${st.ino}`, hit = jsonCache.get(file);
+  if (hit?.key === key) return hit.value;
+  const value = readJson(file);
+  scanStats.parses++;
+  if (jsonCache.size > 4096) jsonCache.clear();
+  jsonCache.set(file, { key, value });
+  return value;
+};
 
 const readAdded = (file) => {
   const v = readJson(file);
@@ -185,6 +200,8 @@ export function openBatch(root, id) {
     },
     store: {
       load: () => readJson(f("state.json")),
+      /** #5531: read-only cached state for scans (status, watchdog); never mutate or save the result. */
+      peek: () => readJsonCached(f("state.json")),
       save: (state) => put(f("state.json"), JSON.stringify(state) + "\n"),
       log: (row) => { try { appendFileSync(f("log.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...row }) + "\n", { mode: 0o600 }); } catch { /* the log is advisory */ } },
     },
@@ -255,7 +272,7 @@ export function openBatch(root, id) {
       return { requeued, refused };
     },
     /** #4917: the issues still `pending` in state.json (deferred or requeued included); [] when none or unreadable. */
-    pendingIssues: () => { const p = readJson(f("state.json"))?.pending; return Array.isArray(p) ? p.filter((n) => Number.isSafeInteger(n)) : []; },
+    pendingIssues: () => { const p = readJsonCached(f("state.json"))?.pending; return Array.isArray(p) ? p.filter((n) => Number.isSafeInteger(n)) : []; },
     /** Every `--requeue` entry, in order; [] when missing or invalid. */
     readRequeued: () => readRequeueFile(f("requeue")),
     /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */
@@ -306,7 +323,9 @@ export function openBatch(root, id) {
     readCancel: () => { const v = readJson(f("cancel")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.at === "string" ? v : null; },
     clearCancel: () => rmSync(f("cancel"), { force: true }),
     /** Added issues the batch never took into its `order` (a finished or unhosted batch with pending adds). */
-    unrunAdds: () => { const order = new Set(readJson(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
+    unrunAdds: () => { const order = new Set(readJsonCached(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
+    /** #5531: a `report.json` or `cancel` file exists (two stats, no parse): the batch needs no scanning. */
+    isTerminal: () => existsSync(f("report.json")) || existsSync(f("cancel")),
     /** #4775: epoch ms of the batch's last progress (newest mtime of `state.json` / `log.jsonl`), or null when neither exists. */
     lastProgressMs: () => {
       let best = null;

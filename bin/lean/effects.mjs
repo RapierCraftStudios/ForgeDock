@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { promisify } from "node:util";
 import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
@@ -30,14 +29,31 @@ import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
 
-const pexec = promisify(execFile);
+/** #5531: children started by this process's gh/script helpers still running; the schedd kills them on close so none outlives the daemon. */
+const liveChildren = new Set();
+export function killTrackedChildren(signal = "SIGKILL") {
+  let n = 0;
+  for (const c of liveChildren) { try { if (c.kill(signal)) n++; } catch { /* gone */ } }
+  liveChildren.clear();
+  return n;
+}
+export const trackedChildCount = () => liveChildren.size;
+const pexec = (bin, args, opts) => new Promise((res, rej) => {
+  const child = execFile(bin, args, opts, (err, stdout, stderr) => {
+    liveChildren.delete(child);
+    if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res({ stdout, stderr });
+  });
+  liveChildren.add(child);
+});
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
 /** Argv-only child with stdin input; resolves stdout, rejects on a non-zero exit with stderr attached. */
 export function runWithInput(bin, args, input, timeout = 120000, env = undefined) {
   return new Promise((res, rej) => {
     const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
+      liveChildren.delete(child);
       if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res(String(stdout));
     });
+    liveChildren.add(child);
     // A child that exits before reading stdin closes the pipe: EPIPE must reject via the exit callback, never crash the lane.
     child.stdin.on("error", () => {});
     child.stdin.end(input);

@@ -7,7 +7,8 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, utime
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
+import { openBatch, isLaneAlive, listBatches, SECRET_ENV, scanStats } from "./batch.mjs";
+import { killTrackedChildren, runWithInput, trackedChildCount } from "./effects.mjs";
 import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
@@ -998,5 +999,78 @@ describe("#5469: orphaned batches", () => {
     const r = findUnhosted(root, { isHosted: (id) => id === "hosted" });
     assert.deepEqual(r.orphaned, [{ id: "ancient", pending: [1] }]);
     assert.deepEqual(r.unhosted, [{ id: "recent", pending: [1] }]);
+  });
+});
+
+describe("schedd scans stay off the loop (#5531)", () => {
+  const mk = (root, id, state, ageDays = 0) => {
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", created: new Date(Date.now() - (ageDays + 1) * 86400000).toISOString() });
+    b.store.save(state);
+    if (ageDays) { const old = new Date(Date.now() - ageDays * 86400000); utimesSync(join(b.dir, "state.json"), old, old); }
+    return b;
+  };
+
+  it("#5531: status and watchdog scans yield and parse each batch state once", async () => {
+    const dir = tmpDir("schedd-scan-"), root = join(dir, "batches");
+    for (let i = 0; i < 60; i++) mk(root, `b20261031-000000-${5000 + i}`, { v: 1, order: [1], results: {}, running: {}, pending: [], parallel: 1 }, 1);
+    const d = await startDaemon({ dir, root, runBatch: async () => {}, log: () => {}, resumeOnStart: false });
+    try {
+      const sock = await connectDaemon({ dir, spawnDaemon: null });
+      let ticks = 0, stop = false;
+      const spin = () => { if (!stop) { ticks++; setImmediate(spin); } };
+      spin();
+      const before = scanStats.parses;
+      const st = await request(sock, { op: "status" });
+      stop = true;
+      assert.equal(st.type, "status");
+      assert.ok(ticks >= 60, `loop turned ${ticks} times during the scan (one yield per batch expected)`);
+      assert.ok(scanStats.parses - before <= 60, `parsed ${scanStats.parses - before} states for 60 batches`);
+      const mid = scanStats.parses;
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.equal(scanStats.parses, mid, "unchanged files are not parsed again");
+    } finally { await d.close(); }
+  });
+
+  it("#5531: close kills the daemon's own tracked child processes", async () => {
+    const dir = tmpDir("schedd-kill-"), root = join(dir, "batches");
+    let called = 0;
+    const d = await startDaemon({ dir, root, runBatch: async () => {}, log: () => {}, resumeOnStart: false, killChildren: () => { called++; return 0; } });
+    await d.close();
+    assert.equal(called, 1);
+    const p = runWithInput("sleep", ["30"], "").catch((e) => e);
+    await until(() => trackedChildCount() === 1, 5000);
+    assert.equal(killTrackedChildren(), 1);
+    assert.ok((await p) instanceof Error, "the killed child rejects");
+    assert.equal(trackedChildCount(), 0);
+  });
+
+  it("#5531: long-unhosted batch abandoned once", async () => {
+    const dir = tmpDir("schedd-abandon-"), root = join(dir, "batches");
+    const blocked = mk(root, "b20261001-000000-6001", { v: 1, order: [2, 9], results: {}, running: {}, pending: [2], deps: { 2: [9] }, parallel: 1 }, 20);
+    const logs = [], calls = [];
+    const d = await startDaemon({ dir, root, runBatch: async ({ argv }) => { calls.push(argv); }, log: (l) => logs.push(l), resumeOnStart: false, stallCheckMs: 50, stallMin: 10 });
+    try {
+      await until(() => blocked.readCancel()?.reason === "abandoned", 8000);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(logs.filter((l) => /abandoned/.test(l)).length, 1, "reported once");
+      assert.equal(calls.length, 0, "nothing ready: not re-hosted");
+      const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.deepEqual(st.abandoned, [blocked.id]);
+    } finally { await d.close(); }
+  });
+
+  it("#5531: long-unhosted batch with a ready issue is re-hosted, not abandoned", async () => {
+    const dir = tmpDir("schedd-rehost-old-"), root = join(dir, "batches");
+    const ready = mk(root, "b20261001-000000-6002", { v: 1, order: [3], results: {}, running: {}, pending: [3], parallel: 1 }, 20);
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => { calls.push(argv); sink.batch({ id: ready.id, dir: ready.dir }); return await new Promise(() => {}); };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false, stallCheckMs: 50, stallMin: 10 });
+    try {
+      await until(() => calls.length === 1, 8000);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual(calls[0], ["--resume", ready.id]);
+      assert.equal(ready.readCancel(), null);
+    } finally { await d.close(); }
   });
 });
