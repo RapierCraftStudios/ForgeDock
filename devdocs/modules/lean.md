@@ -3177,3 +3177,7 @@ R3/R5/R7 follow-up (#5450): image sandboxes join a per-lane network `forge-sbx-<
 ### Hold honoured at recovery and launch (#5526)
 
 `orchestrate.mjs` re-reads the operator hold (`refreshHeld`) in the lane-finish path and just before `runOne`: a held issue's `needs-human`/`ci-pending`/`budget-exceeded` outcome starts no recovery lane (a `decision` row says why), and an issue held since the pass read goes back to pending with no lane. A hold that arrives while the lane runs does not stop it; it is reported as a `hold` row `#N held after launch: lane still running`. `--hold` on an already-held issue prints `batch X: already held #N` (not `held (none)`); `schedd.mjs`'s hold/release reply carries `held: b.readHeld()` for it.
+
+### Pool disk reporting (#5535)
+
+`sandbox-remote.mjs` `inventory()` rows gain `disk_used_mb` (null when the agent did not report it), and `agentDisk()` reads `GET /agents` `agents[]` as `[{name, disk_free_gb|null}]` (a non-array answer throws; the inventory fail-closed rule for a malformed list is unchanged). The fields come from `bin/pool/agent.mjs` (`disk_free_gb`, `sandbox_disk_mb`, walked at most every 60s) merged by the router. `gc.mjs` prints the disk used per pool entry (`unknown` when absent, never a failure); `poolDiskCheck` backs doctor's "Pool disk" line, warning below `hygiene.min_free_gb`.
