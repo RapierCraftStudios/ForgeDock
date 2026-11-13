@@ -3431,6 +3431,19 @@ export async function runCore(o) {
     };
     let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
+    /** #5583 follow-up: the builder resolved a base-sync whose conflicts were all documentation files, and the lane's non-doc
+     * diff against the new base equals its non-doc diff against the old fork point (so no code changed in the resolution). */
+    const DOC_FILE_RE = /\.(md|mdx|markdown|rst|adoc|txt)$/i, DOC_EXCLUDES = ["md", "mdx", "markdown", "rst", "adoc", "txt"].map((e) => `:(exclude)*.${e}`);
+    const docsOnlyConflict = async (conflicted, laneBefore) => {
+      if (!conflicted.length || !conflicted.every((f) => DOC_FILE_RE.test(f))) return false;
+      try {
+        const fork = await gitOut(["merge-base", laneBefore, "HEAD^2"]);
+        if (!/^[0-9a-f]{7,}$/.test(fork)) return false; // gitOut swallows errors as "": never treat that as "unchanged"
+        const was = await gitOut(["diff", fork, laneBefore, "--", ".", ...DOC_EXCLUDES]);
+        const now = await gitOut(["diff", "HEAD^2", "HEAD", "--", ".", ...DOC_EXCLUDES]);
+        return was === now;
+      } catch { return false; }
+    };
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
     const syncRow = [];
@@ -3454,7 +3467,7 @@ export async function runCore(o) {
       // #4386: conflicts only in sequence files (numbered, journal, snapshot, their index) resolve without a builder
       // #4588: union / JSON-map / generated files resolve first; only the files left go to the sequence resolver
       const bm = o.baseMerge, cr = !clean && io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files, cfg: bm }).catch(() => null) : null;
-      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false;
+      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false, docsOnlySync = false;
       if (cr?.resolved?.length && !seqFiles.length) { try { await git(["commit", "--no-edit"]); crDone = true; } catch { /* the builder finishes the merge */ } }
       if (cr?.note) T.decisions.push(`Base-sync ${syncs}: ${cr.note}`);
       const rs = !clean && !crDone && seqFiles.length && io.sequenceResolve ? ((await io.sequenceResolve({ cwd: wt, files: seqFiles }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? {}) : null;
@@ -3482,6 +3495,8 @@ export async function runCore(o) {
         how = `builder resolved ${files.length} conflicted file(s) and committed the merge`;
         const r2 = await readResult();
         tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
+        docsOnlySync = await docsOnlyConflict(files, before); // #5583 follow-up
+        if (docsOnlySync) { T.decisions.push(`Base-sync ${syncs}: conflicts only in documentation (${files.join(", ")}) and the lane's code diff is unchanged; no re-review`); tests = "not required (documentation-only conflicts; lane code diff unchanged)"; }
       }
       const sq = await sequenceHandoff(`base-sync ${syncs}`, detResolved ? { laneRef: before } : {}); // #4322: a clean text merge can still bring a taken number
       if (sq?.done) return sq.done;
@@ -3508,6 +3523,7 @@ export async function runCore(o) {
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
       const engineOnly = !ciFixes && !pm.fixed && !dupFixed && (clean || detResolved) && (!sq?.renumbered || sq.deterministic); // #4386: no builder touched the delta
       if (!isSplit && engineOnly && (detResolved || sq?.deterministic)) rereview = "not required (deterministic renumber + base merge)";
+      else if (!isSplit && docsOnlySync && !ciFixes && !pm.fixed && !dupFixed && !sq?.renumbered) rereview = "not required (documentation-only conflicts; lane code diff unchanged)";
       else if (!isSplit && (!clean || sq?.renumbered || ciFixes || pm.fixed || dupFixed)) {
         let rv = await doReview();
         if (rv.env) return await envNeedsHuman(rv.env);

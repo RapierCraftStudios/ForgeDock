@@ -3492,6 +3492,32 @@ describe("base-sync (#4100)", () => {
     noRebaseNoForce(w);
   });
 
+  it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      return git(a, o);
+    };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1, "no re-review for a documentation-only conflict");
+    assert.match(syncComment(w), /not required \(documentation-only conflicts; lane code diff unchanged\)/);
+  });
+
+  it("#5583 follow-up: a documentation-only conflict whose resolution changed the code diff is re-reviewed", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git; let n = 0;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return `diff --git a/src/foo.js b/src/foo.js\n+fix${n++}`;
+      return git(a, o);
+    };
+    await run(w);
+    assert.equal(reviewers(w).length, 2, "re-review: the resolution touched code");
+  });
+
   it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
     const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), bad("src/foo.js:4 lost base change"), ok()] });
     assert.equal((await run(w)).terminalReason, "merged");
