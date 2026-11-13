@@ -173,3 +173,10 @@ describe("check-config --coverage and contracts[].regenerate (#5570, Q9)", () =>
     assert.match(c("[1]").join(), /regenerate/);
   });
 });
+
+describe("features.flag_policy (#5571)", () => {
+  it("accepts require|warn|off and rejects anything else", () => {
+    for (const v of ["require", "warn", "off"]) assert.deepEqual(check(OK + `features: {flag_policy: ${v}}\n`), [], v);
+    assert.match(check(OK + "features: {flag_policy: maybe}\n").join(), /flag_policy/);
+  });
+});
