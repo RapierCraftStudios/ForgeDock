@@ -297,6 +297,38 @@ export async function requiredChecksRead({ gh, repo, lane }) {
 
 export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
+/** #5592: stdout cap of a lane-path git/gh/docker call; output past it is cut, never an error. */
+export const EXEC_CAPPED_BYTES = 100 * 1024 * 1024;
+/**
+ * #5592: like `execFile` resolving stdout, but a child that prints more than `cap` bytes is stopped and its output
+ * truncated (marker appended) instead of failing with `stdout maxBuffer length exceeded`: a commit that removes a
+ * 485 MB archive made `git diff base...HEAD` kill the lane after it had pushed. A non-zero exit rejects with
+ * {stdout, stderr, code} like execFile, unless the exit came from our own stop (then the capped text is the result).
+ */
+export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_CAPPED_BYTES, spawnFn = spawn } = {}) {
+  return new Promise((res, rej) => {
+    const child = spawnFn(bin, args, { cwd, ...(env ? { env } : {}), stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = []; let size = 0, cut = false, err = "", timedOut = false;
+    const timer = timeout > 0 ? setTimeout(() => { timedOut = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }, timeout) : null;
+    child.stdout.on("data", (b) => {
+      if (cut) return;
+      const room = cap - size;
+      if (b.length > room) { if (room > 0) chunks.push(b.subarray(0, room)); size = cap; cut = true; try { child.kill("SIGTERM"); } catch { /* gone */ } return; }
+      chunks.push(b); size += b.length;
+    });
+    child.stderr.on("data", (b) => { if (err.length < 64000) err += String(b); });
+    child.on("error", (e) => { if (timer) clearTimeout(timer); rej(e); });
+    child.on("close", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      const out = Buffer.concat(chunks).toString("utf8") + (cut ? `\n[forgedock: output truncated at ${cap} bytes]\n` : "");
+      if (cut || code === 0) return res(out);
+      const e = new Error(`Command failed: ${bin} ${args.join(" ")}${timedOut ? " (timed out)" : ""}\n${err}`);
+      Object.assign(e, { code: timedOut ? null : code, signal, killed: timedOut, stdout: out, stderr: err });
+      rej(e);
+    });
+  });
+}
+
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;
 /** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env. */
@@ -319,11 +351,11 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, 
     const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
     child.stdout.on("data", add); child.stderr.on("data", add);
-    child.on("error", (e) => { clearTimeout(timer); done({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
+    child.on("error", (e) => { clearTimeout(timer); finish({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
     child.on("close", (code) => {
       clearTimeout(timer);
       const tail = out.slice(-CHECK_OUTPUT_CAP);
-      done(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
+      finish(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
   return inner.then(async (r) => { await reapContainers(reapLabel, { env: { ...process.env, ...(env ?? {}) } }); return r; });
@@ -357,7 +389,7 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
 export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
-  const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
+  const run = (bin) => async (args, opts = {}) => execCapped(bin, args, { cwd: opts.cwd, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) });
   /** #5235: paths the other open PRs on `lane` carry (gh only, no fetch); [] on any failure. */
   const openPrFiles = async (cwd, lane) => {
     try {
