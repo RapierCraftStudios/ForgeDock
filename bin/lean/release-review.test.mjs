@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, MAX_FIX_ROUNDS, realSeam, withIntegrityMarker, TEST_GATE_SKIP_NO_TESTS, testGatePrompt, integrationTestCount, resolveSkillName } from "./release-review.mjs";
+import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, realSeam, withIntegrityMarker, TEST_GATE_SKIP_NO_TESTS, testGatePrompt, integrationTestCount, resolveSkillName } from "./release-review.mjs";
 import { readFileSync } from "node:fs";
 import { reviewStagingJson } from "../review-staging.mjs";
 
@@ -11,7 +11,7 @@ const manifest = (head, delta = null) => ({ pr: 7, headSha: head, bundle: [1, 2]
 const fin = (extra = {}) => ({ code: 0, data: { head: H1, toFile: [], notes: [], ...extra }, lines: [] });
 
 /** Seam fake: `heads` is what headOf answers in turn; `fins` what finalize answers in turn. */
-function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], gatePlan = { clusters: 1, skill: "forgedock:test-gate" } } = {}) {
+function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = [], gatePlan = { clusters: 1, skill: "forgedock:test-gate" } } = {}) {
   const log = [], agents = [], gateSaved = [], agentCalls = [];
   let h = 0, f = 0, l = 0, n = 100;
   return {
@@ -26,7 +26,8 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], gatePlan 
     testGatePlan: async () => gatePlan,
     runAgent: async (a) => { agentCalls.push(a); agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
-    fileCiIssue: async () => { log.push(["ci-issue"]); return n++; },
+    failedJobs: async () => jobs,
+    fileFixIssue: async () => { log.push(["fix-issue"]); return n++; },
     issueMerged: async () => false,
     addNotes: async (pr, notes) => log.push(["notes", notes]),
     runLane: async (a) => { log.push(["lane", a.issue, a.lane]); return lanes[l++] ?? { terminalReason: "merged" }; },
@@ -141,21 +142,23 @@ describe("fixStep", () => {
     assert.equal(s.log.length, 0);
   });
 
-  it("runs a lane on the staging branch per blocking issue, then a delta review from the reviewed head", async () => {
+  it("runs ONE lane on the consolidated fix issue on the staging branch, then a delta review from the reviewed head", async () => {
     const s = fakeSeam({ heads: [H2] });
     const c = ctx(s, { review: { result: failed } });
     const r = await fixStep(c);
-    assert.deepEqual(s.log[0], ["lane", 101, "staging"]);
-    assert.deepEqual(s.log[1], ["pre", H1]);
+    assert.deepEqual(s.log.slice(0, 3), [["fix-issue"], ["lane", 100, "staging"], ["pre", H1]]);
     assert.equal(r.verdict, "APPROVE FOR DEPLOY");
+    assert.equal(c.state.fixloop.heads[H2].rounds, 1, "the round is counted per head sha");
   });
 
-  it("is bounded: blocks once the rounds are spent", async () => {
+  it("is bounded: one round (ci.fix.max_rounds default 1), then HELD with an owner ask for a non-flake, non-regression failure", async () => {
     const bad = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 0 }, lines: [] };
     const s = fakeSeam({ heads: [H2], summary: bad, fins: [fin({ toFile: [{ title: "x", severity: "CRITICAL" }] })] });
     const r = await fixStep(ctx(s, { review: { result: failed } }));
     assert.equal(r.blocked, true);
-    assert.equal(s.log.filter((e) => e[0] === "lane").length, MAX_FIX_ROUNDS);
+    assert.equal(r.held, true);
+    assert.match(r.reason, /^Owner: .*ci\.fix\.max_rounds=1/);
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 1);
   });
 
   it("blocks when a lane does not merge", async () => {
@@ -166,31 +169,31 @@ describe("fixStep", () => {
   it("red CI with no finding files one CI issue and runs a lane on it, then reviews the delta", async () => {
     const s = fakeSeam({ heads: [H2] });
     const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], ciFailing: 2 } } }));
-    assert.deepEqual(s.log.slice(0, 3), [["ci-issue"], ["lane", 100, "staging"], ["pre", H1]]);
+    assert.deepEqual(s.log.slice(0, 3), [["fix-issue"], ["lane", 100, "staging"], ["pre", H1]]);
     assert.equal(r.blocked, undefined);
   });
 
   it("a resume skips fix issues already closed as merged and goes on to the delta review", async () => {
     const s = fakeSeam({ heads: [H2] });
-    s.issueMerged = async (n) => n === 101;
+    s.issueMerged = async (n) => n === 100;
     const r = await fixStep(ctx(s, { review: { result: failed } }));
     assert.equal(s.log.filter((e) => e[0] === "lane").length, 0);
     assert.deepEqual(s.log[0], ["pre", H1]);
     assert.equal(r.blocked, undefined);
   });
 
-  it("realSeam.fileCiIssue reuses the issue already filed for the same release head", async () => {
+  it("realSeam.fileFixIssue reuses the issue already filed for the same release head", async () => {
     const calls = [];
-    const gh = (args) => { calls.push(args); if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 5396, title: "Release PR #7: CI red at b48bae6" }]); throw new Error("unexpected"); };
+    const gh = (args) => { calls.push(args); if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 5396, title: "Release PR #7: one-round fix at b48bae6" }]); throw new Error("unexpected"); };
     const seam = realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", gh });
-    assert.equal(await seam.fileCiIssue({ pr: 7, head: "b48bae6628432906aa96f509eddfe6d49608e725" }), 5396);
+    assert.equal(await seam.fileFixIssue({ pr: 7, head: "b48bae6628432906aa96f509eddfe6d49608e725", brief: "b" }), 5396);
     assert.equal(calls.length, 1);
   });
 
-  it("a blocking finding and red CI together get a lane each", async () => {
+  it("a blocking finding and red CI together get ONE lane on one consolidated issue", async () => {
     const s = fakeSeam({ heads: [H2] });
     await fixStep(ctx(s, { review: { result: { ...failed, ciFailing: 1 } } }));
-    assert.deepEqual(s.log.filter((e) => e[0] === "lane").map((e) => e[1]), [101, 100]);
+    assert.deepEqual(s.log.filter((e) => e[0] === "lane").map((e) => e[1]), [100]);
   });
 
   it("only cancelled CI: no CI issue, no lane, no round spent; re-summarises and goes on", async () => {
@@ -204,7 +207,7 @@ describe("fixStep", () => {
     const s2 = fakeSeam({ summary: still });
     const r2 = await fixStep(ctx(s2, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 1, ciCancelOnly: true } } }));
     assert.match(r2.reason, /still cancelled/);
-    assert.ok(!s2.log.some((e) => e[0] === "ci-issue" || e[0] === "lane"));
+    assert.ok(!s2.log.some((e) => e[0] === "fix-issue" || e[0] === "lane"));
   });
 
   it("only pending CI (#5519): blocks without a CI issue or lane; a real failure alongside still files", async () => {
@@ -214,7 +217,7 @@ describe("fixStep", () => {
     assert.deepEqual(s.log, []);
     const s2 = fakeSeam();
     await fixStep(ctx(s2, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 2, ciPendingOnly: false } } }));
-    assert.ok(s2.log.some((e) => e[0] === "ci-issue"));
+    assert.ok(s2.log.some((e) => e[0] === "fix-issue"));
   });
 
   it("blocks when the verdict is not a pass but there is nothing to fix", async () => {
@@ -237,6 +240,66 @@ describe("reviewStagingJson (library entry)", () => {
     assert.equal(r.data, null);
     assert.ok(r.code >= 1);
     assert.ok(r.lines.length > 0);
+  });
+});
+
+describe("fixStep one-round loop (#5567)", () => {
+  const failed = { pr: 7, head: H1, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [], filed: [], ciFailing: 1, items: [] };
+  const bad = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 1 }, lines: [] };
+  it("the brief the lane gets is one compiled record of every failed job (fail-late)", async () => {
+    const s = fakeSeam({ heads: [H2], jobs: [{ name: "unit", conclusion: "failure", log: "AssertionError" }, { name: "lint", conclusion: "success" }] });
+    let brief = null;
+    s.fileFixIssue = async (a) => { brief = a.brief; return 100; };
+    await fixStep(ctx(s, { review: { result: failed } }));
+    assert.match(brief, /## Invariant: ci:unit/);
+    assert.match(brief, /## Sibling sweep/);
+    assert.ok(!brief.includes("lint"), "a passing job is not in the brief");
+  });
+  it("ci.fix.max_rounds raises the round budget", async () => {
+    const s = fakeSeam({ heads: [H2], summary: bad, jobs: [{ name: "unit", conclusion: "failure", log: "AssertionError" }] });
+    const c = ctx(s, { review: { result: failed } });
+    c.config = { fix: { maxRounds: 2 } };
+    await fixStep(c);
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 2);
+  });
+  it("a remaining infra flake gets one rerun, no code change, then GATE_PASS", async () => {
+    const s = fakeSeam({ heads: [H2], summary: bad, jobs: [{ name: "unit", conclusion: "failure", log: "ECONNRESET" }] });
+    const c = ctx(s, { review: { result: failed } });
+    let reran = 0;
+    c.rerunInfra = async () => { reran++; s.summary = async () => ({ code: 0, data: { verdict: "APPROVE FOR DEPLOY", marker: "FORGE:GATE_PASS", ciFailing: 0 }, lines: [] }); return { reran: ["unit"], skipped: [] }; };
+    const r = await fixStep(c);
+    assert.equal(r.verdict, "APPROVE FOR DEPLOY");
+    assert.equal(reran, 1);
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 1, "the rerun is not a fix lane");
+  });
+  it("an infra flake that still fails after its one rerun is HELD, never rerun again", async () => {
+    const s = fakeSeam({ heads: [H2], summary: bad, jobs: [{ name: "unit", conclusion: "failure", log: "ECONNRESET" }] });
+    const c = ctx(s, { review: { result: failed } });
+    let reran = 0, held = null;
+    c.rerunInfra = async () => { reran++; return { reran: ["unit"], skipped: [] }; };
+    c.hold = async (ask) => { held = ask; };
+    const r = await fixStep(c);
+    assert.equal(reran, 1);
+    assert.equal(r.held, true);
+    assert.match(held, /already used/);
+  });
+  it("a fix that regressed a check is reverted mechanically once (snapshot mode), then HELD if still red", async () => {
+    const SNAP = "1".repeat(40), PK = "4".repeat(40), RV = "5".repeat(40);
+    const git = [];
+    const s = fakeSeam({ heads: [H2, H2], summary: bad });
+    let call = 0;
+    s.failedJobs = async () => (call++ === 0 ? [{ name: "unit", conclusion: "failure", log: "x" }] : [{ name: "unit", conclusion: "failure", log: "x" }, { name: "e2e", conclusion: "failure", log: "y" }]);
+    const c = ctx(s, { review: { result: failed } });
+    c.config = { mode: "snapshot" };
+    c.git = (a) => { git.push(a); if (a[0] === "commit-tree") return `${RV}\n`; return `${"6".repeat(40)}\n`; };
+    c.io = { ...c.io, git: c.git, gh: async () => JSON.stringify({ body: "" }) };
+    c.state.release = { branch: "release/x", snapshot: SNAP, range: {}, picks: [{ sha: PK, orig: "3".repeat(40), kind: "fix" }] };
+    c.hold = async () => {};
+    const r = await fixStep(c);
+    assert.ok(git.some((a) => a[0] === "push" && a.includes(`${RV}:refs/heads/release/x`)), "the revert is pushed");
+    assert.deepEqual(c.state.release.picks.at(-1), { sha: RV, orig: PK, kind: "revert" });
+    assert.equal(r.held, true);
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 1, "the revert is not a lane");
   });
 });
 
@@ -281,10 +344,10 @@ describe("fixStep in snapshot mode (#5276)", () => {
     const c = snapCtx(s, w);
     const r = await fixStep(c);
     assert.equal(r.blocked, undefined);
-    assert.deepEqual(c.state.release.picks, [{ sha: PICK, orig: ORIG, pr: 55 }]);
+    assert.deepEqual(c.state.release.picks, [{ sha: PICK, orig: ORIG, pr: 55, kind: "fix" }]);
     assert.ok(w.git.some((a) => a[0] === "push" && a.includes(`${PICK}:refs/heads/release/x`)));
     assert.ok(w.gh.some((a) => a[1] === "edit" && a[a.indexOf("--body") + 1].includes("FORGE:RELEASE")), "the record is written to the PR");
-    assert.deepEqual(s.log.slice(0, 2), [["lane", 101, "staging"], ["pre", H1]]);
+    assert.deepEqual(s.log.slice(0, 3), [["fix-issue"], ["lane", 100, "staging"], ["pre", H1]]);
   });
 
   it("a conflicting cherry-pick blocks the job instead of reviewing a head that lacks the fix", async () => {

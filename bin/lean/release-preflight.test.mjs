@@ -100,7 +100,7 @@ describe("release host preflight (#5277)", () => {
     const mk = (pfOk) => {
       const io = fakeIo({ preflightOk: () => pfOk });
       const seam = {
-        headOf: async () => HEAD, runLane: async () => ({ terminalReason: "merged" }), fileCiIssue: async () => 3,
+        headOf: async () => HEAD, runLane: async () => ({ terminalReason: "merged" }), fileFixIssue: async () => 3, failedJobs: async () => [],
         calls: [],
       };
       return { io, seam, ctx: { io: Object.assign(io, { review: seam }), repo: REPO, def: "main", staging: "staging", config: CFG, save() {}, state: { steps: { review: { result: { pr: 9, marker: "FORGE:GATE_FAILURE", verdict: "X", head: "b".repeat(40), blocking: [11], ciFailing: 0 } } } } } };
