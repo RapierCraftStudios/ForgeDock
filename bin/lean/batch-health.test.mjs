@@ -260,7 +260,13 @@ describe("#5466 stateless issues surface in the batch health check", () => {
     assert.equal(h.healthy, false);
     assert.equal(h.causes[0].code, "stateless");
     const gh = async (a) => JSON.stringify(a[2] === "1" ? { state: "OPEN", labels: [], comments: [{ body: "<!-- FORGE:NEEDS_HUMAN -->" }] } : { state: "OPEN", labels: [{ name: "needs-human" }], comments: [{ body: "<!-- FORGE:NEEDS_HUMAN -->" }] });
-    assert.deepEqual(await statelessOnGithub({ order: [1, 2] }, gh, "o/r"), [1]);
+    const ended = { 1: { outcome: "needs-human" }, 2: { outcome: "needs-human" } };
+    assert.deepEqual(await statelessOnGithub({ order: [1, 2], results: ended }, gh, "o/r"), [1]);
+  });
+  it("#5592: a requeued (pending), running, merged or result-less issue is not stateless: its labels were cleared on purpose", async () => {
+    const gh = async () => JSON.stringify({ state: "OPEN", labels: [], comments: [{ body: "<!-- FORGE:NEEDS_HUMAN -->\nold run" }] });
+    const st = { order: [1, 2, 3, 4, 5], results: { 1: { outcome: "needs-human" }, 2: { outcome: "needs-human" }, 3: { outcome: "needs-human" }, 4: { outcome: "merged" } }, pending: [2], running: { 3: {} } };
+    assert.deepEqual(await statelessOnGithub(st, gh, "o/r"), [1], "only the row that ended parked, with no label, is flagged");
   });
 });
 

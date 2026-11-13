@@ -46,6 +46,18 @@ function fakeIo(world = {}) {
 }
 const ok = async () => ({ ok: true });
 
+describe("unmanaged release carries no epoch (#5553)", () => {
+  it("promotion merges with the plain argv and makes no ledger call", async () => {
+    const mod = await import("./release.mjs");
+    const io = fakeIo();
+    io.api = async () => { throw new Error("no ledger call expected"); };
+    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    assert.equal(out.status, "done");
+    const merge = io.calls.find((a) => a[0] === "pr" && a[1] === "merge");
+    assert.deepEqual(merge, ["pr", "merge", "7", "--repo", REPO, "--merge", "--match-head-commit", HEAD]);
+  });
+});
+
 describe("release job (#5211)", () => {
   const promote = async (world, { opts = {}, config = {} } = {}) => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();
@@ -455,5 +467,21 @@ describe("snapshot releases (#5276)", () => {
     assert.equal(snap.out.published, true);
     assert.deepEqual(snap.pushes, [["push", "--quiet", "origin", "--delete", "release/20231114-1"]]);
     assert.deepEqual((await step(undefined)).pushes, []);
+  });
+});
+
+
+describe("release control routing (#5556)", () => {
+  it("`release hold` and `release control hold` share one implementation and refuse without --reason", async () => {
+    for (const argv of [["hold", "r20260101-000000-1"], ["control", "hold", "r20260101-000000-1"]]) {
+      const out = [];
+      const io = { print: (l) => out.push(l), gh: async () => JSON.stringify({ nameWithOwner: "o/r" }), api: async () => { throw new Error("no api"); }, git: () => { throw new Error("none"); }, now: () => 1 };
+      assert.equal(await releaseFromCli([...argv, "--json"], { io, cwd: tmp() }), 1);
+      assert.match(out[0], /forgedock.release.control\/v1/);
+      assert.match(out[0], /--reason is required/);
+    }
+  });
+  it("an unknown control verb is an error", async () => {
+    await assert.rejects(releaseFromCli(["control", "nope"], { io: { print() {}, gh: async () => "" }, cwd: tmp() }), /unknown control verb/);
   });
 });

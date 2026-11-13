@@ -101,4 +101,9 @@ describe("CLI", () => {
     assert.equal(initFromCli([], { io, cwd }), 1);
     assert.equal(existsSync(join(cwd, "forge.yaml")), false);
   });
+
+  it("accepts the flake and quarantine policy keys (#5568)", () => {
+    assert.deepEqual(check(`${OK}  flake: {quarantine_after: 3, window_days: 14}\nquarantine: {days: 14, max: 15}\n`.replace("ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake", "ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake")), []);
+    assert.notDeepEqual(check(`${OK}quarantine: {max: x}\n`), []);
+  });
 });

@@ -37,7 +37,7 @@ export function parsePagesConfig(raw, { hasAppPages = false } = {}) {
   const req = list(obj.require).map((k) => k.toLowerCase()).filter((k) => PAGE_REQUIRE.includes(k));
   const pick = (v, d) => { const l = list(v); return l.length ? l : d; };
   return {
-    routes, icp_doc: typeof obj.icp_doc === "string" && obj.icp_doc.trim() ? obj.icp_doc.trim() : null,
+    routes, exclude: list(obj.exclude).map(norm), design_only: list(obj.design_only).map(norm), icp_doc: typeof obj.icp_doc === "string" && obj.icp_doc.trim() ? obj.icp_doc.trim() : null,
     require: raw && obj.require !== undefined && req.length ? [...new Set(req)] : [...PAGE_REQUIRE],
     sitemap: pick(obj.sitemap, DEFAULTS.sitemap).map(norm), metadata_patterns: pick(obj.metadata_patterns, DEFAULTS.metadata),
     canonical_patterns: pick(obj.canonical_patterns, DEFAULTS.canonical), structured_data_patterns: pick(obj.structured_data_patterns, DEFAULTS.structured),
@@ -45,18 +45,41 @@ export function parsePagesConfig(raw, { hasAppPages = false } = {}) {
   };
 }
 
-/** The public page files among `files`: built-in Next `app/**\/page.*` plus `pages.routes` globs, tests excluded. */
-export function pageFiles(files, cfg) {
+const NOINDEX_RE = /robots\s*:\s*\{[^}]*index\s*:\s*false|noindex/i;
+/** #5585: true when the page file or an ancestor layout declares noindex (needs `readFile`; without it a page stays public). */
+function noindexed(f, readFile) {
+  if (typeof readFile !== "function") return false;
+  const dirs = f.split("/").slice(0, -1);
+  const cands = [f];
+  for (let i = dirs.length; i > 0; i--) for (const ext of ["tsx", "ts", "jsx", "js"]) cands.push(`${dirs.slice(0, i).join("/")}/layout.${ext}`);
+  return cands.some((p) => { try { return NOINDEX_RE.test(String(readFile(p) ?? "")); } catch { return false; } });
+}
+
+/** The public page files among `files`: built-in Next `app/**\/page.*` plus `pages.routes` globs, tests excluded; `pages.exclude`, `pages.design_only` and (with `readFile`) noindex pages dropped. */
+export function pageFiles(files, cfg, { readFile = null } = {}) {
   if (!cfg) return [];
-  return [...new Set((files ?? []).map(norm).filter((f) => f && !TEST_RE.test(f) && (PAGE_RE.test(f) || anyGlob(cfg.routes, f))))];
+  const ex = cfg.exclude ?? [], dz = cfg.design_only ?? [];
+  return [...new Set((files ?? []).map(norm).filter((f) => f && !TEST_RE.test(f) && (PAGE_RE.test(f) || anyGlob(cfg.routes, f)) && !anyGlob(ex, f) && !anyGlob(dz, f) && !noindexed(f, readFile)))];
+}
+
+/** #5585: files under `pages.design_only`: not public pages (no SEO/GEO), but the design requirement still applies. */
+export function designOnlyFiles(files, cfg) {
+  if (!cfg?.design_only?.length) return [];
+  return [...new Set((files ?? []).map(norm).filter((f) => f && !TEST_RE.test(f) && anyGlob(cfg.design_only, f) && !anyGlob(cfg.exclude ?? [], f)))];
 }
 
 const present = (o, ks) => ks.filter((k) => blank(o?.[k]));
 
 /** Contract-time problems: a deliverable that is a page needs `page_gate` {design_spec, seo, geo} per `pages.require`. [] when off or no page deliverable. */
-export function contractBriefProblems(contract, cfg) {
-  const pages = pageFiles((contract?.deliverables ?? []).map((d) => d?.path), cfg);
-  if (!pages.length) return [];
+export function contractBriefProblems(contract, cfg, { readFile = null } = {}) {
+  const paths = (contract?.deliverables ?? []).map((d) => d?.path);
+  const pages = pageFiles(paths, cfg, { readFile }), dOnly = designOnlyFiles(paths, cfg);
+  if (!pages.length && !dOnly.length) return [];
+  if (!pages.length) {
+    const g = contract?.page_gate;
+    return cfg.require.includes("design") && blank(g && typeof g === "object" ? g.design_spec : null)
+      ? [`deliverable page ${dOnly.slice(0, 3).join(", ")} (pages.design_only) needs contract.page_gate.design_spec: the approved FORGE:DESIGN_SPEC (run /design first; issue or comment ref)`] : [];
+  }
   const g = contract?.page_gate, out = [], at = `deliverable page ${pages.slice(0, 3).join(", ")} needs contract.page_gate`;
   if (!g || typeof g !== "object" || Array.isArray(g)) return [`${at}: {"design_spec":"<FORGE:DESIGN_SPEC ref>","seo":{...},"geo":{...}} (forge.yaml pages.require: ${cfg.require.join(", ")})`];
   if (cfg.require.includes("design") && blank(g.design_spec)) out.push(`${at}.design_spec: the approved FORGE:DESIGN_SPEC (run /design first; issue or comment ref)`);
@@ -107,17 +130,17 @@ const LINK_RE = /href\s*=\s*\{?\s*["'`](\/[^"'`#?\s{}$]*)/g;
  * `tracked` the repo's files; `designApproved` true/false/null (unknown skips); `run({command})` -> {rc, output} for `pages.lint`.
  */
 export async function pageFailures({ cfg, files = [], diff = "", result = null, readFile = () => "", tracked = null, designApproved = null, run = null }) {
-  const pages = pageFiles(files, cfg);
-  if (!cfg || !pages.length) return [];
+  const pages = pageFiles(files, cfg, { readFile }), dOnly = designOnlyFiles(files, cfg), uiFiles = [...pages, ...dOnly];
+  if (!cfg || !uiFiles.length) return [];
   const C = OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, out = [], j = result?.page_gate ?? {};
   const row = (kind, detail) => out.push({ code: C, kind, detail });
   if (cfg.require.includes("design")) {
-    if (designApproved === false) row("page_design_missing", `${pages.slice(0, 3).join(", ")} is a public page but the issue has no approved FORGE:DESIGN_SPEC: run /design before building`);
+    if (designApproved === false) row("page_design_missing", `${uiFiles.slice(0, 3).join(", ")} is a public page but the issue has no approved FORGE:DESIGN_SPEC: run /design before building`);
     const shots = list(j.screenshots).join(" ");
-    if (!/390/.test(shots) || !/1440/.test(shots)) row("page_visual_missing", `${pages.slice(0, 3).join(", ")}: the result's page_gate.screenshots must name a 390px and a 1440px visual check attached to the PR`);
+    if (!/390/.test(shots) || !/1440/.test(shots)) row("page_visual_missing", `${uiFiles.slice(0, 3).join(", ")}: the result's page_gate.screenshots must name a 390px and a 1440px visual check attached to the PR`);
   }
   const all = [...new Set([...(tracked ?? []), ...files].map(norm))];
-  if (cfg.require.includes("seo_intent")) {
+  if (pages.length && cfg.require.includes("seo_intent")) {
     const meta = regexes(cfg.metadata_patterns), canon = regexes(cfg.canonical_patterns), sd = regexes(cfg.structured_data_patterns);
     for (const f of pages) {
       const dir = f.split("/").slice(0, -1);

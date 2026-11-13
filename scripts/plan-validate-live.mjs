@@ -10,6 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseDependsOn, isTrustedComment } from "../bin/engine/phases.mjs";
+import { mapLimit } from "../bin/lean/pmap.mjs";
 import { parseState } from "../bin/engine/state.mjs";
 
 /** Milestones in train order. Input: [{ title, number, due_on }]. */
@@ -102,13 +103,15 @@ export async function unmetDependencies({ issues, baseOf, gh, repo, isAncestor }
   const r = repo ? ["-R", repo] : [];
   const view = async (n, fields) => parse(await gh(["issue", "view", String(n), ...r, "--json", fields]));
   const inBatch = new Set(issues);
-  const unmet = [];
-  for (const n of issues) {
+  const perIssue = [];
+  // #5592: bounded-concurrency reads (the gh calls were serial, starving admission on a loaded host); results keep issue order.
+  await mapLimit(issues, 6, async (n, idx) => {
+    const unmet = []; perIssue[idx] = unmet;
     let rec;
     try { rec = await view(n, "body,milestone"); } catch { rec = null; }
-    if (!rec || !rec.milestone) continue;
+    if (!rec || !rec.milestone) return;
     const base = await baseOf(n);
-    if (!base) continue;
+    if (!base) return;
     for (const dep of parseDependsOn(rec.body, n).filter((d) => !inBatch.has(d))) {
       let why = null, sha = null;
       try {
@@ -155,8 +158,8 @@ export async function unmetDependencies({ issues, baseOf, gh, repo, isAncestor }
       } catch { why = "unreadable"; }
       if (why) unmet.push({ issue: n, dep, base, why, sha, kind: sha ? "commit" : "other" });
     }
-  }
-  return unmet;
+  });
+  return perIssue.flat();
 }
 
 const ghExec = async (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 100 * 1024 * 1024, timeout: 60000 });
