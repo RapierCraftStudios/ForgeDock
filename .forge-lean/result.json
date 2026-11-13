@@ -1,0 +1,185 @@
+{
+ "status": "fixed",
+ "summary": "regate control verb + classifyGateOnly: audited, fenced gate-only re-evaluation at the fix ref",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:regateDispatch"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/release-control.mjs regate branch"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:classifyGateOnly"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:hunkSteps"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:classifyGateOnly"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:regateDispatch"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:regatePlan"
+  },
+  {
+   "id": "R8",
+   "status": "implemented",
+   "evidence": "bin/lean/release-control.mjs:buildDispatchArgs"
+  },
+  {
+   "id": "R9",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.mjs:regatePlan"
+  },
+  {
+   "id": "R10",
+   "status": "implemented",
+   "evidence": "bin/lean/release-control.mjs regate branch; bin/lean/release.mjs telemetry stamp"
+  },
+  {
+   "id": "R11",
+   "status": "implemented",
+   "evidence": "docs/CONFIG.md; bin/lean/release-regate.mjs:regateDispatch"
+  },
+  {
+   "id": "R12",
+   "status": "implemented",
+   "evidence": "bin/lean/release-control.mjs regate branch"
+  },
+  {
+   "id": "R13",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.test.mjs"
+  },
+  {
+   "id": "R14",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.test.mjs"
+  },
+  {
+   "id": "R15",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.test.mjs"
+  },
+  {
+   "id": "R16",
+   "status": "implemented",
+   "evidence": "bin/lean/release-regate.test.mjs"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test (release-regate/control/config/gates/deploy/rollback/release tests)",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "check-config; node --check release-regate.mjs",
+   "exit": 0
+  },
+  {
+   "id": "G1",
+   "command": "node --test fence/verify/ledger/status",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/release-regate.test.mjs bin/lean/release-control.test.mjs bin/lean/release-config.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R16 map to release-regate.mjs / release-control.mjs / docs/CONFIG.md; R17 is a contract defer"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "215 related tests pass; other verbs unchanged (release-control.mjs branch only for regate)"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D9 changed; preserve paths untouched except additive edits; forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "only contract deliverable paths and tests changed"
+  }
+ ],
+ "amendments": [],
+ "not_members": [
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "the list at line 30 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "the list at line 215 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "the list at line 800 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/context.test.mjs",
+   "why": "the list at line 385 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "the list at line 28 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "the list at line 324 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "the list at line 10 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/guardgate.test.mjs",
+   "why": "the list at line 35 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/lean/ledger.test.mjs",
+   "why": "the list at line 14 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  },
+  {
+   "symbol": "release-regate",
+   "test": "bin/tests/experiment.test.mjs",
+   "why": "the list at line 155 enumerates unrelated fixtures/kinds, not release modules; release-regate is a release-control helper module and is not a member"
+  }
+ ]
+}
