@@ -33,7 +33,7 @@ export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE, e2eCheckFor } from "./postdeploy-check.mjs";
-import { normaliseDecision, deadAnchors, anchorMatches } from "./decisions.mjs";
+import { normaliseDecision, deadAnchors, anchorMatches, parseRequirementDecision } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
 const C = OUTCOME_CODES;
@@ -1433,7 +1433,9 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 
 
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
-const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(String(r?.quote ?? ""));
+/** #5547: a tag inside a mid-sentence code span (`` `[type:e2e]` row whose ... ``) is a mention of the tag, not the tag; a trailing backticked tag still counts. */
+const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
 // #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
 const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
@@ -1452,9 +1454,12 @@ export function isE2eCommand(command, e2e = null) {
 /** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
+  if (LIVE_INFRA_RE.test(q)) return true; // #5547
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
   return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
 }
+/** #5547: criteria whose run needs a live benchmark, a paid run, remote infra or host-level load: observable only outside the lane, by shape not by repo name. */
+const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;
 /** #5524: production observation windows without a URL: a metric/alert window, "at the next <weekday>", current volume, a prod host. */
 const PROD_WINDOW_RE = /\b(?:over|for|within|across)\s+(?:the\s+(?:last|next)\s+)?\d+\s*(?:h|hrs?|hours?|d|days?|w|weeks?|min|minutes?)\b|\bat the next (?:mon|tues?|wednes|thurs?|fri|sat(?:ur)?|sun)(?:day)?\b|\bat current (?:volume|traffic|load)\b|\bon (?:OVH|prod(?:uction)?)\b|\b\w*Slo\w*Burn\w*\b|\bSLO\b|\b(?:does not|doesn't|did not) fire\b/i;
 /**
@@ -1466,6 +1471,10 @@ export function autoPostDeployE2e(contract, only = null) {
   const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
     if (!["deliver", "defer"].includes(r?.disposition) || !wantsE2e(r) || (only && !only.includes(r.id)) || isOutOfBand(r) || !prodOnlyE2e(r.quote)) return r;
     const g = e2eCheckFor(r.id, r.quote);
+    if (!g && LIVE_INFRA_RE.test(String(r.quote))) { // #5547: needs a paid/remote/host-level run: a checkless row for the orchestrator (its why names spend and a third-party host so deferChecklessPostDeploy routes it)
+      converted.push({ id: r.id, check: null, entry: null });
+      return { ...r, e2e_tracked: true, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "the run needs a live benchmark, paid run, remote infra or host-level load that no local fixture provides", why: "live benchmark/paid run/remote infra/host-level load: needs spend or a third-party host the lane cannot run; tracked by the orchestrator (#5547)" };
+    }
     if (!g) { // #5524: no probeable URL: a checkless post-deploy row; deferChecklessPostDeploy routes it to the orchestrator
       converted.push({ id: r.id, check: null, entry: null });
       return { ...r, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "the observable is a production observation window with no probeable URL", why: "production observation window: read-only production telemetry, no probeable URL (#5524)" };
@@ -1474,6 +1483,24 @@ export function autoPostDeployE2e(contract, only = null) {
     return { ...r, disposition: "post-deploy", bucket: "post-deploy", check: g.id, local_infeasible_why: "the observable exists only in production (live domain or deploy), so no local fixture can check it", why: "production-only e2e/manual criterion: converted by the engine to a post-deploy check (#5468)" };
   });
   return { contract: converted.length ? { ...contract, requirements } : contract, converted };
+}
+/**
+ * #5547: apply trusted structured operator decisions (`<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy"} -->`) to a
+ * frozen contract: a deliver/defer row becomes a checkless post-deploy row (deferChecklessPostDeploy then routes it). Only comments after
+ * the last FORGE:CONTRACT comment count. Pure; returns {contract, applied:[id]}.
+ */
+export function applyRequirementDecisions(contract, comments = []) {
+  const list = Array.isArray(comments) ? comments : [];
+  const at = list.map((c) => String(c?.body ?? "").trimStart().startsWith("<!-- FORGE:CONTRACT")).lastIndexOf(true);
+  const ds = list.slice(at + 1).map((c) => parseRequirementDecision(c?.body)).filter(Boolean);
+  const applied = [];
+  const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
+    const d = ds.find((x) => x.requirement === r?.id);
+    if (!d || !["deliver", "defer"].includes(r.disposition)) return r;
+    applied.push(r.id);
+    return { ...r, e2e_tracked: true, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "operator decision: the run needs spend or a third-party host outside the lane", why: `operator FORGE:DECISION: tracked post-deploy by the orchestrator, needs spend or a third-party host${d.why ? ` (${d.why})` : ""} (#5547)` };
+  });
+  return { contract: applied.length ? { ...contract, requirements } : contract, applied };
 }
 /** #5468: the row ids named by `e2e_row` failures when every failure is one; null otherwise (anything else blocks as before). */
 export function loneE2eRows(failures) {
@@ -1518,7 +1545,7 @@ export function decide(raw, ctx) {
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
       const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance${ctx.e2e?.sandboxes?.length ? `; it can run pre-merge: declare env: [${ctx.e2e.sandboxes.slice(0, 3).join(", ")}] on its validate to use the test sandbox (#5450), do not defer it` : ""}` });
-    } else if (r.disposition === "defer" && wantsE2e(r)) {
+    } else if (r.disposition === "defer" && wantsE2e(r) && r.e2e_tracked !== true) { // #5547: an engine-tracked live-infra/operator-decided row is the transfer the gate asks for
       // #5339: a deferred e2e/manual requirement is not met; only a post-deploy one is transferred to the epic (the lane closes partial)
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion deferred without a run; run the real path, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance` });
     }
