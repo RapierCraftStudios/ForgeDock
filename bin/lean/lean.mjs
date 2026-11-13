@@ -21,14 +21,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
+import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -354,7 +355,20 @@ export async function runCore(o) {
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
+  let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
   const post = async (marker, body, on = issue) => {
+    if (on === issue && isStatusPost(marker)) { // machine-state markers: a section of the one status comment, not a comment of their own
+      try {
+        const r = await writeStatus({ known: statusCache, comments: iss?.comments, trusted: isTrustedIssueComment, markers: Array.isArray(marker) ? marker : [marker], text: body, cap: capComment,
+          create: async (b) => /https?:\/\/\S+/.exec(String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", b])))?.[0] ?? null,
+          patch: (id, b) => ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${b}`]) });
+        statusCache = { id: r.id, sections: r.sections };
+        return r.url;
+      } catch (e) { if (e?.deferCode) throw e; /* a failed status edit falls back to a plain comment below */ }
+    }
+    if (on === issue && isUpsertPost(marker)) { // one comment edited in place across requeues (the marker still leads the body)
+      return postUpsert({ gh: ghw, repo, issue: on, markers: marker, body, comments: iss?.comments, cap: capComment });
+    }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
     const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
@@ -589,6 +603,7 @@ export async function runCore(o) {
       if (deferTail) { postRun.add("lane-facts", postLaneFacts); postRun.add("trajectory", postTrajectory); } else await postTrajectory();
     }
     if (deferTail) postRun.add("teardown", () => teardown(reason, extra)); // last: the structure delta and guard read the worktree
+    if (reason === "merged" || reason === "invalid") await clearPipelineLabels({ gh: ghc, repo, issue }); // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue
     await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
@@ -1334,6 +1349,8 @@ export async function runCore(o) {
     const fetchP = step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
     await step("claim", async () => {
     await label("investigating");
+    // #5592: a live lane is not parked: needs-human, needs-human:*, parked:* and remediation-queue from an earlier run come off (a later park puts them back)
+    await clearPipelineLabels({ gh: ghc, repo, issue, labels: iss.labels });
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
     if (recover) {
       // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
@@ -1542,7 +1559,10 @@ export async function runCore(o) {
     const tH = now();
     if (heavyOn) {
       try {
-        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path0 = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        // #5592: a tool that only exists in a project's .venv/bin or node_modules/.bin (poetry/uv in-project venv, monorepo service) is shimmed too, so the preflight probe and the shim agree
+        let tracked = []; try { tracked = String(await git(["ls-files"])).split("\n").map((x) => x.trim()).filter(Boolean); } catch { /* no git listing */ }
+        const path = withLocalBins(path0, projectBinDirs(wt, tracked));
         const names = await (io.writeHeavyShims ?? writeHeavyShims)(binDir, { path });
         if (names?.length) {
           heavyWaitsFile = join(root, "heavy-waits.jsonl");
@@ -1699,7 +1719,7 @@ export async function runCore(o) {
         const rec = { event: "CONTEXT_PACK", mode: ctxCfg.mode, ...ctxAb, lane_type: ctxLane, sources: p.sources, found: p.found, bytes: p.bytes, items: p.items, truncated: p.truncated,
           hash: p.hash, cached: r.cached, ...(p.recall ? { recall: p.recall.present ? "present" : "absent" } : {}), ...(r.errors?.length ? { errors: r.errors } : {}) };
         ev({ ...rec, pitfalls: inPack }); await emit(rec);
-        const seen = trustedComments.some((c) => String(c?.body ?? "").startsWith("<!-- FORGE:CONTEXT -->") && String(c.body).includes(`hash ${p.hash})`));
+        const seen = trustedComments.some((c) => hasSection(c?.body, "FORGE:CONTEXT") && String(c.body).includes(`hash ${p.hash})`));
         if (p.items && !seen) { try { await post("FORGE:CONTEXT", renderContextRecord(p, { mode: ctxCfg.mode, laneType: ctxLane })); } catch { /* best effort */ } }
         T.decisions.push(`Context pack (${ctxCfg.mode}): ${p.items} item(s), ${p.bytes} bytes${p.truncated ? `, ${p.truncated} dropped` : ""}, ${ctxCfg.mode === "on" ? "given to the builder" : "recorded only"}`);
         return p;
@@ -1824,6 +1844,9 @@ export async function runCore(o) {
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
+      // #5592: tools resolve where the lane runs them from: project-local .venv/bin and node_modules/.bin (as the heavy shims do)
+      const local = projectBinDirs(wt, files);
+      if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
       if (io.probeCommand) {
         const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
@@ -2185,20 +2208,25 @@ export async function runCore(o) {
           return sq.contract;
         };
         contract = snapContract(contract);
-        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
+        const wtRead = (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }; // #5585: noindex pages are not public
+        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let misses = missed;
-        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
-          const problems = [...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)];
-          T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
+        const correctContract = async (problems, note) => {
+          T.decisions.push(`Contract rejected (${problems[0]}); ${note}`);
           await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
           contract = freezeRewrites(dropScope(await readContract()));
           await persistGenChecks();
           await refreshIssue("contract validation");
           contract = snapContract(contract);
-          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
+          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead });
+        };
+        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
+          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
           if (missed.length) misses = await preflightValidates(contract);
         }
+        if (!vc.ok && sessionId && onlyTestPlanProblems(vc.problems)) await correctContract(vc.problems, "test-plan rules only, resumed a second time"); // #5587
+        if (!vc.ok) ev({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }), await emit({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }); // #5587: per-rule counts for the batch false-park rate
         planMisses = misses;
         if (missed.length) {
           ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
@@ -2233,7 +2261,7 @@ export async function runCore(o) {
         if (designRoute.blocked) return await needsHuman(`Design gate (forge.yaml design.gate: blocking): ${designRoute.reason}.\n\nRun /design on #${issue}; a FORGE:DESIGN_SPEC comment or the \`${designConfig.specLabel}\` label lifts the hold.`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue} (${designRoute.pages.slice(0, 3).join(", ")})` });
       }
       { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
-        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t}`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
         if (envMiss.length) {
           try {

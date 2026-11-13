@@ -84,6 +84,10 @@ issue_watch:
 
 `--dry-run` lists what each would claim. A batch that reported is never added to: the next claims start a new one.
 
+## Intake pause from GitHub (#5555)
+
+With `release.managed` on, the watch also reads the pause from GitHub on every pass, so every host honours it and nothing depends on a local state file: `_active.intake.paused` on the ledger control branch, an active ledger entry (the lease's release has no end `status`), or any open `release/*`, `train/*` or `hotfix/*` PR. `forgedock intake pause|resume|status [--reason <text>] [--tracker <issue>] [--release <id>]` writes `_active.intake` (with an audit line in `controls.jsonl`) and the `forge:intake-paused` label on the tracker (`--tracker` or `release.tracker`). With `freeze.intake_auto_resume: true` a pause that names `--release <id>` is cleared by the watch once that release's ledger has an end status. Unmanaged repos make no extra call. A failed GitHub read does not pause (it shows as `pauseError` in `status.json`).
+
 ## Release pause and liveness
 
 With `release_pause` (default in `mode: batch`) the watch pauses while a `forgedock release` job is in flight (its `~/.forge/releases/<id>/state.json` has no end `status` and was written in the last 6 hours): no claims, retries or decisions. The next pass after the job ends resumes by itself. Every pass writes `heartbeat` to `status.json`, and `forgedock issue-watch status` prints it:

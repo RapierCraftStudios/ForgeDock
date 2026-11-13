@@ -4,7 +4,7 @@ This benchmark checks the claim that a fixed process beats a bare agent session 
 
 - Harness: `scripts/bench-adversarial.mjs`. It is a sibling of `scripts/bench-lightlane.mjs` (#4453) and reuses its arm runner, so the arms are run and costed the same way.
 - Corpus: `docs/eval/corpus/adversarial-v1.json`
-- Arms: `full` (`forgedock run-issue` with the light lane off) and `control` (a plain `claude -p` session).
+- Arms: `full` (`forgedock run-issue` with the fast path engaged: `lean.light.mode: on`, `lean.light.source: investigation`, #5426) and `control` (a plain `claude -p` session).
 
 ## Corpus
 
@@ -20,7 +20,7 @@ Each invalid issue has `evidence: {file, pattern}`. The pattern must match the f
 
 ## Prerequisites and run config
 
-Same as `docs/eval/lightlane-bench.md`: `python3`, `git`, `gh`, `claude` and `forgedock` on PATH, plus one **private sandbox repo** for the full arm. The base SHA must exist in it, and its `forge.yaml` sets `lean:` → `light:` → `mode: off`. File the corpus issues in the sandbox with the title and body taken verbatim from the corpus:
+Same as `docs/eval/lightlane-bench.md`: `python3`, `git`, `gh`, `claude` and `forgedock` on PATH, plus one **private sandbox repo** for the full arm. The base SHA must exist in it, and its `forge.yaml` sets `lean:` → `light:` → `mode: on` and `source: investigation`. The default `shadow` (and `off`) never fast-forwards, so the full lane would pay for plan, freeze and review and miss the ≤ 1.3× control cost target. Run each lane with `--result-file`; a lane whose result has no boolean `light` is counted as `light_unobserved` in the scorecard (#5541). File the corpus issues in the sandbox with the title and body taken verbatim from the corpus:
 
 ```sh
 jq -c '.issues[]' docs/eval/corpus/adversarial-v1.json | while read -r i; do

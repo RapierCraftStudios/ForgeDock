@@ -473,13 +473,52 @@ export function weakenedE2eDecisions(c) {
 
 const TEST_LEVELS = ["unit", "integration", "e2e", "live"];
 const planWords = (t) => new Set(String(t ?? "").toLowerCase().match(/[a-z0-9]{3,}/g)?.map((w) => w.slice(0, 5)) ?? []);
-const MOCK_RE = /\b(?:mock|stub|fake)\w*/i, NEG_MOCK_PLAN_RE = /\b(?:no|not|never|without|non|avoid\w*)[ -]+(?:\w+[ -]+)?(?:mock|stub|fake)\w*/gi;
+const NEG_MOCK_PLAN_RE = /\b(?:no|not|never|without|non|avoid\w*)[ -]+(?:\w+[ -]+)?(?:mock|stub|fake)\w*/gi;
+const deliverableWords = (d) => planWords(`${d?.change ?? ""} ${d?.path ?? ""}`);
+/** #5445: the deliverable whose words cover the largest share of the proof's, as {id, pct, ratio}, or null. Pure. */
+export function proofEchoDetail(proof, deliverables) {
+  // #5592: code identifiers (`name`, camelCase, snake_case, name()) only name the thing under test; they never count towards an echo,
+  // and a proof with fewer than 3 words left says too little to be a restatement.
+  const pw = planWords(String(proof ?? "").replace(/`[^`]*`|\b\w+\(\)|\b[a-z]+[A-Z]\w*|\b\w+_\w+/g, " "));
+  if (pw.size < 3) return null;
+  let best = null;
+  for (const d of deliverables) { const dw = deliverableWords(d); let n = 0; for (const w of pw) if (dw.has(w)) n++; const ratio = n / pw.size; if (!best || ratio > best.ratio) best = { id: d?.id ?? d?.path ?? "?", pct: Math.round(ratio * 100), ratio }; }
+  return best;
+}
 /** #5445: a proof whose words are (almost) all in the deliverable text of its requirement only restates the fix. Pure. */
 export function proofEchoesDeliverable(proof, deliverables) {
-  const pw = planWords(proof);
-  if (!pw.size) return false;
-  return deliverables.some((d) => { const dw = planWords(`${d?.change ?? ""} ${d?.path ?? ""}`); let n = 0; for (const w of pw) if (dw.has(w)) n++; return n / pw.size >= 0.7; });
+  return (proofEchoDetail(proof, deliverables)?.ratio ?? 0) >= 0.7;
 }
+const MOCK_STOP = new Set(["only", "the", "and", "out", "with", "for", "its", "that", "this", "any", "all", "are", "was", "were", "been", "being", "than", "then", "also", "real"]);
+/**
+ * #5587: the first non-negated mock/stub/fake mention in `reason` whose target (up to 4 words after the mock word, or up to 3 words
+ * before it, inside the same clause) shares a word stem with a deliverable path/change, as {phrase, id}; else null. Fake clocks and
+ * a stub aimed at something outside the deliverables (an I/O boundary) are fine. Pure.
+ */
+export function mockedDeliverable(reason, deliverables) {
+  const text = String(reason ?? "").replace(NEG_MOCK_PLAN_RE, " ").replace(FAKE_CLOCK_RE, " ");
+  const re = /\b(?:mock|stub|fake)\w*/gi;
+  for (let m; (m = re.exec(text));) {
+    const clauseStart = Math.max(text.lastIndexOf(".", m.index), text.lastIndexOf(";", m.index), text.lastIndexOf(",", m.index), text.lastIndexOf("\n", m.index)) + 1;
+    const after = text.slice(m.index + m[0].length).split(/[.;,\n]/)[0].split(/\s+/).filter(Boolean).slice(0, 4);
+    const before = text.slice(clauseStart, m.index).split(/\s+/).filter(Boolean).slice(-3);
+    const words = [...before, ...after].filter((w) => !MOCK_STOP.has(w.toLowerCase().replace(/[^a-z0-9]/g, "")));
+    const tw = planWords(words.join(" "));
+    for (const d of deliverables) { const dw = deliverableWords(d); if ([...tw].some((w) => dw.has(w))) return { phrase: `${m[0]} ${after.join(" ")}`.trim(), id: d?.id ?? d?.path ?? "?" }; }
+  }
+  return null;
+}
+const TEST_PLAN_RULES = [["test_plan.mock", /level_reason mocks /], ["test_plan.echo", /proof restates a deliverable/], ["test_plan.proof", /test_plan proof /], ["test_plan.level", /test_plan level/], ["test_plan.repro", /test_plan (?:repro|no-repro)/], ["test_plan.command", /test_plan (?:needs the exact command|command)/], ["test_plan.row", /test_plan (?:needs a row|row |must be an array)/]];
+/** #5587: the rule id of a contract problem for `contract.invalid` telemetry: a test_plan rule, else "other". Pure. */
+export const contractRuleId = (problem) => TEST_PLAN_RULES.find(([, re]) => re.test(String(problem)))?.[0] ?? "other";
+/** #5587: {ruleId: count} over contract problems. Pure. */
+export function contractRuleCounts(problems) {
+  const out = {};
+  for (const p of problems ?? []) { const k = contractRuleId(p); out[k] = (out[k] ?? 0) + 1; }
+  return out;
+}
+/** #5587: true when every problem is a test_plan rule (not scope or safety), so a second correction round is allowed. Pure. */
+export const onlyTestPlanProblems = (problems) => (problems ?? []).length > 0 && problems.every((p) => contractRuleId(p) !== "other");
 /**
  * #5445: problems with the frozen test plan `test_plan: [{requirement, proof, level, level_reason, repro, reason, regression, env, command}]`.
  * Shape is checked whenever present; `required` (a bug lane with repro on) also needs one row per deliver requirement.
@@ -494,11 +533,17 @@ export function testPlanProblems(c, { required = false } = {}) {
     const id = t?.requirement ?? "test_plan row";
     if (!t || typeof t !== "object" || !t.requirement) { problems.push("test_plan row without a requirement id"); continue; }
     if (blank(t.proof)) problems.push(`${id}: test_plan proof must name the root-cause observable that shows the cause is fixed`);
-    else if (proofEchoesDeliverable(t.proof, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)))) problems.push(`${id}: test_plan proof only restates a deliverable; describe the observable that was wrong (the symptom or root cause), not the presence of the fix`);
+    else {
+      const echo = proofEchoDetail(t.proof, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
+      if (echo && echo.ratio >= 0.7) problems.push(`${id}: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable ${echo.id} (${echo.pct}%); phrase it as the wrong behaviour observed on base (symptom observed today → assertion that fails on base and passes on head, e.g. \"www.reddit.com listing .json returns 403 today → assert the fetch returns 200 JSON\")`);
+    }
     if (!TEST_LEVELS.includes(t.level)) problems.push(`${id}: test_plan level must be one of ${TEST_LEVELS.join("|")}`);
     if (blank(t.level_reason)) problems.push(`${id}: test_plan level needs a level_reason (why the cheapest level that observes the cause)`);
-    else if (MOCK_RE.test(String(t.level_reason).replace(NEG_MOCK_PLAN_RE, " "))) problems.push(`${id}: test_plan may not prove the cause fixed by mocking the component the bug lives in; pick a level that exercises it`);
-    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason`);
+    else {
+      const mocked = mockedDeliverable(t.level_reason, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
+      if (mocked) problems.push(`${id}: test_plan level_reason mocks \"${mocked.phrase}\", which is in deliverable ${mocked.id}; level_reason must not contain the words mock/stub/fake unless negated or aimed outside the deliverables; describe the real component exercised and where the I/O boundary is; allowed: a real instance of ${mocked.id}'s component, with stubs only at its I/O boundary (clock, network, browser factory) and, for DB code, a real database session`);
+    }
+    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason; a test id is a file path plus test name, e.g. \`tests/test_scrape.py::test_listing_returns_json\` or \`test/scrape.test.js#listing returns json\`, not a sentence`);
     else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject`);
     if (blank(t.command)) problems.push(`${id}: test_plan needs the exact command validate runs`);
     else {
@@ -513,7 +558,7 @@ export function testPlanProblems(c, { required = false } = {}) {
 
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -570,7 +615,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
-    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
+    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix), e.g. {"path":"tests/test_scrape.py","id":"test_listing_returns_json","command":"pytest tests/test_scrape.py::test_listing_returns_json"}, or "none" with a repro_test_reason; free text is not a test id`);
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));
@@ -583,7 +628,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
   }
   problems.push(...testPlanProblems(c, { required: testPlan }));
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
-  if (pages) problems.push(...contractBriefProblems(c, pages)); // #5428: page deliverables need page_gate briefs
+  if (pages) problems.push(...contractBriefProblems(c, pages, { readFile })); // #5428: page deliverables need page_gate briefs
   return { ok: problems.length === 0, problems };
 }
 
@@ -810,8 +855,8 @@ const ENV_SIGNATURES = [
   [/\bENOTFOUND\b|\bEAI_AGAIN\b|npm (?:ERR!|error) network|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)/i, "network access for npm"],
 ];
 const envSignature = (out) => { const hit = ENV_SIGNATURES.find(([re]) => re.test(out)); return hit ? { tool: hit[1], kind: "environment" } : null; };
-const SECRET_PAIR_RE = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)\S+/gi;
-const SECRET_SHAPE_RE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b|Bearer\s+[A-Za-z0-9._~+/=-]{12,}/g;
+export const SECRET_PAIR_RE = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)\S+/gi;
+export const SECRET_SHAPE_RE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b|Bearer\s+[A-Za-z0-9._~+/=-]{12,}/g;
 /** #5371: the last `lines` lines of a command's output with secret-looking values redacted, as an indented block for a failure detail ("" when empty). */
 export function outputTail(output, lines = 40) {
   const t = String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());

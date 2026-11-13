@@ -19,8 +19,15 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
-import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
+import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
+import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
+import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
+import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
+import { fenced, epochTrailer } from "./release-fence.mjs";
+import { holdCheck, exemptionsSection, VERBS as CONTROL_VERBS } from "./release-control.mjs";
+import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
+import { readActive } from "./release-ledger.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -51,8 +58,50 @@ export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...optKeys(r), ...snapshotKeys(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...managedKeys(raw, r), ...freezeKeys(raw, r), ...optKeys(r), ...snapshotKeys(r) };
 }
+
+/** `{nightly, budget}` (#5569) only when `release.managed` is on: the forge.yaml `nightly:` and `budget:` blocks. */
+const managedKeys = (raw, r) => {
+  if (r.managed === undefined || off2(r.managed)) return {};
+  let y = {}; try { y = parseForgeYaml(String(raw ?? "")) ?? {}; } catch { y = {}; }
+  return { nightly: parseNightlyConfig(y.nightly), budget: parseBudgetConfig(y.budget) };
+};
+const off2 = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
+
+/**
+ * Managed gate before the first step (#5569; there is no APPROVED state, so this is where it applies): a red nightly blocks only
+ * `lane: release` (T0-T2 reds and unskippable classes), and a forecast over the month's remaining minutes applies `budget.on_exceed`
+ * (p0 never). Every read is best effort: unreadable facts proceed. @returns {{blocked?, reason?, ciMode?}}
+ */
+export async function managedGate({ io, repo, config, lane, root }) {
+  if (config.nightly) {
+    try {
+      const n = await readNightly({ gh: (a) => io.gh(a), repo, cfg: config.nightly, now: io.now() });
+      if (n?.reds.length) await fileNightlyRed({ gh: (a) => io.gh(a), repo, reds: n.reds, run: n.run });
+      const hit = blocksRelease({ lane, reds: n?.reds ?? [], cfg: config.nightly });
+      if (hit.length) return { blocked: true, reason: `nightly is red: ${hit.map((r) => r.name).join(", ")}` };
+    } catch { /* best effort */ }
+  }
+  if (config.budget) {
+    try {
+      const forecast = trailingMedian(historyFromRoot(root), lane);
+      const facts = await detectBudget({ gh: (a) => io.gh(a), repo, policy: config.ciPolicy, now: io.now() });
+      const remaining = facts.budget != null && facts.mtd != null ? facts.budget * (1 - (config.ciPolicy?.reservePct ?? 10) / 100) - facts.mtd : null;
+      const r = applyOnExceed({ lane, forecast, remaining, cfg: config.budget });
+      if (r.action === "hold") return { blocked: true, reason: `budget hold: ${r.why}` };
+      if (r.action === "local-first") return { ciMode: "local-first", why: r.why };
+    } catch { /* best effort */ }
+  }
+  return {};
+}
+
+/** `{intakeAutoResume, tracker}` only when configured (#5555): forge.yaml `freeze.intake_auto_resume`, `release.tracker`. */
+const freezeKeys = (raw, r) => {
+  let f = {}; try { f = parseForgeYaml(String(raw ?? ""))?.freeze ?? {}; } catch { f = {}; }
+  const on = f.intake_auto_resume !== undefined && !["false", "off", "no", "0", ""].includes(String(f.intake_auto_resume).trim().toLowerCase());
+  return { ...(on ? { intakeAutoResume: true } : {}), ...(r.tracker ? { tracker: r.tracker } : {}) };
+};
 
 /** `{mode, branchPattern, fixMode}` only when configured (#5276): mode `snapshot` cuts release/<id>; anything else is `freeze`. */
 const snapshotKeys = (r) => {
@@ -123,7 +172,7 @@ async function snapshotPrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", branch, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch };
   const list = state.releaseBundle ?? [];
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list)])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx)])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   state.steps["release-pr"] = { done: false, result: { pr: n } }; // writeRecord reads the PR number from here
@@ -138,11 +187,17 @@ async function releasePrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", staging, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true };
   const list = await bundleList({ io, repo, head: staging, base: def });
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
   return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length };
+}
+
+/** The live operator exemptions as a PR-body section (#5568, I20); "" when unmanaged, none, or `_active` is unreadable. */
+async function exemptionBody({ io, repo, config }) {
+  if (!config.managed || !io.api) return "";
+  try { return exemptionsSection((await readActive({ io, repo, credential: "driver" })).exemptions, io.now?.()); } catch { return ""; }
 }
 
 /** GATE_PASS marker on the PR and the `forge/deploy-gate` conclusion at `head`. */
@@ -165,16 +220,49 @@ export async function gateState({ io, repo, pr, head }) {
 const GATE_POLLS = 12, GATE_POLL_MS = 10_000;
 
 /** Re-run the newest gate-marker-check run on `head`: the bot's GATE_PASS comment never triggers it, so the status would stay pending. */
-async function retriggerGate({ io, repo, head }) {
+async function retriggerGate({ io, repo, head, fence }) {
   try {
     const runs = json(await io.gh(["run", "list", "--repo", repo, "--workflow", "gate-marker-check.yml", "--commit", head, "--json", "databaseId", "--limit", "1"])) ?? [];
-    if (runs[0]?.databaseId) await io.gh(["run", "rerun", String(runs[0].databaseId), "--repo", repo]);
-  } catch { /* a run still in progress cannot be rerun, and it re-reads the markers anyway: just wait */ }
+    if (!runs[0]?.databaseId) return null;
+    const f = await fenced(fence, { action: "rerun", key: `rerun:${runs[0].databaseId}` }, () => io.gh(["run", "rerun", String(runs[0].databaseId), "--repo", repo]));
+    return f.refused ?? null; // #5553: a fenced host stops here
+  } catch { return null; /* a run still in progress cannot be rerun, and it re-reads the markers anyway: just wait */ }
+}
+
+/**
+ * #5568 (5.5): `rerun --failed` once per job for failed runs on `head` whose failures all carry a known infra signature, inside
+ * `ci.rerun_budget_min`; every decision (rerun or not, and why) is recorded in `flakes.json`. Best effort: never throws.
+ * @returns {{reran: string[], skipped: object[]}}
+ */
+export async function rerunInfraFlakes({ io, repo, head, fence, policy }) {
+  const out = { reran: [], skipped: [] };
+  try {
+    const cfg = parseFlakeConfig(policy);
+    if (!fence?.lctx || !(cfg.rerunBudgetMin > 0)) return out;
+    const prior = await readFlakes(fence.lctx), done = prior.filter((f) => f.rerun).map((f) => `${f.sha}:${f.check}`);
+    const runs = json(await io.gh(["run", "list", "--repo", repo, "--commit", head, "--status", "failure", "--json", "databaseId,name", "--limit", "20"])) ?? [];
+    const at = new Date(io.now?.() ?? Date.now()).toISOString(), entries = [];
+    let spentMin = 0;
+    for (const r of runs) {
+      const log = String(await io.gh(["run", "view", String(r.databaseId), "--repo", repo, "--log-failed"]).catch(() => "")).slice(-20_000);
+      const c = classifyFailure(log);
+      const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class }], done, spentMin, budgetMin: cfg.rerunBudgetMin });
+      if (d.rerun) {
+        const f = await fenced(fence, { action: "rerun", key: `rerun-failed:${r.databaseId}` }, () => io.gh(["run", "rerun", String(r.databaseId), "--repo", repo, "--failed"]));
+        if (f.refused) { out.skipped.push({ name: r.name, why: f.refused }); continue; }
+        out.reran.push(r.name);
+      } else out.skipped.push({ name: r.name, why: d.why });
+      entries.push(flakeEntry({ check: r.name, signature: c.signature, kind: c.class === "infra" ? "infra" : "decision", sha: head, runIds: [r.databaseId], at, rerun: d.rerun }));
+    }
+    await recordFlakes(fence.lctx, entries.filter((e) => e.kind === "infra"));
+  } catch { /* best effort */ }
+  return out;
 }
 
 /** Re-trigger the gate, then poll (bounded) until `forge/deploy-gate` is success or failure; @returns the last gateState. */
-async function awaitGate({ io, repo, pr, head, gate }) {
-  await retriggerGate({ io, repo, head });
+async function awaitGate({ io, repo, pr, head, gate, fence }) {
+  const refused = await retriggerGate({ io, repo, head, fence });
+  if (refused) return { ...gate, fenced: refused };
   for (let i = 0; i < GATE_POLLS && gate.deployGate !== "success" && gate.deployGate !== "failure"; i++) {
     await io.sleep(GATE_POLL_MS);
     gate = await gateState({ io, repo, pr, head });
@@ -196,11 +284,18 @@ async function promotionStep(ctx) {
   }
   let gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
-  if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate });
+  if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate, fence: ctx.fence });
+  if (gate.fenced) return { refused: gate.fenced, head };
+  if (gate.deployGate === "failure" && ctx.config.managed && io.git) { // #5568: policy loaded lazily (release-config imports this module)
+    const { readPolicy } = await import("./release-config.mjs");
+    const policy = readPolicy({ io, defaultBranch: ctx.def }).policy;
+    await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+  }
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }
   if (gate.deployGate !== "success") return { stopped: true, why: `forge/deploy-gate is ${gate.deployGate ?? "absent"}, not success${gate.deployGate === "failure" ? "" : ` after ${GATE_POLLS} polls`}`, head, gate };
-  await io.gh(["pr", "merge", String(pr), "--repo", repo, "--merge", "--match-head-commit", head]);
+  const f = await fenced(ctx.fence, { action: "merge", key: `merge:${pr}:${head}` }, (epoch) => io.gh(["pr", "merge", String(pr), "--repo", repo, "--merge", "--match-head-commit", head, ...(epoch != null ? ["--body", epochTrailer(epoch)] : [])]));
+  if (f.refused) return { refused: f.refused, head, gate };
   return { merged: true, head, gate };
 }
 
@@ -228,14 +323,44 @@ export const withStubs = (over = {}) => ({ ...STEP_FNS, ...over });
  */
 export async function runRelease({ io, repo, opts = {}, config = {}, branches = {}, root, id, steps = STEP_FNS, mounts }) {
   const rel = openRelease(root, id, mounts);
-  const state = rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
+  // #5550: managed releases read the ledger first (it is authoritative; the local file is a cache); off = no ledger call at all.
+  const lctx = config.managed && io.api ? { io, repo, credential: "driver" } : null;
+  const led = lctx ? await readLedger(lctx, id) : null;
+  if (led?.rejected) return { id, status: "refused", step: "ledger", reason: `ledger of ${id} rejected: ${led.rejected}` };
+  let ledgerHead = led?.head ?? null;
+  const mirror = async (s) => { // best effort: a lost race means another writer owns the release, which stops this run
+    const r = ledgerHead ? await writeRelease(lctx, id, s, ledgerHead) : await createReleaseLedger(lctx, id, s);
+    if (r.ok) ledgerHead = r.sha; else throw new Error(`release ${id}: ledger write lost the race (another writer holds the release)`);
+  };
+  const state = led?.state ?? rel.load() ?? { v: 1, id, repo, startedAt: new Date(io.now()).toISOString(), steps: {}, held: [] };
   state.opts = { merge: !!(opts.merge || state.opts?.merge) };
+  if (lctx) {
+    state.lane = opts.lane || state.lane || "release";
+    if (!Object.values(state.steps).some((x) => x?.done)) {
+      const g = await managedGate({ io, repo, config, lane: state.lane, root });
+      if (g.blocked) return { id, status: "blocked", step: "gate", reason: g.reason };
+      if (g.ciMode) { state.ciMode = g.ciMode; io.print?.(`release ${id}: ${g.why}; host checks run before paid CI`); }
+    }
+  }
+  const holder = io.holder ?? `host-${process.pid}`;
+  const takeLease = async () => { // #5553: the epoch fences every irreversible effect; the release PR carries the heartbeat comment
+    const l = await acquireLease(lctx, { holder, release: id, issue: state.steps["release-pr"].result.pr, ttlS: config.leaseTtlS ?? 120, now: io.now() });
+    if (!l.ok) return l.refused ?? "lease lost the race";
+    const record = async (rec) => { const a = (state.intents ??= []); const i = a.findIndex((x) => x.key === rec.key); if (i < 0) a.push(rec); else a[i] = rec; ctx.save(); await mirror(state); };
+    ctx.fence = { lctx, lease: l.lease, record, now: () => new Date(io.now()).toISOString() };
+    return null;
+  };
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.save();
   let out;
   try {
     for (const step of RELEASE_STEPS) {
       if (state.steps[step]?.done) continue;
+      if (lctx && !ctx.fence && state.steps["release-pr"]?.done) { const why = await takeLease(); if (why) { out = { id, status: "refused", step: "lease", reason: why }; break; } }
+      if (ctx.fence) { // #5556 (I24): a hold stops the run before the next step; an unreadable _active already ends it above
+        const held = await holdCheck(lctx, id).catch(() => null);
+        if (held) { out = { id, status: "refused", step, reason: held }; break; }
+      }
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
@@ -243,13 +368,23 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       if (result?.stopped) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; out = { id, status: "stopped", step, reason: result.why }; break; }
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
       ctx.save();
+      if (lctx) await mirror(state);
+      if (lctx && !ctx.fence && step === "release-pr") { const why = await takeLease(); if (why) { out = { id, status: "refused", step: "lease", reason: why }; break; } }
+      if (ctx.fence) { // an unreadable _active ends the run too (I5): the next irreversible step would refuse anyway
+        const hb = await heartbeat(lctx, ctx.fence.lease).catch((e) => ({ unreadable: e.message }));
+        if (hb.fenced || hb.unreadable) { out = { id, status: "refused", step, reason: hb.fenced ? "fenced: another host took over the release lease" : `cannot read _active (${hb.unreadable})` }; break; }
+      }
     }
     out ??= { id, status: "done" };
   } finally {
     // A stop at GATE_PASS ends the release hold as well: nothing else is waiting on the batches.
     await restoreBatches(ctx);
   }
+  if (lctx) { // #5569: Actions minutes of this release (sum of ceil per job), mirrored to the ledger below
+    try { const m = await releaseMinutes({ gh: (a) => io.gh(a), repo, sinceMs: Date.parse(state.startedAt) }); if (m) state.minutes = { runs: m.runs, total: m.minutes }; } catch { /* best effort */ }
+  }
   state.status = out.status; ctx.save();
+  if (lctx) await mirror(state);
   return out;
 }
 
@@ -260,7 +395,11 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
   const mine = (b, repo) => { const r = b.readPlan()?.repo; return !r || r === repo; };
   const unfinished = (repo) => listBatches(root).map((id) => openBatch(root, id)).filter((b) => !b.readReport() && mine(b, repo));
   return {
-    gh: (args) => gh(args), print, now: () => Date.now(),
+    gh: (args) => gh(args), print,
+    api: (method, path, body) => { // JSON in and out for the ledger (#5550); the error carries the HTTP status
+      try { return JSON.parse(String(exec("gh", ["api", "-X", method, path, ...(body ? ["--input", "-"] : [])], { encoding: "utf8", input: body ? JSON.stringify(body) : undefined, maxBuffer: 64 << 20, stdio: ["pipe", "pipe", "pipe"] })) || "null"); }
+      catch (e) { throw Object.assign(new Error(`gh api ${method} ${path} failed: ${String(e?.stderr ?? e?.message ?? e).split("\n")[0]}`), { status: Number(/HTTP (\d{3})/.exec(String(e?.stderr ?? ""))?.[1]) || undefined }); }
+    }, now: () => Date.now(),
     git: (args, { env: extra, input } = {}) => exec("git", args, { cwd, encoding: "utf8", input, env: { ...env, ...extra }, maxBuffer: 64 << 20, stdio: ["pipe", "pipe", "pipe"] }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     run: async (cmd) => { try { exec("sh", ["-c", cmd], { stdio: "ignore", timeout: 120_000 }); return { ok: true }; } catch { return { ok: false }; } },
@@ -280,31 +419,50 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo]";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env;
   const io = deps.io ?? realReleaseIo({ env, cwd });
+  if (argv[0] === "report") { // #5569: monthly model vs measured minutes of the first 3 managed waves
+    let y = {}; try { y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {}; } catch { /* defaults */ }
+    for (const l of waveReport(historyFromRoot(releaseRoot(env)), parseBudgetConfig(y.budget)).lines) io.print(l);
+    return 0;
+  }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
-  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo"));
+  if (argv[0] === "check-config" || argv[0] === "init") { // #5551: policy file, loaded lazily (release-config imports this module)
+    const { checkConfigFromCli, initFromCli } = await import("./release-config.mjs");
+    return (argv[0] === "init" ? initFromCli : checkConfigFromCli)(argv.slice(1), { io, cwd });
+  }
+  const cv = argv[0] === "control" ? argv[1] : argv[0]; // #5556: one implementation, the bare verbs are aliases
+  if (CONTROL_VERBS.includes(cv)) {
+    const { controlFromCli } = await import("./release-control.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const policy = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
+    return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
+  }
+  if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
+  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
   const root = releaseRoot(env);
   const resume = flag(argv, "--resume");
   let id = resume ?? newReleaseId(io.now());
   let repo = flag(argv, "--repo");
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
+  const config = readReleaseConfig(raw);
+  if (config.managed) config.ciPolicy = readCiPolicy(cwd);
   if (resume) {
     const st = openRelease(root, resume).load();
-    if (!st) throw new Error(`no release ${resume} in ${root}`);
-    repo ??= st.repo;
+    if (!st && !config.managed) throw new Error(`no release ${resume} in ${root}`); // managed: the ledger may hold it (another host)
+    repo ??= st?.repo;
   }
   repo ??= JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
-  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
   const budget = async (since) => { // #5278: the Actions-minutes line (and any auto switch to local-first); never fails the job
     try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
   };
   await budget(null);
-  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge") }, config: readReleaseConfig(raw), branches: readBranches(cwd), root, id, mounts: deps.mounts });
+  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge"), lane: flag(argv, "--lane") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
