@@ -29,7 +29,8 @@ const depsOf = (i) => [...new Set([...String(i.body ?? "").matchAll(/^\s*(?:[-*]
 export function recordOf(comments) {
   const c = (comments ?? []).map((x) => String(x?.body ?? "")).filter((b) => b.includes("FORGE:CLASSIFY")).at(-1);
   if (!c) return null;
-  const body = c.replace(/<!--[^>]*-->/g, "");
+  let body = c, prev; // strip comment markers until stable (CodeQL js/incomplete-multi-character-sanitization)
+  do { prev = body; body = body.replace(/<!--[\s\S]*?-->/g, "").replace(/<!--/g, ""); } while (body !== prev);
   try { const o = JSON.parse(body.slice(body.indexOf("{"), body.lastIndexOf("}") + 1)); return o && typeof o === "object" ? o : null; } catch { return null; }
 }
 

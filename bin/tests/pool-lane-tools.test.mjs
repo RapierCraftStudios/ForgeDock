@@ -90,7 +90,7 @@ describe("agent launch and warm pool", () => {
     const docker = fakeDocker(), agent = agentWith(docker);
     await agent.launch({ spec: spec("lane-2"), ...SIZE });
     const run = docker.runs.find((a) => a.includes("cs-lane-2"));
-    assert.match(run[run.length - 2], /^forgedock-lane:[^-]+(\.[^-]+)*(-[A-Za-z0-9.]+)?$/);
+    assert.match(run[run.length - 2], /^forgedock-lane:[^-]+(-[A-Za-z0-9.]+)?$/);
     assert.ok(!/-t[0-9a-f]{12}$/.test(run[run.length - 2]));
     assert.equal(docker.builds.length, 0);
   });
