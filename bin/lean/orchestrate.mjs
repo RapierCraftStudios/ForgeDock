@@ -744,7 +744,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
-    if (cancelled && releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } } // #5241: the lane ended: its lease goes with it
+    // #5241: the lane ended: its lease goes with it. #5654: also an interrupted or engine-error end, which is requeued at once
+    if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
@@ -1058,8 +1059,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5204: a requeue is never silent: one `deferred`/`run.interrupted` row names the cause (an upgrade or a plain restart)
   // and `onInterrupted` reconciles the issue's labels. It consumes no deferral, engine-error or recovery attempt.
   const interruptCause = saved?.engineVersion && version && saved.engineVersion !== version ? `upgrade v${saved.engineVersion}→v${version}` : "dispatcher restart";
-  const requeueLost = (n, why) => {
+  const requeueLost = async (n, why) => {
+    const rec = runRecs.get(n);
     runRecs.delete(n);
+    if (pending.includes(n) || results.has(n)) return;
+    // #5654: the lost lane's own lease would defer the requeue as lease.held for its whole TTL
+    if (releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     if (pending.includes(n) || results.has(n)) return;
     pending.unshift(n); enqueued.set(n, now());
     update({ issue: n, outcome: "deferred", code: "run.interrupted", pr: null, cost_usd: 0, minutes: 0, detail: `interrupted: ${interruptCause}; ${why}; requeued` });
@@ -1080,17 +1085,17 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (live) {
       if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
       else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
-      track(n, p.then((r) => {
+      track(n, p.then(async (r) => {
         if (r) return settle(n, r, rec, checked.get(n) ?? null);
         if (halted) return; // #4454: kept for the next resume
-        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n, "the adopted lane ended without a result"); save(); // ended without a result after all
+        running.delete(n); releaseSlot(n); endRemote(n); await requeueLost(n, "the adopted lane ended without a result"); save(); // ended without a result after all
       }));
       continue;
     }
     const r = await p;
     if (!r) {
       const why = adoptErrors.get(n) ?? (!adopt || !(rec?.pid || rec?.handle || rec?.remote) ? "no adoptable pid or handle" : "the lane ended without a result");
-      requeueLost(n, why); continue;
+      await requeueLost(n, why); continue;
     }
     if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
     else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle

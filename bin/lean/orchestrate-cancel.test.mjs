@@ -140,4 +140,26 @@ describe("--requeue of a lease-deferred pending issue (#5241)", () => {
     assert.deepEqual(runs, [9, 9]);
     assert.equal(rows.find((r) => r.issue === 9).outcome, "merged");
   });
+
+  // #5654: an interrupted or engine-error lane releases its own lease so the requeue is not deferred as lease.held
+  it("releases the lease of a resumed run whose lane is gone, and re-dispatches it", async () => {
+    let saved = { v: 1, order: [9], running: { 9: { startedAt: 1, pid: 4242 } }, results: {}, pending: [] };
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const released = [], ran = [], order = [];
+    await orchestrate({ issues: [9], parallel: 1, pollMs: 5, readBody: async () => "", store, adopt: async () => null,
+      releaseLease: async (n) => { released.push(n); order.push("release"); },
+      runOne: async (n) => { ran.push(n); order.push("run"); return { terminalReason: "merged", pr: 1 }; } });
+    assert.deepEqual(released, [9]);
+    assert.deepEqual(ran, [9]);
+    assert.equal(order[0], "release", "the lease goes before the issue is dispatched again");
+  });
+
+  it("releases the lease of a lane that ends in engine-error", async () => {
+    const released = [];
+    const store = { load: () => null, save: () => {}, log: () => {} };
+    let calls = 0;
+    await orchestrate({ issues: [2], parallel: 1, pollMs: 5, readBody: async () => "", store, releaseLease: async (n) => { released.push(n); },
+      runOne: async () => (++calls === 1 ? { terminalReason: "engine-error", detail: "boom" } : { terminalReason: "merged", pr: 2 }) });
+    assert.deepEqual(released, [2]);
+  });
 });
