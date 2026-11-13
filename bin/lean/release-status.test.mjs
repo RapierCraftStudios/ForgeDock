@@ -6,10 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { releaseFromCli, gateState } from "./release.mjs";
-import { collectStatus, renderStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
+import { collectStatus, renderStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, policyFromYaml, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
 
 const REPO = "o/r", ID = "r20261112-141530-4242", HEAD = "a".repeat(40);
 const STATE = { v: 1, id: ID, repo: REPO, steps: { preflight: { done: true, at: "T1" }, "release-pr": { done: true, at: "T2", result: { pr: 7, head: HEAD } }, promotion: { done: false, at: "T3" } }, release: { snapshot: "s1", issues: [12, 5], picks: [] } };
+const GOLDEN_ISSUE = "{\"schema\":\"forgedock.release.explain/v1\",\"kind\":\"issue\",\"repo\":\"o/r\",\"issue\":40,\"lane\":\"pool\",\"classification\":\"absent\",\"trace\":[{\"step\":1,\"rule\":\"classification\",\"config_key\":\"FORGE:CLASSIFY\",\"result\":\"n/a\",\"detail\":\"classification: absent\",\"would_change\":[]},{\"step\":2,\"rule\":\"skip_labels\",\"config_key\":\"plan.skip_labels\",\"result\":\"pass\",\"detail\":\"no skip label\",\"would_change\":[]},{\"step\":3,\"rule\":\"min_confidence\",\"config_key\":\"classify.min_confidence\",\"result\":\"n/a\",\"detail\":\"no minimum configured\",\"would_change\":[]},{\"step\":4,\"rule\":\"risk.rules\",\"config_key\":\"risk.rules\",\"result\":\"n/a\",\"detail\":\"no rules configured\",\"would_change\":[]},{\"step\":5,\"rule\":\"forces\",\"config_key\":\"forces\",\"result\":\"n/a\",\"detail\":\"no rules configured\",\"would_change\":[]},{\"step\":6,\"rule\":\"priority\",\"config_key\":\"issue_watch.watches.<name>.immediate\",\"result\":\"pass\",\"detail\":\"priority P1\",\"would_change\":[]},{\"step\":7,\"rule\":\"theme\",\"config_key\":\"issue_watch.watches.<name>.theme_map\",\"result\":\"fail\",\"detail\":\"no theme rule matches\",\"would_change\":[\"add a theme_map rule (label:, scope: or path:) in forge.yaml\"]},{\"step\":8,\"rule\":\"depends_on\",\"config_key\":\"release.managed\",\"result\":\"pass\",\"detail\":\"no open prerequisite\",\"would_change\":[]},{\"step\":9,\"rule\":\"release_set\",\"config_key\":\"release.mode\",\"result\":\"fail\",\"detail\":\"no release recorded\",\"would_change\":[\"include it in the next release cut\"]},{\"step\":10,\"rule\":\"planner\",\"config_key\":\"release.planner\",\"result\":\"n/a\",\"detail\":\"planner: not installed\",\"would_change\":[]},{\"step\":11,\"rule\":\"lane\",\"config_key\":\"controls.jsonl lane | plan lane\",\"result\":\"n/a\",\"detail\":\"lane pool (plan)\",\"would_change\":[\"label or config key above, or: forgedock release lane #40 --force <lane> --reason <reason>\"]}],\"would_change\":[\"add a theme_map rule (label:, scope: or path:) in forge.yaml\",\"include it in the next release cut\",\"label or config key above, or: forgedock release lane #40 --force <lane> --reason <reason>\"],\"next_actions\":[\"forgedock release status --repo o/r --json\"]}";
+const GOLDEN_PR = "{\"schema\":\"forgedock.release.explain/v1\",\"kind\":\"pr\",\"repo\":\"o/r\",\"pr\":7,\"head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"pass\",\"demoted\":[],\"trace\":[{\"step\":1,\"rule\":\"gate_marker\",\"config_key\":\"release.gate\",\"result\":\"pass\",\"detail\":\"FORGE:GATE_PASS marker: pass\",\"would_change\":[]},{\"step\":2,\"rule\":\"deploy_gate\",\"config_key\":\"forge/deploy-gate\",\"result\":\"pass\",\"detail\":\"forge/deploy-gate: success\",\"would_change\":[]},{\"step\":3,\"rule\":\"check:unit\",\"config_key\":\"branches.required_checks\",\"result\":\"pass\",\"detail\":\"success\",\"would_change\":[]}],\"would_change\":[],\"next_actions\":[\"forgedock release explain 7 --repo o/r --json\"]}";
+const GOLDEN_PR_TEXT = "PR #7  head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  decision=pass\n  1. pass  gate_marker  [release.gate]  FORGE:GATE_PASS marker: pass\n  2. pass  deploy_gate  [forge/deploy-gate]  forge/deploy-gate: success\n  3. pass  check:unit  [branches.required_checks]  success\n  next:\n    forgedock release explain 7 --repo o/r --json";
 const b64 = (o) => ({ content: Buffer.from(typeof o === "string" ? o : JSON.stringify(o)).toString("base64") });
 
 /** io fake: GitHub is a read-only world; any non-GET api call is recorded in `writes`. */
@@ -63,7 +66,7 @@ describe("release status / explain (#5554)", () => {
       "  wave: unknown  lane: unknown", "  lease: holder=h epoch=2 heartbeat_age_s=unknown", "  cut: s1",
       "  [x] preflight  T1", "  [ ] host-preflight", "  [x] release-pr  T2", "  [ ] review", "  [ ] fixes", "  [ ] mark-ready", "  [ ] rehearsal", "  [ ] promotion  T3", "  [ ] post-merge",
       `  PR #7  head ${HEAD}  gate marker=pass deploy-gate=success  ci: total=1 failed=0 pending=0`,
-      "  review: unknown", "  merge: unknown", "  deploy: unknown", "  rollback: target=unknown auto=unknown",
+      `  review: verdict=GATE_PASS head=${HEAD}`, "  merge: unknown", "  deploy: unknown", "  rollback: target=unknown auto=unknown",
       "  release set: #5 #12  picks=0",
       "  next:",
       `    forgedock release --resume ${ID} --repo o/r`,
@@ -122,6 +125,22 @@ describe("release status / explain (#5554)", () => {
     } finally { PLANNER_RULES.length = 0; }
   });
 
+  it("R8: explain #N and explain <PR> JSON are byte-for-byte goldens", async () => {
+    const issues = { 40: { number: 40, title: "fix(api): x", body: "", labels: [{ name: "P1" }] } };
+    const e = await explainIssue({ io: fakeIo({ issues }), repo: REPO, number: 40, state: null });
+    assert.equal(JSON.stringify(e), GOLDEN_ISSUE);
+    const p = await explainPr({ io: fakeIo({ checks: [{ name: "unit", conclusion: "success" }] }), repo: REPO, pr: 7, gateState, policy: { required_checks: ["unit"] } });
+    assert.equal(JSON.stringify(p), GOLDEN_PR);
+    assert.equal(renderExplain(p), GOLDEN_PR_TEXT);
+  });
+
+  it("R5/R6: policyFromYaml reads skip_labels, min_confidence, risk/forces labels and required_checks from forge.yaml", () => {
+    const { policy } = policyFromYaml("plan:\n  skip_labels: [epic, foo]\nclassify:\n  min_confidence: 0.7\nrisk:\n  rules:\n    - label: risky\nbranches:\n  required_checks: [ci, lint]\n");
+    assert.deepEqual(policy.skip_labels, ["epic", "foo"]); assert.equal(policy.min_confidence, 0.7);
+    assert.deepEqual(policy.risk_rules, [{ label: "risky" }]); assert.deepEqual(policy.required_checks, ["ci", "lint"]);
+    assert.deepEqual(policyFromYaml("").policy.skip_labels, undefined);
+  });
+
   it("R6: explain <PR> lists each required check, the demotion (actor, expiry, reason, issue) and the gate decision", async () => {
     const io = fakeIo({ marker: "failure", deployGate: "failure", checks: [{ name: "lint", conclusion: "failure" }, { name: "unit", conclusion: "failure" }, { name: "e2e", conclusion: "success" }] });
     const controls = [{ type: "exempt", check: "unit", actor: "op", until: "2026-12-01T00:00:00Z", reason: "flaky", issue: 99 }];
@@ -150,9 +169,9 @@ describe("release status / explain (#5554)", () => {
     const s = await collectStatus(base(io));
     assert.equal(s.wave, "1/3"); assert.equal(s.lane, "fast"); assert.equal(s.lease.heartbeat_age_s, 5); assert.equal(s.hold, true); assert.equal(s.intake, "paused");
     assert.equal(s.merge_sha, "m1"); assert.deepEqual(s.deploy, { run: 5, stage: "canary", attempt: 2 }); assert.equal(s.rollback_target, "v1"); assert.equal(s.auto_rollback, "armed");
-    assert.deepEqual(s.review, { verdict: "pass", head: HEAD });
+    assert.deepEqual(s.review, { verdict: "GATE_PASS", head: HEAD });
     const bare = await collectStatus(base(fakeIo()));
-    for (const k of ["wave", "lane", "cut_sha", "review", "merge_sha", "deploy", "rollback_target", "auto_rollback", "intake"]) assert.ok(bare[k] === "unknown" || k === "cut_sha", k);
+    for (const k of ["wave", "lane", "cut_sha", "merge_sha", "deploy", "rollback_target", "auto_rollback", "intake"]) assert.ok(bare[k] === "unknown" || k === "cut_sha", k);
     for (const x of [s, bare]) for (const a of x.next_actions) parseNextAction(a);
     assert.ok(s.next_actions.some((a) => /release resume .* --reason <reason>/.test(a)));
     assert.ok(s.next_actions.some((a) => /release rollback/.test(a)));

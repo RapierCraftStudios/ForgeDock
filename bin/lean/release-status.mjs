@@ -9,6 +9,7 @@
  * closure, recorded release set, lane); the wave planner (#5559) registers into PLANNER_RULES, until then `planner: not installed`. Effects (`io`, `gateState`, local cache) are injected, so it is unit-testable.
  */
 import { readLedger, readActive } from "./release-ledger.mjs";
+import { parseForgeYaml } from "../forge-utils.mjs";
 import { priorityOf, classifyTheme, closure } from "./issuewatch-release.mjs";
 
 export const STATUS_SCHEMA = "forgedock.release.status/v1";
@@ -62,7 +63,7 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
   const lease = active?.lease;
   const hb = lease?.heartbeat_at ? Math.max(0, Math.round((io.now() - Date.parse(lease.heartbeat_at)) / 1000)) : null;
   const w = state.wave;
-  const verdict = state.steps?.review?.result?.verdict;
+  const marker = pr?.gate?.marker, verdict = marker ? (marker === "pass" ? "GATE_PASS" : "GATE_FAILURE") : state.steps?.review?.result?.verdict;
   const out = {
     schema: STATUS_SCHEMA, id, repo, source: led ? "ledger" : "local", status, next_step: TERMINAL.includes(status) ? null : next,
     wave: w ? `${w.n}/${w.of ?? w.m}` : "unknown", lane: unk(state.lane ?? w?.lane),
@@ -227,6 +228,25 @@ export function renderExplain(e) {
   if (e.would_change?.length) lines.push("  would change:", ...e.would_change.map((w) => `    - ${w}`));
   lines.push("  next:", ...e.next_actions.map((a) => `    ${a}`));
   return lines.join("\n");
+}
+
+const ruleList = (v) => (Array.isArray(v) ? v : v ? [v] : []).map((r) => (typeof r === "string" ? { label: r.replace(/^\s*label:\s*/, "").trim() } : r)).filter((r) => r?.label);
+const strList = (v) => (Array.isArray(v) ? v : v ? [v] : []).map(String);
+
+/** `{policy, watch}` read from forge.yaml (`plan.skip_labels`, `classify.min_confidence`, `risk.rules`, `forces`, `branches.required_checks`, `issue_watch` theme_map); a key that is absent stays undefined. */
+export function policyFromYaml(raw) {
+  let y = {}; try { y = parseForgeYaml(String(raw ?? "")) ?? {}; } catch { y = {}; }
+  const mc = y.classify?.min_confidence === undefined ? undefined : Number(y.classify.min_confidence);
+  const watches = Object.values(y.issue_watch?.watches ?? {}).filter((w) => w && typeof w === "object");
+  return {
+    policy: {
+      skip_labels: y.plan?.skip_labels === undefined ? undefined : strList(y.plan.skip_labels),
+      min_confidence: Number.isNaN(mc) ? undefined : mc,
+      risk_rules: ruleList(y.risk?.rules), forces: ruleList(y.forces?.rules ?? y.forces),
+      required_checks: y.branches?.required_checks === undefined ? undefined : strList(y.branches.required_checks),
+    },
+    watch: watches.find((w) => w.theme_map) ?? {},
+  };
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };

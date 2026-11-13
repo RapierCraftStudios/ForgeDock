@@ -22,7 +22,7 @@ import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
-import { statusFromCli, CONTROL_VERBS } from "./release-status.mjs";
+import { statusFromCli, policyFromYaml, CONTROL_VERBS } from "./release-status.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -351,5 +351,6 @@ function statusCli(argv, { io, cwd, env, deps }) {
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* defaults */ }
   const root = releaseRoot(env);
   const local = { load: (id) => (ID_RE.test(String(id)) ? openRelease(root, id).load() : null), ids: () => { try { return readdirSync(root).filter((d) => ID_RE.test(d)); } catch { return []; } } };
-  return statusFromCli(argv, { io, config: readReleaseConfig(raw), local, gateState, watch: deps.watch, maxPolls: deps.maxPolls });
+  const { policy, watch } = policyFromYaml(raw);
+  return statusFromCli(argv, { io, config: readReleaseConfig(raw), local, gateState, watch: deps.watch ?? watch, policy: deps.policy ?? policy, maxPolls: deps.maxPolls });
 }
