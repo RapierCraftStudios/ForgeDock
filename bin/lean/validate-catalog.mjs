@@ -10,7 +10,7 @@
 /** Default CI sources read for the derived catalogue (repo-relative). */
 export const DEFAULT_CATALOG_SOURCES = [".github/workflows/ci.yml", "scripts/ci-local.sh"];
 
-const PY_RUNNER_RE = /\b(uv run(?: +--[\w-]+(?:[ =][^\s|&;]+)?)* +)(?:python3? +-m +)?pytest\b/;
+const PY_RUNNER_RE = /\b(uv run(?: +--[\w-]+(?:[ =][^\s|&;-][^\s|&;]*)?)* +)(?:python3? +-m +)?pytest\b/; // an option value never starts with "-" (no ambiguous backtracking)
 const JS_RUNNER_RE = /\b(pnpm exec|npx|yarn) +(vitest|jest)\b/;
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

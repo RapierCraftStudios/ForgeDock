@@ -29,7 +29,8 @@ const depsOf = (i) => [...new Set([...String(i.body ?? "").matchAll(/^\s*(?:[-*]
 export function recordOf(comments) {
   const c = (comments ?? []).map((x) => String(x?.body ?? "")).filter((b) => b.includes("FORGE:CLASSIFY")).at(-1);
   if (!c) return null;
-  const body = c.replace(/<!--[^>]*-->/g, "");
+  let body = c; // drop every <!-- ... --> span (an unterminated one drops the rest) without a regex sanitizer
+  for (let i = body.indexOf("<!--"); i >= 0; i = body.indexOf("<!--", i)) { const j = body.indexOf("-->", i + 4); body = body.slice(0, i) + (j < 0 ? "" : body.slice(j + 3)); }
   try { const o = JSON.parse(body.slice(body.indexOf("{"), body.lastIndexOf("}") + 1)); return o && typeof o === "object" ? o : null; } catch { return null; }
 }
 
