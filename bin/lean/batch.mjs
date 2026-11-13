@@ -138,7 +138,8 @@ export function batchesOwning(root, repo, issue, { exceptId = null, now = Date.n
     if (b.readCancel()) { out.push({ id, cancelled: true, running }); continue; }
     const last = b.lastProgressMs();
     const live = !b.readReport() && last !== null && now - last <= staleMs;
-    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue)) || b.readHeld().includes(issue))) out.push({ id, cancelled: false, running });
+    // #5592: a batch that only HOLDS the issue (pending but held) does not run it, so it is not an owner: the batch that now runs it is.
+    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue) && !b.readHeld().includes(issue)))) out.push({ id, cancelled: false, running });
   }
   return out;
 }
@@ -245,7 +246,11 @@ export function openBatch(root, id) {
         if (!Number.isSafeInteger(n) || n < 1) refused.push({ issue: x, reason: "not an integer" });
         else if (!order.has(n)) refused.push({ issue: n, reason: "not in batch" });
         else if (pend.has(n)) refused.push({ issue: n, reason: "already requeued" });
-        else if (!REQUEUABLE(st.results?.[n]?.outcome) && !quotaPaused(n) && !leaseOrphaned(n)) refused.push({ issue: n, reason: "not terminal" });
+        else if (!REQUEUABLE(st.results?.[n]?.outcome) && !quotaPaused(n) && !leaseOrphaned(n)) {
+          // #5592: held here while another batch runs it: say so, and release the hold here (`--release`) or requeue in that batch
+          const other = st.results?.[n] === undefined && self.readHeld().includes(n) ? activeBatchOf(dirname(dir), readJson(f("plan.json"))?.repo, n, { exceptId: id }) : null;
+          refused.push({ issue: n, reason: other ? `not terminal: held here, run by ${other}; requeue it there` : "not terminal" });
+        }
         else { pend.add(n); requeued.push(n); }
       }
       if (requeued.length) {
