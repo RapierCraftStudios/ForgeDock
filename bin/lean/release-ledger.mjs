@@ -206,3 +206,10 @@ export async function recordP0Divergence(ctx, rec, now = Date.now()) {
   const at = new Date(now).toISOString();
   return updateActive(ctx, ["p0"], (active) => ({ patch: { p0: { ...(active.p0 ?? {}), [rec.release ?? "-"]: { ...rec, at } } }, control: { at, verb: "p0-divergence", ...rec } }));
 }
+
+/** #5566: the merge-back sync of a fast lane (PR, conflicts, target set, validation) kept in `_active.sync` with an audit line. */
+export async function recordSync(ctx, rec, now = Date.now()) {
+  const at = new Date(now).toISOString();
+  const { milestones, duplicates, ...audit } = rec;
+  return updateActive(ctx, ["sync"], () => ({ patch: { sync: { ...rec, at } }, control: { at, verb: "sync", ...audit, milestones: milestones?.length ?? 0, duplicates: duplicates?.length ?? 0 } }));
+}

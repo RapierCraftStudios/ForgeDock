@@ -240,3 +240,17 @@ describe("claimDeploy (#5565)", async () => {
     assert.equal((await claimDeploy(ctx, { release: "r3" })).ok, true);
   });
 });
+
+describe("recordSync (#5566)", async () => {
+  const { recordSync } = await import("./release-ledger.mjs");
+  it("keeps the sync in _active.sync and appends one audit line", async () => {
+    const g = fakeGh(), ctx = ctxOf(g);
+    const r = await recordSync(ctx, { pr: 7, conflicted: true, target: ["a.js"], milestones: [{ branch: "milestone/x" }], duplicates: [] }, 0);
+    assert.equal(r.ok, true);
+    assert.equal(r.active.sync.pr, 7);
+    const files = g.trees.get(g.commits.get(g.refs.get(ACTIVE)).tree);
+    const line = JSON.parse(files["controls.jsonl"].trim());
+    assert.equal(line.verb, "sync");
+    assert.equal(line.milestones, 1);
+  });
+});

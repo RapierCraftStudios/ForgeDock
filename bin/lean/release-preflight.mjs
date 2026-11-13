@@ -35,6 +35,22 @@ export async function runHostPreflight(ctx, { head, pr }) {
   return kept;
 }
 
+const shq = (f) => `'${String(f).replace(/'/g, `'\\''`)}'`;
+
+/**
+ * Targeted preflight (#5566): runs `preflight.command` with `{files}` replaced by the quoted target set. A command without `{files}`
+ * is not targeted, so it covers nothing: the caller counts that as unvalidated. Files no blocker issue (the caller decides).
+ * @returns {Promise<{ok, head, command, covered: string[], code}>}
+ */
+export async function runTargetedPreflight(ctx, { head, target }) {
+  const cfg = ctx.config?.preflight;
+  if (!cfg) return { ok: false, head, covered: [], why: "no release.preflight_command configured" };
+  const targeted = cfg.command.includes("{files}");
+  const command = cfg.command.split("{files}").join(target.map(shq).join(" "));
+  const run = await ctx.io.rehearse(command, { timeout: cfg.timeoutMs });
+  return { ok: !!run.ok, head, command, covered: run.ok && targeted ? [...target] : [], code: run.code ?? null };
+}
+
 const stopOf = (r) => ({ stopped: true, why: `release preflight failed at ${r.head} (release-blocker #${r.issue}); fix it, then resume`, ...r });
 
 /** Step before `release-pr`: preflight on the staging head, so no release PR is opened on a failing head. */
