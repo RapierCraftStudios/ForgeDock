@@ -82,5 +82,11 @@
     "pass": "exit 0",
     "timeout": 60,
     "for": "30d"
+  },
+  "release-deploy-live-check": {
+    "run": "for b in $(gh api \"repos/{owner}/{repo}/branches?per_page=100\" --paginate --jq \".[].name\" | grep \"^forge-ledger/r\"); do gh api \"repos/{owner}/{repo}/contents/state.json?ref=$b\" --jq .content | base64 -d | grep -q \"\\\"phase\\\": *\\\"LIVE\\\"\" && exit 0; done; exit 1",
+    "pass": "exit 0",
+    "timeout": 300,
+    "for": "30d"
   }
 }
