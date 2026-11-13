@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
@@ -161,5 +162,16 @@ describe("#5447 declaredEnv", () => {
     assert.deepEqual(declaredEnv({}), []);
     // #5590: fixtures and libraries are not executables
     assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", "caplog", "FakeRedis", "tmp_path", "node", "psql"] } }), ["pytest", "node", "psql"]);
+  });
+});
+
+describe("project-local probe (#5601)", () => {
+  it("command probe searches binDirs after PATH; unchanged without them", () => {
+    const c = C("pytest -q tests/x.py");
+    assert.match(preflightProbes(c).probes.find((p) => p.tool === "pytest").probe, /^command -v -- 'pytest'/);
+    const dir = tmpDir("pp-"); mkdirSync(join(dir, ".venv/bin"), { recursive: true }); writeFileSync(join(dir, ".venv/bin/pytest"), "#!/bin/sh\n", { mode: 0o755 });
+    const probe = preflightProbes(c, { binDirs: [join(dir, ".venv/bin")] }).probes.find((p) => p.tool === "pytest").probe;
+    assert.match(probe, /^PATH="\$PATH:.*\.venv\/bin" command -v/);
+    assert.equal(spawnSync("sh", ["-c", probe], { env: { PATH: "/usr/bin:/bin" } }).status, 0);
   });
 });

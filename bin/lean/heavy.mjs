@@ -18,7 +18,7 @@
  * re-resolves the name back to the shim is cut off by FORGE_HEAVY_CHAIN (`name:cmd|...`, see `runWrapped`, #4680).
  */
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync, appendFileSync, writeFileSync, chmodSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync, appendFileSync, writeFileSync, chmodSync } from "node:fs";
 import { cpus, freemem } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -318,10 +318,27 @@ export function sumWaits(text, waits = {}) {
 }
 
 /**
+ * #5601: the project-local executable dirs under `root` (`.venv/bin`, `node_modules/.bin`, at the root and up to two levels
+ * down, e.g. services/api/.venv/bin). The loop check and the tool probes both resolve through these, so they agree.
+ */
+export function projectBinDirs(root, { list = (d) => readdirSync(d, { withFileTypes: true }), exists = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } } } = {}) {
+  const out = [];
+  const scan = (dir, depth) => {
+    for (const rel of [".venv/bin", "node_modules/.bin"]) if (exists(join(dir, rel))) out.push(join(dir, rel));
+    if (depth >= 2) return;
+    let ents = [];
+    try { ents = list(dir); } catch { return; }
+    for (const e of ents) if (e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules") scan(join(dir, e.name), depth + 1);
+  };
+  if (root) scan(root, 0);
+  return out;
+}
+
+/**
  * Admission-time form of the guardChain loop (#4866): every PATH dir holding a pass-through wrapper for a heavy-shimmed tool
  * with no real binary behind it (so the wrapper's own `command -v` lands back on the shim). Returns [{name, dir}].
  */
-export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = head, skip = [] } = {}) {
+export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = head, skip = [], realDirs = [] } = {}) {
   const out = [];
   const dirs = String(path ?? "").split(delimiter).filter(Boolean);
   for (const name of names) {
@@ -332,7 +349,7 @@ export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = h
       if (f && isPassThroughWrapper(read(f), name)) wrappers.push(d);
     }
     if (!wrappers.length) continue;
-    const real = find(name, path, [...skip, ...wrappers]);
+    const real = find(name, path, [...skip, ...wrappers]) || realDirs.map((d) => find(name, d, [])).find(Boolean); // #5601: a project-local binary (venv, node_modules) is behind the wrapper
     if (!real) for (const dir of wrappers) out.push({ name, dir });
   }
   return out;

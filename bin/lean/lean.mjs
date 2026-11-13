@@ -80,7 +80,7 @@ import { openRotator, rotatorRetry } from "./rotator.mjs";
 import { poolExhausted, exhaustedDeferral, quotaFacts } from "./quota.mjs"; // #5236
 import { watchAccount } from "./account-watch.mjs"; // #5268
 import { SPLIT_LABEL } from "./refactor.mjs";
-import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
+import { writeHeavyShims, sumWaits, isHeavyProcess, projectBinDirs } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
 import { applyArmOverrides } from "../experiment.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
@@ -1825,7 +1825,7 @@ export async function runCore(o) {
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
       if (io.probeCommand) {
-        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files), binDirs: projectBinDirs(wt) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
         for (const p of probes) {
           if (p.needs && missing.has(p.needs)) continue;
@@ -2234,7 +2234,7 @@ export async function runCore(o) {
         if (designRoute.blocked) return await needsHuman(`Design gate (forge.yaml design.gate: blocking): ${designRoute.reason}.\n\nRun /design on #${issue}; a FORGE:DESIGN_SPEC comment or the \`${designConfig.specLabel}\` label lifts the hold.`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue} (${designRoute.pages.slice(0, 3).join(", ")})` });
       }
       { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
-        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? `python3 -m pytest --version || PATH="$PATH:${projectBinDirs(wt).join(":")}" command -v pytest` : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
         if (envMiss.length) {
           try {

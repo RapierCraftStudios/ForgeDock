@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, SHIM_DEPTH_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
+import { projectBinDirs, findShimLoops, guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, SHIM_DEPTH_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy, readAdmission, liveLaneCap } from "../engine-cli.mjs";
@@ -399,5 +399,22 @@ describe("#5148 dynamic-name pass-through wrapper", () => {
     const r = spawnSync("systemd-run", ["--user", "--scope", "-q", "-p", "TasksMax=64", "env", `PATH=${bin}:${wrap}:${real}:/usr/bin:/bin`, "FORGE_HEAVY_DISABLED=1", join(bin, "docker"), "ps"], { encoding: "utf8", timeout: 30000 });
     assert.equal(r.status, 0, r.stderr);
     assert.ok(lines(log).length < 13);
+  });
+});
+
+describe("project-local bin dirs (#5601)", () => {
+  it("finds root and nested .venv/bin and node_modules/.bin, skipping node_modules and dot dirs", () => {
+    const d = tmpDir("pb-");
+    for (const p of [".venv/bin", "services/api/.venv/bin", "web/node_modules/.bin", "node_modules/x/.venv/bin", ".git/.venv/bin"]) mkdirSync(join(d, p), { recursive: true });
+    assert.deepEqual(projectBinDirs(d).sort(), [join(d, ".venv/bin"), join(d, "services/api/.venv/bin"), join(d, "web/node_modules/.bin")].sort());
+    assert.deepEqual(projectBinDirs(join(d, "missing")), []);
+  });
+  it("a wrapper with a real binary only in realDirs is no loop; with none it still is", () => {
+    const d = tmpDir("pl-"); const w = join(d, "wrap"), v = join(d, ".venv/bin");
+    mkdirSync(w); mkdirSync(v, { recursive: true });
+    writeFileSync(join(w, "pytest"), '#!/bin/sh\nexec "$(command -v pytest)" "$@"\n'); chmodSync(join(w, "pytest"), 0o755);
+    writeFileSync(join(v, "pytest"), "#!/bin/sh\necho real\n"); chmodSync(join(v, "pytest"), 0o755);
+    assert.equal(findShimLoops(w).some((l) => l.name === "pytest"), true);
+    assert.deepEqual(findShimLoops(w, { realDirs: [v] }).filter((l) => l.name === "pytest"), []);
   });
 });

@@ -71,6 +71,12 @@ describe("path_loop", () => {
     const c = checkPathLoop({ env: { PATH: w } });
     assert.equal(c.ok, false); assert.equal(c.code, "preflight.path_loop"); assert.ok(c.detail.includes(w));
   });
+  it("passes when the real binary is in a project .venv/bin (#5601), message names the wrapper otherwise", () => {
+    const { d, w } = mk(); const v = join(d, ".venv/bin"); mkdirSync(v, { recursive: true }); writeFileSync(join(v, "docker"), "#!/bin/sh\necho hi\n"); chmodSync(join(v, "docker"), 0o755);
+    assert.equal(checkPathLoop({ env: { PATH: w }, cwd: d }).ok, true);
+    const bad = checkPathLoop({ env: { PATH: w }, cwd: join(d, "none") });
+    assert.equal(bad.ok, false); assert.ok(bad.detail.includes(join(w, "docker")));
+  });
   it("passes when a real binary is behind the wrapper", () => {
     const { d, w } = mk(); const real = join(d, "real"); mkdirSync(real); writeFileSync(join(real, "docker"), "#!/bin/sh\necho hi\n"); chmodSync(join(real, "docker"), 0o755);
     assert.equal(checkPathLoop({ env: { PATH: `${w}:${real}` } }).ok, true);

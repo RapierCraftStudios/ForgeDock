@@ -107,7 +107,7 @@ export function contractCommands(contract) {
   const t = contract?.repro_test;
   return t && typeof t === "object" && typeof t.command === "string" && t.command.trim() ? [...out, { id: "repro_test", command: t.command }] : out;
 }
-export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIGHT_CAP } = {}) {
+export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIGHT_CAP, binDirs = [] } = {}) {
   const changes = (Array.isArray(contract?.deliverables) ? contract.deliverables : []).map((d) => String(d?.change ?? "")).join("\n");
   const named = (name) => new RegExp(`(^|[^\\w@/.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w/-])`).test(changes);
   const skip = (name) => !name || name.includes("/") && !name.startsWith("@") || name.startsWith("$") || repoHas(name) || named(name);
@@ -116,7 +116,7 @@ export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIG
     const key = `${kind}|${tool}|${interp ?? ""}`;
     const p = byKey.get(key);
     if (p) { if (!p.ids.includes(id)) p.ids.push(id); return; }
-    const probe = kind === "command" ? `command -v -- ${sq(tool)} >/dev/null 2>&1`
+    const probe = kind === "command" ? `${binDirs.length ? `PATH="$PATH:${binDirs.join(":").replace(/(["$`\\])/g, "\\$1")}" ` : ""}command -v -- ${sq(tool)} >/dev/null 2>&1` // #5601: project-local executables count
       : kind === "python-module" ? `${sq(interp)} -c ${sq(PY_PROBE)} ${sq(tool)} >/dev/null 2>&1`
       : `node -e ${sq(NODE_PROBE)} ${sq(tool)} >/dev/null 2>&1`;
     byKey.set(key, { ids: [id], tool, kind, interp, needs: kind === "command" ? null : interp, probe });
