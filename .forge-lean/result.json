@@ -129,7 +129,18 @@
    "evidence": "only contract deliverable paths and tests changed"
   }
  ],
- "amendments": [],
+ "amendments": [
+  {
+   "kind": "add-deliverable",
+   "path": "devdocs/index.yaml",
+   "why": "scripts/check-devdocs-freshness.sh requires a decision record for the bin/lean behaviour change; the ADR devdocs/decisions/5584-release-regate.md (commit 79dc6e78) must be registered in the index"
+  },
+  {
+   "kind": "add-deliverable",
+   "path": "devdocs/decisions/5584-release-regate.md",
+   "why": "decision record for the gate-only regate lane, required by the devdocs freshness check"
+  }
+ ],
  "not_members": [
   {
    "symbol": "release-regate",

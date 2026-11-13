@@ -30,3 +30,4 @@ Dispatch inputs: `sha`, `regate=true`, `gate_sha`, `forge_epoch`, optional `gate
 
 ## Sibling-list follow-up
 The ten flagged tests do not enumerate release modules; release-regate recorded under not_members in result.json. No test edits.
+- Scope amendment: devdocs/index.yaml and devdocs/decisions/5584-release-regate.md (the ADR) are registered as deliverables because scripts/check-devdocs-freshness.sh requires a decision record for the bin/lean behaviour change; both are docs-only.
