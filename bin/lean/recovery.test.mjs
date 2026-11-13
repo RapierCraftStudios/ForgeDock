@@ -161,10 +161,10 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.deepEqual(seen.sort(), [[1, 101], [2, 102]]);
   });
 
-  it("contract.invalid recovers only when the issue was edited mid-run", async () => {
-    const { rows, calls } = await batch({ 1: [NH("contract.invalid", "contract invalid", { issueEdited: true }), { terminalReason: "merged" }], 2: [NH("contract.invalid")] });
+  it("#5623: contract.invalid recovers with a fresh plan whether or not the issue was edited mid-run", async () => {
+    const { rows, calls } = await batch({ 1: [NH("contract.invalid", "contract invalid", { issueEdited: true }), { terminalReason: "merged" }], 2: [NH("contract.invalid"), { terminalReason: "merged" }] });
     assert.equal(byIssue(rows)[1].recovered, "contract.invalid");
-    assert.equal(byIssue(rows)[2].outcome, "needs-human"); assert.equal(calls.filter((c) => c.n === 2).length, 1);
+    assert.equal(byIssue(rows)[2].recovered, "contract.invalid"); assert.equal(byIssue(rows)[2].outcome, "merged"); assert.equal(calls.filter((c) => c.n === 2).length, 2);
   });
 
   it("relabelNeedsHuman (SPEC-7/8): only a recovery that ends final engine-error/deferred relabels; invalid/merged never; a requeued deferred waits", async () => {
@@ -573,5 +573,30 @@ describe("#5423 env.tool_missing recovery placement", () => {
   };
   it("the first recovery of a remote run retries remotely, a repeat goes to the host", async () => {
     assert.deepEqual(await run(2), ["remote", "remote", "local"]);
+  });
+});
+
+describe("#5592 env.tool_missing recovery is not a verbatim replay", () => {
+  const go = (script, first = "remote") => {
+    const calls = [], decisions = [];
+    return orchestrate({ issues: [7], parallel: 2, recovery: { maxAttempts: 2, mechanicalMaxAttempts: 3 }, readBody: async () => "",
+      remote: { max: 2, isRemote: () => true, place: () => ({ where: first, reason: "test" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async (_n, _l, ctx = {}) => { calls.push(ctx.recover?.attempt ?? 0); return script[Math.min(calls.length - 1, script.length - 1)]; },
+      decide: (d) => decisions.push(d) }).then((rows) => ({ rows, calls, decisions }));
+  };
+  const miss = (tool, extra, more = {}) => ({ terminalReason: "needs-human", code: "env.tool_missing", detail: `Environment error: the host is missing ${tool}, so validate command(s) could not run\n- env.tool_missing: ${extra}`, ...more });
+  it("a first tool_missing from a run on the host is not recovered on that same host: literal message, no lane", async () => {
+    const r = await go([miss("pytest", "x")], "local");
+    assert.deepEqual(r.calls, [0]);
+    assert.match(r.rows[0].detail, /recovery would replay the identical frozen contract on that same host, so none is launched/);
+  });
+  it("a first tool_missing from a remote sandbox still recovers on the host", async () => {
+    const r = await go([miss("pytest", "x", { placement: { where: "remote" } }), { terminalReason: "merged", pr: 1 }]);
+    assert.deepEqual(r.calls, [0, 1]);
+  });
+  it("a repeat with the same missing tools stops even when the detail lines differ", async () => {
+    const r = await go([miss("pytest", "probe line A", { placement: { where: "remote" } }), miss("pytest", "other line B /tmp/x1", { placement: { where: "local" } })]);
+    assert.deepEqual(r.calls, [0, 1]);
+    assert.match(r.rows[0].detail, /same `env\.tool_missing` as the run before it/);
   });
 });

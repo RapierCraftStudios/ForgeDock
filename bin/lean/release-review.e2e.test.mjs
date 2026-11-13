@@ -39,7 +39,8 @@ function world() {
     runAgent: async ({ role }) => { w.agents.push(role); return { text: "FORGE:TEST_GATE:RESULT=PASS" }; },
     finalize: async () => ({ code: 0, lines: [], data: { head: sha(w.head), notes: ["- nit"], toFile: w.fixed ? [] : [{ title: "leak", severity: "HIGH" }] } }),
     fileIssue: async ({ item }) => { w.issues.push(item.title); return 100 + w.issues.length; },
-    fileCiIssue: async () => 999,
+    failedJobs: async () => [],
+    fileFixIssue: async () => 999,
     addNotes: async () => {},
     summary: async ({ filed }) => {
       const pass = w.fixed;
@@ -59,7 +60,7 @@ describe("forgedock release, review to gate (e2e on in-memory GitHub)", () => {
     assert.equal(out.step, "promotion");
     assert.match(out.reason, /GATE_PASS/);
     assert.deepEqual(w.issues, ["leak"], "the finding was filed");
-    assert.deepEqual(w.lanes, [[101, "staging"]], "one fix lane on the staging branch");
+    assert.deepEqual(w.lanes, [[999, "staging"]], "one fix lane, on the consolidated fix issue, on the staging branch");
     assert.deepEqual(w.comments, ["<!-- FORGE:GATE_FAILURE -->", "<!-- FORGE:GATE_PASS -->"], "failure at the first head, pass after the delta review");
     assert.ok(w.agents.includes("release-review-security") && w.agents.includes("release-review-regression-risk") && w.agents.includes("release-test-gate"), "the full panel ran");
     assert.ok(w.printed.some((l) => l.includes(`--match-head-commit ${sha(2)}`)), "merge command at the fixed head");

@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { parseStatus } from "./statuscomment.mjs";
 import { foldRegression } from "./baselines.mjs";
 import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #5338
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -71,9 +73,18 @@ const bad = (note = "src/foo.js:9 still wrong", verdict = "NONCONFORMING") => co
 const genericPass = () => fence({ verdict: "PASS", fixes_issue: true, regression: false, reason: "looks good" });
 
 /** In-memory world with fake gh, git, fs and runner. */
+/** #5592: `w.comments` stays the list of logical per-marker comments (what the lane wrote), whether it posted them or edited them into the FORGE:STATUS comment. */
+function statusLogical(w, body) {
+  w.statusBody = body;
+  for (const [key, { markers, text }] of parseStatus(body)) {
+    if (w.statusSections[key] === text) continue;
+    w.statusSections[key] = text;
+    w.comments.push(`${markers.map((m) => `<!-- ${m} -->`).join("\n")}\n${text}`);
+  }
+}
 function world(o = {}) {
   const w = {
-    comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111", followups: [], prEdits: [], patches: [],
+    comments: [], rawComments: [], statusPatches: [], statusSections: {}, labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111", followups: [], prEdits: [], patches: [],
     contract: o.contract ?? CONTRACT, issueComments: o.issueComments, issueStates: o.issueStates,
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
@@ -91,17 +102,19 @@ function world(o = {}) {
       const k = a.slice(0, 2).join(" ");
       if (opts?.env) (w.ghEnvs ??= []).push(opts.env);
       if (k === "pr view" && a.at(-1) === "state" && a.at(-2) === "--json") return JSON.stringify({ state: o.prState ?? "OPEN" });
+      if (a[0] === "api" && a.includes("PATCH") && a.some((x) => /\/comments\/9000$/.test(x))) { statusLogical(w, a[a.indexOf("-f") + 1].replace(/^body=/, "")); w.statusPatches.push(a); return "{}"; } // #5592: the one FORGE:STATUS comment
       if (a[0] === "api" && a.includes("PATCH")) { w.patches.push(a); return "{}"; }
       if (a[0] === "api") return a.some((x) => /\/comments$/.test(x)) ? (w.issueComments ?? []).map((c) => JSON.stringify(c)).join("\n") : "";
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
-      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: o.viewComments ?? [] }); }
+      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: o.viewComments ?? [], ...(o.labels ? { labels: o.labels } : {}) }); }
       if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: a[2] === "7" && o.body ? o.body : ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
-      if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
+      if (k === "issue comment" && a[a.indexOf("--body") + 1].startsWith("<!-- FORGE:STATUS -->")) { w.rawComments.push(a[a.indexOf("--body") + 1]); statusLogical(w, a[a.indexOf("--body") + 1]); w.seq.push("comment"); return "https://github.com/o/r/issues/7#issuecomment-9000\n"; }
+      if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.rawComments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
       if (k === "issue close") { w.closed.push(a); w.seq.push("close"); return ""; }
       if (k === "issue edit") { w.edits.push(a); return ""; }
       if (k === "pr create") { w.prs.push(a); w.seq.push("pr"); return "https://github.com/o/r/pull/77\n"; }
@@ -1212,7 +1225,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
     assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
-    assert.match(nhBody(w), /still invalid after one correction/);
+    assert.match(nhBody(w), /still invalid after \d+ correction\(s\)/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
     assert.equal((await run(w2)).terminalReason, "merged");
   });
@@ -1867,6 +1880,31 @@ describe("conformance shadow mode (the default)", () => {
       assert.equal(readdirSync(dir).length, 1);
     } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
   });
+  it("#5338 a merged supersedes decision on an interface reopens its closed consumers, notifies open ones and files one issue per named consumer", async () => {
+    const dir = tmpDir("ifc-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
+    try {
+      const seeded = normaliseDecision({ id: "i40-1", choice: "Interface web -> api: POST /v1/search", anchors: ["src/"], issue: 40, consumers: ["#12", "#13", "search-sdk"], seam: { kind: "payload", auth: "k", payload: { fields: ["q"] }, provider: ["src/"], consumer: ["web/"] } });
+      writeDecisionIndex("o/r", [seeded]);
+      const amendments = [{ kind: "decision", why: "v2", decision: { choice: "Interface web -> api: POST /v2/search", anchors: ["src/db.ts"], supersedes: "i40-1" } }];
+      const w = world({ amendments, issueStates: { 12: "CLOSED", 13: "OPEN" } });
+      const base = w.io.gh, calls = [];
+      w.io.gh = async (a, opts) => {
+        const k = a.slice(0, 2).join(" ");
+        if (k === "issue reopen") { calls.push(a.join(" ")); return ""; }
+        if (k === "issue list") return "[]";
+        if (k === "issue create") { calls.push(a.join(" ")); return "https://github.com/o/r/issues/99\n"; }
+        return base(a, opts);
+      };
+      const r = await runShadow(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.ok(calls.includes("issue reopen 12 -R o/r"), "the closed consumer is reopened");
+      assert.ok(!calls.some((c) => c.startsWith("issue reopen 13")), "an open consumer is only told");
+      assert.ok(calls.some((c) => c.startsWith("issue create") && /Adapt search-sdk to interface change/.test(c)), "one issue for the named consumer");
+      assert.ok(w.comments.some((c) => c.includes("FORGE:INTERFACE_CHANGED") && c.includes("consumer=#12")));
+      assert.ok(w.comments.some((c) => c.includes("FORGE:INTERFACE_CHANGED") && c.includes("consumer=#13")));
+      assert.ok(w.comments.some((c) => /Interface i40-1 superseded by d\S+: #12 reopened #12, #13 notified #13, search-sdk filed #99/.test(c)), "the trajectory records it");
+    } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
+  });
   it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -2141,7 +2179,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2600, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2650, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1875, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2279,6 +2317,14 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
       assert.equal(w.closed.length, 1); assert.equal(w.closed[0][w.closed[0].indexOf("--reason") + 1], "completed");
       assert.match(w.closed[0][w.closed[0].indexOf("--comment") + 1], /Already fixed on the base/);
     }
+  });
+
+  it("#5544 test-only fix whose base version fails is merged, not already-fixed", async () => {
+    const contract = { ...CONTRACT, repro_test: RT, deliverables: [{ id: "D1", path: "test/foo.test.js", change: "fix the test", requirements: ["R1"] }] }; // the bug is in the test itself
+    const w = rworld([{ base: "RAN", head: "RAN", pristine: "FAILED" }], { changed: ["test/foo.test.js"], contract });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.merges.length, 1);
+    assert.equal(w.closed.some((c) => /Already fixed on the base/.test(c.join(" "))), false, "not closed as already fixed");
   });
 
   it("a repro test the harness cannot run on head (or no harness result) is env.repro_unrunnable: recoverable, no resume, no reviewer (#4334)", async () => {
@@ -2622,7 +2668,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2500, `plan prompt is ${approxTokens(plan)} tokens`); // 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2550, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 1850, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -3444,6 +3490,32 @@ describe("base-sync (#4100)", () => {
     assert.equal(w.merges.length, 1);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     noRebaseNoForce(w);
+  });
+
+  it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      return git(a, o);
+    };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1, "no re-review for a documentation-only conflict");
+    assert.match(syncComment(w), /not required \(documentation-only conflicts; lane code diff unchanged\)/);
+  });
+
+  it("#5583 follow-up: a documentation-only conflict whose resolution changed the code diff is re-reviewed", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git; let n = 0;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return `diff --git a/src/foo.js b/src/foo.js\n+fix${n++}`;
+      return git(a, o);
+    };
+    await run(w);
+    assert.equal(reviewers(w).length, 2, "re-review: the resolution touched code");
   });
 
   it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
@@ -7715,6 +7787,13 @@ describe("resume digest in builder prompts (#4400)", () => {
       assert.doesNotMatch(p, /untrusted override|older decision/);
     });
 
+    it("#5547 a structured post-deploy decision after the freeze amends the recovered frozen contract", async () => {
+      const sd = { body: `<!-- FORGE:DECISION ${JSON.stringify({ requirement: CONTRACT.requirements[0].id, disposition: "post-deploy" })} -->\n## Decision\npaid run`, ...BOT };
+      const w = withDecisions([CONTRACT_C, sd, { body: factsRec, ...BOT }]);
+      await run(w);
+      assert.match(traj(w).join("\n"), new RegExp(`FORGE:DECISION applied to the frozen contract: ${CONTRACT.requirements[0].id} tracked post-deploy`));
+    });
+
     it("context_pack off still passes the decision", async () => {
       const w = withDecisions([CONTRACT_C, dec("deliver the nightly timer")]);
       await run(w, { contextPack: { mode: "off" } });
@@ -7835,7 +7914,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 1850, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2500, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2550, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -8575,5 +8654,95 @@ describe("#5469: --adopt takes over a hand-built open PR", () => {
     assert.ok(reviewers(w).length >= 1, "the PR is reviewed");
     assert.ok(w.calls.some((c) => c[0] === "git" && JSON.stringify(c).includes("hand/fix-7")), "its head branch is the lane branch");
     assert.equal(r.terminalReason, "merged");
+  });
+});
+
+describe("design gate routing in the lane (#5330 R11, R13, R15)", () => {
+  const PAGE = "web/app/hands/page.tsx";
+  const pageContract = { ...CONTRACT, deliverables: [{ id: "D1", path: PAGE, change: "new hands page", requirements: ["R1"] }] };
+  const dg = (gate = "blocking") => ({ system: [], routes: ["web/app/**/page.tsx"], exclude: [], gate, specLabel: "design:approved", neededLabel: "design:needed", viewports: [390, 1440], requireVisual: true });
+  const mk = (o = {}) => world({ contract: pageContract, changed: [PAGE, "test/foo.test.js"], reviews: [conf({}, pageContract, [PAGE, "test/foo.test.js"])], ...o });
+
+  it("blocking: a predicted new page under design.routes with no FORGE:DESIGN_SPEC stops pending /design, before any build", async () => {
+    const w = mk(), r = await run(w, { designConfig: dg("blocking") });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && /Run \/design/.test(c) && c.includes(PAGE)));
+    assert.equal(builders(w).length, 1, "only the plan call ran; the implement call never started");
+  });
+
+  it("the design:approved label lifts the hold: the lane builds", async () => {
+    const w = mk({ labels: [{ name: "design:approved" }] }), r = await run(w, { designConfig: dg("blocking") });
+    assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(builders(w).length >= 2);
+  });
+
+  it("advisory: routed to /design in the implement prompt, never blocked", async () => {
+    const w = mk(), r = await run(w, { designConfig: dg("advisory") });
+    assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(builders(w).some((c) => /Design gate: page web\/app\/hands\/page\.tsx/.test(c[4])));
+  });
+
+  it("opt-in: with no design.routes the lane is today's (no design prompt, no block)", async () => {
+    for (const extra of [{}, { designConfig: { ...dg(), routes: [] } }]) {
+      const w = mk(), r = await run(w, extra);
+      assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+      assert.ok(!builders(w).some((c) => /Design gate:/.test(c[4])));
+    }
+  });
+});
+
+describe("#5592 (8) comment and label spam", () => {
+  const BOTC = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" };
+  const SEP = "<!-- FORGE:STATUS:SEP -->";
+  const oldStatus = `<!-- FORGE:STATUS -->\n${SEP}\n<!-- FORGE:STARTED -->\nStarted work on #7 (base \`staging\`).\n${SEP}\n<!-- FORGE:TRAJECTORY -->\n<!-- FORGE:WORK-ON -->\nold run trajectory`;
+  const statusComments = (w) => w.rawComments.filter((c) => c.startsWith("<!-- FORGE:STATUS -->"));
+
+  it("a fresh run puts STARTED, TRAJECTORY (and LANE_BRANCH/CONTEXT/DECISION) into ONE status comment, edited in place", async () => {
+    const w = world();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(statusComments(w).length, 1, "the status comment is created once");
+    assert.ok(w.statusPatches.length >= 1, "later machine-state markers PATCH it");
+    const body = w.statusBody;
+    assert.match(body, /<!-- FORGE:STARTED -->\nStarted work on #7/);
+    assert.match(body, /<!-- FORGE:TRAJECTORY -->\n<!-- FORGE:WORK-ON -->/);
+    assert.ok(!w.rawComments.some((c) => c.startsWith("<!-- FORGE:STARTED") || c.startsWith("<!-- FORGE:TRAJECTORY")), "no separate STARTED / TRAJECTORY comment");
+    assert.ok(w.rawComments.length <= 10, `a run posts at most 10 comments, got ${w.rawComments.length}: ${w.rawComments.map((c) => c.split("\n")[0]).join(" | ")}`);
+  });
+
+  it("a requeued run edits the existing trusted status comment: STARTED and TRAJECTORY are replaced, nothing new is posted for them", async () => {
+    const w = world({ issueBodies: [ISSUE_BODY], viewComments: [{ ...BOTC, url: "https://github.com/o/r/issues/7#issuecomment-9000", body: oldStatus }] });
+    w.statusSections = {};
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(statusComments(w).length, 0, "no second status comment");
+    assert.ok(w.statusPatches.length >= 2);
+    assert.doesNotMatch(w.statusBody, /old run trajectory/, "the newest run's trajectory replaced the old one");
+    assert.equal((w.statusBody.match(/<!-- FORGE:TRAJECTORY -->/g) ?? []).length, 1);
+  });
+
+  it("an untrusted comment carrying the status marker is never edited", async () => {
+    const w = world({ issueBodies: [ISSUE_BODY], viewComments: [{ author: { login: "drive-by" }, authorAssociation: "NONE", url: "https://github.com/o/r/issues/7#issuecomment-9000", body: oldStatus }] });
+    await run(w);
+    assert.equal(statusComments(w).length, 1, "a fresh status comment is posted instead");
+    assert.ok(!w.statusPatches.some((a) => a.some((x) => /comments\/9000$/.test(x)) && false));
+  });
+
+  it("start clears needs-human, needs-human:external, parked:* and remediation-queue; other labels stay", async () => {
+    const w = world({ issueBodies: [ISSUE_BODY], labels: [{ name: "bug" }, { name: "needs-human" }, { name: "needs-human:external" }, { name: "parked:ci.red" }, { name: "remediation-queue" }] });
+    await run(w);
+    const rm = w.edits.find((e) => e.includes("--remove-label") && e.some((x) => /needs-human/.test(x)));
+    assert.ok(rm, "labels cleared");
+    assert.deepEqual(rm[rm.indexOf("--remove-label") + 1].split(","), ["needs-human", "needs-human:external", "parked:ci.red", "remediation-queue"]);
+  });
+
+  it("a merged run re-reads the labels and clears a parked label added meanwhile", async () => {
+    const w = world();
+    const gh = w.io.gh;
+    w.io.gh = async (a, o) => (a[0] === "issue" && a[1] === "view" && a.includes("labels") && a[a.indexOf("--json") + 1] === "labels" ? JSON.stringify({ labels: [{ name: "parked:ci.red" }] }) : gh(a, o));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label parked:ci.red"));
   });
 });

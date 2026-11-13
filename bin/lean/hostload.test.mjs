@@ -114,4 +114,32 @@ describe("#5174 hostload", () => {
     assert.deepEqual(out.map((r) => r.outcome), ["merged"]);
     assert.equal(probes, 0, "the remote placement never consults the overload gate");
   });
+
+  it("#5592: a pool capacity 503 never falls back to an overloaded host; the lane keeps retrying the pool", async () => {
+    const c = { t: 1_000_000 };
+    const csleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const where = [];
+    let tries = 0;
+    const rows = await orchestrate({ issues: [1], parallel: 1, now: () => c.t, sleep: csleep, pollMs: 1, readBody: async () => "",
+      overload: () => ({ overloaded: true, perCore: 5, threshold: 2 }),
+      remote: { max: 1, isRemote: () => true, capacity: () => ({ free: null, online: 1, at: 1 }), offlineFallback: true, capacityFallbackAfter: 2, headroom: () => ({ ok: true }) },
+      runOne: async (n, _ln, ctx = {}) => {
+        where.push(ctx.placement?.where ?? "remote");
+        tries++;
+        return tries >= 6 ? { terminalReason: "merged", pr: 1 } : { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "HTTP 503 capacity" };
+      } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(tries, 6);
+    assert.ok(where.every((w) => w === "remote"), where.join());
+  });
+
+  it("#5592: a local issue held by host overload does not block a remote issue behind it", async () => {
+    const started = [], seen = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, pollMs: 1, sleep, readBody: async () => "",
+      overload: () => { seen.push([...started]); return { overloaded: !started.includes(2), perCore: 5, threshold: 2 }; },
+      remote: { max: 2, isRemote: (n) => n === 2 },
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged", pr: n }; } });
+    assert.deepEqual(started, [2, 1], "#2 (remote) starts while #1 (local) is held; #1 follows once the host clears");
+    assert.equal(rows.length, 2);
+  });
 });

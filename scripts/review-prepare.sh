@@ -98,6 +98,7 @@ if [ -n "$DELTA_FROM_OPT" ] && [ "$THOROUGH" = "true" ]; then echo "review-prepa
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; _SELF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" "${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/* "$_SELF_ROOT"; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 
 ROSTER_SCRIPT=$(forge_resolve review-roster.sh)
+VGATE_SCRIPT=$(forge_resolve visual-gate.mjs 2>/dev/null)
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 # shellcheck disable=SC2034  # read by lib/review-delta-mode.sh (sourced below)
 REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
@@ -425,10 +426,15 @@ SC="AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DATAB
 SPEC_CLI=false; [ -n "$TOP" ] && [ -f "$TOP/commands/review-pr-agents/spec-cli.md" ] && SPEC_CLI=true   # existence only
 SCRAPING_ON=false; [ -n "$DOMAIN_CONTEXT_SCRAPING" ] && SCRAPING_ON=true
 DBC=false; printf '%s\n' "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && DBC=true
+# forge#5330: a changed user-visible route under forge.yaml design.routes (scripts/visual-gate.mjs --list names one) adds the Frontend persona; unset or unresolved = false
+DESIGN_ROUTES=false
+if [ -n "$VGATE_SCRIPT" ] && [ -n "$TOP" ] && [ -f "$TOP/forge.yaml" ] && command -v node >/dev/null 2>&1; then
+    printf '%s\n' "$FILES" | node "$VGATE_SCRIPT" --root "$TOP" --files-file - --list 2>/dev/null | grep -q '"file"' && DESIGN_ROUTES=true
+fi
 ROSTER_OUT=""
 [ -n "$ROSTER_SCRIPT" ] && ROSTER_OUT=$(printf '%s\n' "$FILES" | bash "$ROSTER_SCRIPT" --files-file - --scores "$SC" --changed-lines "$LINES" --changed-files "$NFILES" \
     --fix-pr "$FIX_PR" --source-severity "$SRC_SEV" --source-domain "$SRC_DOM" --contract-flags "$CONTRACT_RISK_FLAGS" --churn "$CHURN_ESCALATION" --danger-zone "$DANGER" \
-    --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" --review-depth "$REVIEW_DEPTH" 2>/dev/null)
+    --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" --review-depth "$REVIEW_DEPTH" --design-routes "$DESIGN_ROUTES" 2>/dev/null)
 SELECTED_AGENTS=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^SELECTED_AGENTS=//p')
 ROSTER_TIER=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^TIER=//p')
 ROSTER_REASON=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^REASON=//p')

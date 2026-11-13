@@ -7,7 +7,9 @@
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { parseDocsConfig } from "./lean/docsgate.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
+import { parseDesignConfig } from "./lean/design-gate.mjs";
 import { execFileSync } from "node:child_process";
+import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -582,9 +584,10 @@ export function readEnvConfig(cwd = process.cwd()) {
     let appPages = false; // #5428: default-on trigger: the repo tracks Next app/**/page.* files
     try { appPages = String(execFileSync("git", ["ls-files", "--", "*page.*"], { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] })).split("\n").some((f) => PAGE_RE.test(f)); } catch { /* not a git checkout: off */ }
     const pg = parsePagesConfig(y?.pages, { hasAppPages: appPages }); // #5428: forge.yaml pages: (off for repos without pages)
+    const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -934,7 +937,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease] [--local]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -981,6 +984,26 @@ export async function runFromCli(argv, deps = {}) {
     return res;
   }
   await assertLaneNotDefault(io, lane, repo);
+  // #5542: placement. A lane already placed (--placement, a batch lane, --adopt, --recover) or forced local runs here; otherwise a
+  // remote or hybrid `execution:` hands the single issue to the same batch placement `orchestrate` uses.
+  if (enginePath !== "full") {
+    const exec = deps.execution !== undefined ? deps.execution : readExecution();
+    const placed = placementWhere || argv.includes("--adopt") || recover || (deps.env ?? process.env).FORGEDOCK_BATCH_ID;
+    const wantsRemote = exec && (exec.mode === "remote" || (exec.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1));
+    if (argv.includes("--local")) console.log("placement: local (--local)");
+    else if (!placed && wantsRemote) {
+      console.log(`placement: ${exec.mode} execution (${exec.provider}); placed by the batch dispatcher`);
+      const res = await orchestrateFromCli([String(issue), "--parallel", "1", "--foreground", ...(repo ? ["--repo", repo] : []), ...(lane ? ["--lane", lane] : []),
+        ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])], deps);
+      const row = res?.rows?.find((r) => r.issue === issue) ?? res?.rows?.[0] ?? {};
+      let laneRes = null; // the lane's own result file carries cost_usd / wall_ms / light* that the benchmarks read
+      try { const bm = await import("./lean/batch.mjs"); laneRes = JSON.parse(readFileSync(bm.openBatch(deps.batchRoot ?? bm.batchRoot(), res.batch).resultFile(issue), "utf8")); } catch { laneRes = null; }
+      const metrics = Object.fromEntries(["cost_usd", "wall_ms", "model_ms", "light", "light_eligibility", "light_upgrade"].filter((k) => row[k] !== undefined).map((k) => [k, row[k]])); // the batch row carries them when no lane file exists (sandbox lanes)
+      const out = { ...metrics, ...(laneRes ?? {}), terminalReason: laneRes?.terminalReason ?? row.outcome ?? "engine-error", ...(row.pr != null && laneRes?.pr == null ? { pr: row.pr } : {}), ...(row.detail && !laneRes?.detail ? { detail: row.detail } : {}), ...(row.code && !laneRes?.code ? { code: row.code } : {}), ...(row.placement ? { placement: row.placement } : {}) };
+      console.log(`issue #${issue} → ${out.terminalReason}`);
+      return report(out);
+    } else if (!placed) console.log(`placement: local (${exec ? `execution mode ${exec.mode}` : "no execution configured"})`);
+  }
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
@@ -1039,7 +1062,7 @@ export async function runFromCli(argv, deps = {}) {
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1771,12 +1794,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
     { // #5442: page work waits for an approved design: a design:* issue is never dispatched (--force does not lift it)
       const held = new Map();
-      for (const n of issues) {
+      // #5592: bounded-concurrency label reads, not one serial gh call per issue (starved admission on a loaded host)
+      const hs = await mapLimit(issues, 6, async (n) => {
         let v = null;
         try { v = JSON.parse(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])); } catch { v = null; }
-        const h = designHold(v?.labels);
-        if (h) held.set(n, h);
-      }
+        return designHold(v?.labels);
+      });
+      issues.forEach((n, i) => { if (hs[i]) held.set(n, hs[i]); });
       for (const [n, h] of held) sink.line(`skipped: #${n} design_pending (${h}); run /design, design:approved lifts the hold`);
       if (held.size) {
         if (held.size === issues.length) throw new Error(`every issue is design_pending (${[...held.values()].join(", ")}); run /design first`);
@@ -1891,7 +1915,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
       laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -2146,8 +2170,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       decide: deps.decide ?? (async (d) => {
         if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
-        const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
-        try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
+        const body = `## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
+        // #5592: runner decisions are a section of the issue's one FORGE:STATUS comment (last 5 kept), not a comment per requeue
+        try { const { postStatusSection } = await import("./lean/statuscomment.mjs"); const { capComment } = await import("./lean/render.mjs"); await postStatusSection({ gh: (a) => leanIo.gh(a), repo, issue: d.issue, markers: ["FORGE:DECISION"], text: body, cap: capComment }); } catch { /* best effort: the batch log keeps the row */ }
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
@@ -2294,6 +2319,8 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
       const reopened = await lastReopen(n);
       if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
     }
+    // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue (a verify reopen returned null above)
+    if (pr !== null || state === "CLOSED") { const { clearPipelineLabels } = await import("./lean/statuscomment.mjs"); await clearPipelineLabels({ gh, repo, issue: n, labels: iss?.labels }); }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") {
       // #5152: workflow:merged / a fully closed decomposition is delivered whatever the stateReason; a decomposition still
@@ -2337,7 +2364,10 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       if (!(await parkedRelabel({ gh, repo, issue, code: parked.code })).ok) return "failed"; // #5466: needs-human stays unless the replacement labels landed
       try {
         const { capComment } = await import("./lean/render.mjs");
-        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:PARKED code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""} -->\n## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}`)]);
+        const { postUpsert } = await import("./lean/statuscomment.mjs");
+        // #5592: one PARKED comment per issue, edited in place (the marker still leads the body)
+        await postUpsert({ gh, repo, issue, markers: ["FORGE:PARKED"], attrs: `code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""}`, cap: capComment,
+          body: `## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}` });
       } catch { /* best effort */ }
       return true;
     }

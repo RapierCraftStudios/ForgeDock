@@ -68,7 +68,7 @@ const COVERAGE = {
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
   "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "contract.invalid_command": "lean", "cli.host_killed": "lean", "cli.spawn_failed": "lean", "env.setup_failed": "lean", "env.lane_limit": "lean", "env.tool_missing": "lean", "env.repro_unrunnable": "lean", "env.capability_remote": "lean", "budget.exceeded": "lean", "sandbox.start_failed": "execution", "sandbox.capacity": "execution", "sandbox.transient": "execution", "sandbox.auth": "execution", "sandbox.unreachable": "execution", "ci.red": "reserved", "ci.dco": "lean", "engine.dco_rewrite": "lean", "ci.timeout": "reserved",
   "base.conflict": "reserved", "base.red": "lean", "rate_limited": "engine", "backend.auth": "lean", "quota.exhausted": "lean", "host.busy": "lean", "gh.unavailable": "engine", "gh.auth": "lean", "merge.transient": "lean", "push.transient": "lean", "engine.push_diverged": "lean", "cli.idle": "lean", "run.interrupted": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
-  "dependency.open": "engine", "design.invalidated": "lean", "dependency.unreadable": "engine", "dependency.blocked": "lean",
+  "dependency.open": "engine", "design.invalidated": "lean", "design.spec_required": "lean", "dependency.unreadable": "engine", "dependency.blocked": "lean",
   "lane.mismatch": "lean", "lane.default_branch": "lean", "lane.branch_missing": "lean", "lane.unresolved": "lean",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
   "builder.blocked": "lean", "builder.block_untyped": "lean", "builder.no_evidence": "lean", "builder.no_commit": "lean",
@@ -307,8 +307,8 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
   it("human: builder.blocked (product-decision, spend, credentials, promotion, customer)", () => {
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "builder.blocked" }), "human");
   });
-  it("terminal: other codes, unedited contract.invalid, plain ci-pending, unknown and non-needs-human rows", () => {
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "terminal");
+  it("terminal: other codes, plain ci-pending, unknown and non-needs-human rows (#5623: contract.invalid is recoverable)", () => {
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "recoverable");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "nope" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human" }), "terminal");

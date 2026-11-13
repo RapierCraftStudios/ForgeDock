@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
+import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -841,6 +841,14 @@ describe("repro_test on bug lanes (#4271)", () => {
     }
     assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
     assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
+  });
+  it("#5544 BASE=RAN HEAD=RAN PRISTINE=FAILED is a test-only fix: no repro_base_green, not already fixed", () => {
+    const k = { ...C, repro_test: RT };
+    const testOnly = ["test/leak.test.js"];
+    const pc = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "RAN", head: "RAN", pristine: "FAILED" } });
+    assert.equal(pc.failures.some((f) => f.kind === "repro_base_green"), false);
+    assert.equal(alreadyFixedOnBase(pc.failures, testOnly), false);
+    assert.deepEqual(reproFailures(k, { base: "RAN", head: "RAN", pristine: "RAN" }).map((f) => f.kind), ["repro_base_green"]);
   });
   it("#5080 repro_base_green: BASE=RAN HEAD=RAN is its own kind, and a test-only diff with a source deliverable is never the fix", () => {
     const k = { ...C, repro_test: RT };
@@ -1821,17 +1829,39 @@ describe("test plan frozen with the contract (#5445)", () => {
     assert.equal(bug(K([row("R1", { repro: "no-repro", reason: "spec-only change" }), row("R2")])), "");
   });
   it("a proof that echoes a deliverable is rejected; one about the 403 is accepted", () => {
-    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof only restates a deliverable/);
+    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable D1 \(\d+%\); phrase it as the wrong behaviour observed on base/);
     assert.equal(proofEchoesDeliverable("the listing json URL is rewritten", D.slice(0, 1)), true);
     assert.equal(proofEchoesDeliverable("returns 200 JSON instead of 403", D.slice(0, 1)), false);
+    assert.equal(proofEchoDetail("the listing json URL is rewritten", D.slice(0, 1)).id, "D1");
+  });
+  it("#5592: naming the function under test does not make a proof an echo; a blank repro gets a literal test id example", () => {
+    const d = [{ id: "D1", path: "src/scrape.js", change: "fix fetchListing so the listing url uses old.reddit.com", requirements: ["R1"] }];
+    assert.equal(proofEchoesDeliverable("`fetchListing` returns 403 for www.reddit.com", d), false);
+    assert.equal(proofEchoesDeliverable("fetchListing() fetch_listing listing", d), false, "fewer than 3 prose words left: nothing to judge");
+    assert.equal(proofEchoesDeliverable("the listing url uses old.reddit.com", d), true);
+    assert.match(testPlanProblems(K([row("R1", { repro: "" })])).join(), /e\.g\. `tests\/test_scrape\.py::test_listing_returns_json`/);
   });
   it("level, its reason and the command are checked; mocking the bug's component is rejected", () => {
     assert.match(testPlanProblems(K([row("R1", { level: "manual" })])).join(), /level must be one of/);
     assert.match(testPlanProblems(K([row("R1", { level_reason: "" })])).join(), /level_reason/);
-    assert.match(testPlanProblems(K([row("R1", { level_reason: "mock the fetcher" })])).join(), /mocking the component/);
+    assert.match(testPlanProblems(K([row("R1", { level_reason: "mock the listing URL rewrite" })])).join(), /level_reason mocks "mock the listing URL rewrite", which is in deliverable D1; level_reason must not contain the words mock\/stub\/fake unless negated/);
+    for (const ok of ["real AsyncSession; stub only the Umami HTTP endpoint", "fake clock drives the expiry", "no mocks needed, real fixture"]) assert.equal(testPlanProblems(K([row("R1", { level_reason: ok })])).length, 0, ok);
+    assert.equal(mockedDeliverable("stub the search handler", D.slice(0, 1)), null);
+    assert.equal(mockedDeliverable("the scrape module is mocked", D.slice(0, 1)).id, "D1");
     assert.equal(testPlanProblems(K([row("R1", { level_reason: "no mocks needed, real fixture" })])).length, 0);
     assert.match(testPlanProblems(K([row("R1", { command: "" })])).join(), /exact command/);
     assert.match(testPlanProblems({ ...C, test_plan: "x" }).join(), /must be an array/);
+  });
+  it("#5587: rule ids are counted, the corrections carry the allowed level and the worked example, and only test-plan problems earn a second round", () => {
+    const mock = testPlanProblems(K([row("R1", { level_reason: "mock the listing URL rewrite" }), row("R2", { proof: "the listing json URL is rewritten", command: "" })]));
+    assert.match(mock.join("\n"), /real instance of D1's component, with stubs only at its I\/O boundary \(clock, network, browser factory\) and, for DB code, a real database session/);
+    assert.deepEqual(contractRuleCounts(mock), { "test_plan.mock": 1, "test_plan.command": 1 });
+    const echo = testPlanProblems(K([row("R1", { proof: "the listing json URL is rewritten to old.reddit.com" })]));
+    assert.match(echo.join(), /symptom observed today → assertion that fails on base and passes on head, e\.g\./);
+    assert.deepEqual(contractRuleCounts(echo), { "test_plan.echo": 1 });
+    assert.equal(onlyTestPlanProblems(mock), true);
+    assert.equal(onlyTestPlanProblems([...mock, "R1: quote is not verbatim"]), false);
+    assert.equal(onlyTestPlanProblems([]), false);
   });
   it("applyValidateRecipes rewrites test_plan commands", () => {
     const r = applyValidateRecipes(K([row("R1")]), [{ match: "^node --test", replace: "npx node --test" }]);
@@ -1929,6 +1959,28 @@ describe("#5468 production-only e2e/manual criteria become post-deploy checks", 
   });
 });
 
+import { interfaceDecisionFailures } from "./conformance.mjs";
+describe("interface decisions at precheck (#5338)", () => {
+  const row = { id: "H1", what: "Interface api -> worker", source: "decision", decision: "i7-2", anchors: ["worker/refund.py", "api/"] };
+  const c = { requirements: [], preserve: [row] };
+  it("flags a changed anchored file without an intact preserve report", () => {
+    const f = interfaceDecisionFailures(c, {}, ["worker/refund.py"]);
+    assert.deepEqual(f.map((x) => x.kind), ["decision_unsuperseded"]);
+    assert.match(f[0].detail, /supersedes:"i7-2"/);
+    assert.equal(interfaceDecisionFailures(c, { preserve: [{ id: "H1", status: "violated" }] }, ["api/x.py"]).length, 1);
+  });
+  it("passes when acknowledged, superseded (row removed), or no anchored file changed", () => {
+    assert.deepEqual(interfaceDecisionFailures(c, { preserve: [{ id: "H1", status: "intact" }] }, ["api/x.py"]), []);
+    assert.deepEqual(interfaceDecisionFailures({ preserve: [] }, {}, ["api/x.py"]), []);
+    assert.deepEqual(interfaceDecisionFailures(c, {}, ["web/a.ts"]), []);
+    assert.deepEqual(interfaceDecisionFailures({ preserve: [{ ...row, anchors: ["db/"] }] }, {}, ["api/x.py"]), []);
+  });
+  it("precheck surfaces it and stays ok without interface rows", () => {
+    const res = { requirements: [], validation: [] };
+    assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [row] }, result: res, changedFiles: ["api/x.py"], ignore: ["api/x.py"] }).failures.some((x) => x.kind === "decision_unsuperseded"), true);
+    assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [] }, result: res, changedFiles: [] }).failures.some((x) => x.kind === "decision_unsuperseded"), false);
+  });
+});
 describe("#5524 URL-less production-only e2e/manual rows", () => {
   const Q40655 = "On OVH after deploy, a Monday report closed during the day is not re-created (verified at the next Monday) [type:manual]";
   const Q40662 = "T1 succeeded slow ratio < 0.05 over 24h, and `JobTurnaroundSloSlowBurn` does not fire at current volume for 7 days [type:manual]";
@@ -1969,5 +2021,98 @@ describe("#5524 URL-less production-only e2e/manual rows", () => {
     const cv = autoPostDeployE2e(contract, ids);
     assert.equal(cv.converted.length, ids.length);
     assert.equal(deferChecklessPostDeploy(cv.contract).contract.requirements[0].disposition, "defer");
+  });
+});
+import { applyRequirementDecisions } from "./conformance.mjs";
+describe("#5547 live-infra, paid and host-load e2e rows", () => {
+  const Q5541 = "re-run `bench-adversarial.mjs run … --arms full,control` on legion, ≤ 1.3× control cost [type:e2e]";
+  const Q5531 = "Under a synthetic load of 4× nproc CPU hogs, `schedd status` answers in < 1 s [type:e2e]";
+  const LOCAL = "The signup page works against the local stack in a browser under load [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }, { id: "R2", quote, disposition: "deliver" }], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] });
+  it("#5547 prodOnlyE2e recognises live-infra shapes, not local rows", () => {
+    for (const q of [Q5541, Q5531, "a paid run of the batch completes [type:manual]", "on a rented GPU box the job finishes [type:e2e]", "on the remote cluster the job finishes [type:e2e]", "a sandbox pool run passes [type:e2e]", "host-level load keeps p99 low [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
+    for (const q of [LOCAL, "sandbox run over 24h [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5547 live-infra rows convert to a post-deploy defer owned by the orchestrator", () => {
+    for (const q of [Q5541, Q5531]) {
+      const out = autoPostDeployE2e(mk(q));
+      assert.deepEqual(out.converted.map((x) => x.id), ["R2"]);
+      const d = deferChecklessPostDeploy(out.contract);
+      assert.deepEqual(d.converted, ["R2"]);
+      assert.equal(d.contract.requirements[1].disposition, "defer");
+      assert.equal(d.contract.requirements[1].bucket, "owner:orchestrator");
+      assert.equal(d.contract.requirements[0].disposition, "deliver");
+    }
+    assert.equal(autoPostDeployE2e(mk(LOCAL)).converted.length, 0);
+  });
+  it("#5547 the classifier keys on shape, not on host or repo names", () => {
+    for (const q of ["on myhost the job finishes [type:e2e]", "legion of users sign up locally [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5547 replay: #5531 R2 unchanged converts at review and the lane conforms", () => {
+    const contract = mk(Q5531);
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${Q5531}` };
+    const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: Q5531, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
+    const d = decide(r, lctx);
+    assert.equal(d.state, "nonconforming");
+    const ids = loneE2eRows(d.failures);
+    assert.deepEqual(ids, ["R2"]);
+    const eff = deferChecklessPostDeploy(autoPostDeployE2e(contract, ids).contract).contract;
+    assert.equal(eff.requirements[1].disposition, "defer");
+    const d2 = decide({ ...r, requirements: [good.requirements[0], { id: "R2", status: "deferred", evidence: "-", deferral_ok: true }] }, { ...lctx, contract: eff });
+    assert.equal(d2.state, "conforms", JSON.stringify(d2.failures));
+  });
+  it("#5547 a quote that only mentions the tag in a mid-sentence code span is not an e2e row; a trailing backticked tag still is", () => {
+    const R1 = "An `[type:e2e]`/`[type:manual]` row whose quote names a live benchmark, a paid run, remote infra (legion, computeshare, a sandbox pool) or host-level load is converted to a tracked `post-deploy` defer";
+    assert.equal(autoPostDeployE2e(mk(R1)).converted.length, 0, "the mention is not converted to post-deploy");
+    const contract = mk(R1);
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${R1}` };
+    const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: R1, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
+    assert.ok(!decide(r, lctx).failures.some((f) => f.kind === "e2e_row"), "no e2e_unverified for a tag mention");
+    assert.deepEqual(autoPostDeployE2e(mk("on a remote host the live benchmark finishes `[type:e2e]`")).converted.map((x) => x.id), ["R2"]);
+  });
+  it("#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched", () => {
+    const contract = mk(Q5531);
+    const dec = (j) => ({ body: `<!-- FORGE:DECISION ${JSON.stringify(j)} -->\n## Decision` });
+    const out = applyRequirementDecisions(contract, [{ body: "<!-- FORGE:CONTRACT -->\n{}" }, dec({ requirement: "R2", disposition: "post-deploy" }), { body: "FORGE:DECISION prose" }]);
+    assert.deepEqual(out.applied, ["R2"]);
+    assert.equal(out.contract.requirements[1].disposition, "post-deploy");
+    assert.equal(deferChecklessPostDeploy(out.contract).contract.requirements[1].bucket, "owner:orchestrator");
+    assert.equal(out.contract.requirements[0].disposition, "deliver");
+    assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "deliver" })]).applied.length, 0);
+    assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "post-deploy" }), { body: "<!-- FORGE:CONTRACT -->\n{}" }]).applied.length, 0, "a decision older than the contract is ignored");
+  });
+});
+
+describe("#5623: builder-correctable contract problems", () => {
+  it("contractSelfCorrectable: shape problems are builder-correctable; a quote-only mismatch is not", async () => {
+    const { contractSelfCorrectable } = await import("./lean.mjs");
+    assert.equal(contractSelfCorrectable(["R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim", "R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim"]), false);
+    assert.equal(contractSelfCorrectable([]), false);
+  });
+  it("classifyNeedsHuman: contract.invalid is recoverable (one fresh-plan requeue), with or without an issue edit", async () => {
+    const { classifyNeedsHuman, OUTCOME_CODES } = await import("../engine/outcome-codes.mjs");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID, issueEdited: true }), "recoverable");
+  });
+});
+
+describe("first-pass: an unregistered post-deploy check id fails at freeze, not after the build", () => {
+  const issue = "The schedd answers status in under 1 s under load.";
+  const row = (extra = {}) => ({ requirements: [{ id: "R1", quote: "The schedd answers status in under 1 s under load.", disposition: "post-deploy", why: "needs a loaded host", bucket: "post-deploy", check: "schedd-status-under-load", local_infeasible_why: "needs real host load" }], deliverables: [{ id: "D1", path: "bin/x.mjs", change: "x", requirements: ["R1"] }], ...extra });
+  const files = (json) => new Set(Object.keys(JSON.parse(json)));
+  it("an id absent from the checks file and not delivered is a freeze problem naming the fix", () => {
+    const v = validateContract(row(), issue, { checkIds: files('{"login-smoke":{"run":"true"}}') });
+    assert.ok(v.problems.some((p) => /R1: post-deploy check 'schedd-status-under-load' is not registered[\s\S]*login-smoke/.test(p)), v.problems.join("\n"));
+  });
+  it("a registered id, or a deliverable that adds the checks file, passes this rule", () => {
+    const reg = validateContract(row(), issue, { checkIds: files('{"schedd-status-under-load":{"run":"true"}}') });
+    assert.ok(!reg.problems.some((p) => /is not registered/.test(p)));
+    const del = validateContract(row({ deliverables: [{ id: "D1", path: "bin/x.mjs", change: "x", requirements: ["R1"] }, { id: "D2", path: ".forge/post-deploy-checks.json", change: "register it", requirements: ["R1"] }] }), issue, { checkIds: files("{}") });
+    assert.ok(!del.problems.some((p) => /is not registered/.test(p)));
+  });
+  it("without checkIds (not resolved) the rule is skipped", () => {
+    assert.ok(!validateContract(row(), issue).problems.some((p) => /is not registered/.test(p)));
   });
 });

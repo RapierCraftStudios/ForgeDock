@@ -9,19 +9,22 @@ import { selftestFromCli } from "./selftest-live.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
 const GOOD = {
-  banner: { code: 0, output: "ForgeDock v1.2.3\n  ✖ Claude Code  not found\n" },
+  banner: { code: 0, output: "ForgeDock v1.2.3\n  ✖ Claude Code  not found\n  ! startup splash skipped: claude CLI not found   re-run npx forgedock after installing Claude Code\n" },
   help: { code: 0, output: "Usage: forgedock <command>\n" },
-  doctor: { code: 1, output: "  ✗  gh CLI\n  ✗  Claude Code settings\n" },
+  doctor: { code: 1, output: "  ✗  gh CLI\n  ✗  Claude Code settings\n  ✔  Startup splash  not installed (forgedock-splash)\n" },
   errors: { code: 1, output: "Unknown command: nosuchcommand\n" },
+  "no-splash": { code: 0, output: "  ! startup splash skipped (--no-splash)\n" },
 };
 const stage1Io = (over = {}, files = { "./forge.yaml": 'owner: "acme"\n' }) => ({
   pack: async () => "/x/f.tgz",
   clean: async (_t, args) => { const c = CASES.find((k) => k.args.join(" ") === args.join(" ")); return { ...(over[c.name] ?? GOOD[c.name]), files: c.name === "banner" ? files : {} }; },
 });
 const now = (() => { let t = 1000; return () => (t += 10); })();
+let lastNoSplash = false;
 const io2 = (over = {}) => ({
   now, ghAuthed: async () => true, claudeAvailable: async () => true, mkdir: async () => "/d", rm: async () => {},
-  cli: async (args) => ({ code: 0, stdout: args.includes("--run") ? "Proceed? [y/N]\nmerged\n" : "ok\n", stderr: "" }),
+  readFile: async () => (lastNoSplash ? null : JSON.stringify({ enabledPlugins: { "forgedock-splash@forgedock-local": true } })),
+  cli: async (args) => (lastNoSplash = args.includes("--no-splash"), { code: 0, stdout: args.includes("--run") ? "Proceed? [y/N]\nmerged\n" : args[0] === "doctor" ? "  ✔  Startup splash  installed (forgedock-splash)\n" : args.includes("--no-splash") ? "  ! startup splash skipped (--no-splash)\n" : "  ✔ startup splash installed   turn off: x\n", stderr: "" }),
   gh: async (a) => (a[0] === "pr" ? JSON.stringify([{ number: 1, mergedAt: new Date(5000).toISOString() }]) : "[]"),
   ...over,
 });
@@ -50,6 +53,43 @@ describe("assertStage1 (the 2026-11-10 regression classes)", () => {
   it("fails placeholder config values but not installed copies", () => {
     assert.match(assertStage1({ ...ok, files: { "./forge.yaml": 'owner: "your-github-org"\n' } })[0][1], /placeholder/);
     assert.deepEqual(assertStage1({ ...ok, files: { "~/.forge/commands/x.md": "TODO your-org" } }), []);
+  });
+});
+
+describe("splash assertions (#5312 R17)", () => {
+  const ok = { cases: GOOD, files: {} };
+  const msgs = (cases) => assertStage1({ ...ok, cases: { ...GOOD, ...cases } }).map((b) => b[1]).join("|");
+  it("stage 1 passes with the skip lines and fails when they are missing or an install is reported", () => {
+    assert.deepEqual(assertStage1(ok), []);
+    assert.match(msgs({ banner: { code: 0, output: "ForgeDock\n" } }), /never printed the splash skip line/);
+    assert.match(msgs({ banner: { code: 0, output: "startup splash skipped: claude CLI not found\nstartup splash installed" } }), /reported installed/);
+    assert.match(msgs({ "no-splash": { code: 0, output: "nothing" } }), /did not report the skip/);
+    assert.match(msgs({ "no-splash": { code: 0, output: "startup splash skipped (--no-splash)\nstartup splash installed" } }), /still installed/);
+    assert.deepEqual(msgs({ banner: { code: 1, output: "Not ready yet" }, "no-splash": { code: 1, output: "Not ready yet" } }), "");
+    assert.match(msgs({ banner: { code: 1, output: "Not ready yet" }, "no-splash": { code: 0, output: "x" } }), /exited 0|did not report/);
+    assert.match(msgs({ doctor: { code: 1, output: "gh claude" } }), /splash state/);
+  });
+  it("stage 2 asserts the install at user scope, doctor's state and the --no-splash skip", async () => {
+    const homes = [], envs = [];
+    const base = io2({ mkdir: async () => { const h = `/h${homes.length}`; homes.push(h); return h; }, cli: async (args, o = {}) => { envs.push(o.env?.HOME); return io2().cli(args, o); } });
+    let r = await run({ ...stage1Io(), ...base });
+    assert.equal(r.ok, true, r.message);
+    assert.ok(envs.includes("/h1") && envs.includes("/h2"), "setup runs under throwaway homes");
+    const bad = async (over) => run({ ...stage1Io(), ...io2(over) });
+    r = await bad({ readFile: async () => JSON.stringify({ enabledPlugins: {} }) });
+    assert.equal(r.step, "splash");
+    assert.match(r.message, /not enabled at user scope/);
+    r = await bad({ cli: async (a) => ({ code: 0, stdout: a[0] === "doctor" ? "nothing" : "startup splash installed", stderr: "" }) });
+    assert.match(r.message, /doctor does not report/);
+    r = await bad({ cli: async (a) => ({ code: 0, stdout: a.includes("--no-splash") ? "startup splash installed" : a[0] === "doctor" ? "Startup splash  installed" : "startup splash installed", stderr: "" }) });
+    assert.match(r.message, /--no-splash did not report/);
+    r = await bad({ cli: async () => ({ code: 0, stdout: "ok", stderr: "" }) });
+    assert.match(r.message, /did not report the splash installed/);
+  });
+  it("removes the throwaway homes", async () => {
+    const removed = [];
+    await run({ ...stage1Io(), ...io2({ rm: async (d) => removed.push(d) }) });
+    assert.ok(removed.length >= 3);
   });
 });
 

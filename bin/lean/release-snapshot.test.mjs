@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { cutSnapshot, pickFixes, recut, checkChain, verifyRelease, cleanupSnapshot, parseRecord, withRecord, branchName, patternPrefix } from "./release-snapshot.mjs";
+import { cutSnapshot, pickFixes, revertLast, recut, checkChain, verifyRelease, cleanupSnapshot, parseRecord, withRecord, branchName, patternPrefix } from "./release-snapshot.mjs";
 
 const ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const mk = (cwd) => (args, { env, input } = {}) => execFileSync("git", args, { cwd, encoding: "utf8", input, env: { ...process.env, ...ENV, ...env }, stdio: ["pipe", "pipe", "pipe"] });
@@ -107,6 +107,23 @@ describe("cherry-picks and the verifier (#5276)", () => {
     assert.deepEqual(parseRecord(s.w.body).picks.map((p) => p.orig), [fix]);
     assert.deepEqual(await pickFixes(s.ctx), { picked: [] }, "idempotent: a fix already on the branch is not picked twice");
     assert.deepEqual(checkChain({ git: s.git, record: s.ctx.state.release, sha: pick.sha, staging: "staging", exact: true }), { ok: true, picks: 1 });
+  });
+
+  it("#5567: a recorded mechanical revert verifies; an unrecorded pick kind fails; staging advancing leaves the head alone", async () => {
+    const { s, c } = await blockerWorld();
+    await pickFixes(s.ctx);
+    const rec = s.ctx.state.release;
+    const head0 = s.git(["ls-remote", "origin", `refs/heads/${c.branch}`]).split("\t")[0];
+    s.commit("later.txt", "l\n", "feat: later");
+    assert.equal(s.git(["ls-remote", "origin", `refs/heads/${c.branch}`]).split("\t")[0], head0, "a staging merge does not move the release head");
+    const rv = await revertLast(s.ctx);
+    assert.equal(rv.reverted, rec.picks[0].sha);
+    assert.equal(rec.picks.at(-1).kind, "revert");
+    assert.equal(checkChain({ git: s.git, record: rec, sha: rec.picks.at(-1).sha, staging: "staging", exact: true }).ok, true);
+    const bad = { ...rec, picks: [{ ...rec.picks[0], kind: "sneaky" }] };
+    assert.match(checkChain({ git: s.git, record: bad, sha: rec.picks[0].sha, staging: "staging", exact: true }).why, /unrecorded pick kind/);
+    const unrec = { ...rec, picks: [rec.picks[0]] };
+    assert.equal(checkChain({ git: s.git, record: unrec, sha: rec.picks.at(-1).sha, staging: "staging", exact: true }).ok, false, "an unrecorded pick fails");
   });
 
   it("picks a fix that closes a named issue even without the label", async () => {

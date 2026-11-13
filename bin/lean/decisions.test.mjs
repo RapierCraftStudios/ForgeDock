@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { normaliseDecision, renderDecision, parseDecisionComment, foldDecisions, anchorMatches, deadAnchors, staleDecisions, historyRows, withDecisionRows, supersede, readDecisionIndex, recordDecisions, HISTORY_ROWS_MAX } from "./decisions.mjs";
+import { normaliseDecision, interfaceDecisions, renderDecision, parseDecisionComment, foldDecisions, anchorMatches, deadAnchors, staleDecisions, historyRows, withDecisionRows, supersede, readDecisionIndex, recordDecisions, HISTORY_ROWS_MAX } from "./decisions.mjs";
 
 const D = (o) => normaliseDecision({ choice: "use A not B", why: "B leaks", anchors: ["src/a/**"], ...o }, { issue: 10, n: 1 });
 
@@ -67,5 +67,34 @@ describe("decisions (#4695)", () => {
     const idx = foldDecisions(readDecisionIndex("o/r"));
     assert.equal(idx.find((d) => d.id === "d10-1").status, "superseded");
     assert.equal(idx.find((d) => d.id === "d11-1").supersedes, "d10-1");
+  });
+  it("interface decisions (#5338): spike rows and anchored choices become records; lanes on the anchors get H-rows; supersedes retires one", () => {
+    const spike = [
+      "## Stack", "next", "**Rationale**: one framework", "**Anchors**: `web/`", "",
+      "## Interfaces", "| Boundary | Signature or schema | Auth mode | Owner issue | Anchors |", "|---|---|---|---|---|",
+      "| api -> worker | refund(id: str, amount: int) | internal key | WORKER | `worker/refund.py`, `api/` |",
+      "| {x} | {y} | {z} | {o} | `{p}` |", "| no anchor | sig | key | O | |", "",
+    ].join("\n");
+    const recs = interfaceDecisions(spike, { issue: 7 });
+    assert.deepEqual(recs.map((r) => r.id), ["i7-1", "i7-2"]);
+    assert.deepEqual(recs.map((r) => r.anchors), [["web/"], ["worker/refund.py", "api/"]]);
+    assert.equal(recs[1].choice, "Interface api -> worker: refund(id: str, amount: int); auth internal key; owner WORKER");
+    const lane = withDecisionRows({ deliverables: [{ id: "D1", path: "worker/refund.py" }], preserve: [] }, recs);
+    assert.equal(lane.preserve.length, 1);
+    assert.equal(lane.preserve[0].source, "decision");
+    assert.match(lane.preserve[0].what, /Interface api -> worker.*supersedes:"i7-2"/);
+    const { old, next } = supersede(recs[1], D({ id: "n" }));
+    const gone = withDecisionRows({ deliverables: [{ id: "D1", path: "worker/refund.py" }], preserve: [] }, [...recs, old, next]);
+    assert.ok(gone.preserve.every((p) => p.decision !== "i7-2"));
+    assert.deepEqual(interfaceDecisions("## Interfaces\nnone", { issue: 1 }), []);
+  });
+});
+import { parseRequirementDecision } from "./decisions.mjs";
+describe("#5547 requirement decisions", () => {
+  it("parses a post-deploy requirement decision and ignores anchored, prose and other dispositions", () => {
+    assert.deepEqual(parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy","why":"paid run"} -->\nx'), { requirement: "R2", disposition: "post-deploy", why: "paid run" });
+    assert.equal(parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R2","disposition":"deliver"} -->'), null);
+    assert.equal(parseRequirementDecision('<!-- FORGE:DECISION {"choice":"x","anchors":["a.js"]} -->'), null);
+    assert.equal(parseRequirementDecision("FORGE:DECISION prose"), null);
   });
 });

@@ -21,14 +21,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
+import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -47,6 +48,13 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
+/** #5623: a contract problem the builder can fix in its own session (shape, typed fields, test-plan rules, check ids), as
+ * opposed to one that needs the issue changed (quote not verbatim) or a person. */
+export function contractSelfCorrectable(problems) {
+  const list = Array.isArray(problems) ? problems : [];
+  return list.length > 0 && !list.every((x) => /: quote is not verbatim/.test(String(x)));
+}
+
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
@@ -58,6 +66,8 @@ import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparit
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { docsFailures } from "./docsgate.mjs";
 import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
+import { uiBuildRule, uiIssue, uiChanged } from "./ui-quality.mjs"; // #5330
+import { designGate, designGateNote, designFailures, specApproved as designSpecOk } from "./design-gate.mjs"; // #5330
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { startSpeculative } from "./overlap.mjs";
@@ -84,6 +94,8 @@ import { applyArmOverrides } from "../experiment.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { readDecisionIndex, withDecisionRows, recordDecisions } from "./decisions.mjs";
+import { seamFailures } from "./seam.mjs"; // #5338
+import { notifyConsumers } from "./interfaces.mjs"; // #5338
 import { normaliseInvalidation, epicOf, fileAmendment, REPLAN_MARKER } from "./replan.mjs";
 import { claimSurfaces, parseSharedSurfaces, generatorNote } from "./surfaces.mjs";
 import { parseContextPackConfig, resolveContextMode, parentOf, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
@@ -274,7 +286,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -350,7 +362,20 @@ export async function runCore(o) {
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
+  let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
   const post = async (marker, body, on = issue) => {
+    if (on === issue && isStatusPost(marker)) { // machine-state markers: a section of the one status comment, not a comment of their own
+      try {
+        const r = await writeStatus({ known: statusCache, comments: iss?.comments, trusted: isTrustedIssueComment, markers: Array.isArray(marker) ? marker : [marker], text: body, cap: capComment,
+          create: async (b) => /https?:\/\/\S+/.exec(String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", b])))?.[0] ?? null,
+          patch: (id, b) => ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${b}`]) });
+        statusCache = { id: r.id, sections: r.sections };
+        return r.url;
+      } catch (e) { if (e?.deferCode) throw e; /* a failed status edit falls back to a plain comment below */ }
+    }
+    if (on === issue && isUpsertPost(marker)) { // one comment edited in place across requeues (the marker still leads the body)
+      return postUpsert({ gh: ghw, repo, issue: on, markers: marker, body, comments: iss?.comments, cap: capComment });
+    }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
     const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
@@ -585,6 +610,7 @@ export async function runCore(o) {
       if (deferTail) { postRun.add("lane-facts", postLaneFacts); postRun.add("trajectory", postTrajectory); } else await postTrajectory();
     }
     if (deferTail) postRun.add("teardown", () => teardown(reason, extra)); // last: the structure delta and guard read the worktree
+    if (reason === "merged" || reason === "invalid") await clearPipelineLabels({ gh: ghc, repo, issue }); // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue
     await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
@@ -934,7 +960,8 @@ export async function runCore(o) {
   let decisionsNote = ""; // #4901: trusted FORGE:DECISION comments newer than the frozen contract, "" otherwise
   let carriedPasses = []; // #5331: validate ids that passed on the resume head (resume digest); carried into the builder result while HEAD is unchanged
   let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
-  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
+  let uiOn = false; // #5330: the lane changes user-visible frontend (issue text, then contract deliverables): the design-system and visual self-check rules join its prompts
+  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + uiBuildRule(uiOn, designConfig) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
   /** #5334: records a builder session that ended without its result line (kill, signal) as one attempt; `at` = its start. */
   const killedAttempt = (n, e, opts, at) => attempt("implement", n, { killed: true, usage: e.usage ?? null, turns: e.turns ?? null, tools: toolStats(e.toolUses), costUsd: null, durationMs: now() - at, model: opts.model ?? laneModel() ?? null }, opts.mode, opts.trigger, opts.restartOf);
   async function flushInflight() {
@@ -1329,6 +1356,8 @@ export async function runCore(o) {
     const fetchP = step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
     await step("claim", async () => {
     await label("investigating");
+    // #5592: a live lane is not parked: needs-human, needs-human:*, parked:* and remediation-queue from an earlier run come off (a later park puts them back)
+    await clearPipelineLabels({ gh: ghc, repo, issue, labels: iss.labels });
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
     if (recover) {
       // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
@@ -1537,7 +1566,10 @@ export async function runCore(o) {
     const tH = now();
     if (heavyOn) {
       try {
-        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path0 = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        // #5592: a tool that only exists in a project's .venv/bin or node_modules/.bin (poetry/uv in-project venv, monorepo service) is shimmed too, so the preflight probe and the shim agree
+        let tracked = []; try { tracked = String(await git(["ls-files"])).split("\n").map((x) => x.trim()).filter(Boolean); } catch { /* no git listing */ }
+        const path = withLocalBins(path0, projectBinDirs(wt, tracked));
         const names = await (io.writeHeavyShims ?? writeHeavyShims)(binDir, { path });
         if (names?.length) {
           heavyWaitsFile = join(root, "heavy-waits.jsonl");
@@ -1694,7 +1726,7 @@ export async function runCore(o) {
         const rec = { event: "CONTEXT_PACK", mode: ctxCfg.mode, ...ctxAb, lane_type: ctxLane, sources: p.sources, found: p.found, bytes: p.bytes, items: p.items, truncated: p.truncated,
           hash: p.hash, cached: r.cached, ...(p.recall ? { recall: p.recall.present ? "present" : "absent" } : {}), ...(r.errors?.length ? { errors: r.errors } : {}) };
         ev({ ...rec, pitfalls: inPack }); await emit(rec);
-        const seen = trustedComments.some((c) => String(c?.body ?? "").startsWith("<!-- FORGE:CONTEXT -->") && String(c.body).includes(`hash ${p.hash})`));
+        const seen = trustedComments.some((c) => hasSection(c?.body, "FORGE:CONTEXT") && String(c.body).includes(`hash ${p.hash})`));
         if (p.items && !seen) { try { await post("FORGE:CONTEXT", renderContextRecord(p, { mode: ctxCfg.mode, laneType: ctxLane })); } catch { /* best effort */ } }
         T.decisions.push(`Context pack (${ctxCfg.mode}): ${p.items} item(s), ${p.bytes} bytes${p.truncated ? `, ${p.truncated} dropped` : ""}, ${ctxCfg.mode === "on" ? "given to the builder" : "recorded only"}`);
         return p;
@@ -1819,6 +1851,9 @@ export async function runCore(o) {
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
+      // #5592: tools resolve where the lane runs them from: project-local .venv/bin and node_modules/.bin (as the heavy shims do)
+      const local = projectBinDirs(wt, files);
+      if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
       if (io.probeCommand) {
         const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
@@ -2035,7 +2070,11 @@ export async function runCore(o) {
           if (stale) {
             ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
-          } else { frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+          } else {
+            frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`);
+            const ad = applyRequirementDecisions(frozen, trustedComments); // #5547: a structured operator decision amends the frozen row
+            if (ad.applied.length) { frozen = deferChecklessPostDeploy(ad.contract).contract; T.decisions.push(`FORGE:DECISION applied to the frozen contract: ${ad.applied.join(", ")} tracked post-deploy`); }
+          }
         }
       }
       if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
@@ -2072,7 +2111,7 @@ export async function runCore(o) {
         const tPack = now(); packP = contextPackStep(); ctxPack = await within(packP, waitMs); setupStep("context_pack", tPack);
         if (ctxPack === TIMED_OUT) { ctxPack = null; T.decisions.push(`Context pack not ready in ${waitMs / 1000}s: the plan starts without it`); }
       }
-      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
+      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + uiBuildRule(uiOn = uiOn || uiIssue(iss ?? {}), designConfig) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
       let ffPlan = "full", ffGo = false, lightElig = elig, lightPred = null, ffTriage = null; // #5426: how the plan call runs; ffGo = fast-forward to the light step
       const ffTriageOf = async (raw) => parseTriage(raw, await io.fs.read(`${wt}/${INVESTIGATION_FILE}`).catch(() => ""));
@@ -2176,20 +2215,34 @@ export async function runCore(o) {
           return sq.contract;
         };
         contract = snapContract(contract);
-        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
+        const wtRead = (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }; // #5585: noindex pages are not public
+        const freezeCheckIds = await (async () => { try { return new Set(Object.keys(await checksAt(git, [base], wt))); } catch { return null; } })(); // first-pass: the base's registered post-deploy check ids
+        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let misses = missed;
-        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
-          const problems = [...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)];
-          T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
+        const correctContract = async (problems, note) => {
+          T.decisions.push(`Contract rejected (${problems[0]}); ${note}`);
           await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
           contract = freezeRewrites(dropScope(await readContract()));
           await persistGenChecks();
           await refreshIssue("contract validation");
           contract = snapContract(contract);
-          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() });
+          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+        };
+        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
+          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
           if (missed.length) misses = await preflightValidates(contract);
         }
+        // #5623: builder-correctable contract problems get up to contractMaxCorrections rounds (default 3), each with only the
+        // problems still open; the round ends early when a correction changes nothing (same problem set twice).
+        let rounds = vc.ok ? 0 : 1, lastProblems = null;
+        while (!vc.ok && sessionId && rounds < contractMaxCorrections && contractSelfCorrectable(vc.problems)) {
+          const key = JSON.stringify([...vc.problems].sort());
+          if (key === lastProblems) break;
+          lastProblems = key; rounds++;
+          await correctContract(vc.problems, `${vc.problems.length} problem(s) still open, correction round ${rounds} of ${contractMaxCorrections}`);
+        }
+        if (!vc.ok) ev({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }), await emit({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }); // #5587: per-rule counts for the batch false-park rate
         planMisses = misses;
         if (missed.length) {
           ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
@@ -2199,7 +2252,7 @@ export async function runCore(o) {
           }
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after ${rounds} correction(s):\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
@@ -2215,8 +2268,16 @@ export async function runCore(o) {
       } else {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
       }
+      const dgFiles = (frozen?.deliverables ?? []).map((d) => d?.path).filter(Boolean);
+      const designComments = (iss?.comments ?? []).filter(isTrustedIssueComment);
+      const designRoute = designGate({ files: dgFiles, cfg: designConfig, comments: designComments, labels: iss?.labels }); // #5330: opt-in (forge.yaml design.routes): a page without a FORGE:DESIGN_SPEC goes to /design
+      if (designRoute.route) {
+        ev({ event: "DESIGN_ROUTED", pages: designRoute.pages, blocked: designRoute.blocked });
+        T.decisions.push(`Design gate: ${designRoute.reason}${designRoute.blocked ? " (design.gate: blocking, lane stopped)" : " (advisory)"}`);
+        if (designRoute.blocked) return await needsHuman(`Design gate (forge.yaml design.gate: blocking): ${designRoute.reason}.\n\nRun /design on #${issue}; a FORGE:DESIGN_SPEC comment or the \`${designConfig.specLabel}\` label lifts the hold.`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue} (${designRoute.pages.slice(0, 3).join(", ")})` });
+      }
       { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
-        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t}`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
         if (envMiss.length) {
           try {
@@ -2282,7 +2343,7 @@ export async function runCore(o) {
       if (!ctxPack && packP) ctxPack = await packP.catch(() => null); // #5434: a pack that missed the plan wait still reaches the build
       const openPaths = (frozen?.deliverables ?? []).map((d) => d?.path); // #5347: facts for the build's opening batch
       const openMap = io.runCommand ? await readTestMapAtRef(git, base).catch(() => null) : null;
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + uiBuildRule(uiOn = uiOn || uiChanged(dgFiles).length > 0, designConfig) + designGateNote(designRoute) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
       { const f = await gateSetup(); if (f) return f; } // #5434: resumed or frozen lanes skip the plan
       stage = "implement"; phaseLedger.enter("implement");
@@ -3010,9 +3071,15 @@ export async function runCore(o) {
       const docsFail = docsConfig ? await docsFailures({ cfg: docsConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5428: forge.yaml pages: a public page needs design, SEO and GEO briefs and passes the deterministic page checks; unset = no check
       const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      // #5330: forge.yaml design.routes (opt-in, blocking only): a user-visible page needs an approved spec and passes the deterministic visual critique
+      const designFail = designFailures({ cfg: designConfig, files, specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
       // #5284: forge.yaml topology.prod_parity: declared production-only surfaces this diff touches need a check result or a justification
       const parityRules = parseProdParity(prodParity);
       const prodParityFailures = parityRules.length && io.runCommand ? await prodParityOf({ rules: parityRules, changedFiles: files, result, run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
+      // #5338: a declared interface whose provider and consumer no longer agree (route, signature, payload) is flagged at lane review
+      const seamRecs = [...readDecisionIndex(repo), ...pendingDecisions].filter((r) => r.seam);
+      const ls = seamRecs.length ? String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean) : [];
+      const seamFail = seamRecs.length ? seamFailures({ records: seamRecs, changedFiles: files, read: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, list: () => ls, superseded: pendingDecisions.map((d) => d.supersedes).filter(Boolean) }) : [];
       // #4705: only the part not hidden behind the validate rerun; 0 when the gate errored or skipped
       const guardRunMs = guardEv && !guardEv.error ? Math.max(0, now() - gateT0 - validateMs) : 0;
       guardAddedMs += guardRunMs;
@@ -3029,7 +3096,7 @@ export async function runCore(o) {
         baselineRuns.push({ ...b, rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") });
       }
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
-      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: pageFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
       const depFail = depInstallFailures({ results: depResults, changedFiles: files });
       for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);
@@ -3365,6 +3432,19 @@ export async function runCore(o) {
     };
     let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
+    /** #5583 follow-up: the builder resolved a base-sync whose conflicts were all documentation files, and the lane's non-doc
+     * diff against the new base equals its non-doc diff against the old fork point (so no code changed in the resolution). */
+    const DOC_FILE_RE = /\.(md|mdx|markdown|rst|adoc|txt)$/i, DOC_EXCLUDES = ["md", "mdx", "markdown", "rst", "adoc", "txt"].map((e) => `:(exclude)*.${e}`);
+    const docsOnlyConflict = async (conflicted, laneBefore) => {
+      if (!conflicted.length || !conflicted.every((f) => DOC_FILE_RE.test(f))) return false;
+      try {
+        const fork = await gitOut(["merge-base", laneBefore, "HEAD^2"]);
+        if (!/^[0-9a-f]{7,}$/.test(fork)) return false; // gitOut swallows errors as "": never treat that as "unchanged"
+        const was = await gitOut(["diff", fork, laneBefore, "--", ".", ...DOC_EXCLUDES]);
+        const now = await gitOut(["diff", "HEAD^2", "HEAD", "--", ".", ...DOC_EXCLUDES]);
+        return was === now;
+      } catch { return false; }
+    };
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
     const syncRow = [];
@@ -3388,7 +3468,7 @@ export async function runCore(o) {
       // #4386: conflicts only in sequence files (numbered, journal, snapshot, their index) resolve without a builder
       // #4588: union / JSON-map / generated files resolve first; only the files left go to the sequence resolver
       const bm = o.baseMerge, cr = !clean && io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files, cfg: bm }).catch(() => null) : null;
-      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false;
+      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false, docsOnlySync = false;
       if (cr?.resolved?.length && !seqFiles.length) { try { await git(["commit", "--no-edit"]); crDone = true; } catch { /* the builder finishes the merge */ } }
       if (cr?.note) T.decisions.push(`Base-sync ${syncs}: ${cr.note}`);
       const rs = !clean && !crDone && seqFiles.length && io.sequenceResolve ? ((await io.sequenceResolve({ cwd: wt, files: seqFiles }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? {}) : null;
@@ -3416,6 +3496,8 @@ export async function runCore(o) {
         how = `builder resolved ${files.length} conflicted file(s) and committed the merge`;
         const r2 = await readResult();
         tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
+        docsOnlySync = await docsOnlyConflict(files, before); // #5583 follow-up
+        if (docsOnlySync) { T.decisions.push(`Base-sync ${syncs}: conflicts only in documentation (${files.join(", ")}) and the lane's code diff is unchanged; no re-review`); tests = "not required (documentation-only conflicts; lane code diff unchanged)"; }
       }
       const sq = await sequenceHandoff(`base-sync ${syncs}`, detResolved ? { laneRef: before } : {}); // #4322: a clean text merge can still bring a taken number
       if (sq?.done) return sq.done;
@@ -3442,6 +3524,7 @@ export async function runCore(o) {
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
       const engineOnly = !ciFixes && !pm.fixed && !dupFixed && (clean || detResolved) && (!sq?.renumbered || sq.deterministic); // #4386: no builder touched the delta
       if (!isSplit && engineOnly && (detResolved || sq?.deterministic)) rereview = "not required (deterministic renumber + base merge)";
+      else if (!isSplit && docsOnlySync && !ciFixes && !pm.fixed && !dupFixed && !sq?.renumbered) rereview = "not required (documentation-only conflicts; lane code diff unchanged)";
       else if (!isSplit && (!clean || sq?.renumbered || ciFixes || pm.fixed || dupFixed)) {
         let rv = await doReview();
         if (rv.env) return await envNeedsHuman(rv.env);
@@ -3776,6 +3859,10 @@ export async function runCore(o) {
     try { // #4695/#4737: FORGE:DECISION records and supersession are persisted only after the merge
       const rec = await recordDecisions(pendingDecisions, { issue, repo, post });
       if (rec.length) T.decisions.push(`FORGE:DECISION: ${rec.map((d) => d.id).join(", ")}`);
+      for (const d of rec.filter((x) => x.supersedes && x.consumers?.length)) { // #5338: a superseded interface reopens/notifies its consumers, or files one issue per named consumer
+        const n = await notifyConsumers({ rec: d, pr, repo, gh: ghw });
+        T.decisions.push(`Interface ${d.supersedes} superseded by ${d.id}: ${n.map((x) => `${x.consumer} ${x.action}${x.issue ? ` #${x.issue}` : ""}`).join(", ")}`);
+      }
     } catch (e) { T.anomalies.push(`decision records not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
     for (const sp of supersededIds(effective, guardSel)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
       try { await ghw(["issue", "comment", sp.guard.slice(1), "-R", repo, "--body", supersessionComment({ guard: sp.guard, pr, why: sp.why })]); ev({ event: "supersedes_accepted", guard: sp.guard, pr }); T.decisions.push(`Guard ${sp.guard} superseded: ${sp.why}`); } catch (e) { T.anomalies.push(`supersession of ${sp.guard} not posted: ${String(e?.message ?? e).slice(0, 160)}`); }

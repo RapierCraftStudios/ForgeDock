@@ -527,9 +527,9 @@ if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output";
   eq "ForgeDock: the Windows job is not run on PRs" not-applicable "$(state "$P" gha:shell-compat:windows-fixture-smoke)"
   eq "ForgeDock: the macOS portability job is not run on PRs" not-applicable "$(state "$P" gha:shell-compat:macos-portability)"
   eq "ForgeDock: portability checks run" runnable "$(state "$P" portability:builtin)"
-  # Narrowing is asserted on a spec with a small reference reach. build.md sits near the 600-file fan-out cap, so any
-  # growth in the engine's neighbourhood correctly widens it to the full suite; that is the cap working, not a regression.
-  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/review-pr-staging.md" --json --no-cache 2>/dev/null)
+  # Narrowing is asserted on a spec with a small reference reach (design-bench.md: ~10 referrers). Specs that name the release engine
+  # (build.md, review-pr-staging.md) sit near the 600-file fan-out cap, so any growth in bin/lean widens them to the full suite; that is the cap working.
+  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/design-bench.md" --json --no-cache 2>/dev/null)
   eq "ForgeDock: the unit-test step is narrowed by the reference graph" scoped "$(printf '%s' "$PN" | jq -r '[.jobs[] | select(.id == "gha:ci:unit-tests") | .steps[] | select(.scope.selector == "refgraph-nodetest") | .scope.mode][0]')"
 fi
 
@@ -597,6 +597,19 @@ has "SEC-3: an empty selection for a changed source file widens" "$(printf '%s' 
 eq "SEC-3: the widened selection is the full set" 3 "$(printf '%s' "$R" | jq '.sel | length')"
 R=$(_imp README.md)
 eq "SEC-3: a docs-only change still selects nothing (no widening)" '[]' "$(printf '%s' "$R" | jq -c '.sel')"
+
+# #5583 follow-up: a tree-scanning lint test (find/git ls-files, directly or via a script it runs) is selected for any change
+r=$(blank); mkdir -p "$r/scripts" "$r/bin"
+printf '#!/bin/bash\nfind "$1/bin" -name "*.test.mjs" | while read -r f; do grep -q tmpDir "$f" || echo "VIOLATION: $f"; done\n' > "$r/scripts/check-tmp.sh"
+printf '#!/bin/bash\nout=$(bash "$ROOT/scripts/check-tmp.sh" .)\n[ -z "$out" ]\n' > "$r/scripts/check-tmp.test.sh"
+printf '#!/bin/bash\n[ 1 -eq 1 ]\n' > "$r/scripts/plain.test.sh"
+commit_base "$r"
+_imp2() { node -e "
+import('$ROOT/scripts/ci-local/scoping.mjs').then(m=>{const c=process.argv.slice(1);const s=m.makeScopeCtx({repo:'$r',baseRef:'main',from:'main',changed:c});
+const t=['scripts/check-tmp.test.sh','scripts/plain.test.sh'];const r=m.impactedTests(s,t);console.log(JSON.stringify({sel:r.selected,widen:r.widen}))})" "$@"; }
+echo 'import x from "y";' > "$r/bin/new.test.mjs"
+R=$(_imp2 bin/new.test.mjs)
+eq "tree-scan: a new test file selects the lint that scans the tree (via the script it runs)" '["scripts/check-tmp.test.sh"]' "$(printf '%s' "$R" | jq -c '.sel')"
 
 # item 4 (REG-3): the built-in bash-3.2/GNU portability job runs only when CI targets macOS/Windows
 r=$(blank); mkdir -p "$r/.github/workflows" "$r/scripts"

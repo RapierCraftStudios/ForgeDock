@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli, isOwnApp, selectorMiss, planClaims, ghFailureEffect, ghRunner, isTransientGhError } from "./issuewatch.mjs";
@@ -762,4 +762,52 @@ test("a needs-human issue a person cleared with a new comment is re-claimed; stu
   io.gh = ((orig) => async (a) => (a[1] === "view" && a.includes("state,labels,comments") ? JSON.stringify({ state: "OPEN", labels: [], comments: [{ authorAssociation: "OWNER", body: "fixed the cause", createdAt: new Date(at + 1000).toISOString() }] }) : orig(a)))(io.gh);
   await tick({ watch: w, repo: "o/r", io, state });
   assert.ok(!state.outcomes?.[1]); // released, then re-selected is up to planClaims
+});
+
+// #5529: real tick/reconcile/redrive over a real batch state.json (openBatch) and the real claims.json registry; the
+// orchestrate --requeue spawn and gh are the external seams (calls recorded); claude is resolved on a real temp PATH
+const stageClaude = (d) => { mkdirSync(d, { recursive: true }); writeFileSync(join(d, "claude"), "#!/bin/sh\n"); chmodSync(join(d, "claude"), 0o755); return d; };
+
+test("#5529 a missing-executable engine-error is requeued once claude resolves, not before; other stranded claims are re-driven within budget", async () => {
+  const dir = tmp(), root = tmp(), noClaude = tmp(), bin = join(tmp(), "bin");
+  const b = openBatch(root, "b1");
+  mkdirSync(b.dir, { recursive: true });
+  b.store.save({ order: [1, 2], results: { 1: { outcome: "engine-error", detail: "claude CLI exited with status 1. Output: Failed to find executable claude: No such file or directory" }, 2: { outcome: "engine-error", detail: "lane pid 9 exited without a result" } } });
+  const io = fakeIo(dir, []), requeued = [];
+  io.env.PATH = noClaude;
+  io.batch.results = (id) => openBatch(root, id).store.load()?.results ?? null;
+  io.batch.requeue = (id, n) => { requeued.push(n); const st = b.store.load(); delete st.results[n]; b.store.save(st); return true; }; // what orchestrate --requeue does to the row
+  for (const n of [1, 2]) assert.equal(claimIssue(repoDir("o/r", io.env), n, "w"), true);
+  const state = batchState({ claimed: [1, 2], inflight: [1, 2], lanes: { 1: "staging", 2: "staging" } });
+  const watch = W({ mode: "batch" });
+  await tick({ watch, repo: "o/r", io, state });
+  assert.deepEqual(requeued, [2], "claude still missing: only the generic stranded claim is re-driven");
+  assert.match(formatStatus(state, watch, io.now()), /stranded 1/);
+  await tick({ watch, repo: "o/r", io, state });
+  assert.deepEqual(requeued, [2], "still not resolvable: no requeue");
+  io.env.PATH = `${noClaude}:${stageClaude(bin)}`;
+  await tick({ watch, repo: "o/r", io, state });
+  assert.deepEqual(requeued, [2, 1]);
+  assert.ok(state.inflight.includes(1) && !state.failed.includes(1));
+  assert.match(formatStatus(state, watch, io.now()), /stranded 0.*re-driven 2/);
+  assert.equal(claimIssue(repoDir("o/r", io.env), 1, "other"), false, "the claim stays with this watch while it is requeued");
+  // budget: issue 2 keeps failing; it is requeued at most twice in total
+  for (let i = 0; i < 3; i++) { const st = b.store.load(); st.results[2] = { outcome: "engine-error", detail: "boom" }; b.store.save(st); await tick({ watch, repo: "o/r", io, state }); }
+  assert.equal(requeued.filter((n) => n === 2).length, 2);
+  assert.match(formatStatus(state, watch, io.now()), /stranded 1/);
+});
+
+test("#5529 the running watcher records whether it resolves claude and status warns when it cannot", async () => {
+  const dir = tmp(), bin = join(tmp(), "bin"), watch = W({ mode: "batch" });
+  const io = fakeIo(dir, []);
+  io.env.PATH = tmp();
+  const wd = watchDir("o/r", "w", io.env);
+  let state = await runWatch({ watch, repo: "o/r", io, dir: wd, once: true });
+  assert.equal(state.claude, null);
+  assert.equal(JSON.parse(readFileSync(join(wd, "status.json"), "utf8")).claude, null);
+  assert.match(formatStatus(state, watch, io.now()), /WARNING: this watcher cannot resolve claude/);
+  io.env.PATH = stageClaude(bin);
+  state = await runWatch({ watch, repo: "o/r", io, dir: wd, once: true });
+  assert.equal(state.claude, join(bin, "claude"));
+  assert.doesNotMatch(formatStatus(state, watch, io.now()), /cannot resolve claude/);
 });

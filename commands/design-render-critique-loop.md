@@ -98,6 +98,8 @@ auditable artifact:
 <!-- FORGE:CRITIQUE:COMPLETE -->
 ```
 
+Also run, one iteration per route, by `review-pr-staging` 1I (forge#5369).
+
 ## Success measure
 
 The loop works when a page **improves across iterations** and when, on the seed set, *A-with-loop* scores higher than

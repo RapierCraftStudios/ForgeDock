@@ -7,6 +7,8 @@
  * Sibling of bench-lightlane.mjs (#4453), which it reuses for the arm runs. The corpus mixes valid issues with ones that
  * must not be implemented (wrong premise, duplicate of an existing feature, already shipped) and with integration issues
  * whose correct change touches more than one file. Grading is deterministic (diff paths and added lines), no LLM.
+ * The fast-forward depth (#5426) only engages with the sandbox forge.yaml at lean.light.mode: on and a result file per lane;
+ * rows without a `light` field count as light_unobserved in the scorecard (#5541).
  * Instructions: docs/eval/adversarial-bench.md. Corpus: docs/eval/corpus/adversarial-v1.json.
  *
  * Usage:
@@ -129,6 +131,7 @@ export function aggregateAdversarial(rows, meta) {
       oracle_pass_rate: oracle.length ? r4(oracle.filter((r) => r.oracle_pass === true).length / oracle.length) : null,
       cost_usd: r4(sumOf(mine, "cost_usd")),
       wall_ms: sumOf(mine, "wall_ms"),
+      light_unobserved: mine.filter((r) => r.light_unobserved === true).length, // #5541
     };
   }
   return { meta, arms };
@@ -144,6 +147,7 @@ export function renderScorecard({ meta, arms }) {
     ["Oracle pass rate", (a) => (a.oracle_pass_rate == null ? "n/a" : `${a.oracle_pass_rate} (n=${a.oracle_n})`)],
     ["Cost (USD, sum)", (a) => String(a.cost_usd)],
     ["Wall time (ms, sum)", (a) => String(a.wall_ms)],
+    ["Lanes with no `light` in the result (light_unobserved)", (a) => String(a.light_unobserved)],
   ];
   return [
     "# Adversarial benchmark scorecard (#5292)",

@@ -22,12 +22,12 @@ import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
 import { releaseRoot } from "./release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { decisionContext, decisionsActive, decisionStep, decisionCounts, formatDecisionDryRun, claimsUsed } from "./issuewatch-decisions.mjs";
-import { reconcileClaims, remediateStep, reclaimStep, claimCounts, stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
+import { reconcileClaims, remediateStep, reclaimStep, redriveStep, claimCounts, stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
-import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness, alertDeadWatches } from "./issuewatch-parity.mjs";
+import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness, alertDeadWatches, resolveOnPath } from "./issuewatch-parity.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause", "max_remediations"];
 export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -362,6 +362,16 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   if (watch.mode === "batch") {
     await remediateStep({ watch, repo, io, state, handles, now, settle, fail });
     await reclaimStep({ repo, io, state, trusted: (c) => TRUSTED.has(c?.authorAssociation), release: (n) => { releaseClaims(repoDir(repo, io.env), [n], watch.name); state.claimed = state.claimed.filter((x) => x !== n); delete state.lanes[n]; unsettle(state, n); } });
+    // #5529: stranded claims are re-driven (budgeted); a missing-executable one once this watcher, whose env its lanes inherit, finds claude
+    redriveStep({ state, now, resolved: () => resolveOnPath("claude", (io.env ?? process.env).PATH) !== null, redrive: (n) => {
+      if (state.batch) {
+        if (!io.batch?.requeue?.(state.batch, n, "issue-watch: re-drive stranded claim")) return false;
+        unsettle(state, n); if (!state.inflight.includes(n)) state.inflight.push(n);
+        return true;
+      }
+      releaseClaims(repoDir(repo, io.env), [n], watch.name); state.claimed = state.claimed.filter((x) => x !== n); delete state.lanes[n]; unsettle(state, n);
+      return true;
+    } });
   }
   for (const n of [...(state.pendingVerify ?? [])]) if (await closed(n)) await verify(n);
   if (watch.mode === "batch" && state.batch && io.batch.reported(state.batch)) { state.inflight.forEach(fail); state.batch = null; }
@@ -497,7 +507,8 @@ export function formatStatus(s, watch, now = Date.now()) {
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
   const live = s.heartbeat || s.paused || s.phase === "exited" ? watchLiveness(s, now) : null;
   return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, ...(live ? [`  state: ${live.state === "dead" ? "DEAD" : live.state}${["paused", "dead", "exited"].includes(live.state) ? ` (${live.reason})` : ""}  last heartbeat: ${s.heartbeat ?? "never"}${live.ageMs != null ? ` (${Math.round(live.ageMs / 1000)}s ago)` : ""}`] : []), `  selector: ${sel}`,
-    `  reconciled: ${Object.entries(claimCounts(s)).map(([k, v]) => `${k} ${v}`).join("  ")}`,
+    ...(s.claude === null ? ["  WARNING: this watcher cannot resolve claude on its PATH; its lanes fail 'Failed to find executable claude' (reinstall: forgedock issue-watch install)"] : []), // #5529
+    `  reconciled: ${Object.entries(claimCounts(s)).map(([k, v]) => `${k} ${v}`).join("  ")}${s.redriven && Object.keys(s.redriven).length ? `  re-driven ${Object.keys(s.redriven).length}` : ""}`,
     `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(s.decisions ? [(({ decided, evidence, folded, external_kept: kept }) => `  needs-human decisions: decided ${decided}  evidence-gathered ${evidence}  folded ${folded}  external-kept ${kept}`)(decisionCounts(s))] : []),
     ...(s.passError ? [`  last pass failed: ${s.passError}`] : []), // #5425
@@ -554,7 +565,11 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
   try {
     do {
       state.heartbeat = new Date(io.now()).toISOString(); state.heartbeatEveryMs = intervalMs; // #5313: liveness lives in the state, not a process grep
+      state.claude = resolveOnPath("claude", (io.env ?? process.env).PATH); // #5529: what this watcher's lanes inherit; status/doctor warn on null
       let rel = null; try { rel = watch.release_pause && state.phase === "running" ? (io.releaseInFlight ?? releaseInFlight)({ root: releaseRoot(io.env), repo, now: io.now() }) : null; } catch { /* unreadable release state: not paused */ }
+      let gp = null; // #5555 (I18): GitHub truth, every host; only for a managed release repo, so defaults make no call
+      if (!rel && watch.release_pause && state.phase === "running") { try { gp = await githubIntake({ io, repo, cwd, state }); } catch (e) { state.pauseError = String(e?.message ?? e).slice(0, 200); } }
+      if (gp) { state.paused = { reason: gp.reason, source: gp.source, since: state.paused?.since ?? state.heartbeat }; writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n"); if (once) break; await io.sleep(intervalMs); continue; }
       if (rel) { // a release job holds staging: no claims, retries or decisions until it ends; the next pass resumes by itself
         state.paused = { reason: `release ${rel.id} in flight${rel.step ? ` (${rel.step})` : ""}`, release: rel.id, since: state.paused?.since ?? state.heartbeat };
         writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
@@ -669,6 +684,22 @@ export function ghRunner(exec, warn = () => {}, { retries = GH_RETRIES, sleep = 
       throw Object.assign(new Error(`gh ${call} failed: ${first}`), { status: e?.status, stderr });
     }
   };
+}
+
+/** #5555: `{reason, source}` when GitHub says intake is paused (null otherwise); auto-resumes a pause whose release ended. */
+async function githubIntake({ io, repo, cwd, state }) {
+  const { readReleaseConfig } = await import("./release.mjs"), { githubPause, ghGet, setIntake } = await import("./intake.mjs");
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* defaults */ }
+  const cfg = readReleaseConfig(raw);
+  if (!cfg.managed) return null;
+  const g = await githubPause({ get: ghGet(io.gh), repo, autoResume: !!cfg.intakeAutoResume });
+  state.pauseError = null;
+  if (g.resume) {
+    const api = io.api ?? (await import("./release.mjs")).realReleaseIo({ env: io.env, cwd }).api;
+    await setIntake({ io: { api }, repo, paused: false, by: "issue-watch", tracker: cfg.tracker ?? null, now: io.now() });
+    return null;
+  }
+  return g.paused ? g : null;
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };

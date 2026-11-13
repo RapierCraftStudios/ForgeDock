@@ -9,6 +9,8 @@
  * (`(args, {env, input}) => stdout`, throws on failure) and `io.gh`, so the module is testable with a real temp repo.
  */
 const REMOTE = "origin";
+/** Head movement after the cut (#5567): the fix push, a recorded `main-sync` cherry-pick of a staging commit, or a mechanical `revert`. */
+export const PICK_KINDS = ["fix", "main-sync", "revert"];
 import { BLOCKER_LABEL } from "./release-rehearsal.mjs";
 export const DEFAULT_PATTERN = "release/{date}-{n}";
 const MARKER = "FORGE:RELEASE";
@@ -116,7 +118,7 @@ export async function pickFixes(ctx, { issues = [] } = {}) {
     const [an, ae, ad] = git(["log", "-1", "--format=%an%n%ae%n%aI", orig]).trim().split("\n");
     const msg = `${git(["log", "-1", "--format=%B", orig]).trimEnd()}\n\n(cherry picked from commit ${orig})\n`;
     const sha = git(["commit-tree", tree, "-p", head, "-F", "-"], { input: msg, env: { GIT_AUTHOR_NAME: an, GIT_AUTHOR_EMAIL: ae, GIT_AUTHOR_DATE: ad, ...committer(git) } }).trim();
-    rec.picks.push({ sha, orig, pr: p.number });
+    rec.picks.push({ sha, orig, pr: p.number, kind: "fix" });
     picked.push(p.number);
     head = sha;
   }
@@ -125,6 +127,27 @@ export async function pickFixes(ctx, { issues = [] } = {}) {
   push(head);
   await writeRecord(ctx);
   return { picked };
+}
+
+/**
+ * #5567: the mechanical revert of the newest pick (the round-1 fix commit): a commit whose tree is the tree before that pick, recorded
+ * as a `revert` pick naming the reverted commit. No new code; `checkChain` verifies the tree. @returns {{reverted: string}|{err: string}}
+ */
+export async function revertLast(ctx) {
+  const { git, state } = ctx;
+  const rec = state.release;
+  if (!rec?.picks?.length) return { err: "no recorded pick to revert" };
+  const last = rec.picks.at(-1);
+  if (last.kind === "revert") return { err: "the newest pick is already a revert" };
+  const parent = git(["rev-parse", `${last.sha}^`]).trim();
+  const tree = git(["rev-parse", `${parent}^{tree}`]).trim();
+  const msg = `Revert "${git(["log", "-1", "--format=%s", last.sha]).trim()}"\n\n(reverts commit ${last.sha})\n`;
+  const sha = git(["commit-tree", tree, "-p", last.sha, "-F", "-"], { input: msg, env: committer(git) }).trim();
+  rec.picks.push({ sha, orig: last.sha, kind: "revert" });
+  ctx.save();
+  git(["push", "--quiet", REMOTE, `${sha}:refs/heads/${rec.branch}`]);
+  await writeRecord(ctx);
+  return { reverted: last.sha };
 }
 
 /** `fix_mode: recut`: move the (unmerged) release branch to the current staging tip and start the record's picks over. */
@@ -163,6 +186,14 @@ export function checkChain({ git, record, sha, staging, exact = false }) {
       const pick = record.picks[i];
       if (c !== pick.sha) return no(`commit ${c.slice(0, 12)} is not the recorded pick ${pick.sha.slice(0, 12)}`);
       if (parents.length !== 1 || parents[0] !== prev) return no(`commit ${c.slice(0, 12)} is not a linear child of ${prev.slice(0, 12)}`);
+      if (pick.kind && !PICK_KINDS.includes(pick.kind)) return no(`commit ${c.slice(0, 12)} has the unrecorded pick kind ${JSON.stringify(pick.kind)}`);
+      if (pick.kind === "revert") { // #5567: a mechanical revert of the previous pick: same tree as before it, and it names it
+        if (pick.orig !== prev) return no(`revert ${c.slice(0, 12)} does not revert the previous pick`);
+        if (!git(["log", "-1", "--format=%B", c]).includes(`(reverts commit ${pick.orig})`)) return no(`revert ${c.slice(0, 12)} does not name ${pick.orig.slice(0, 12)}`);
+        if (git(["rev-parse", `${c}^{tree}`]).trim() !== git(["rev-parse", `${pick.orig}~1^{tree}`]).trim()) return no(`revert ${c.slice(0, 12)} is not the mechanical revert of ${pick.orig.slice(0, 12)}`);
+        prev = c;
+        continue;
+      }
       if (!isAncestor(git, pick.orig, stagingTip)) return no(`${pick.orig} is not a ${staging} commit`);
       if (!git(["log", "-1", "--format=%B", c]).includes(`(cherry picked from commit ${pick.orig})`)) return no(`commit ${c.slice(0, 12)} does not name ${pick.orig} as its cherry-pick source`);
       if (git(["rev-parse", `${c}^{tree}`]).trim() !== pickTree(git, prev, pick.orig)) return no(`commit ${c.slice(0, 12)} differs from the cherry-pick of ${pick.orig.slice(0, 12)}`);

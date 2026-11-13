@@ -278,5 +278,14 @@ run "docs/web-notes.md
 svc/a.py" --scores "$SC_QUIET" --changed-lines 30 --changed-files 2
 expect_not "no frontend path" frontend
 
+# forge#5330: --design-routes true selects the frontend persona for a user-visible route outside the built-in frontend paths, in every tier
+run "site/pages-src/hands.page" --scores "$SC_QUIET" --changed-lines 30 --changed-files 1
+expect_not "design routes off" frontend
+run "site/pages-src/hands.page" --scores "$SC_QUIET" --changed-lines 30 --changed-files 1 --design-routes true
+expect_has "design routes on (small tier)" frontend
+case "$REASON" in *design-route*) ok ;; *) bad "design-route trigger missing from '$REASON'" ;; esac
+run "site/pages-src/hands.page" --scores "$SC_QUIET" --changed-lines 30 --changed-files 1 --design-routes false
+expect_not "design routes false" frontend
+
 echo "review-roster: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

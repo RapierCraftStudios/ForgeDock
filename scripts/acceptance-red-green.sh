@@ -15,6 +15,7 @@
 #   UNRUNNABLE  could not execute (timeout 124, not executable 126/127, worktree/overlay/classifier failure, or head failed
 #               only on a missing host module/command such as `No module named pytest`; forge#4655)
 #   SKIPPED     base was not run because head did not PASS (never a missing file: head's new test files are overlaid)
+# BASE=RAN additionally reruns base with the base's own version of modified test files; FAILED appends " PRISTINE=FAILED" (#5544: the test was the bug).
 # Never prints a verdict on success of cleanup: the base worktree is removed on every exit path (trap + explicit remove).
 # Callers map: HEAD=RAN BASE=FAILED -> proof; BASE=RAN -> passes on base (gate FAIL); anything else that is not a proof -> DEGRADED/FAIL.
 # Exit: 0 line printed | 2 usage error (stdout empty so callers fail closed)
@@ -111,6 +112,19 @@ while IFS= read -r t; do
 done <<< "$DEPS"
 
 if [ "$OVERLAY_OK" != "true" ]; then BASE_RES=UNRUNNABLE; else BASE_RES=$(run_in "$BASE_WT"); fi
+# #5544: BASE=RAN means head's test passes on base source, which a test-only fix satisfies by construction. Rerun with the
+# base's own version of each test file that exists at base (head-added files stay overlaid): FAILED there means the test was the bug.
+PRISTINE=""
+if [ "$BASE_RES" = "RAN" ]; then
+  RESTORED=false
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    is_test_path "$f" || continue
+    git -C "$REPO" cat-file -e "$BASE_SHA:$f" 2>/dev/null || continue
+    git -C "$BASE_WT" checkout "$BASE_SHA" -- "$f" >/dev/null 2>&1 && RESTORED=true
+  done <<< "$CHANGED"
+  if [ "$RESTORED" = "true" ] && [ "$(run_in "$BASE_WT")" = "FAILED" ]; then PRISTINE=" PRISTINE=FAILED"; fi
+fi
 cleanup   # explicit; the EXIT trap is the backstop
-echo "BASE=$BASE_RES HEAD=$HEAD_RES"
+echo "BASE=$BASE_RES HEAD=$HEAD_RES$PRISTINE"
 exit 0
