@@ -11,7 +11,7 @@ import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #533
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
+import { runCore, contractHash, isProtectedLaneBranch, classifyBlock, builderFixable } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { writeIndex } from "./guards.mjs";
@@ -375,7 +375,7 @@ describe("core work-on", () => {
     assert.equal(w.prs.length, 1);
     assert.equal(traj(w).length, 1);
     assert.match(traj(w)[0], /2 round\(s\)/);
-    assert.match(traj(w)[0], /Not conforming \(review\): conformance\.unimplemented \(R1 partial: .*\("foo must handle a null argument without throwing\."\)\); builder resumed once/);
+    assert.match(traj(w)[0], /Not conforming \(review\): conformance\.unimplemented \(R1 partial: .*\("foo must handle a null argument without throwing\."\)\); builder resumed \(round 1 of 3\)/);
     assert.equal(w.comments.filter((c) => c.includes("FORGE:IMPLEMENTATION")).length, 1, "one implementation note");
     assert.equal(w.patches.length, 1, "edited in place after the resume");
     assert.match(w.patches[0].join(" "), /-X PATCH repos\/o\/r\/issues\/comments\/\d+ -f body=<!-- FORGE:IMPLEMENTATION -->/);
@@ -384,7 +384,7 @@ describe("core work-on", () => {
 
   it("nonconforming twice -> needs-human with the specific code, no PR, issue left open", async () => {
     const w = world({ reviews: [bad(), bad("still bad")] });
-    const r = await run(w);
+    const r = await run(w, { reviewMaxResumes: 1 });
     assert.equal(r.terminalReason, "needs-human");
     assert.equal(r.code, "conformance.unimplemented");
     assert.equal(w.closed.length, 0);
@@ -2597,9 +2597,30 @@ describe("comment templates", () => {
     assert.match(renderTrajectory({ issue: 9, validate: ["a|b", "x\ny"] }), /\| Validate \| a\\\|b \| x y \|/);
   });
 
+  it("#5644 review findings get up to 3 builder resume rounds: replay of a fixable finding that clears in round 3 merges", async () => {
+    const w = world({ reviews: [bad("round 1"), bad("round 2"), conf()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 4, "build plus two resume rounds");
+  });
+
+  it("#5644 rounds are spent: a changing but never fixed finding ends needs-human after reviewMaxResumes rounds; an unchanged one stops early", async () => {
+    const w = world({ reviews: [bad("a"), bad("b"), bad("c"), bad("d")] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(builders(w).length, 5);
+    assert.match(traj(w)[0], /after 3 builder resumes/);
+    const w2 = world({ reviews: [bad("a"), bad("b"), bad("c")] });
+    assert.equal((await run(w2, { reviewMaxResumes: 1 })).terminalReason, "needs-human"); assert.equal(builders(w2).length, 3);
+  });
+
+  it("#5644 builderFixable: regression, deferral, scope are fixable; environment and empty sets are not", () => {
+    assert.equal(builderFixable([{ code: "conformance.regression" }, { code: "conformance.unjustified_deferral" }, { code: "conformance.scope_creep" }]), true);
+    assert.equal(builderFixable([{ code: "conformance.regression" }, { code: "env.tool_missing" }]), false);
+    assert.equal(builderFixable([]), false); assert.equal(builderFixable(null), false);
+  });
+
   it("a merged run's trajectory and a needs-human run's trajectory carry the right rows", async () => {
     const w = world({ reviews: [bad(), bad("still bad")] });
-    await run(w);
+    await run(w, { reviewMaxResumes: 1 });
     const t = traj(w)[0];
     assert.match(t, /\| Validate \| CONFIRMED \|/);
     assert.match(t, /\| Plan \| contract [0-9a-f]{12} \| 1 requirement\(s\) \|/);

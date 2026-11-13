@@ -304,12 +304,17 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
     assert.equal(recoveryCodeOf({ outcome: "ci-pending", conflicting: true }), "base.conflict");
     assert.equal(recoveryCodeOf({ outcome: "needs-human", code: "ci.red" }), "ci.red");
   });
+  it("#5644: regression and scope_creep recover; builder.blocked stays human", () => {
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.scope_creep" }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "builder.blocked" }), "human");
+  });
   it("human: builder.blocked (product-decision, spend, credentials, promotion, customer)", () => {
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "builder.blocked" }), "human");
   });
   it("terminal: other codes, plain ci-pending, unknown and non-needs-human rows (#5623: contract.invalid is recoverable)", () => {
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "recoverable");
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.guard_broken" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "nope" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "ci-pending" }), "terminal");
@@ -320,9 +325,9 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
 
 describe("forge#4656: parked class", () => {
   it("is opt-in, keeps terminal by default, and the legacy classifier defaults to external", () => {
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "terminal");
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }, { parked: true }), "parked");
-    assert.equal(parkedLabel("conformance.regression"), "parked:conformance.regression");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.guard_broken" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.guard_broken" }, { parked: true }), "parked");
+    assert.equal(parkedLabel("conformance.guard_broken"), "parked:conformance.guard_broken");
     assert.deepEqual(classifyLegacyNeedsHuman("needs the legal sign-off"), { kind: "external" });
   });
 });
