@@ -42,7 +42,7 @@ describe("#4773: Blocked by edges and the blocked label", () => {
   it("a blocked-labelled issue is admitted but not dispatched; removing the label releases it on the next tick", async () => {
     let blocked = [1];
     const started = [], log = [];
-    const done = orchestrate({ issues: [1, 2], parallel: 3, pollMs: 5, readBody: async () => "", getBlocked: async () => blocked, onUpdate: (r) => log.push(r),
+    const done = orchestrate({ issues: [1, 2], parallel: 3, pollMs: 5, readBody: async () => "", blockedRefreshMs: 0, getBlocked: async () => blocked, onUpdate: (r) => log.push(r),
       runOne: async (n) => { started.push(n); return merged; } });
     await until(() => started.includes(2));
     await new Promise((r) => setTimeout(r, 40));
@@ -57,7 +57,7 @@ describe("#4773: Blocked by edges and the blocked label", () => {
   it("a failed label read keeps the last set instead of releasing", async () => {
     let fail = false, set = [1], reads = 0;
     const started = [];
-    const done = orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", getBlocked: async () => { reads++; if (fail) throw new Error("gh down"); return set; },
+    const done = orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", blockedRefreshMs: 0, getBlocked: async () => { reads++; if (fail) throw new Error("gh down"); return set; },
       runOne: async (n) => { started.push(n); return merged; } });
     await until(() => reads > 0);
     fail = true;
@@ -165,5 +165,21 @@ describe("#5162: failed roots hold their subtree; only real cycles are cycles", 
     const { formatOutcomeLists } = await import("./orchestrate.mjs");
     const lines = formatOutcomeLists([{ issue: 1, outcome: "engine-error" }, { issue: 2, outcome: "held", root: 1 }, { issue: 3, outcome: "held", root: 1 }]);
     assert.ok(lines.some((l) => /held subtree: #1 \(engine-error\) holds #2 #3; release: forgedock orchestrate --requeue <batch> 1/.test(l)), lines.join("\n"));
+  });
+
+  it("the blocked-label list is read at most once per blockedRefreshMs, not on every pass", async () => {
+    let reads = 0, t = 0;
+    const started = [];
+    let open;
+    const g = new Promise((r) => { open = r; });
+    const done = orchestrate({ issues: [1, 2], parallel: 1, pollMs: 5, now: () => t, blockedRefreshMs: 60000, readBody: async () => "",
+      getBlocked: async () => { reads++; return []; }, runOne: async (n) => { started.push(n); if (n === 1) await g; return merged; } });
+    await until(() => started.includes(1));
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(reads, 1, "many passes inside the window make one read");
+    t = 60001;
+    open();
+    await done;
+    assert.ok(reads >= 2, "a pass after the window reads again");
   });
 });
