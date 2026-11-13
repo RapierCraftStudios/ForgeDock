@@ -182,4 +182,12 @@ describe("#5162: failed roots hold their subtree; only real cycles are cycles", 
     await done;
     assert.ok(reads >= 2, "a pass after the window reads again");
   });
+
+  it("#5632: refreshHeld is a hoisted function declaration (finish/recovery callbacks of a resumed batch call it before its line runs)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./orchestrate.mjs", import.meta.url), "utf8");
+    assert.match(src, /\n  function refreshHeld\(\) \{/);
+    assert.doesNotMatch(src, /const refreshHeld\s*=/);
+  });
 });
+

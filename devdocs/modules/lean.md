@@ -3259,3 +3259,7 @@ Root cause of the AlterLab `dispatch-stalled ... free lanes` batch: with `execut
 
 - **Unregistered check ids:** in `conformance.mjs`, `validateContract` takes `checkIds`, which `lean.mjs` fills at freeze through `checksAt(git, [base], wt)`, the same read precheck uses. A post-deploy row whose `check` is neither registered on the base nor added by a `.forge/post-deploy-checks.json` deliverable is now a freeze problem, and its message names the fix and the existing ids. Before, it passed freeze and failed precheck `check_unknown` after a full build (#5531). Rows the engine converts itself are exempt: `engine_check` (generated check) and `e2e_tracked`.
 - **Plan prompt:** it now states the registration rule, and that a requirement needing another open issue's code is blocked with `{"kind":"dependency","issues":[N]}`, never narrowed. On #5561, a builder narrowed a requirement that depends on #5559, and review refused the amendment.
+
+## Entry 2026-11-13: refreshHeld hoisted (#5632)
+
+In `orchestrate.mjs`, `refreshHeld` is now a function declaration. Finish and recovery callbacks, such as `settle()` for an adopted lane that ended needs-human and the `start()` finish path, can run during the resume awaits before its former `const` line executed. They then threw `Cannot access 'refreshHeld' before initialization` and ended the lane `engine-error`. The test asserts the declaration form.
