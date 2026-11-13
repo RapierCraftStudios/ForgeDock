@@ -63,6 +63,7 @@ export function sharedPendingLines(batches) {
   return [...shared].filter(([, ids]) => ids.length > 1).map(([n, ids]) => `schedd: warning: #${n} is pending in ${ids.length} batches (${ids.join(", ")}); only one should run it`);
 }
 
+export const ORPHAN_AGE_MS = 7 * 24 * 3600 * 1000; // #5469: an unhosted batch idle this long with pending issues is orphaned
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
@@ -95,7 +96,6 @@ export async function findUnhostedAsync(root, { isHosted = () => false, now = Da
   return { unhosted, orphaned };
 }
 export const ABANDON_AGE_MS = 14 * 24 * 3600 * 1000; // #5531: an unhosted batch with pending issues and no progress for this long is re-hosted (when ready) or abandoned
-export const ORPHAN_AGE_MS = 7 * 24 * 3600 * 1000; // #5469: an unhosted batch idle this long with pending issues is orphaned
 export const UNIT = "forgedock-schedd";
 export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
@@ -211,6 +211,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const runs = new Map(); // every runBatch in flight (hosted or not yet started) -> its AbortController (#4454)
   const starting = new Map(); // batch id -> host() promise of a start-up resume not yet hosted (#4503: an attach waits for it)
   let closing = null, resolveClosed, keepSock = false;
+  let idleTimer, lockTimer, lagTimer, stallTimer, dueTimer; // assigned below; close() clears them
   let lastActive = Date.now();
   const touch = () => { lastActive = Date.now(); };
   let lastTick = Date.now();
@@ -246,7 +247,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
 
   // #4917: a batch that ended with a deferred issue still waiting (no report) is re-hosted once its retry-at is near, without a restart
   const rehostTimers = new Set();
-  const rehostLater = (id) => {
+  function rehostLater(id) {
     if (closing) return;
     let b, st;
     try { b = openBatch(root, id); if (b.readReport() || b.readCancel() || !b.pendingIssues().length) return; st = b.store.load(); } catch { return; }
@@ -264,13 +265,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }, Math.min(60_000, Math.max(1000, at - Date.now())));
     t.unref?.();
     rehostTimers.add(t);
-  };
+  }
 
   // #5242: an add/requeue that landed while the runner was past its dispatch loop (still "hosted", no longer draining) is
   // dispatched by re-hosting the batch once the run has ended. Once per distinct set of unrun entries, so an add that cannot
   // drain (a cancel, a tripped breaker) never loops.
   const rehostedUnrun = new Map();
-  const rehostUnrun = (id) => {
+  function rehostUnrun(id) {
     if (closing || hosted.has(id) || starting.has(id)) return;
     let sig;
     try {
@@ -287,7 +288,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
     starting.set(id, started);
     started.catch((e) => log(`schedd: re-host ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
-  };
+  }
 
   /** #4775: wait for a batch start at most `admitMs`; the start itself goes on (a second host() would duplicate the batch). */
   const bound = (p, what) => {
@@ -459,7 +460,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     });
     return closing;
   };
-  const idleTimer = setInterval(() => {
+  idleTimer = setInterval(() => {
     if (!hosted.size && !conns.size && Date.now() - lastActive >= idleMs) { log("schedd: idle, exiting"); close(); }
   }, Math.min(idleMs, 30_000));
   idleTimer.unref?.();
@@ -467,7 +468,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const versionOf = () => { try { return installedVersion?.() ?? null; } catch { return null; } };
   const loadedVersion = versionOf();
   // #4503: a daemon whose lock or socket was taken stops (its batches stay resumable) instead of running unreachable.
-  const lockTimer = setInterval(() => {
+  lockTimer = setInterval(() => {
     if (closing) return;
     const now = loadedVersion ? versionOf() : null;
     if (now && now !== loadedVersion) {
@@ -483,7 +484,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   lockTimer.unref?.();
   // #4775: an event loop starved by host load leaves sockets unanswered and children unreaped; leave a trace of it.
   let lagAt = Date.now(), lagLogged = 0;
-  const lagTimer = setInterval(() => {
+  lagTimer = setInterval(() => {
     const now = Date.now(), lag = now - lagAt - 1000;
     lagAt = now;
     if (lag >= lagMs && now - lagLogged >= 60_000) { lagLogged = now; log(`schedd: event loop stalled ${Math.round(lag / 1000)}s (host overloaded?; last phase: ${lastPhase.name}, started ${Math.round((now - lastPhase.at) / 1000)}s ago)`); }
@@ -499,7 +500,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     phase("watch");
     try { await watchPass(); } finally { watching = false; phase("idle"); }
   };
-  const watchPass = async () => {
+  async function watchPass() {
     const now = Date.now();
     for (const id of listBatches(root)) {
       await yieldLoop(); // #5531: one batch per loop turn, so status and dispatch are never starved by a long history
@@ -533,13 +534,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         } else if (recordStallAlert(b, stall)) log(`schedd: batch ${id} needs you: ${stall.detail}`);
       } catch { /* advisory: one unreadable batch never stops the watchdog */ }
     }
-  };
-  const stallTimer = setInterval(() => { watchBatches().catch(() => {}); }, stallCheckMs);
+  }
+  stallTimer = setInterval(() => { watchBatches().catch(() => {}); }, stallCheckMs);
   stallTimer.unref?.();
 
   // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
   let dueRunning = false;
-  const dueTimer = due ? setInterval(async () => {
+  dueTimer = due ? setInterval(async () => {
     if (closing || dueRunning) return;
     dueRunning = true;
     try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
