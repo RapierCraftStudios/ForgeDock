@@ -144,7 +144,9 @@ export function pySatisfies(spec, v) {
 }
 /** Full frozen install on a miss, and the warm no-op repair pass on a hit (null: nothing path-dependent to repair). */
 function commands(d, py = null) {
-  const use = py ? [["poetry", ["env", "use", py.cmd]]] : [];
+  // #5651: with an in-range interpreter poetry itself runs under it (`<py> -m poetry`), so its resolver never sees the host default python.
+  const poetry = (args) => (py ? [py.cmd, ["-m", "poetry", ...args]] : ["poetry", args]);
+  const use = py ? [poetry(["env", "use", py.cmd])] : [];
   switch (d.eco) {
     case "pnpm": return { install: [["pnpm", ["install", "--frozen-lockfile"]]], repair: [["pnpm", ["install", "--frozen-lockfile", "--offline"]]] };
     // npm/yarn node_modules hold only relative links; npm's hidden lockfile is rewritten in place, which the read-only
@@ -152,7 +154,7 @@ function commands(d, py = null) {
     case "npm": return { install: [["npm", ["ci", "--no-audit", "--no-fund"]]], repair: null };
     case "yarn": return { install: [["yarn", ["install", d.berry ? "--immutable" : "--frozen-lockfile"]]], repair: null };
     case "uv": return { install: [["uv", ["venv", "--relocatable", ...(py ? ["--python", py.cmd] : []), ".venv"]], ["uv", ["sync", "--frozen"]]], repair: [["uv", ["sync", "--frozen"]]] };
-    case "poetry": return { install: [...use, ["poetry", ["install", "--sync"]]], repair: [...use, ["poetry", ["install", "--sync"]]] };
+    case "poetry": return { install: [...use, poetry(["install", "--sync"])], repair: [...use, poetry(["install", "--sync"])] };
     default: return null;
   }
 }
@@ -189,32 +191,36 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   }
 
   /**
-   * #5590: for a Python project whose pyproject declares a range the host's default python3 is outside of, the interpreter that
-   * does satisfy it ({cmd, version}: pythonX.Y on PATH, then `uv python find`); null keeps the default (no range, default in range, none found).
+   * #5590/#5651: for a Python project whose pyproject declares a range, {py: null} (no range, or the default python3 is in range),
+   * {py: {cmd, version}} (the interpreter that satisfies it: pythonX.Y on PATH, then `uv python find`) or {missing: {range, probed}}
+   * (nothing in range: the caller stops, the out-of-range default is never used).
    */
   async function pythonFor(wt, d) {
-    if (!PY.has(d.eco)) return null;
+    if (!PY.has(d.eco)) return { py: null };
     let range = null;
     try { range = pyRange(String(fs.readFileSync(join(wt, "pyproject.toml"))), d.eco); } catch { /* no pyproject */ }
-    if (!range) return null;
+    if (!range) return { py: null };
+    const probed = [];
     const probe = async (cmd) => {
       try {
         const version = String(await exec(cmd, ["--version"], { timeoutMs: 30000 })).trim();
         const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(version);
-        return m ? { cmd, version, v: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] } : null;
-      } catch { return null; }
+        if (m) { probed.push(`${cmd} (${version})`); return { cmd, version, v: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] }; }
+      } catch { /* not installed */ }
+      probed.push(`${cmd} (not found)`);
+      return null;
     };
     const def = await probe("python3");
-    if (def && pySatisfies(range, def.v)) return null;
+    if (def && pySatisfies(range, def.v)) return { py: null };
     const minors = [14, 13, 12, 11, 10, 9, 8];
-    for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return c; }
+    for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return { py: c }; }
     for (const x of minors) {
       let path = "";
-      try { path = String(await exec("uv", ["python", "find", `3.${x}`], { timeoutMs: 30000 })).trim().split("\n")[0]; } catch { break; } // no uv
+      try { path = String(await exec("uv", ["python", "find", `3.${x}`], { timeoutMs: 30000 })).trim().split("\n")[0]; } catch { probed.push("uv python find (unavailable)"); break; } // no uv
       const c = path ? await probe(path) : null;
-      if (c && pySatisfies(range, c.v)) return c;
+      if (c && pySatisfies(range, c.v)) return { py: c };
     }
-    return null;
+    return { missing: { range, probed } };
   }
 
   async function keyOf(wt, d, pkgs, py = null) {
@@ -352,7 +358,18 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? repaired, ...(extra.published === undefined ? {} : { published: extra.published }) });
     if (d.skip) return done("skipped", { reason: d.skip });
     const pkgs = JS.has(d.eco) ? await manifests(wt) : [];
-    const py = await pythonFor(wt, d);
+    const found = await pythonFor(wt, d);
+    if (found.missing) {
+      // #5651: never resolve under an out-of-range default interpreter (poetry dies in _finalize_license_expression on python 3.14).
+      const { range, probed } = found.missing;
+      return { ...done("failed", { reason: `no python satisfying the declared range "${range}" was found (probed: ${probed.join(", ")}); install one (for example \`uv python install\`) or put pythonX.Y on PATH` }), code: "env.tool_missing" };
+    }
+    const py = found.py;
+    if (py && d.eco === "poetry") {
+      try { await exec(py.cmd, ["-m", "poetry", "--version"], { timeoutMs: 30000 }); } catch {
+        return { ...done("failed", { reason: `poetry is not available under ${py.cmd} (${py.version}), the interpreter satisfying the declared python range; install it there (for example \`${py.cmd} -m pip install poetry\`) or provide poetry on that interpreter` }), code: "env.tool_missing" };
+      }
+    }
     const key = await keyOf(wt, d, pkgs, py);
     const snap = join(keyRoot, `${d.eco}-${key}`);
     const cmds = commands(d, py);
@@ -371,7 +388,9 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const runList = async (list) => {
       for (const [c, a] of list) {
         try { await run(c, a, wt, laneEnv); } catch (e) {
-          if (c !== "poetry" || a[0] !== "install" || a.includes("--no-root") || !NO_ROOT_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) throw e;
+          const wrapped = py && c === py.cmd && a[0] === "-m" && a[1] === "poetry"; // #5651: `<py> -m poetry ...`
+          const sub = wrapped ? a.slice(2) : a;
+          if (!(c === "poetry" || wrapped) || sub[0] !== "install" || sub.includes("--no-root") || !NO_ROOT_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) throw e;
           await run(c, [...a, "--no-root"], wt, laneEnv);
           repaired = repaired ?? "poetry install --no-root (project is not package-mode)";
         }

@@ -280,6 +280,7 @@ export function depInstallFailures({ results = [], changedFiles = [] } = {}) {
     if (r?.status !== "failed") continue;
     const label = `${r.eco ?? "dependencies"}${r.dir && r.dir !== "." ? ` in ${r.dir}` : ""}: ${r.reason ?? "install failed"}`;
     const rx = SRC_BY_ECO(r.eco);
+    if (r.code === "env.tool_missing") { block.push({ code: "env.tool_missing", kind: "dep_install", tool: r.eco ?? "python", detail: `dependency install stopped (${label}) (environment, not the change)` }); continue; } // #5651
     const hit = r.eco ? changedFiles.find((f) => rx.test(f) && underDir(r.dir, f) && (r.dir && r.dir !== "." ? true : !dirs.some((d) => underDir(d, f)))) : null;
     if (hit) block.push({ code: "env.tool_missing", kind: "dep_install", tool: r.eco, detail: `dependency install failed (${label}) for a package the changed file ${hit} imports (environment, not the change)` });
     else logged.push(`Dependency install failed, unrelated to the changed files: ${label}`);

@@ -643,6 +643,8 @@ via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets 
 stores; install/repair commands get the lane's toolchain env (#4347: a pm only the shim provides
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
+#5651: for a Python project with a declared range, `pythonFor` returns the in-range interpreter (poetry runs under it as `<py> -m poetry env use|install`, so its resolver never runs on the host default python; poetry missing from that interpreter is `env.tool_missing`; uv uses `uv venv --python`) or, when none is found, `prepare` stops with a failed row coded `env.tool_missing` naming the range, the interpreters probed and how to provide one; the out-of-range default python3 is never used silently. `depInstallFailures` blocks on that code regardless of changed files.
+
 `depcache.mjs` `linkOrCopy` (#4909) copies a file when the hardlink fails with EXDEV, so a cache on another filesystem is still a `hit`. `capwait.mjs` holds a lane refused for capacity (`sandbox.capacity`) until the pool reports `free > 0` and banks the wait as `waits.queue`.
 
 `depcache.mjs` `linkTree` (#5574) copies, rather than hardlinks, the package-manager state the repair pass rewrites in place (`.modules.yaml`, `.pnpm-workspace-state*.json`, `.package-lock.json`, `.yarn-state.yml` directly under a `node_modules`, and `.pnpm/lock.yaml`) with the owner-write bit set, so pnpm's offline repair no longer fails with EACCES and falls back to a fresh install. The snapshot inode stays read-only and package files stay hardlinks.
