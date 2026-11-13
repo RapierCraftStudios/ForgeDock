@@ -1814,6 +1814,11 @@ saves and settles, and throws `code: "batch.stopped"`. `runBatch` therefore writ
 `resumeOnStart` resumes the batch and adopts the lanes. This differs from #4376 cancel, which SIGTERMs lanes and ends the
 batch with a report. Callers without `signal` are unchanged. Cost: 0 LLM calls.
 
+- #5669: `orchestrate` now passes its halt `signal` to `runOne` and `adopt` via `ctx`. `providerLanes` (`execution.mjs`) `wait` stops polling once it
+  aborts, and `runOne`/`adoptSaved` then skip result handling, teardown and ledger release, so a halted remote lane keeps its
+  sandbox and persisted handle and the next daemon adopts it instead of requeueing `interrupted: upgrade`. Lanes that cannot be
+  adopted (no pid, handle or sandbox) are still requeued as before. Cost: 0 LLM calls.
+
 ## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
 
 Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now

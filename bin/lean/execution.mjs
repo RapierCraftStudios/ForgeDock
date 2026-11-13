@@ -614,6 +614,8 @@ export function usageLimitInTail(tail) {
   return { resetAt: RESETS_RE.exec(t)?.[1]?.trim() ?? null };
 }
 
+const HALTED = { terminalReason: "deferred", detail: "batch halted (schedd handover); sandbox kept for adopt" }; // #5669: dropped by orchestrate's settle
+
 /**
  * Lane seams for `orchestrate()` over a provider, the same contract as batch.mjs `detachedLanes`. `ledgerFor(issue)`
  * returns that sandbox's ledger (ledger.mjs `makeLedger`). #5095: with `holdId` every `rate_limited` result is held under it
@@ -661,8 +663,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
   const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
-  const wait = async (h, g = guard({ waited: 0, tries: 0 })) => {
+  // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
+  const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
     for (;;) {
+      if (sig?.aborted) return null;
       const r = await g(() => provider.fetchResult(h));
       if (r) return r;
       const st = await g(() => provider.status(h));
@@ -725,7 +729,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (!Number.isFinite(h.startedAt)) h.startedAt = base.startedAt;
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
-        r = settleClone(await wait(h), base.id);
+        r = settleClone(await wait(h, undefined, ctx.signal), base.id);
+        if (ctx.signal?.aborted) return HALTED; // #5669: the sandbox stays for adopt, whatever `r` is
       } catch (e) {
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
@@ -753,7 +758,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       try {
         const ended = await g(() => provider.fetchResult(h));
         if (!ended && (await g(() => provider.status(h))) !== "running") r = null; // relaunched
-        else { if (!ended) ctx.onLive?.(); r = await wait(h, g); } // #4504: a live sandbox is awaited in the background
+        else { if (!ended) ctx.onLive?.(); r = await wait(h, g, ctx.signal); } // #4504: a live sandbox is awaited in the background
+        if (ctx.signal?.aborted) return null; // #5669: halted: left for the next adopt, no tear
       } catch (e) {
         if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };

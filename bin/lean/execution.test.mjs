@@ -1164,3 +1164,20 @@ describe("#5650: execution.lane_tools", () => {
     assert.equal(c.launched.length, 0);
   });
 });
+
+describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", () => {
+  it("#5669: a halt while the sandbox runs neither tears it down nor releases the ledger; adopt reattaches", async () => {
+    const prov = fakeProvider(); const root = tmpDir("exec-halt-"); const ledgerFor = ledgerIn(root);
+    const l = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 5 });
+    const ac = new AbortController();
+    const run = l.runOne(8, "main", { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    prov.results[8] = { terminalReason: "merged", pr: 8 }; prov.live.delete(8);
+    await run;
+    assert.deepEqual(prov.calls.filter((c) => c[0] === "teardown"), [], "no teardown after the halt");
+    assert.ok(ledgerFor(8).entries("sandbox").some((e) => e.value === "fake-8"), "ledger entry kept");
+    const r = await l.adopt(8, { handle: { provider: "fake", id: "fake-8", issue: 8 } }, {});
+    assert.equal(r.terminalReason, "merged");
+  });
+});
