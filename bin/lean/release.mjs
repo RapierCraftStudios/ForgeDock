@@ -458,7 +458,7 @@ export async function releaseFromCli(argv, deps = {}) {
     const { readPolicy } = await import("./release-config.mjs");
     const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
     if (pol?.deploy) config.deploy = pol.deploy;
-    if (pol?.verify) config.verify = pol.verify;
+    config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
   }
   if (resume) {
     const st = openRelease(root, resume).load();

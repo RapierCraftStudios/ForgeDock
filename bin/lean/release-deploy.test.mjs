@@ -35,11 +35,11 @@ describe("release deploy stages (#5560)", () => {
     const { io } = world(); const c = mk(io, {}, null);
     assert.deepEqual(await deployStep(c), { skipped: true }); assert.equal(c.state.deploy, undefined);
   });
-  it("MERGED -> LIVE: records the rollback target, observes the run, passes LIVE_CHECK, writes FORGE:VERIFIED", async () => {
+  it("MERGED -> LIVE: records the rollback target, observes the run, passes LIVE_CHECK, and never writes FORGE:VERIFIED (#5562)", async () => {
     const { w, io } = world(); const c = mk(io);
     const out = await deployStep(c);
     assert.equal(out.live, true); assert.equal(c.state.deploy.target.sha, OLD); assert.equal(c.state.deploy.phase, "LIVE");
-    assert.ok(w.gh.some((g) => g.startsWith("pr comment 7") && g.includes(`FORGE:VERIFIED ${SHA}`)));
+    assert.ok(!w.gh.some((g) => g.startsWith("pr comment") || g.includes("FORGE:VERIFIED")));
     assert.ok(!w.gh.some((g) => g.startsWith("workflow run")), "an observed push run is never redispatched");
   });
   it("I9: an unknown rollback target blocks before any dispatch", async () => {
@@ -77,7 +77,7 @@ describe("release deploy stages (#5560)", () => {
   it("a failure without a transient signature is not rerun", async () => {
     const { w, io } = world({ live: [OLD], log: "tsc error", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }] });
     const out = await deployStep(mk(io));
-    assert.match(out.reason, /transient signature/); assert.equal(w.reran, undefined);
+    assert.match(out.reason, /never retried blindly/); assert.equal(w.reran, undefined);
   });
   it("dispatches (fenced, with forge_epoch) only when no run appears, and never an override input", async () => {
     const { w, io } = world({ runs: [] }); const calls = [];
@@ -85,7 +85,7 @@ describe("release deploy stages (#5560)", () => {
     const out = await deployStep(mk(io, { fence: fence(calls) }));
     const d = w.gh.filter((g) => g.startsWith("workflow run")); assert.equal(out.live, true); assert.equal(d.length, 1);
     assert.match(d[0], /forge_epoch=3/); assert.ok(!/override_|acknowledge_/.test(d[0]));
-    assert.ok(calls.some((r) => r.key === `deploy:${SHA}`));
+    assert.ok(calls.some((r) => r.key.endsWith(`:deploy:3:deploy:${SHA}`)));
   });
   it("a stale epoch refuses the dispatch", async () => {
     const { io } = world({ runs: [] });
@@ -93,13 +93,8 @@ describe("release deploy stages (#5560)", () => {
     const out = await deployStep(mk(io, { fence: f }));
     assert.match(out.reason, /fenced|refused/);
   });
-  it("a post-deploy check that fails blocks FORGE:VERIFIED", async () => {
-    const { w, io } = world({ failCheck: true }); io.git = () => JSON.stringify({ c1: { run: "check-it" } });
-    const out = await deployStep(mk(io, { state: { issues: [{ number: 1, checks: ["c1"] }], steps: { "post-merge": { result: { merge: SHA } }, "release-pr": { result: { pr: 7 } } } } }));
-    assert.match(out.reason, /check c1 failed/); assert.ok(!w.gh.some((g) => g.includes("FORGE:VERIFIED")));
-  });
-  it("chaos: a throw at every boundary, then a resume, repeats no dispatch, rerun or verified comment", async () => {
-    for (const dieOn of ["variable", "run list", "run view", "run rerun", "pr comment", "live"]) {
+  it("chaos: a throw at every boundary, then a resume, repeats no dispatch or rerun", async () => {
+    for (const dieOn of ["variable", "run list", "run view", "run rerun", "live"]) {
       const { w, io } = world({ live: [OLD, SHA], log: "429 Too Many Requests", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }, { databaseId: 9, status: "completed", conclusion: "success" }] });
       let armed = true; const g0 = io.gh, r0 = io.rehearse;
       const maybe = (k) => { if (armed && k === dieOn) { armed = false; throw new Error("kill -9"); } };
@@ -109,9 +104,62 @@ describe("release deploy stages (#5560)", () => {
       try { await deployStep(c); } catch { /* killed */ }
       const out = await deployStep(c);
       assert.equal(out.live, true, dieOn);
-      assert.ok((w.reran ?? 0) <= 1, `${dieOn}: one rerun`); assert.equal(w.gh.filter((g) => g.includes("FORGE:VERIFIED")).length, 1, `${dieOn}: one comment`);
+      assert.ok((w.reran ?? 0) <= 1, `${dieOn}: one rerun`); 
       assert.equal(w.gh.filter((g) => g.startsWith("workflow run")).length, 0, dieOn);
     }
+  });
+});
+
+describe("deploy observation and recovery (#5560)", () => {
+  it("trigger dispatch (service/hotfix) dispatches at once with unit inputs and forge_epoch, fenced under (release, step, epoch)", async () => {
+    const { w, io } = world({ runs: [] }); const calls = []; const orig = io.gh;
+    io.gh = async (a) => { const r = await orig(a); if (a[0] === "workflow") w.runs = [{ databaseId: 11, status: "completed", conclusion: "success" }]; return r; };
+    const pol = { ...POLICY, pipelines: { service: { workflow: "deploy.yml", trigger: "dispatch", inputs: { unit: "api" } } } };
+    const out = await deployStep(mk(io, { fence: fence(calls), config: { deploy: pol, deployPipeline: "service", deployBounds: { pollMs: 1, runPollMs: 1 } } }));
+    const d = w.gh.filter((g) => g.startsWith("workflow run")); assert.equal(out.live, true); assert.equal(d.length, 1);
+    assert.match(d[0], /unit=api/); assert.match(d[0], /forge_epoch=3/);
+    assert.ok(calls.some((r) => r.key.endsWith(`:deploy:3:deploy:${SHA}`)));
+  });
+  it("a skipped push run is expected: it is not a run, so the deploy is dispatched", async () => {
+    const { w, io } = world({ runs: [{ databaseId: 5, status: "completed", conclusion: "skipped" }] }); const orig = io.gh;
+    io.gh = async (a) => { const r = await orig(a); if (a[0] === "workflow") w.runs = [{ databaseId: 12, status: "completed", conclusion: "success" }]; return r; };
+    const out = await deployStep(mk(io, { fence: fence() }));
+    assert.equal(out.live, true); assert.equal(w.gh.filter((g) => g.startsWith("workflow run")).length, 1);
+  });
+  it("a run cancelled by a newer concurrency-group run is expected: no rerun", async () => {
+    const { w, io } = world({ live: [OLD], runs: [{ databaseId: 9, status: "completed", conclusion: "cancelled" }], log: "429 Too Many Requests" }); const orig = io.gh;
+    io.gh = async (a) => (a[0] === "run" && a[1] === "list" && !a.includes("--commit") ? JSON.stringify([{ databaseId: 10, status: "in_progress" }]) : orig(a));
+    const out = await deployStep(mk(io));
+    assert.match(out.reason, /cancelled by a newer run/); assert.equal(w.reran, undefined);
+  });
+  it("another cancelled run is checked against live first: a matching live passes, a mismatch may be rerun only when transient", async () => {
+    const ok = world({ live: [OLD, SHA], runs: [{ databaseId: 9, status: "completed", conclusion: "cancelled" }] });
+    assert.equal((await deployStep(mk(ok.io))).live, true); assert.equal(ok.w.reran, undefined);
+    const bad = world({ live: [OLD], runs: [{ databaseId: 9, status: "completed", conclusion: "cancelled" }], log: "the runner received a shutdown signal" });
+    const out = await deployStep(mk(bad.io));
+    assert.equal(bad.w.reran, 2); assert.match(out.reason, /recovery spent/);
+  });
+  it("shared INFRA_SIGNATURES count as transient without any configured signature", async () => {
+    const { w, io } = world({ live: [OLD, SHA], log: "fatal: ECONNRESET", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }, { databaseId: 9, status: "completed", conclusion: "success" }] });
+    const out = await deployStep(mk(io, {}, { ...POLICY, recovery: { rerun_max: 2, max_attempts: 3 } }));
+    assert.equal(out.live, true); assert.equal(w.reran, 1);
+  });
+  it("a deterministic build failure and a migration failure hold with an owner ask and needs-agent", async () => {
+    for (const [log, kind] of [["tsc error TS2304", "deterministic"], ["migration 0042 failed", "migration"]]) {
+      const { w, io } = world({ live: [OLD], log, runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }] });
+      const out = await deployStep(mk(io));
+      assert.equal(out.hold?.kind, kind); assert.equal(out.hold.label, "needs-agent"); assert.match(out.reason, /owner ask/); assert.equal(w.reran, undefined);
+    }
+  });
+  it("max_attempts hands off to the rollback ladder", async () => {
+    const { io } = world({ live: [OLD], log: "ECONNRESET", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }] });
+    const out = await deployStep(mk(io, {}, { ...POLICY, recovery: { rerun_max: 5, max_attempts: 1 } }));
+    assert.match(out.reason, /rollback ladder/);
+  });
+  it("unreadable freeze-independent guard: an unreadable live record blocks LIVE_CHECK (I5)", async () => {
+    const { io } = world({ live: [OLD, null] });
+    const out = await deployStep(mk(io));
+    assert.equal(out.blocked, true); assert.match(out.reason, /unreadable/);
   });
 });
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
- * Deploy stages of `forgedock release` (#5560, epic #5549 Phase 3): MERGED -> DEPLOYING -> LIVE_CHECK -> VERIFYING -> LIVE.
+ * Deploy stages of `forgedock release` (#5560, epic #5549 Phase 3): MERGED -> DEPLOYING -> LIVE_CHECK -> RECOVERING -> VERIFYING -> LIVE (verification layers and FORGE:VERIFIED are #5562).
  * Off unless the policy has `deploy.pipelines` (`ctx.config.deploy`): without it the step is `{skipped}` and leaves no trace.
  * Every step is observe -> decide -> fenced act -> verify, and progress lives in `state.deploy`, so a resume re-observes GitHub
  * (the run, the live record, the freeze variable) before it acts and repeats no dispatch or rerun. Waits are bounded and end in
@@ -11,7 +11,7 @@
  */
 import { fenced } from "./release-fence.mjs";
 import { buildDispatchArgs } from "./release-control.mjs";
-import { CHECKS_FILE, parseChecks } from "./postdeploy-check.mjs";
+import { INFRA_SIGNATURES } from "./release-flakes.mjs";
 
 const BOUNDS = { pollMs: 10_000, runPollMs: 20_000, defaultStageS: 3600, rerunMax: 2, maxAttempts: 3 };
 const json = (s) => JSON.parse(String(s || "null"));
@@ -48,9 +48,16 @@ async function freezeValue(io, repo, name) {
   try { return String(await io.gh(["variable", "get", name, "--repo", repo])).trim(); } catch { return ""; }
 }
 
+/** The newest run for `(workflow, sha)`; a `skipped` run (a push the workflow chose not to run) is expected and not a run. */
 async function latestRun({ io, repo, workflow, sha }) {
   const runs = json(await io.gh(["run", "list", "--repo", repo, "--workflow", workflow, "--commit", sha, "--json", "databaseId,status,conclusion", "--limit", "5"])) ?? [];
-  return runs[0] ?? null;
+  return runs.find((r) => r.conclusion !== "skipped") ?? null;
+}
+
+/** A cancelled run is a concurrency-group supersede (expected) when the workflow has a newer run. */
+async function superseded({ io, repo, workflow }, run) {
+  const runs = json(await io.gh(["run", "list", "--repo", repo, "--workflow", workflow, "--json", "databaseId,status", "--limit", "10"])) ?? [];
+  return runs.some((r) => r.databaseId > run.databaseId);
 }
 
 async function poll(io, polls, ms, fn) {
@@ -62,13 +69,16 @@ async function poll(io, polls, ms, fn) {
   return null;
 }
 
+/** Intent key `(release, step, epoch, what)`: one irreversible action per epoch, named in the write-ahead intent (R10). */
+const idemKey = (ctx, what) => `${ctx.fence?.lease?.release ?? ctx.state.id ?? "-"}:deploy:${ctx.fence?.lease?.epoch ?? 0}:${what}`;
+
 /** A dispatch (fenced, write-ahead intent) and the run it makes; observe first so a crashed driver never dispatches twice. */
 async function runFor(ctx, { workflow, sha, inputs, key, startPolls, b }) {
   const { io, repo } = ctx;
   const look = () => latestRun({ io, repo, workflow, sha });
   let run = await poll(io, startPolls, b.pollMs, look);
   if (run) return { run, dispatched: false };
-  const f = await fenced(ctx.fence, { action: "dispatch", key }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
+  const f = await fenced(ctx.fence, { action: "dispatch", key: idemKey(ctx, key) }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
   if (f.refused) return { err: `dispatch ${f.refused}` };
   run = await poll(io, startPolls, b.pollMs, look);
   return run ? { run, dispatched: true } : { err: `no ${workflow} run for ${sha.slice(0, 8)} after a dispatch on ${ctx.def}; check the Actions tab, then resume` };
@@ -79,51 +89,34 @@ async function finished(ctx, workflow, sha, polls, b) {
   return poll(io, polls, b.runPollMs, async () => { const r = await latestRun({ io, repo, workflow, sha }); return r?.status === "completed" ? r : null; });
 }
 
-const isTransient = (log, sigs) => (sigs ?? []).some((s) => { try { return new RegExp(s, "i").test(log); } catch { return log.includes(s); } });
+/** transient: shared infra signatures (release-flakes) or configured ones; migration: a rehearsal-class failure; else a deterministic build failure. */
+export function classifyDeploy(log, sigs) {
+  if (INFRA_SIGNATURES.some(([, re]) => re.test(log)) || (sigs ?? []).some((s) => { try { return new RegExp(s, "i").test(log); } catch { return log.includes(s); } })) return "transient";
+  return /migrat/i.test(log) ? "migration" : "deterministic";
+}
+
+const hold = (reason, kind) => ({ blocked: `${reason} (owner ask: decide rollback or fix; label needs-agent when no host is attached)`, hold: { kind, label: "needs-agent" } });
 
 /**
  * Recovery (6.5): one action at a time, bounded. @returns {{rerun: true}|{blocked: string}}
  * No rerun while a freeze is set (I26); only a failed run with a configured transient log signature is rerun.
  */
-async function recover(ctx, d, run, why, freezeNow, b) {
+async function recover(ctx, d, run, why, freezeNow, b, workflow) {
   const { io, repo, state } = ctx;
   const st = state.deploy, rec = d.recovery ?? {};
   const rerunMax = rec.rerun_max ?? b.rerunMax, maxAttempts = rec.max_attempts ?? b.maxAttempts;
   if (freezeNow) return { blocked: `${why}; ${d.freeze_variable} is set, so the engine never reruns or redispatches the deploy (I26): roll back, or a human runs the workflow with override_freeze` };
-  if (!run || run.conclusion !== "failure") return { blocked: `${why}; nothing to rerun (a run that finished without changing live is not retried)` };
-  if (st.reruns >= rerunMax || st.attempts >= maxAttempts) return { blocked: `${why}; recovery spent (${st.reruns}/${rerunMax} reruns, ${st.attempts}/${maxAttempts} actions): escalate to rollback` };
+  if (!run || !["failure", "timed_out", "cancelled"].includes(run.conclusion)) return { blocked: `${why}; nothing to rerun (a run that finished without changing live is not retried)` };
+  if (run.conclusion === "cancelled" && await superseded({ io, repo, workflow }, run)) return { blocked: `${why}; run ${run.databaseId} was cancelled by a newer run of the concurrency group: expected, not rerun` };
+  if (st.reruns >= rerunMax || st.attempts >= maxAttempts) return { blocked: `${why}; recovery spent (${st.reruns}/${rerunMax} reruns, ${st.attempts}/${maxAttempts} actions): hand off to the rollback ladder (#5563)` };
   let log = ""; try { log = String(await io.gh(["run", "view", String(run.databaseId), "--repo", repo, "--log-failed"])); } catch { /* unreadable log: not transient */ }
-  if (!isTransient(log, rec.signatures)) return { blocked: `${why}; failure does not match a configured transient signature (deploy.recovery.signatures): ${tail(log, 200)}` };
+  const cls = classifyDeploy(log, rec.signatures);
+  if (cls !== "transient") return hold(`${why}; ${cls === "migration" ? "migration failure" : "deterministic build failure"}, never retried blindly: ${tail(log, 200)}`, cls);
   st.reruns += 1; st.attempts += 1; ctx.save(); // counted before the act: a crash can only spend budget, never exceed it
-  const f = await fenced(ctx.fence, { action: "rerun", key: `rerun:${run.databaseId}:${st.reruns}` }, () => io.gh(["run", "rerun", String(run.databaseId), "--repo", repo, "--failed"]));
+  const f = await fenced(ctx.fence, { action: "rerun", key: idemKey(ctx, `rerun:${run.databaseId}:${st.reruns}`) }, () => io.gh(["run", "rerun", String(run.databaseId), "--repo", repo, "--failed"]));
   if (f.refused) return { blocked: `rerun ${f.refused}` };
   await io.sleep(b.pollMs); // the rerun flips the run back to in_progress before the next observation
   return { rerun: true };
-}
-
-/** VERIFYING: the verify workflow (if configured), then each included issue's named check from the default branch (layer 4). */
-async function verify(ctx, d, sha, b) {
-  const { io, repo, state } = ctx;
-  const wf = ctx.config.verify?.workflow;
-  if (wf) {
-    const r = await runFor(ctx, { workflow: wf, sha, inputs: {}, key: `verify:${sha}`, startPolls: 3, b });
-    if (r.err) return blocked(r.err);
-    const done = await finished(ctx, wf, sha, Math.ceil(stageS(d) * 1000 / b.runPollMs), b);
-    if (!done) return blocked(`${wf} run ${r.run.databaseId} did not finish in time; resume to keep waiting`);
-    if (done.conclusion !== "success") return blocked(`${wf} run ${done.databaseId} concluded ${done.conclusion}`);
-  }
-  const ids = [...new Set((state.issues ?? []).flatMap((i) => i.checks ?? []))];
-  if (ids.length) {
-    let checks = {};
-    try { checks = parseChecks(String(io.git(["show", `origin/${ctx.def}:${ctx.config.verify?.post_deploy_checks_file ?? CHECKS_FILE}`]))); } catch { /* none registered */ }
-    for (const id of ids) {
-      const c = checks[id];
-      if (!c?.run) return blocked(`post-deploy check ${id} is not registered on ${ctx.def}`);
-      const r = await io.rehearse(c.run, { timeout: (c.timeoutS ?? 120) * 1000 });
-      if (!r?.ok) return blocked(`post-deploy check ${id} failed: ${tail(r?.output, 200)}`);
-    }
-  }
-  return { ok: true, checks: ids };
 }
 
 /**
@@ -144,7 +137,7 @@ export async function reconcile(ctx, d, pipe, sha) {
 
 const stageS = (d) => (typeof d.stage_timeout_s === "number" ? d.stage_timeout_s : BOUNDS.defaultStageS);
 
-/** @returns {Promise<{skipped: true}|{live: true, merge, run, reruns, verified}|{blocked: true, reason}|{stopped: true, why}>} */
+/** @returns {Promise<{skipped: true}|{live: true, merge, run, reruns}|{blocked: true, reason, hold?}|{stopped: true, why}>} */
 export async function deployStep(ctx) {
   const { io, repo, state } = ctx;
   const d = ctx.config.deploy;
@@ -178,7 +171,7 @@ export async function deployStep(ctx) {
   if (st.phase !== "LIVE_CHECKED" && st.phase !== "LIVE") {
     for (;;) {
       st.phase = "DEPLOYING"; ctx.save();
-      const r = await runFor(ctx, { workflow: pipe.workflow, sha, inputs: pipe.inputs ?? {}, key: `deploy:${sha}`, startPolls: Math.max(1, Math.ceil((d.start_timeout_s ?? 60) * 1000 / b.pollMs)), b });
+      const r = await runFor(ctx, { workflow: pipe.workflow, sha, inputs: pipe.inputs ?? {}, key: `deploy:${sha}`, startPolls: pipe.trigger === "dispatch" ? 1 : Math.max(1, Math.ceil((d.start_timeout_s ?? 60) * 1000 / b.pollMs)), b });
       if (r.err) return blocked(r.err);
       st.runId = r.run.databaseId; ctx.save();
       const done = await finished(ctx, pipe.workflow, sha, Math.ceil(stageS(d) * 1000 / b.runPollMs), b);
@@ -192,22 +185,15 @@ export async function deployStep(ctx) {
       else if (!liveMatches(live, sha, st.expected)) why = `LIVE_CHECK failed: run ${done.databaseId} concluded ${done.conclusion} but live is ${live?.sha?.slice(0, 8) ?? "unreadable"}, not ${sha.slice(0, 8)} (I28)${frozenByRun ? `; the run set ${d.freeze_variable}` : ""}`;
       else if (frozenByRun) why = `LIVE_CHECK failed: the run set ${d.freeze_variable}`;
       if (!why) { st.phase = "LIVE_CHECKED"; ctx.save(); break; }
-      const rec = await recover(ctx, d, done, why, !!freezeNow, b);
-      if (rec.blocked) return blocked(rec.blocked);
+      const rec = await recover(ctx, d, done, why, !!freezeNow, b, pipe.workflow);
+      if (rec.blocked) return { ...blocked(rec.blocked), ...(rec.hold ? { hold: rec.hold } : {}) };
     }
   }
 
   if (st.phase !== "LIVE") {
     st.phase = "VERIFYING"; ctx.save();
-    const v = await verify(ctx, d, sha, b);
-    if (v.blocked) return v;
-    const pr = state.steps["release-pr"]?.result?.pr;
-    if (pr) {
-      const f = await fenced(ctx.fence, { action: "comment", key: `verified:${sha}` }, () => io.gh(["pr", "comment", String(pr), "--repo", repo, "--body", `<!-- FORGE:VERIFIED ${sha} -->\nrelease deployed and verified at ${sha}.`]));
-      if (f.refused) return blocked(`FORGE:VERIFIED ${f.refused}`);
-    }
-    st.phase = "LIVE"; st.verified = v.checks; ctx.save();
+    st.phase = "LIVE"; ctx.save(); // verification layers and FORGE:VERIFIED are #5562
   }
-  io.print?.(`release: live at ${sha.slice(0, 8)} (run ${st.runId}, ${st.reruns} rerun(s), ${(st.verified ?? []).length} check(s))`);
-  return { live: true, merge: sha, run: st.runId, reruns: st.reruns, verified: st.verified ?? [] };
+  io.print?.(`release: live at ${sha.slice(0, 8)} (run ${st.runId}, ${st.reruns} rerun(s))`);
+  return { live: true, merge: sha, run: st.runId, reruns: st.reruns };
 }

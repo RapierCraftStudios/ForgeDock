@@ -10,6 +10,9 @@ import { writeAtomic } from "./batch.mjs";
 import { delimiter, join } from "node:path";
 import { RELEASE_STEPS } from "./release.mjs";
 
+/** Optional steps that leave no trace when unconfigured: once post-merge is done they are not the pending step (#5560). */
+const OPTIONAL_NO_TRACE = ["deploy"];
+
 export const DEFAULT_SKIP_LABELS = ["epic", "needs-human", "post-deploy", "workflow:merged", "awaiting-promotion", "host-task"];
 /** A release job that has not written its end `status` for this long is taken as dead, not in flight. */
 export const RELEASE_STALE_MS = 6 * 3600 * 1000;
@@ -48,7 +51,7 @@ export function releaseInFlight({ root, repo = null, now = Date.now(), staleMs =
     if (!st || st.status || (repo && st.repo && st.repo !== repo)) continue;
     let age; try { age = now - stat(f).mtimeMs; } catch { continue; }
     if (age > staleMs) continue;
-    if (!best || age < best.ageMs) best = { id, step: RELEASE_STEPS.find((x) => !st.steps?.[x]?.done) ?? null, ageMs: age };
+    if (!best || age < best.ageMs) best = { id, step: RELEASE_STEPS.find((x) => !st.steps?.[x]?.done && !(OPTIONAL_NO_TRACE.includes(x) && st.steps?.["post-merge"]?.done)) ?? null, ageMs: age };
   }
   return best;
 }
