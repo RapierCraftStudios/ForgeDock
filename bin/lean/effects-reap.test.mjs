@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCheckCommand, execCapped, reapRunContainers } from "./effects.mjs";
 
 describe("#5592 containers of a check run are reaped when it ends", () => {
   const fakeDocker = () => {
-    const d = mkdtempSync(join(tmpdir(), "fake-docker-")), log = join(d, "log");
+    const d = tmpDir("fake-docker-"), log = join(d, "log");
     writeFileSync(join(d, "docker"), `#!/bin/sh\necho "$@" >> ${log}\n`); chmodSync(join(d, "docker"), 0o755);
     return { dir: d, log };
   };
