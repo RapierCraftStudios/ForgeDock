@@ -428,6 +428,37 @@ A permanent audit trail of a completed pipeline run.
 **Completed**: {ISO 8601 timestamp}
 ```
 
+#### `FORGE:STATUS` (lean engine, #5592)
+
+- **Written by**: the lean engine and the batch runner, one comment per issue, edited in place
+- **Read by**: any reader of a section marker (the section markers below stay in the body)
+
+The machine-state markers `FORGE:STARTED`, `FORGE:CONTEXT`, `FORGE:LANE_BRANCH`, `FORGE:LITE`,
+`FORGE:TRAJECTORY` (with its `FORGE:WORK-ON` alias) and the engine's prose `FORGE:DECISION` are
+sections of one trusted comment instead of a comment per run. A requeue or recovery edits the
+same comment: a section holds the newest run's text (`FORGE:DECISION` keeps its last 5 entries).
+The engine finds its comment by the leading marker and a trusted author (trusted association, Bot,
+or the ForgeDock App) and edits only that; an untrusted comment carrying the marker is ignored.
+
+```
+<!-- FORGE:STATUS -->
+<!-- FORGE:STATUS:SEP -->
+<!-- FORGE:STARTED -->
+Started work on #{NUMBER} (base `{lane}`).
+<!-- FORGE:STATUS:SEP -->
+<!-- FORGE:TRAJECTORY -->
+<!-- FORGE:WORK-ON -->
+## Pipeline Trajectory — #{NUMBER}
+```
+
+A reader that searches a body for a marker keeps working. A reader that anchors the marker at the
+start of the comment must also accept a section (`hasSection` in `bin/lean/statuscomment.mjs`).
+`FORGE:INVESTIGATION`, `FORGE:IMPLEMENTATION` and `FORGE:PARKED` are single comments edited in
+place (marker still leading). `FORGE:NEEDS_HUMAN`, `FORGE:HOST_TASK`, `FORGE:DEPENDENCY`,
+`FORGE:CONTRACT`/`FORGE:PLAN`, `FORGE:REVIEW`, `FORGE:FACTS`, `FORGE:TRACKED`, owner asks and JSON
+`FORGE:DECISION` records stay separate comments: a person must see them (an edit does not
+notify) or other code reads them in comment order.
+
 ### 4.2 Cross-artifact annotations
 
 These annotations move context between issues — useful when a parent issue is
