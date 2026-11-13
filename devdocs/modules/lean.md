@@ -350,7 +350,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    learned commands, budget, timeouts; forge.yaml is gitignored, so not in the worktree) beside contract.json; the CLI
    runs the contract's validate commands (`ci` and not run in `verify.mode: ci`) and the planned pre-PR commands through
    `runChecks` + `runCheckCommand` in the builder's env (lane TMPDIR, toolchain, heavy shims gate heavy binaries: no
-   `acquire`), prints a capped pass/fail table and writes `.forge-lean/self-check.json` with `worktreeFingerprint`
+   `acquire`; #5592: `runCheckCommand` puts a `docker` shim first on PATH that labels `docker run|create` with `forgedock.run=<id>` plus `$FORGE_DOCKER_LABELS`, and removes those containers when the run ends, timeout included), prints a capped pass/fail table and writes `.forge-lean/self-check.json` with `worktreeFingerprint`
    (sha256 of path + blob sha of every path differing from the merge base, committed or not; `.forge-lean/` excluded).
    After the implement call a `fixed` result whose record is not green on the current tree logs `SELF_CHECK_MISSING`
    (`state: skipped|stale|red`); a failed `PRECHECK_COMMANDS` round carries `self_check` (`selfCheckState`). Both are
@@ -3220,3 +3220,5 @@ When a lane's `supersedes` decision lands (after the merge, beside `recordDecisi
 ## Entry 2026-11-12 — `.forge/release.yaml` policy and unit map (#5551)
 
 `release-config.mjs`: `readPolicy` reads only `io.git(["show","origin/<default>:.forge/release.yaml"])` (I13: a head-modified worktree copy is ignored), parses with the vendored js-yaml 4.1.0 (`bin/vendor/js-yaml/`, pin and sha256 in `PIN.md`; `JSON_SCHEMA`, duplicate keys throw), validates closed against `POLICY_SCHEMA` (unknown keys, types, enums, unreachable lanes, dangling unit ids) and rejects the deferred keys (I23, `DEFERRED_KEYS`). Absent file: `source: "forge.yaml"` with `readReleaseConfig` flat keys. `release.mjs` dispatches `release check-config` and `release init` (lazy import; release-config imports `readReleaseConfig` from release.mjs). `release-unitmap.mjs` `resolvePath(policy, path)` returns the owning unit or `"none"`, coupling fan-out, contracts and forces (own glob matcher: `**`, `*`, `?`). Bump the parser: re-vendor, update `PIN.md`.
+
+#5592: the lane's `io.git|gh|docker` (`effects.mjs` `execCapped`) cut stdout at 100 MB with a marker instead of failing `stdout maxBuffer length exceeded` (a commit removing a huge archive killed a lane after it pushed). The echo rule ignores code identifiers in a proof and needs 3+ prose words; the repro messages carry a literal test id. Generated CI path filters use git mode (docs/CONFIG.md).

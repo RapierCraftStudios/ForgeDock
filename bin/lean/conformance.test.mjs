@@ -1834,6 +1834,13 @@ describe("test plan frozen with the contract (#5445)", () => {
     assert.equal(proofEchoesDeliverable("returns 200 JSON instead of 403", D.slice(0, 1)), false);
     assert.equal(proofEchoDetail("the listing json URL is rewritten", D.slice(0, 1)).id, "D1");
   });
+  it("#5592: naming the function under test does not make a proof an echo; a blank repro gets a literal test id example", () => {
+    const d = [{ id: "D1", path: "src/scrape.js", change: "fix fetchListing so the listing url uses old.reddit.com", requirements: ["R1"] }];
+    assert.equal(proofEchoesDeliverable("`fetchListing` returns 403 for www.reddit.com", d), false);
+    assert.equal(proofEchoesDeliverable("fetchListing() fetch_listing listing", d), false, "fewer than 3 prose words left: nothing to judge");
+    assert.equal(proofEchoesDeliverable("the listing url uses old.reddit.com", d), true);
+    assert.match(testPlanProblems(K([row("R1", { repro: "" })])).join(), /e\.g\. `tests\/test_scrape\.py::test_listing_returns_json`/);
+  });
   it("level, its reason and the command are checked; mocking the bug's component is rejected", () => {
     assert.match(testPlanProblems(K([row("R1", { level: "manual" })])).join(), /level must be one of/);
     assert.match(testPlanProblems(K([row("R1", { level_reason: "" })])).join(), /level_reason/);

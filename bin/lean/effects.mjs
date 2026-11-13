@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { chmodSync, readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -296,23 +296,97 @@ export async function requiredChecksRead({ gh, repo, lane }) {
 
 export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
+/** #5592: stdout cap of a lane-path git/gh/docker call; output past it is cut, never an error. */
+export const EXEC_CAPPED_BYTES = 100 * 1024 * 1024;
+/**
+ * #5592: like `execFile` resolving stdout, but a child that prints more than `cap` bytes is stopped and its output
+ * truncated (marker appended) instead of failing with `stdout maxBuffer length exceeded`: a commit that removes a
+ * 485 MB archive made `git diff base...HEAD` kill the lane after it had pushed. A non-zero exit rejects with
+ * {stdout, stderr, code} like execFile, unless the exit came from our own stop (then the capped text is the result).
+ */
+export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_CAPPED_BYTES, spawnFn = spawn } = {}) {
+  return new Promise((res, rej) => {
+    const child = spawnFn(bin, args, { cwd, ...(env ? { env } : {}), stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = []; let size = 0, cut = false, err = "", timedOut = false;
+    const timer = timeout > 0 ? setTimeout(() => { timedOut = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }, timeout) : null;
+    child.stdout.on("data", (b) => {
+      if (cut) return;
+      const room = cap - size;
+      if (b.length > room) { if (room > 0) chunks.push(b.subarray(0, room)); size = cap; cut = true; try { child.kill("SIGTERM"); } catch { /* gone */ } return; }
+      chunks.push(b); size += b.length;
+    });
+    child.stderr.on("data", (b) => { if (err.length < 64000) err += String(b); });
+    child.on("error", (e) => { if (timer) clearTimeout(timer); rej(e); });
+    child.on("close", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      const out = Buffer.concat(chunks).toString("utf8") + (cut ? `\n[forgedock: output truncated at ${cap} bytes]\n` : "");
+      if (cut || code === 0) return res(out);
+      const e = new Error(`Command failed: ${bin} ${args.join(" ")}${timedOut ? " (timed out)" : ""}\n${err}`);
+      Object.assign(e, { code: timedOut ? null : code, signal, killed: timedOut, stdout: out, stderr: err });
+      rej(e);
+    });
+  });
+}
+
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;
-/** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env. */
-export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }) {
+/**
+ * #5592: a docker shim for one check-command run. `docker run|create` gets `--label <runLabel>` (plus every entry of
+ * $FORGE_DOCKER_LABELS) so the containers the run starts can be found, and removed, when the run ends. Resolves the real
+ * docker from the PATH without the shim dir. Returns {dir, label}; the caller removes dir.
+ */
+export function writeDockerRunShim(runId, { tmp = tmpdir(), path = process.env.PATH ?? "" } = {}) {
+  const dir = mkdtempSync(join(tmp, "forge-docker-shim-"));
+  const label = `forgedock.run=${runId}`;
+  const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
+  const rest = path.split(":").filter((d) => d && d !== dir).join(":");
+  writeFileSync(join(dir, "docker"), `#!/bin/sh
+# forgedock check-run docker shim (#5592): label what this run starts so the engine can reap it
+real=$(PATH=${q(rest)} command -v docker) || { echo "docker: not found" >&2; exit 127; }
+case "$1" in
+  run|create)
+    : > ${q(join(dir, "used"))}
+    sub="$1"; shift
+    set -- "$sub" --label ${q(label)} $(for l in $FORGE_DOCKER_LABELS; do printf -- '--label %s ' "$l"; done) "$@"
+    ;;
+esac
+exec "$real" "$@"
+`);
+  chmodSync(join(dir, "docker"), 0o755);
+  return { dir, label };
+}
+/** #5592: force-remove the containers labelled for a check run (best effort; only ever this run's label). */
+export async function reapRunContainers(label, { docker = (args) => pexec("docker", args, { timeout: 60000 }).then((r) => String(r.stdout)) } = {}) {
+  try {
+    const ids = String(await docker(["ps", "-aq", "--filter", `label=${label}`])).split(/\s+/).filter(Boolean);
+    if (ids.length) await docker(["rm", "-f", ...ids]);
+    return ids.length;
+  } catch { return 0; }
+}
+/**
+ * #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env.
+ * #5592: containers the command starts through `docker run|create` carry a per-run label and are removed when the run ends, timeout included.
+ */
+export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, docker = undefined }) {
   return new Promise((done) => {
-    let out = "", timedOut = false, child;
+    let out = "", timedOut = false, child, shim = null;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) }); }
-    catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
+    try { shim = writeDockerRunShim(`${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, { path: env?.PATH ?? process.env.PATH ?? "" }); } catch { shim = null; }
+    const runEnv = shim ? { ...process.env, ...(env ?? {}), PATH: `${shim.dir}:${env?.PATH ?? process.env.PATH ?? ""}` } : (env ? { ...process.env, ...env } : null);
+    const finish = async (r) => {
+      if (shim) { if (existsSync(join(shim.dir, "used"))) await reapRunContainers(shim.label, docker ? { docker } : {}); try { rmSync(shim.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      done(r);
+    };
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(runEnv ? { env: runEnv } : {}) }); }
+    catch (e) { finish({ rc: 127, output: String(e?.message ?? e) }); return; }
     const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
     child.stdout.on("data", add); child.stderr.on("data", add);
-    child.on("error", (e) => { clearTimeout(timer); done({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
+    child.on("error", (e) => { clearTimeout(timer); finish({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
     child.on("close", (code) => {
       clearTimeout(timer);
       const tail = out.slice(-CHECK_OUTPUT_CAP);
-      done(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
+      finish(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
 }
@@ -345,7 +419,7 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
 export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
-  const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
+  const run = (bin) => async (args, opts = {}) => execCapped(bin, args, { cwd: opts.cwd, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) });
   /** #5235: paths the other open PRs on `lane` carry (gh only, no fetch); [] on any failure. */
   const openPrFiles = async (cwd, lane) => {
     try {
