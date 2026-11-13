@@ -489,3 +489,17 @@ describe("release control routing (#5556)", () => {
     await assert.rejects(releaseFromCli(["control", "nope"], { io: { print() {}, gh: async () => "" }, cwd: tmp() }), /unknown control verb/);
   });
 });
+
+describe("release plan routing (#5559)", () => {
+  const POLICY_TEXT = "schema: 1\nbranches: {default: main}\nplan: {approval: wait}\nlanes: {release: {pipeline: existing}}\nmerge: {approval: confirm}\nunits:\n  api: {paths: [\"api/**\"]}\ntrust: {actors: [owner]}\ndeploy: {live_release_command: \"echo live\"}\n";
+  const issue = { number: 5, title: "t", body: "", labels: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z", comments: [{ author: { login: "b" }, body: "<!-- FORGE:CLASSIFY -->\n```json\n{\"type\":\"bug\",\"severity\":\"P2\",\"exists_in\":\"live\",\"confidence\":0.9,\"files\":[\"api/a.py\"]}\n```" }] };
+  const mkIo = (out, gh) => ({ print: (l) => out.push(l), gh: async (a) => { gh.push(a); return a[0] === "issue" ? JSON.stringify([issue]) : JSON.stringify({ nameWithOwner: "o/r" }); }, git: (a) => { if (a[0] === "show") return POLICY_TEXT; throw new Error("none"); }, rehearse: async () => ({ ok: true, output: "abc1234" }), now: () => 1 });
+  it("`release plan --json` is read-only and lists the plan; the bare release options still reject unknown flags", async () => {
+    const out = [], gh = [];
+    assert.equal(await releaseFromCli(["plan", "--json"], { io: mkIo(out, gh), cwd: tmp(), env: { ...process.env, FORGEDOCK_RELEASE_DIR: tmp() } }), 0);
+    const p = JSON.parse(out[0]);
+    assert.equal(p.schema, "forgedock.release.plan/v1"); assert.equal(p.issues[5].lane, "train"); assert.equal(p.live_sha, "abc1234");
+    assert.ok(gh.every((a) => a[0] === "issue" || a[0] === "repo"));
+    await assert.rejects(releaseFromCli(["--bogus"], { io: mkIo([], []), cwd: tmp() }), /unknown option/);
+  });
+});
