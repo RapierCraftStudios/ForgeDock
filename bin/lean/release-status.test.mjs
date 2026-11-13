@@ -70,6 +70,7 @@ describe("release status / explain (#5554)", () => {
       `    forgedock release --resume ${ID} --repo o/r --merge`,
       `    forgedock release hold ${ID} --repo o/r --reason <reason>`,
       `    forgedock release cancel ${ID} --repo o/r --reason <reason>`,
+      `    forgedock release lane ${ID} --repo o/r --force <lane> --reason <reason>`,
       `    forgedock release explain 7 --repo o/r`,
       `    forgedock release explain ${ID} --repo o/r`,
       `    forgedock release status ${ID} --repo o/r --json`,

@@ -18,7 +18,7 @@ export const SKIP_LABELS = ["epic", "needs-human", "post-deploy", "workflow:merg
 const STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
 export const CONTROL_VERBS = ["hold", "resume", "cancel", "rollback", "lane"];
 const OK = ["success", "neutral", "skipped"];
-const ACTION_FLAGS = ["--repo", "--merge", "--watch", "--resume", "--json", "--interval", "--reason"];
+const ACTION_FLAGS = ["--repo", "--merge", "--watch", "--resume", "--json", "--interval", "--reason", "--force"];
 const unk = (v) => (v === undefined || v === null || v === "" ? "unknown" : v);
 const json = (s) => JSON.parse(String(s || "null"));
 
@@ -90,6 +90,7 @@ function nextActions(s) {
     if (s.pr?.gate?.marker === "pass") out.push(`forgedock release --resume ${s.id} ${r} --merge`);
     out.push(s.hold === true ? `forgedock release resume ${s.id} ${r} --reason <reason>` : `forgedock release hold ${s.id} ${r} --reason <reason>`);
     out.push(`forgedock release cancel ${s.id} ${r} --reason <reason>`);
+    out.push(`forgedock release lane ${s.id} ${r} --force <lane> --reason <reason>`);
   }
   if (s.steps?.find((x) => x.step === "promotion")?.done) out.push(`forgedock release rollback ${s.id} ${r} --reason <reason>`);
   if (s.pr) out.push(`forgedock release explain ${s.pr.number} ${r}`);
