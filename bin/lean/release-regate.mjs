@@ -20,7 +20,7 @@ export const IMAGE_PATH = /(^|\/)(Dockerfile[^/]*|[^/]*\.dockerfile|docker-compo
 export const WORKFLOW_PATH = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 const reOf = (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\//g, "\u0000").replace(/\*\*/g, "\u0001").replace(/\*/g, "[^/]*").replace(/\u0000/g, "(?:.*/)?").replace(/\u0001/g, ".*")}$`);
-export const matchesAny = (path, globs) => globs.some((g) => reOf(g).test(path));
+export const releaseRegateMatchesAny = (path, globs) => globs.some((g) => reOf(g).test(path));
 
 /**
  * @param {string[]} changedPaths files changed between the failed release sha and the candidate fix
@@ -32,12 +32,12 @@ export function classifyGateOnly(changedPaths, policy, { workflowSteps = {} } = 
   const cfg = parseGatesConfig(policy), offenders = [];
   for (const path of changedPaths) {
     let kind = null;
-    if (matchesAny(path, MIGRATION_PATHS)) kind = "migration";
+    if (releaseRegateMatchesAny(path, MIGRATION_PATHS)) kind = "migration";
     else if (IMAGE_PATH.test(path)) kind = "image";
     else if (WORKFLOW_PATH.test(path)) {
       const steps = workflowSteps[path];
       if (!Array.isArray(steps) || !steps.length || steps.some((s) => s == null || !cfg.workflowSteps.includes(s))) kind = "workflow-hunk";
-    } else if (!matchesAny(path, cfg.paths)) kind = "app";
+    } else if (!releaseRegateMatchesAny(path, cfg.paths)) kind = "app";
     if (kind) offenders.push({ path, kind });
   }
   return { gateOnly: !!changedPaths.length && !offenders.length, offenders };
