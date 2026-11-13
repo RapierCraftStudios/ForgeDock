@@ -75,6 +75,9 @@ domains:
       - path: decisions/5559-release-plan.md
         authority: recommended
         token_cost: 450
+      - path: decisions/5571-release-start.md
+        authority: recommended
+        token_cost: 450
 
   devdocs:
     description: "Devdocs system, frontmatter schema, selective loading, index format"

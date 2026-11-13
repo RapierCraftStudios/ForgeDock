@@ -111,6 +111,7 @@ import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
+import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure } from "./validate-catalog.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -295,7 +296,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -365,7 +366,8 @@ export async function runCore(o) {
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
-    phaseLedger.addModel(phase === "review" ? "review" : stage === "plan" ? "plan" : "implement", rec.duration_ms, c.delta);
+    const ledgerNow = phaseLedger.current(); // #5649: model time of contract and fix calls lands in those phases
+    phaseLedger.addModel(phase === "review" ? "review" : ledgerNow === "contract" || ledgerNow === "fix" ? ledgerNow : stage === "plan" ? "plan" : "implement", rec.duration_ms, c.delta);
     const u = r?.usage ?? {};
     usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
@@ -646,6 +648,7 @@ export async function runCore(o) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
     }
+    if (recover) { try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", "workflow:recovering"]); } catch { /* best effort (#5647): the batch re-marks a requeued attempt */ } }
     if (["merged", "invalid", "needs-human", "budget-exceeded"].includes(reason)) {
       if (reason === "budget-exceeded") T.close = ["left open", "recoverable budget.exceeded"]; // #4505: not a human escalation
       else if (reason === "merged") T.close = [extra.keptOpen ? "left open (follow-up pending)" : extra.close === "partial" ? "issue closed (partial)" : "issue closed (completed)", "label workflow:merged"]; // #5159
@@ -2045,7 +2048,8 @@ export async function runCore(o) {
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
-    async function fixRound(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
+    function fixRound(...a) { return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
+    async function fixRoundRaw(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
       await notePitfall(trigger, failureText); await escalateOn(trigger); // #4375: learned once the same gate passes; #4394
       if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
@@ -2215,7 +2219,7 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        if (ffPlan === "contract") await builder(++attemptN, contractStepPrompt(issue, tcOpts()) + recoverNote() + decisionsNote, sessionId, true, planPrompt, { mode: "resume", trigger: "plan" }); // #5426: same session, investigation already written
+        if (ffPlan === "contract") await phaseLedger.during("contract", () => builder(++attemptN, contractStepPrompt(issue, tcOpts()) + recoverNote() + decisionsNote, sessionId, true, planPrompt, { mode: "resume", trigger: "plan" })); // #5426: same session, investigation already written
         else if (ffPlan === "full") { const tPrompt = now(), planText = planPrompt(); setupStep("prompt_assembly", tPrompt); await builder(++attemptN, planText + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" }); }
         planned = true;
         result = await readResult();
@@ -2267,7 +2271,19 @@ export async function runCore(o) {
         const freezeBase = pagesConfig ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null; // #5648
         const freezeCheckIds = await (async () => { try { return new Set(Object.keys(await checksAt(git, [base], wt))); } catch { return null; } })(); // first-pass: the base's registered post-deploy check ids
         let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
-        const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
+        const found0 = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
+        let missed = found0;
+        // #5653: an unrunnable command is rewritten from the repo catalogue (forge.yaml recipes first, then CI-derived) before any builder correction
+        if (found0.length) {
+          const texts = (validateCatalogSources ?? DEFAULT_CATALOG_SOURCES).map(wtRead);
+          const rw = rewriteMissed(contract, mergeRecipes(validateRecipes, deriveCatalog(texts)), found0.flatMap((m) => m.ids ?? []), applyValidateRecipes);
+          if (rw.applied.length) {
+            contract = snapContract(rw.contract);
+            for (const x of rw.applied) T.decisions.push(`validate catalogue rewrote unrunnable ${x.id}: \`${x.from}\` -> \`${x.to}\``);
+            vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+            missed = await preflightValidates(contract);
+          }
+        }
         let misses = missed;
         const correctContract = async (problems, note) => {
           T.decisions.push(`Contract rejected (${problems[0]}); ${note}`);
@@ -2293,8 +2309,8 @@ export async function runCore(o) {
         }
         if (!vc.ok) ev({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }), await emit({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }); // #5587: per-rule counts for the batch false-park rate
         planMisses = misses;
-        if (missed.length) {
-          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
+        if (found0.length) {
+          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: found0.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
           if (misses.length) {
             T.anomalies.push(`Validate preflight: the host lacks ${misses.map((m) => m.tool).join(", ")} after the contract correction (advisory; a failed rerun ends env.tool_missing)`);
             T.decisions.push(`Validate preflight left ${misses.length} miss(es) after one correction; contract frozen anyway`);
@@ -3017,6 +3033,27 @@ export async function runCore(o) {
           const note = `Validate ${v.id} hit a runner usage error; reran normalised (\`${fixed}\`): exit ${x?.rc}`;
           if (!T.decisions.includes(note)) T.decisions.push(note);
         }
+        // #5653: a stale generated artifact (base drift) is mechanical: base-sync (a clean merge of the lane tip), then the repo's configured regenerate command, then one rerun
+        if (x && x.rc !== 0 && x.rc !== 124 && isDriftFailure(x.output)) {
+          try {
+            const rerunV = async () => await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r);
+            let note = "";
+            if (Number(String(await git(["rev-list", "--count", `HEAD..${base}`]).catch(() => "0")).trim()) > 0) {
+              try { await git(["merge", "--no-edit", base]); note = `base-synced onto ${base}`; } catch { await git(["merge", "--abort"]).catch(() => {}); }
+              if (note) { const again = await rerunV(); if (again?.rc === 0) { x = again; T.decisions.push(`Validate ${v.id} failed on a stale generated artifact; ${note} and the rerun passed (base drift, not a conformance failure)`); } }
+            }
+            if (validateRegenerate && x.rc !== 0) {
+              const status = async () => String(await git(["status", "--porcelain"]).catch(() => "")).split("\n").filter(Boolean);
+              const before = new Set(await status());
+              await heavyStep("precheck", () => io.runCommand({ command: forgedockResolved(validateRegenerate), cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env }));
+              const added = (await status()).filter((l) => !before.has(l)); // regeneration must leave nothing new to commit: the lane's diff stays its own
+              if (!added.length) {
+                const again = await rerunV();
+                if (again?.rc === 0) { x = again; T.decisions.push(`Validate ${v.id} failed on a stale generated artifact; ${note ? `${note}, ` : ""}\`${validateRegenerate}\` then a rerun passed (base drift, not a conformance failure)`); }
+              } else for (const l of added.filter((l) => /^ M /.test(l))) await git(["checkout", "--", l.slice(3)]).catch(() => {}); // undo only the files regeneration modified
+            }
+          } catch { /* fail-open: the original failure stands */ }
+        }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
       }
       if (Object.keys(out).length) ev({ event: "VALIDATE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
@@ -3032,6 +3069,11 @@ export async function runCore(o) {
         let x;
         try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.substituted.from), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
+        // #5653: the substitute runs too, so conformance can judge "same test ids, same result" (equivalentRuns)
+        if (out[v.id].rc !== 0 && out[v.id].rc !== 124) {
+          let y; try { y = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch { y = null; }
+          if (y) out[v.id].sub = { rc: Number.isInteger(y.rc) ? y.rc : 1, output: String(y.output ?? "") };
+        }
       }
       if (Object.keys(out).length) ev({ event: "SUBSTITUTE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
       return out;

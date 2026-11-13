@@ -555,3 +555,17 @@ describe("release plan routing (#5559)", () => {
     await assert.rejects(releaseFromCli(["--bogus"], { io: mkIo([], []), cwd: tmp() }), /unknown option/);
   });
 });
+
+describe("release start|go routing (#5571)", () => {
+  const POLICY_TEXT = "schema: 1\nbranches: {default: main}\nlanes: {release: {pipeline: existing}}\nunits:\n  api: {paths: [\"api/**\"]}\ntrust: {actors: [owner]}\n";
+  const mkIo = (out, gh) => ({ print: (l) => out.push(l), gh: async (a) => { gh.push(a); return a[0] === "repo" ? JSON.stringify({ nameWithOwner: "o/r" }) : "[]"; }, git: (a) => (a[0] === "show" ? POLICY_TEXT : "abc1234\n"), now: () => 1_700_000_000_000 });
+  const opts = (out, gh) => ({ io: mkIo(out, gh), cwd: tmp(), env: { ...process.env, FORGEDOCK_RELEASE_DIR: tmp() } });
+  it("an unmanaged `start` and `go <id>` make no GitHub writes; `go` needs an id; a bad --wave is rejected", async () => {
+    const out = [], gh = [];
+    assert.equal(await releaseFromCli(["start"], opts(out, gh)), 0);
+    assert.equal(await releaseFromCli(["go", "r1"], opts(out, gh)), 0);
+    assert.ok(out.every((l) => /unmanaged/.test(l)) && gh.every((a) => a[0] === "repo"));
+    await assert.rejects(releaseFromCli(["go"], opts([], [])), /release id/);
+    await assert.rejects(releaseFromCli(["start", "--wave", "x"], opts([], [])), /--wave/);
+  });
+});

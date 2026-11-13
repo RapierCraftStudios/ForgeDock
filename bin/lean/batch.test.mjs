@@ -11,7 +11,7 @@ import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { providerLanes } from "./execution.mjs";
-import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
+import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
@@ -324,6 +324,45 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
     assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1);
     assert.match(relabels[0].evidence, /the batch stopped \(interrupted by SIGINT\)/);
     assert.deepEqual(removed.sort(), ["SIGINT", "SIGTERM"]);
+  });
+
+  describe("makeMarkRecovering (#5647)", () => {
+    const hook = (failOn = null, labels = ["needs-human", "workflow:recovering"]) => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.join(" "));
+        if (failOn && a.join(" ").includes(failOn)) throw new Error("boom");
+        if (a[1] === "view" && a.includes("labels")) return JSON.stringify({ labels: labels.map((name) => ({ name })) });
+        if (a[1] === "view") return JSON.stringify({ comments: [] });
+        return "";
+      };
+      return { calls, run: () => makeMarkRecovering({ gh, repo: "o/r" })({ issue: 7, code: "ci.red", attempt: 1, max: 2 }) };
+    };
+    it("adds workflow:recovering, reads it back, then removes needs-human and posts the attempt comment", async () => {
+      const h = hook();
+      assert.equal(await h.run(), true);
+      const i = (x) => h.calls.findIndex((c) => c.includes(x));
+      assert.ok(i("label create workflow:recovering") < i("--add-label workflow:recovering"));
+      assert.ok(i("--add-label workflow:recovering") < i("--remove-label needs-human,needs-human:external"));
+      assert.ok(h.calls.some((c) => c.includes("attempt 1/2")));
+    });
+    it("a failed add keeps needs-human and rolls the label back", async () => {
+      const h = hook("--add-label");
+      assert.equal(await h.run(), "failed");
+      assert.ok(!h.calls.some((c) => c.includes("--remove-label needs-human")));
+    });
+    it("an add that did not read back keeps needs-human", async () => {
+      const h = hook(null, ["needs-human"]);
+      assert.equal(await h.run(), "failed");
+      assert.ok(!h.calls.some((c) => c.includes("--remove-label needs-human")));
+    });
+    it("the final needs-human relabel removes workflow:recovering after the skip checks", async () => {
+      const calls = [];
+      const gh = async (a) => { calls.push(a.join(" ")); return a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "" }) : ""; };
+      await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" });
+      assert.ok(calls.some((c) => c.includes("--add-label needs-human") && c.includes("--remove-label workflow:recovering")));
+      assert.ok(calls[0].includes("view"));
+    });
   });
 
   describe("makeRelabelNeedsHuman", () => {

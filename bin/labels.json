@@ -45,6 +45,11 @@
     "description": "Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock."
   },
   {
+    "name": "workflow:recovering",
+    "color": "C5DEF5",
+    "description": "Pipeline: automatic recovery in flight (no human action needed). Managed by ForgeDock."
+  },
+  {
     "name": "workflow:awaiting-merge",
     "color": "FF8C00",
     "description": "Pipeline: remediated + re-reviewed, awaiting a human merge decision. Managed by ForgeDock."

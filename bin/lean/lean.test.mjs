@@ -1314,6 +1314,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     const r = await run(w, { recover: { code: "ci.red", attempt: 1 } });
     assert.equal(r.terminalReason, "merged");
     assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label needs-human"));
+    assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label workflow:recovering"), "#5647: the recovery lane's end clears workflow:recovering");
     const dec = w.comments.find((c) => c.startsWith("<!-- FORGE:DECISION -->"));
     assert.match(dec, /recovery pass for `ci\.red`/); assert.match(dec, /\*\*Why\*\*/); assert.match(dec, /\*\*Alternative\*\*/);
     assert.ok(builders(w).some((b) => /Recovery pass \(ci\.red\): .*--log-failed/.test(b[4])));
@@ -4789,6 +4790,24 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("node --test --test-reporter=dot test/foo.test.js")));
   });
 
+  it("#5653 a validate command freeze preflight finds unrunnable is rewritten from the CI-derived catalogue before any builder correction", async () => {
+    const d = tmpDir("lean-5653-"); const src = join(d, "ci.yml"); writeFileSync(src, "run: uv run --with-requirements r.txt pytest tests\n");
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "poetry run pytest t.py" }] };
+    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /poetry/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: d, validateCatalogSources: [`../..${src}`] });
+    assert.notEqual(r.code, "env.tool_missing");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("uv run --with-requirements r.txt pytest t.py")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("poetry run pytest")));
+  });
+
+  it("#5653 the plan prompt tells the builder to prefer CI commands, record equivalent substitutes and never narrow time or production criteria", async () => {
+    const { unrunnableValidateNote } = await import("./prompts.mjs");
+    const n = unrunnableValidateNote();
+    assert.match(n, /CI-derived command catalogue/);
+    assert.match(n, /same test ids with the same result is recorded/);
+    assert.match(n, /never narrow it/);
+  });
+
   // ---- #4112 ----
   const fakeCli = async (name, body) => {
     const { writeFileSync, chmodSync } = await import("node:fs");
@@ -7150,7 +7169,7 @@ describe("#4362 attempt triggers", () => {
     const builderSites = at(/builder\(\+\+attemptN,/), fixSites = at(/fixRound\("/), attemptSites = at(/attempt\("(?!implement)/);
     assert.ok(builderSites.length >= 9 && fixSites.length >= 9 && attemptSites.length >= 2, "the call sites were found");
     const known = (lit, l, n) => assert.ok(lit && TRIGGERS.includes(lit), `lean.mjs:${n} passes no known trigger: ${l.trim().slice(0, 120)}`);
-    const fixLines = at(/async function fixRound\(/)[0][1];
+    const fixLines = at(/async function fixRoundRaw\(/)[0][1];
     for (const [l, n] of builderSites) {
       if (n > fixLines && n < fixLines + 10 && /trigger \}\)/.test(l)) continue; // fixRound forwards its own trigger, checked below
       known(/trigger: "([a-z_]+)"/.exec(l)?.[1], l, n);
