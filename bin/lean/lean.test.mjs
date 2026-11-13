@@ -1225,7 +1225,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
     assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
-    assert.match(nhBody(w), /still invalid after one correction/);
+    assert.match(nhBody(w), /still invalid after \d+ correction\(s\)/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
     assert.equal((await run(w2)).terminalReason, "merged");
   });
@@ -2178,8 +2178,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 2625: #5557 (classification record line). 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2625, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
+    assert.ok(approxTokens(plan) <= 2650, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1875, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2668,7 +2668,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2500, `plan prompt is ${approxTokens(plan)} tokens`); // 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2550, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 1850, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -3490,6 +3490,32 @@ describe("base-sync (#4100)", () => {
     assert.equal(w.merges.length, 1);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     noRebaseNoForce(w);
+  });
+
+  it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      return git(a, o);
+    };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1, "no re-review for a documentation-only conflict");
+    assert.match(syncComment(w), /not required \(documentation-only conflicts; lane code diff unchanged\)/);
+  });
+
+  it("#5583 follow-up: a documentation-only conflict whose resolution changed the code diff is re-reviewed", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git; let n = 0;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return `diff --git a/src/foo.js b/src/foo.js\n+fix${n++}`;
+      return git(a, o);
+    };
+    await run(w);
+    assert.equal(reviewers(w).length, 2, "re-review: the resolution touched code");
   });
 
   it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
@@ -7888,7 +7914,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 1850, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2500, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2550, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

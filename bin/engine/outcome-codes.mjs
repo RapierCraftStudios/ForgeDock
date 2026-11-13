@@ -236,7 +236,7 @@ function classifyNeedsHumanBase(row) {
   if (outcome === "budget-exceeded") return "recoverable";
   if (outcome !== "needs-human") return "terminal";
   if (HUMAN_CODES.includes(row.code)) return "human";
-  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true || row.quoteMismatch === true ? "recoverable" : "terminal";
+  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return "recoverable"; // #5623: a fresh plan (one recovery requeue) before a person is asked
   return RECOVERABLE_CODES.includes(row.code) ? "recoverable" : "terminal";
 }
 

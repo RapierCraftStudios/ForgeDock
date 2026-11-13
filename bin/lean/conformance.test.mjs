@@ -2082,3 +2082,37 @@ describe("#5547 live-infra, paid and host-load e2e rows", () => {
     assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "post-deploy" }), { body: "<!-- FORGE:CONTRACT -->\n{}" }]).applied.length, 0, "a decision older than the contract is ignored");
   });
 });
+
+describe("#5623: builder-correctable contract problems", () => {
+  it("contractSelfCorrectable: shape problems are builder-correctable; a quote-only mismatch is not", async () => {
+    const { contractSelfCorrectable } = await import("./lean.mjs");
+    assert.equal(contractSelfCorrectable(["R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim", "R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim"]), false);
+    assert.equal(contractSelfCorrectable([]), false);
+  });
+  it("classifyNeedsHuman: contract.invalid is recoverable (one fresh-plan requeue), with or without an issue edit", async () => {
+    const { classifyNeedsHuman, OUTCOME_CODES } = await import("../engine/outcome-codes.mjs");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID, issueEdited: true }), "recoverable");
+  });
+});
+
+describe("first-pass: an unregistered post-deploy check id fails at freeze, not after the build", () => {
+  const issue = "The schedd answers status in under 1 s under load.";
+  const row = (extra = {}) => ({ requirements: [{ id: "R1", quote: "The schedd answers status in under 1 s under load.", disposition: "post-deploy", why: "needs a loaded host", bucket: "post-deploy", check: "schedd-status-under-load", local_infeasible_why: "needs real host load" }], deliverables: [{ id: "D1", path: "bin/x.mjs", change: "x", requirements: ["R1"] }], ...extra });
+  const files = (json) => new Set(Object.keys(JSON.parse(json)));
+  it("an id absent from the checks file and not delivered is a freeze problem naming the fix", () => {
+    const v = validateContract(row(), issue, { checkIds: files('{"login-smoke":{"run":"true"}}') });
+    assert.ok(v.problems.some((p) => /R1: post-deploy check 'schedd-status-under-load' is not registered[\s\S]*login-smoke/.test(p)), v.problems.join("\n"));
+  });
+  it("a registered id, or a deliverable that adds the checks file, passes this rule", () => {
+    const reg = validateContract(row(), issue, { checkIds: files('{"schedd-status-under-load":{"run":"true"}}') });
+    assert.ok(!reg.problems.some((p) => /is not registered/.test(p)));
+    const del = validateContract(row({ deliverables: [{ id: "D1", path: "bin/x.mjs", change: "x", requirements: ["R1"] }, { id: "D2", path: ".forge/post-deploy-checks.json", change: "register it", requirements: ["R1"] }] }), issue, { checkIds: files("{}") });
+    assert.ok(!del.problems.some((p) => /is not registered/.test(p)));
+  });
+  it("without checkIds (not resolved) the rule is skipped", () => {
+    assert.ok(!validateContract(row(), issue).problems.some((p) => /is not registered/.test(p)));
+  });
+});

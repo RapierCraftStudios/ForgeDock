@@ -47,6 +47,14 @@ describe("validate", () => {
   });
 });
 
+describe("ci.fix (#5567)", () => {
+  it("accepts max_rounds, co_start and full_run_workflow; rejects unknown keys and a non-integer max_rounds", () => {
+    assert.deepEqual(check(OK.replace("ci:\n", "ci:\n  fix: {max_rounds: 1, co_start: true, full_run_workflow: full.yml}\n")), []);
+    assert.match(check(OK.replace("ci:\n", "ci:\n  fix: {bogus: 1}\n")).join(), /bogus: unknown key/);
+    assert.notDeepEqual(check(OK.replace("ci:\n", "ci:\n  fix: {max_rounds: x}\n")), []);
+  });
+});
+
 describe("I23 deferred keys are rejected", () => {
   const cases = {
     "plan.auto_if": "plan: {auto_if: x}\n", "retention_days": "retention_days: 30\n", "ci.forbid_per_issue_steps": "ci: {forbid_per_issue_steps: true}\n",
@@ -105,5 +113,38 @@ describe("CLI", () => {
   it("accepts the flake and quarantine policy keys (#5568)", () => {
     assert.deepEqual(check(`${OK}  flake: {quarantine_after: 3, window_days: 14}\nquarantine: {days: 14, max: 15}\n`.replace("ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake", "ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake")), []);
     assert.notDeepEqual(check(`${OK}quarantine: {max: x}\n`), []);
+  });
+  it("accepts the verification layer keys and rejects a bad result kind (#5562)", () => {
+    assert.deepEqual(check(`${OK}verify:\n  workflow: verify.yml\n  close_requires: verified\n  results: [{workflow: smoke.yml, kind: smoke}]\n  flags: [{flag: F, off_command: x}]\n`), []);
+    assert.notDeepEqual(check(`${OK}verify:\n  results: [{workflow: s.yml, kind: nope}]\n`), []);
+  });
+});
+
+describe("gates catalogue and policy (#5583)", () => {
+  const GATE = `schema: 1\ngates:\n  - {id: g1, protects_against: "#1", where: deploy, determinism: high, pre_merge_artifact: f.json, version: v1, mode: block, owner: me, review_by: 2027-01-01}\n`;
+  const gio = (files) => ({ printed: [], print(l) { this.printed.push(l); }, git(a) { const t = files[a[1].split(":").slice(1).join(":")]; if (t === undefined) throw new Error("missing"); return t; } });
+  it("accepts the gates policy keys and rejects a wrong type", () => {
+    assert.deepEqual(check(OK + "gates: {demote_fb_rate: 5, demote_window: 20, safety: [a]}\n"), []);
+    assert.match(check(OK + "gates: {demote_window: 2.5}\n").join(), /demote_window/);
+  });
+  it("check-config reports catalogue errors, passes a valid one, ignores an absent one", () => {
+    const bad = gio({ ".forge/gates.yaml": GATE.replace("mode: block", "mode: nope"), [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: bad }), 1);
+    assert.match(bad.printed.join("\n"), /gates\.yaml: gates\[0\]\.mode/);
+    const good = gio({ ".forge/gates.yaml": GATE, [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: good }), 0);
+    const none = gio({ [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: none }), 0);
+    assert.doesNotMatch(none.printed.join("\n"), /gates/);
+  });
+});
+
+describe("rollback and events keys (#5563)", () => {
+  const rb = "rollback:\n  ladder: [flag, unit, full, stop]\n  triggers: [smoke, sli]\n  refuse_across: [destructive_migration]\n  open_revert_pr: true\n  flags: [{flag: f1, kill_command: ./kill}]\n  unit_workflow: svc.yml\n  full_workflow: rb.yml\n  result_command: ./res\nevents: {webhook_url: https://x.test/h}\n";
+  it("accepts the typed ladder keys", () => assert.deepEqual(check(`${OK}${rb}`), []));
+  it("rejects an unknown rung, trigger and key", () => {
+    assert.match(check(`${OK}rollback: {ladder: [nuke]}\n`).join("\n"), /ladder\[0\].*not one of/);
+    assert.match(check(`${OK}rollback: {triggers: [moon]}\n`).join("\n"), /triggers\[0\]/);
+    assert.match(check(`${OK}rollback: {sql: x}\n`).join("\n"), /rollback\.sql: unknown key/);
   });
 });

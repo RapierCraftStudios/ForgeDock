@@ -89,6 +89,12 @@ test("#5313 a release in flight pauses the watch (no claims), the next pass resu
   assert.match(formatStatus(s, watch, io.now()), /state: exited \(single pass/);
 });
 
+test("#5560 releaseInFlight: an unconfigured (trace-less) deploy is not the pending step after post-merge", () => {
+  const env = tmpDir("iwp-"), root = join(env, "releases"), done = { done: true };
+  relDir(env, "r20261110-120000-1", { repo: "o/r", steps: { preflight: done, "host-preflight": done, "release-pr": done, review: done, fixes: done, "mark-ready": done, rehearsal: done, promotion: done, "post-merge": done } }, 60000);
+  assert.equal(releaseInFlight({ root, repo: "o/r", now: NOW }).step, null);
+});
+
 test("#5313 watchLiveness: a fresh heartbeat runs, an old one is dead, a finished watch is done", () => {
   const beat = (ms) => new Date(NOW - ms).toISOString();
   assert.equal(watchLiveness({ phase: "running", heartbeat: beat(1000), heartbeatEveryMs: 300000 }, NOW).state, "running");

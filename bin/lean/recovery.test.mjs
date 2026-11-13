@@ -161,10 +161,10 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.deepEqual(seen.sort(), [[1, 101], [2, 102]]);
   });
 
-  it("contract.invalid recovers only when the issue was edited mid-run", async () => {
-    const { rows, calls } = await batch({ 1: [NH("contract.invalid", "contract invalid", { issueEdited: true }), { terminalReason: "merged" }], 2: [NH("contract.invalid")] });
+  it("#5623: contract.invalid recovers with a fresh plan whether or not the issue was edited mid-run", async () => {
+    const { rows, calls } = await batch({ 1: [NH("contract.invalid", "contract invalid", { issueEdited: true }), { terminalReason: "merged" }], 2: [NH("contract.invalid"), { terminalReason: "merged" }] });
     assert.equal(byIssue(rows)[1].recovered, "contract.invalid");
-    assert.equal(byIssue(rows)[2].outcome, "needs-human"); assert.equal(calls.filter((c) => c.n === 2).length, 1);
+    assert.equal(byIssue(rows)[2].recovered, "contract.invalid"); assert.equal(byIssue(rows)[2].outcome, "merged"); assert.equal(calls.filter((c) => c.n === 2).length, 2);
   });
 
   it("relabelNeedsHuman (SPEC-7/8): only a recovery that ends final engine-error/deferred relabels; invalid/merged never; a requeued deferred waits", async () => {

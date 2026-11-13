@@ -558,7 +558,7 @@ export function testPlanProblems(c, { required = false } = {}) {
 
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -572,6 +572,11 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     if (!inIssue(r?.quote, issueText)) problems.push(quoteMiss(id, r?.quote, issueText));
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
+    if (r?.disposition === "post-deploy" && !r?.e2e_tracked && !r?.engine_check && CHECK_ID_RE.test(String(r?.check ?? "")) && checkIds) { // first-pass: an unregistered check id fails at freeze, not after the build (precheck check_unknown); checkIds = the base's check ids, as precheck reads them
+      const known = [...checkIds];
+      const delivers = (Array.isArray(c.deliverables) ? c.deliverables : []).some((d) => String(d?.path ?? "").replace(/^\.\//, "") === ".forge/post-deploy-checks.json");
+      if (!known.includes(r.check) && !delivers) problems.push(`${id}: post-deploy check '${r.check}' is not registered in .forge/post-deploy-checks.json; either add a deliverable {"path":".forge/post-deploy-checks.json","change":"register check ${r.check} (run, pass, timeout)"} or use an existing id${known.length ? ` (${known.slice(0, 8).join(", ")}${known.length > 8 ? ", ..." : ""})` : ""}`);
+    }
     if (r?.disposition === "post-deploy" && blank(r?.local_infeasible_why)) problems.push(`${id}: post-deploy needs local_infeasible_why: why a fixture or recorded response cannot check this locally (#5448)`);
     if (r?.disposition === "post-deploy" && (inLaneDeferral(r) || (bucketKind(r?.bucket) !== "owner" && bucketKind(r?.bucket) !== "host" && DEV_WORK_RE.test(String(r?.quote ?? ""))))) problems.push(`${id}: development work (finding or fixing the signal) is delivered in-lane, never deferred as prod-only; deliver it and keep only the measurement post-deploy (#5448)`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
@@ -1480,7 +1485,7 @@ export function autoPostDeployE2e(contract, only = null) {
       return { ...r, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "the observable is a production observation window with no probeable URL", why: "production observation window: read-only production telemetry, no probeable URL (#5524)" };
     }
     converted.push({ id: r.id, check: g.id, entry: g.entry });
-    return { ...r, disposition: "post-deploy", bucket: "post-deploy", check: g.id, local_infeasible_why: "the observable exists only in production (live domain or deploy), so no local fixture can check it", why: "production-only e2e/manual criterion: converted by the engine to a post-deploy check (#5468)" };
+    return { ...r, disposition: "post-deploy", bucket: "post-deploy", check: g.id, engine_check: true, local_infeasible_why: "the observable exists only in production (live domain or deploy), so no local fixture can check it", why: "production-only e2e/manual criterion: converted by the engine to a post-deploy check (#5468)" };
   });
   return { contract: converted.length ? { ...contract, requirements } : contract, converted };
 }

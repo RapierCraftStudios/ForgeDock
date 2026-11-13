@@ -307,8 +307,8 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
   it("human: builder.blocked (product-decision, spend, credentials, promotion, customer)", () => {
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "builder.blocked" }), "human");
   });
-  it("terminal: other codes, unedited contract.invalid, plain ci-pending, unknown and non-needs-human rows", () => {
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "terminal");
+  it("terminal: other codes, plain ci-pending, unknown and non-needs-human rows (#5623: contract.invalid is recoverable)", () => {
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "recoverable");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.regression" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "nope" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "needs-human" }), "terminal");
