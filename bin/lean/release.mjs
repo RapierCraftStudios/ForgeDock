@@ -291,6 +291,11 @@ async function promotionStep(ctx) {
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
   if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate, fence: ctx.fence });
   if (gate.fenced) return { refused: gate.fenced, head };
+  if (gate.deployGate === "failure" && ctx.config.managed && io.git) { // #5568: policy loaded lazily (release-config imports this module)
+    const { readPolicy } = await import("./release-config.mjs");
+    const policy = readPolicy({ io, defaultBranch: ctx.def }).policy;
+    await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+  }
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }
   if (gate.deployGate !== "success") return { stopped: true, why: `forge/deploy-gate is ${gate.deployGate ?? "absent"}, not success${gate.deployGate === "failure" ? "" : ` after ${GATE_POLLS} polls`}`, head, gate };

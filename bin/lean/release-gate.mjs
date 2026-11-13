@@ -7,9 +7,10 @@
  * `mergeGuard` is the MERGING guard. Every function fails closed on unreadable input.
  */
 import { checkChain } from "./release-snapshot.mjs";
+import { assertRole } from "./release-credentials.mjs";
 
 export const GATE_CHECK = "forge/release-gate";
-const PASS_VERDICTS = ["pass", "approve", "approved"];
+const PASS_VERDICTS = ["pass", "approve", "approved", "approve for deploy"]; // the last is the review-staging verdict (bin/review-staging.mjs:650)
 
 /**
  * Pass only when every required check concluded `success` on exactly `head` (neutral, skipped, missing and other-sha runs do
@@ -74,4 +75,14 @@ export async function mergeGuard({ io, repo, head, state, policy, staging }) {
   const chain = checkChain({ git: io.git, record: state.release, sha: head, staging, exact: true });
   if (!chain.ok) return no(`release head ${head} is not snapshot + recorded cherry-picks: ${chain.why}`);
   return { ok: true };
+}
+
+/**
+ * The sole in-repo writer of the `forge/release-gate` check run (the gate workflow normally posts it): refused unless the context holds the `gate` role (I12).
+ * @returns {Promise<{posted: true}>} throws `{refused}` for any other role
+ */
+export async function postReleaseGate({ io, ctx, repo, head, conclusion }) {
+  assertRole(ctx, "gate-post");
+  await io.gh(["api", `repos/${repo}/check-runs`, "-f", `name=${GATE_CHECK}`, "-f", `head_sha=${head}`, "-f", "status=completed", "-f", `conclusion=${conclusion}`]);
+  return { posted: true };
 }

@@ -58,6 +58,17 @@ describe("unmanaged release carries no epoch (#5553)", () => {
   });
 });
 
+describe("legacy managed promotion without a fence (#5561 regression)", () => {
+  it("a failing deploy-gate still reads the policy to rerun infra flakes (as before the managed split)", async () => {
+    const mod = await import("./release.mjs");
+    const io = fakeIo({ gate: "failure" });
+    const shown = [];
+    io.git = (a) => { if (a[0] === "show") shown.push(a[1]); throw new Error("no git"); };
+    await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: { managed: true }, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    assert.ok(shown.some((x) => x.startsWith("origin/main:")), "policy read for the flake rerun");
+  });
+});
+
 describe("release job (#5211)", () => {
   const promote = async (world, { opts = {}, config = {} } = {}) => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();

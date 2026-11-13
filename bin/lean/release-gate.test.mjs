@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeGate, readReleaseGate, mergeGuard, GATE_CHECK } from "./release-gate.mjs";
+import { computeGate, readReleaseGate, mergeGuard, postReleaseGate, GATE_CHECK } from "./release-gate.mjs";
 
 const H = "a".repeat(40), OLD = "b".repeat(40);
 const run = (name, conclusion, head = H) => ({ name, conclusion, head });
@@ -98,5 +98,19 @@ describe("mergeGuard (#5561)", () => {
     const r = await mergeGuard({ io: { ...ioWith(checks), git }, repo: "o/r", head: H, state: state({ release: rec }), policy, staging: "staging" });
     assert.equal(r.ok, false);
     assert.match(r.why, /not snapshot \+ recorded cherry-picks/);
+  });
+});
+
+describe("real review verdict and gate posting (#5561)", () => {
+  it("the review-staging verdict APPROVE FOR DEPLOY passes computeGate; REQUEST CHANGES does not", () => {
+    const base = { checks: [run("ci", "success")], required: ["ci"], head: H };
+    assert.equal(computeGate({ ...base, reviewVerdict: { head: H, verdict: "APPROVE FOR DEPLOY" } }).pass, true);
+    assert.equal(computeGate({ ...base, reviewVerdict: { head: H, verdict: "REQUEST CHANGES" } }).pass, false);
+  });
+  it("gate-post is refused for lane and driver roles and allowed for the gate role", async () => {
+    const calls = [], io = { gh: async (a) => { calls.push(a); return ""; } };
+    for (const credential of ["lane", "driver"]) await assert.rejects(postReleaseGate({ io, ctx: { credential }, repo: "o/r", head: H, conclusion: "success" }), (e) => e.refused === `role ${credential} may not gate-post`);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(await postReleaseGate({ io, ctx: { credential: "gate" }, repo: "o/r", head: H, conclusion: "success" }), { posted: true });
   });
 });
