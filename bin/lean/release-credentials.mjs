@@ -8,7 +8,7 @@
  */
 export const ROLES = Object.freeze(["driver", "lane", "gate"]);
 
-/** Env names that carry the driver credential; the policy `credentials.lane_env_strip` list adds more. */
+/** Env names that carry the driver credential (the lane gets its own token under another name; a deployment whose driver token is named differently lists it in the policy); the policy `credentials.lane_env_strip` list adds more. */
 export const DRIVER_ENV = Object.freeze(["FORGE_DRIVER_TOKEN", "FORGEDOCK_DRIVER_TOKEN", "FORGE_RELEASE_DRIVER_TOKEN"]);
 
 const ALLOWED = { "ledger-write": ["driver"], "gate-post": ["gate"], merge: ["driver"], push: ["driver"] };

@@ -56,6 +56,22 @@ describe("readReleaseGate (#5561)", () => {
   });
 });
 
+describe("mergeGuard I1 actor matrix (#5561)", () => {
+  // Documented: the I1 case. Required checks skipped (check-skip rules) or a gate run posted by anyone but the configured App never count, whoever authored the merge.
+  const policy = { ci: { required_checks: ["ci"] }, credentials: { gate_app: "gate-app" }, plan: { approval: "auto" } };
+  const state = { release: null, steps: { review: { result: { head: H, verdict: "pass" } } } };
+  const rows = [
+    { ci: "success", gateApp: "gate-app", expect: /no FORGE:RELEASE record/ }, // gates pass; refused later only for the missing record
+    { ci: "skipped", gateApp: "gate-app", expect: /required checks not green/ },
+    { ci: "success", gateApp: "agent-bot", expect: /not posted by gate-app/ },
+    { ci: "success", gateApp: "someone", expect: /not posted by gate-app/ },
+  ];
+  for (const row of rows) it(`ci ${row.ci}, gate posted by ${row.gateApp}`, async () => {
+    const checks = [{ name: "ci", conclusion: row.ci, head: H }, { name: GATE_CHECK, conclusion: "success", head: H, app: row.gateApp }];
+    assert.match((await mergeGuard({ io: ioWith(checks), repo: "o/r", head: H, state, policy, staging: "staging" })).why, row.expect);
+  });
+});
+
 describe("mergeGuard (#5561)", () => {
   const policy = { ci: { required_checks: ["ci"] }, credentials: { gate_app: "gate-app" } };
   const state = (over = {}) => ({ plan: { hash: "h1", approved_hash: "h1" }, release: null, steps: { review: { result: { head: H, verdict: "pass" } } }, ...over });
@@ -68,6 +84,7 @@ describe("mergeGuard (#5561)", () => {
   it("stale approval hash, missing plan, unreadable policy and unreadable checks refuse", async () => {
     assert.match((await call({ state: state({ plan: { hash: "h2", approved_hash: "h1" } }) })).why, /approval is not current/);
     assert.match((await call({ state: state({ plan: undefined }) })).why, /approval is not current/);
+    assert.match((await call({ state: state({ plan: undefined }), policy: { ...policy, plan: { approval: "auto" } } })).why, /no FORGE:RELEASE record/); // auto policy: no plan needed, the next guard answers
     assert.match((await call({ policy: null })).why, /policy is unreadable/);
     assert.match((await call({ checks: new Error("x") })).why, /cannot read check runs/);
   });

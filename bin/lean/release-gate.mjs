@@ -58,8 +58,9 @@ export async function readReleaseGate({ io, repo, head, identity }) {
 export async function mergeGuard({ io, repo, head, state, policy, staging }) {
   const no = (why) => ({ ok: false, why });
   const plan = state?.plan;
-  if (!plan?.hash || plan.approved_hash !== plan.hash) return no("plan approval is not current (approved hash does not match the plan hash)");
   if (!policy) return no("release policy is unreadable");
+  // I2: a recorded plan must be approved at its current hash. No plan recorded (the plan step is a separate change) is accepted only under `plan.approval: auto`.
+  if (plan?.hash ? plan.approved_hash !== plan.hash : policy.plan?.approval !== "auto") return no("plan approval is not current (approved hash does not match the plan hash)");
   const required = policy.ci?.required_checks;
   let checks;
   try { checks = JSON.parse(await io.gh(["api", `repos/${repo}/commits/${head}/check-runs`, "--jq", "[.check_runs[] | {name, conclusion, head: .head_sha}]"])); } catch (e) { return no(`cannot read check runs: ${String(e?.message ?? e).split("\n")[0]}`); }
