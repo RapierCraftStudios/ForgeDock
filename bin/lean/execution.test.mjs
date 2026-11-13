@@ -961,6 +961,20 @@ describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-hum
     assert.equal((await lanesFor(prov).runOne(7, null)).retryInSeconds, 12);
   });
 
+  it("#5656 start transport error (fetch failed, ECONNRESET, ETIMEDOUT): deferred sandbox.transient, never needs-human", async () => {
+    const errs = [
+      Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) }),
+      new TypeError("fetch failed"),
+      Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" }),
+    ];
+    for (const e of errs) {
+      const prov = fakeProvider();
+      prov.start = async () => { throw e; };
+      const r = await lanesFor(prov).runOne(7, null);
+      assert.deepEqual([r.terminalReason, r.code, r.retryInSeconds], ["deferred", "sandbox.transient", 60], e.message);
+    }
+  });
+
   it("a non-auth 4xx config error stays needs-human sandbox.start_failed; 429/503 stay sandbox.capacity", async () => {
     const r = await lanesFor(fakeProvider({ startThrows: 422 })).runOne(7, null);
     assert.deepEqual([r.terminalReason, r.code], ["needs-human", "sandbox.start_failed"]);
