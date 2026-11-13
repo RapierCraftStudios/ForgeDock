@@ -37,6 +37,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
    promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
    flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
+   #5598: `runCheckCommand` gives each check `FORGE_REAP_LABEL=forgedock.reap=<token>`; `labelDockerArgs` (`heavy.mjs`) adds it as `--label` to
+   `docker run|create`, and after the check ends (timeout: SIGTERM, grace, SIGKILL) `reapContainers` removes the labelled containers
+   (best effort, no docker = no-op), so a timed-out promtool container is not leaked.
    #5148: `isPassThroughWrapper` also detects a wrapper that looks up a `$0`-derived name (`${0##*/}`, `basename "$0"`), so
    `writeHeavyShims` bakes the real binary past it and the preflight flags it; `guardChain` counts `FORGE_HEAVY_DEPTH` and
    stops at `SHIM_DEPTH_MAX` (32) with `env.shim_loop` (exit 126), whatever the wrapper shape.
@@ -350,7 +353,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    learned commands, budget, timeouts; forge.yaml is gitignored, so not in the worktree) beside contract.json; the CLI
    runs the contract's validate commands (`ci` and not run in `verify.mode: ci`) and the planned pre-PR commands through
    `runChecks` + `runCheckCommand` in the builder's env (lane TMPDIR, toolchain, heavy shims gate heavy binaries: no
-   `acquire`; #5592: `runCheckCommand` puts a `docker` shim first on PATH that labels `docker run|create` with `forgedock.run=<id>` plus `$FORGE_DOCKER_LABELS`, and removes those containers when the run ends, timeout included), prints a capped pass/fail table and writes `.forge-lean/self-check.json` with `worktreeFingerprint`
+   `acquire`; #5598 reaps the containers a check labelled when the run ends, timeout included), prints a capped pass/fail table and writes `.forge-lean/self-check.json` with `worktreeFingerprint`
    (sha256 of path + blob sha of every path differing from the merge base, committed or not; `.forge-lean/` excluded).
    After the implement call a `fixed` result whose record is not green on the current tree logs `SELF_CHECK_MISSING`
    (`state: skipped|stale|red`); a failed `PRECHECK_COMMANDS` round carries `self_check` (`selfCheckState`). Both are

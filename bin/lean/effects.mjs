@@ -3,11 +3,12 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { chmodSync, readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
 import { makeIo, readSubagentModel } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
@@ -330,57 +331,25 @@ export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_C
 
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;
-/**
- * #5592: a docker shim for one check-command run. `docker run|create` gets `--label <runLabel>` (plus every entry of
- * $FORGE_DOCKER_LABELS) so the containers the run starts can be found, and removed, when the run ends. Resolves the real
- * docker from the PATH without the shim dir. Returns {dir, label}; the caller removes dir.
- */
-export function writeDockerRunShim(runId, { tmp = tmpdir(), path = process.env.PATH ?? "" } = {}) {
-  const dir = mkdtempSync(join(tmp, "forge-docker-shim-"));
-  const label = `forgedock.run=${runId}`;
-  const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
-  const rest = path.split(":").filter((d) => d && d !== dir).join(":");
-  writeFileSync(join(dir, "docker"), `#!/bin/sh
-# forgedock check-run docker shim (#5592): label what this run starts so the engine can reap it
-real=$(PATH=${q(rest)} command -v docker) || { echo "docker: not found" >&2; exit 127; }
-case "$1" in
-  run|create)
-    : > ${q(join(dir, "used"))}
-    sub="$1"; shift
-    set -- "$sub" --label ${q(label)} $(for l in $FORGE_DOCKER_LABELS; do printf -- '--label %s ' "$l"; done) "$@"
-    ;;
-esac
-exec "$real" "$@"
-`);
-  chmodSync(join(dir, "docker"), 0o755);
-  return { dir, label };
-}
-/** #5592: force-remove the containers labelled for a check run (best effort; only ever this run's label). */
-export async function reapRunContainers(label, { docker = (args) => pexec("docker", args, { timeout: 60000 }).then((r) => String(r.stdout)) } = {}) {
+/** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env. */
+/** #5598: best-effort removal of the containers a check started (labelled by the docker shim); never throws. */
+export async function reapContainers(label, { timeoutMs = 20000, env = process.env } = {}) {
   try {
-    const ids = String(await docker(["ps", "-aq", "--filter", `label=${label}`])).split(/\s+/).filter(Boolean);
-    if (ids.length) await docker(["rm", "-f", ...ids]);
-    return ids.length;
-  } catch { return 0; }
+    const ids = String((await pexec("docker", ["ps", "-aq", "--filter", `label=${label}`], { timeout: timeoutMs, env })).stdout ?? "").split(/\s+/).filter(Boolean);
+    if (ids.length) await pexec("docker", ["rm", "-f", ...ids], { timeout: timeoutMs, env });
+    return ids;
+  } catch { return []; }
 }
-/**
- * #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env.
- * #5592: containers the command starts through `docker run|create` carry a per-run label and are removed when the run ends, timeout included.
- */
-export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, docker = undefined }) {
-  return new Promise((done) => {
-    let out = "", timedOut = false, child, shim = null;
+
+export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, graceMs = 2000 }) {
+  const reapLabel = `forgedock.reap=${randomBytes(8).toString("hex")}`;
+  const inner = new Promise((done) => {
+    let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { shim = writeDockerRunShim(`${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, { path: env?.PATH ?? process.env.PATH ?? "" }); } catch { shim = null; }
-    const runEnv = shim ? { ...process.env, ...(env ?? {}), PATH: `${shim.dir}:${env?.PATH ?? process.env.PATH ?? ""}` } : (env ? { ...process.env, ...env } : null);
-    const finish = async (r) => {
-      if (shim) { if (existsSync(join(shim.dir, "used"))) await reapRunContainers(shim.label, docker ? { docker } : {}); try { rmSync(shim.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      done(r);
-    };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(runEnv ? { env: runEnv } : {}) }); }
-    catch (e) { finish({ rc: 127, output: String(e?.message ?? e) }); return; }
-    const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
-    const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel } }); }
+    catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
+    const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
+    const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
     child.stdout.on("data", add); child.stderr.on("data", add);
     child.on("error", (e) => { clearTimeout(timer); finish({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
     child.on("close", (code) => {
@@ -389,6 +358,7 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, 
       finish(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
+  return inner.then(async (r) => { await reapContainers(reapLabel, { env: { ...process.env, ...(env ?? {}) } }); return r; });
 }
 
 /**

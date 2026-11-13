@@ -372,6 +372,15 @@ export function guardChain(name, cmd, env, read = head) {
   return { cmd, env: { ...env, FORGE_HEAVY_DEPTH: String(depth + 1), FORGE_HEAVY_CHAIN: [...chain, `${name}:${cmd}`].join("|") } };
 }
 
+/** #5598: `docker run|create` gets `--label <FORGE_REAP_LABEL>` so the validate runner can remove the container when it kills a timed-out step. */
+export function labelDockerArgs(name, args, env = {}) {
+  const label = env.FORGE_REAP_LABEL;
+  if (!label || name !== "docker") return args;
+  const i = args.findIndex((a) => !a.startsWith("-"));
+  if (i < 0 || !(args[i] === "run" || args[i] === "create") || args.includes(label)) return args;
+  return [...args.slice(0, i + 1), "--label", label, ...args.slice(i + 1)];
+}
+
 /**
  * CLI body: `run --name <n> -- <real> args...`. Pass-through when FORGE_HEAVY_HELD is set or the step is llm; else
  * acquire, run with FORGE_HEAVY_HELD=1 and FORGE_HOST_PARALLELISM from live holders, release, propagate the exit.
@@ -386,7 +395,7 @@ export async function runWrapped(argv, { env: env0 = process.env, open = openHea
   const c = heavyConfig({}, env);
   const g0 = guardChain(name, cmd, env);
   if (g0.error) { process.stderr.write(`${g0.error}\n`); return { code: 126, signal: null }; }
-  cmd = g0.cmd; env = g0.env;
+  cmd = g0.cmd; env = g0.env; args = labelDockerArgs(name, args, env);
   if (env.FORGE_HEAVY_HELD || env.FORGE_HEAVY_DISABLED === "1" || classifyStep(name, args) === "llm") return run(cmd, args, env);
   const hostP = host ?? defaultHost();
   const h = open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP });
