@@ -126,6 +126,9 @@ describe("gates catalogue and policy (#5583)", () => {
   it("accepts the gates policy keys and rejects a wrong type", () => {
     assert.deepEqual(check(OK + "gates: {demote_fb_rate: 5, demote_window: 20, safety: [a]}\n"), []);
     assert.match(check(OK + "gates: {demote_window: 2.5}\n").join(), /demote_window/);
+    assert.deepEqual(check(OK + "gates: {paths: [scripts/deploy/**], workflow_steps: [Smoke]}\n"), []); // #5584
+    assert.match(check(OK + "gates: {workflow_steps: Smoke}\n").join(), /workflow_steps/);
+    assert.match(check(OK + "gates: {bogus: 1}\n").join(), /bogus/);
   });
   it("check-config reports catalogue errors, passes a valid one, ignores an absent one", () => {
     const bad = gio({ ".forge/gates.yaml": GATE.replace("mode: block", "mode: nope"), [POLICY_PATH]: OK });
