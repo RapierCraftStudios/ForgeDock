@@ -106,5 +106,29 @@
     "pass": "exit 0",
     "timeout": 180,
     "for": "30d"
+  },
+  "train-first-wave-35min": {
+    "run": "git fetch -q origin main && test \"$(git log origin/main --since='30 days ago' --grep='^Forge-Lane: train' --format=%H | wc -l)\" -ge 1 && npx --no-install forgedock release status --json | jq -e '[.train // {} | to_entries[] | .value | select(.state==\"LIVE\")] | length >= 1'",
+    "pass": "exit 0",
+    "timeout": 180,
+    "for": "30d"
+  },
+  "train-smoke-rollback-by-digest": {
+    "run": "npx --no-install forgedock release status --json | jq -e '[.train // {} | to_entries[] | .value | select(.state==\"ROLLED_BACK\" and (.rollback.digests == null))] | length == 0'",
+    "pass": "exit 0",
+    "timeout": 180,
+    "for": "30d"
+  },
+  "train-full-deploy-skip-ledger": {
+    "run": "git fetch -q origin main && L=\"$(git log origin/main --since='30 days ago' --grep='^Forge-Lane: train' --format=%H | wc -l)\" && test \"$L\" -ge 1 && test \"$L\" -eq \"$(git log origin/main --since='30 days ago' --all-match --grep='^Forge-Lane: train' --grep='^Forge-Release: ' --format=%H | wc -l)\"",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
+  },
+  "remote-lane-tool-recipe-no-host-fallback": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|contains(\"host capability: recovering env.tool_missing\"))]|length')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

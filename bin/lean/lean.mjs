@@ -29,6 +29,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
+import { hasRecipe, installLaneTools } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -2179,7 +2180,8 @@ export async function runCore(o) {
         { const f = await gateSetup(); if (f) return f; } // #5434: the light build is an implement-class session
         liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
-        const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: lightPred ?? namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn() }),
+        const lightBase = pagesConfig ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null; // #5648: pages already on the base are modified, not new
+        const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: lightPred ?? namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: lightBase, testPlan: reproOn() }),
           build: () => builder(++attemptN, (ffGo ? FF_BUILD_LEAD : "") + lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants), ffGo ? sessionId : null, true, undefined, { trigger: "build" }),
           readResult, checkpoint: () => checkpoint("light build"), changedFiles, reproOf, numstat: () => git(["diff", "--numstat", `${base}...HEAD`]),
           runTests: async (cmds) => (io.runCommand ? runLightTests({ commands: mergeChecks(vcfg.invariants ?? [], cmds).commands, parallelism: Number(verifyParallelism()) || 1, now, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, acquire: () => heavyAcquire("precheck"), // #4451: host-capped
@@ -2263,8 +2265,9 @@ export async function runCore(o) {
         contract = snapContract(contract);
         await classifyStage(sessionId ? (problems) => builder(++attemptN, `${contractCorrectionPrompt(problems)}\nThis concerns .forge-lean/classification.json: fix only the invalid fields.`, sessionId, false, planPrompt, { trigger: "contract_correction" }) : null);
         const wtRead = (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }; // #5585: noindex pages are not public
+        const freezeBase = pagesConfig ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null; // #5648
         const freezeCheckIds = await (async () => { try { return new Set(Object.keys(await checksAt(git, [base], wt))); } catch { return null; } })(); // first-pass: the base's registered post-deploy check ids
-        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
         const found0 = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let missed = found0;
         // #5653: an unrunnable command is rewritten from the repo catalogue (forge.yaml recipes first, then CI-derived) before any builder correction
@@ -2274,7 +2277,7 @@ export async function runCore(o) {
           if (rw.applied.length) {
             contract = snapContract(rw.contract);
             for (const x of rw.applied) T.decisions.push(`validate catalogue rewrote unrunnable ${x.id}: \`${x.from}\` -> \`${x.to}\``);
-            vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+            vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
             missed = await preflightValidates(contract);
           }
         }
@@ -2286,7 +2289,7 @@ export async function runCore(o) {
           await persistGenChecks();
           await refreshIssue("contract validation");
           contract = snapContract(contract);
-          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
         };
         if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
           await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
@@ -2329,7 +2332,8 @@ export async function runCore(o) {
       }
       const dgFiles = (frozen?.deliverables ?? []).map((d) => d?.path).filter(Boolean);
       const designComments = (iss?.comments ?? []).filter(isTrustedIssueComment);
-      const designRoute = designGate({ files: dgFiles, cfg: designConfig, comments: designComments, labels: iss?.labels }); // #5330: opt-in (forge.yaml design.routes): a page without a FORGE:DESIGN_SPEC goes to /design
+      const dgBase = dgFiles.length && designConfig ? String(await git(["ls-tree", "--name-only", base, "--", ...dgFiles]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean) : []; // #5648: deliverables already on the base are modified pages
+      const designRoute = designGate({ files: dgFiles, cfg: designConfig, comments: designComments, labels: iss?.labels, baseFiles: dgBase }); // #5330: opt-in (forge.yaml design.routes): a page without a FORGE:DESIGN_SPEC goes to /design
       if (designRoute.route) {
         ev({ event: "DESIGN_ROUTED", pages: designRoute.pages, blocked: designRoute.blocked });
         T.decisions.push(`Design gate: ${designRoute.reason}${designRoute.blocked ? " (design.gate: blocking, lane stopped)" : " (advisory)"}`);
@@ -2371,6 +2375,17 @@ export async function runCore(o) {
             tm = toolMisses(await preflightValidates(frozen).catch(() => []));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           } catch { /* keep the original miss */ }
+        }
+        if (tm.tools.length) { // #5652: a recipe-backed tool is installed in this sandbox and re-probed before any host re-placement
+          const withRecipe = tm.tools.filter(hasRecipe), noRecipe = tm.tools.filter((t) => !hasRecipe(t));
+          if (withRecipe.length && io.runCommand) {
+            const ins = await installLaneTools(withRecipe, { run: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: a.timeoutMs, env: laneEnv() }), root: process.getuid?.() === 0 });
+            ev({ event: "REMOTE_TOOLS_INSTALLED", tools: withRecipe, ok: ins.ok });
+            if (!ins.ok) return await needsHuman(`Installing ${ins.tool} in the remote sandbox failed (execution.lane_tools recipe); not re-placed on the host. Install stderr tail:\n${ins.stderrTail}`, OUTCOME_CODES.ENV_TOOL_MISSING);
+            tm = toolMisses(await preflightValidates(frozen).catch(() => []));
+            ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
+          }
+          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES).`, OUTCOME_CODES.ENV_TOOL_MISSING);
         }
         if (tm.tools.length) {
           ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });
@@ -3155,9 +3170,10 @@ export async function runCore(o) {
       // #5419: forge.yaml docs: user-facing surfaces need docs, and added /docs links must resolve; unset = no check
       const docsFail = docsConfig ? await docsFailures({ cfg: docsConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5428: forge.yaml pages: a public page needs design, SEO and GEO briefs and passes the deterministic page checks; unset = no check
-      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      const addedNow = String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); // #5648: new vs modified pages
+      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5330: forge.yaml design.routes (opt-in, blocking only): a user-visible page needs an approved spec and passes the deterministic visual critique
-      const designFail = designFailures({ cfg: designConfig, files, specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
+      const designFail = designFailures({ cfg: designConfig, files, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
       // #5284: forge.yaml topology.prod_parity: declared production-only surfaces this diff touches need a check result or a justification
       const parityRules = parseProdParity(prodParity);
       const prodParityFailures = parityRules.length && io.runCommand ? await prodParityOf({ rules: parityRules, changedFiles: files, result, run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];

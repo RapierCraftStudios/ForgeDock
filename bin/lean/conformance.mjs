@@ -561,7 +561,7 @@ export function testPlanProblems(c, { required = false } = {}) {
 
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null, baseFiles = null } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -637,7 +637,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
   }
   problems.push(...testPlanProblems(c, { required: testPlan }));
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
-  if (pages) problems.push(...contractBriefProblems(c, pages, { readFile })); // #5428: page deliverables need page_gate briefs
+  if (pages) problems.push(...contractBriefProblems(c, pages, { readFile, baseFiles })); // #5428: page deliverables need page_gate briefs
   return { ok: problems.length === 0, problems };
 }
 

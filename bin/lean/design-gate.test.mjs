@@ -167,3 +167,24 @@ describe("visual gate (#5330 R12, R14; shared with #5369)", () => {
     assert.match(c, /FORGE:VISUAL_GATE/); assert.match(c, /Visual gate: PASS/); assert.match(c, /hands-390\.png/);
   });
 });
+
+describe("copy-only edits to existing pages (#5648)", () => {
+  const P = "web/src/app/(site)/docs/api/search/page.tsx", G = "web/src/app/(site)/docs/api/generated/search/page.tsx";
+  const diff = `+++ b/${P}\n-Google\n+the web\n+++ b/${G}\n-Google\n+the web\n`;
+  it("visualGate: a copy change needs no spec, generated is exempt, unknown still needs a spec", () => {
+    assert.deepEqual(visualGate({ cfg, files: [P, G], specs: false, changes: { [P]: "copy", [G]: "generated" } }).rows, []);
+    assert.ok(visualGate({ cfg, files: [P], specs: false, changes: { [P]: "rewrite" } }).rows.some((r) => r.kind === "design_spec_missing"));
+    assert.ok(visualGate({ cfg, files: [P], specs: false }).rows.some((r) => r.kind === "design_spec_missing"));
+  });
+  it("designFailures: modified copy passes without a spec; new or unknown fails closed", () => {
+    const a = { ...cfg, gate: "blocking" }, rd = () => Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n");
+    assert.deepEqual(designFailures({ cfg: a, files: [P, G], added: [], diff, readFile: rd }), []);
+    assert.ok(designFailures({ cfg: a, files: [P], added: [P], diff, readFile: rd }).some((r) => r.kind === "design_spec_missing"));
+    assert.ok(designFailures({ cfg: a, files: [P], readFile: rd }).some((r) => r.kind === "design_spec_missing"));
+  });
+  it("designGate: a page already on the base is not routed to /design; a generated page is exempt", () => {
+    assert.equal(designGate({ files: [P], cfg, baseFiles: [P] }).route, false);
+    assert.equal(designGate({ files: [G], cfg }).route, false);
+    assert.equal(designGate({ files: [P], cfg }).route, true);
+  });
+});

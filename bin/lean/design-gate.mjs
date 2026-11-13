@@ -14,7 +14,7 @@
  */
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
-import { designSpecApproved, pageRouteOf } from "./pagegate.mjs";
+import { designSpecApproved, pageRouteOf, pageChange } from "./pagegate.mjs";
 
 export const DEFAULT_VIEWPORTS = Object.freeze([390, 1440]);
 const PAGE_ENTRY_RE = /(?:^|\/)page\.[cm]?[jt]sx?$|\.(?:vue|svelte)$/i;
@@ -60,8 +60,10 @@ export function specApproved({ comments = [], labels = [], cfg = null } = {}) {
 }
 
 /** Lane-time routing: { route, blocked, pages, reason }. route when a predicted page matches design.routes and has no spec; blocked only with gate: blocking. */
-export function designGate({ files = [], cfg = null, comments = [], labels = [] } = {}) {
-  const pages = designPages(files, cfg);
+export function designGate({ files = [], cfg = null, comments = [], labels = [], baseFiles = null } = {}) {
+  // #5648: a page already on the base is modified (the precheck judges rewrite vs copy from the diff), generated pages are exempt
+  const onBase = new Set(Array.isArray(baseFiles) ? baseFiles.map(norm) : []);
+  const pages = designPages(files, cfg).filter((f) => !onBase.has(f) && pageChange(f, { added: [f] }) !== "generated");
   if (!pages.length || specApproved({ comments, labels, cfg })) return { route: false, blocked: false, pages, reason: "" };
   return { route: true, blocked: cfg.gate === "blocking", pages, reason: `page ${pages.slice(0, 3).join(", ")} is under design.routes and the issue has no FORGE:DESIGN_SPEC (label ${cfg.specLabel}); route it to /design before building` };
 }
@@ -104,15 +106,17 @@ const hasShot = (shots, vp) => (shots ?? []).some((s) => new RegExp(`(?:^|[^0-9]
  * `evidence`: { [route]: { screenshots: [paths], verdict: "PASS"|"ITERATE"|"BUDGET-EXHAUSTED" } } from the render critique, consulted only with `rendered: true`.
  * -> { gate, verdict: "SKIP"|"PASS"|"ADVISORY"|"FAIL", routes, rows: [{kind, route, detail}] }. Rows are failures when gate is blocking, warnings otherwise.
  */
-export function visualGate({ cfg = null, files = [], specs = false, sources = {}, evidence = {}, rendered = false } = {}) {
+export function visualGate({ cfg = null, files = [], specs = false, sources = {}, evidence = {}, rendered = false, changes = {} } = {}) {
   if (!designOn(cfg)) return { gate: null, verdict: "SKIP", routes: [], rows: [], reason: "design.routes is unset" };
-  const routeFiles = designFiles(files, cfg);
+  // #5648: `changes` {file: pageChange class}: generated files are exempt, a copy-only edit needs the visual check but no spec
+  const routeFiles = designFiles(files, cfg).filter((f) => changes[f] !== "generated");
   const routes = routeFiles.map((file) => ({ file, route: routeOf(file), page: PAGE_ENTRY_RE.test(file) }));
   const rows = [], add = (kind, route, detail) => rows.push({ kind, route, detail });
   for (const r of routes) {
     const spec = typeof specs === "object" && specs !== null ? Boolean(specs[r.route] ?? specs[r.file]) : Boolean(specs);
-    if (r.page && !spec) add("design_spec_missing", r.route, `${r.file} has no approved FORGE:DESIGN_SPEC (label ${cfg.specLabel}): run /design first`);
-    if (r.page && sources[r.file] != null) {
+    const copy = changes[r.file] === "copy";
+    if (r.page && !spec && !copy) add("design_spec_missing", r.route, `${r.file} has no approved FORGE:DESIGN_SPEC (label ${cfg.specLabel}): run /design first`);
+    if (r.page && !copy && sources[r.file] != null) {
       for (const f of critiqueMarkup(sources[r.file])) if (f.severity === "block") add("visual_critique_failed", r.route, `${r.file}: ${f.id}: ${f.detail}`);
     }
     if (rendered && cfg.requireVisual) {
@@ -129,11 +133,12 @@ export function visualGate({ cfg = null, files = [], specs = false, sources = {}
 }
 
 /** Lane precheck rows (conformance.unimplemented) for the diff's user-visible routes; [] unless design.routes is set and gate is blocking. */
-export function designFailures({ cfg = null, files = [], specs = false, readFile = () => "" } = {}) {
+export function designFailures({ cfg = null, files = [], specs = false, readFile = () => "", added = null, diff = "" } = {}) {
   if (!designOn(cfg) || cfg.gate !== "blocking") return [];
-  const sources = {};
+  const sources = {}, changes = {};
+  for (const f of designFiles(files, cfg)) changes[f] = pageChange(f, { added, diff, readFile }); // no added list: "new", fail closed
   for (const f of designPages(files, cfg)) sources[f] = String(readFile(f) ?? "");
-  return visualGate({ cfg, files, specs, sources }).rows.map((r) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, kind: r.kind, detail: r.detail }));
+  return visualGate({ cfg, files, specs, sources, changes }).rows.map((r) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, kind: r.kind, detail: r.detail }));
 }
 
 /** Markdown for the FORGE:VISUAL_GATE comment (review-pr-staging). Rendered screenshots are listed by path. */

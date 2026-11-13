@@ -11,6 +11,8 @@ import { readActive } from "./release-ledger.mjs";
 import { holdCheck } from "./release-control.mjs";
 
 export const epochTrailer = (epoch) => `Forge-Epoch: ${epoch}`;
+/** Landing-merge trailers of a fast lane (#5570): lane, release id and lease epoch, one per line. */
+export const laneTrailers = ({ lane, release, epoch }) => [`Forge-Lane: ${lane}`, `Forge-Release: ${release}`, ...(epoch != null ? [epochTrailer(epoch)] : [])].join("\n");
 export const epochMarker = (epoch) => `<!-- FORGE:EPOCH ${epoch} -->`;
 
 /** @returns {{ok: true, epoch} | {fenced: true, current} | {unreadable: string}} */
