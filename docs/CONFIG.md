@@ -840,7 +840,7 @@ Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-o
 
 `.forge/release.yaml` `gates:`: `demote_fb_rate` (percent, default 5), `demote_window` (runs, default 20), `safety` (never demoted; default `migration-immutability`, `identity-preflight`, `backup-freshness`, `health-auto-restore`, plus the unskippable classes).
 
-A `deploy-telemetry` job prints one JSON line per gate per run: `{"schema":"forgedock.release.gate/v1","gate":"<id>","outcome":"pass|fail|inconclusive|skip","class":"TP|FB|unknown","minutes":<n>,"evidence":"<text>"}`. A `TP`/`FB` class without `evidence` is stored as `unknown`. `forgedock release gates record <release-id> --file <jsonl>` stores the lines in the release state (`gates`).
+A `deploy-telemetry` job prints one JSON line per gate per run: `{"schema":"forgedock.release.gate/v1","gate":"<id>","outcome":"pass|fail|inconclusive|skip","class":"TP|FB|unknown","minutes":<n>,"evidence":"<text>"}`. A `TP`/`FB` class without `evidence` is stored as `unknown`. `forgedock release gates record <release-id> --file <jsonl>` stores the lines in the release state (`gates`). When `FORGE_GATE_TELEMETRY` names such a JSON-lines file and a catalogue exists, the release run stores its lines in `state.gates` next to `state.minutes` automatically; `historyFromRoot` exposes them as its `gates` property.
 
 | Command | Description |
 |---------|-------------|

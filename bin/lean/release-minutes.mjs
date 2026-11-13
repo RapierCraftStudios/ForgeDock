@@ -40,14 +40,14 @@ export async function releaseMinutes({ gh, repo, sinceMs, branch = null }) {
   return { runs: runs.length, minutes };
 }
 
-/** Records `{lane, minutes}` of the finished releases kept under `root` (the local cache of the ledger states). */
+/** Records `{lane, minutes}` of the finished releases kept under `root` (the local cache of the ledger states); the array's non-enumerable `gates` property carries the #5583 gate records (see gateHistoryFromRoot). */
 export function historyFromRoot(root) {
-  if (!existsSync(root)) return [];
+  if (!existsSync(root)) return Object.defineProperty([], "gates", { value: [], enumerable: false });
   const out = [];
   for (const id of readdirSync(root)) {
     try { const s = JSON.parse(readFileSync(join(root, id, "state.json"), "utf8")); if (s?.minutes?.total > 0) out.push({ lane: s.lane ?? "release", minutes: s.minutes.total }); } catch { /* skip */ }
   }
-  return out;
+  return Object.defineProperty(out, "gates", { value: gateHistoryFromRoot(root), enumerable: false });
 }
 
 /** Gate telemetry records (#5583) of the releases kept under `root`, oldest release first, each with `release` and `at`; [] when none. */

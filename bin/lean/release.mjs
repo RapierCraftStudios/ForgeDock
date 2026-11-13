@@ -383,6 +383,15 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   if (lctx) { // #5569: Actions minutes of this release (sum of ceil per job), mirrored to the ledger below
     try { const m = await releaseMinutes({ gh: (a) => io.gh(a), repo, sinceMs: Date.parse(state.startedAt) }); if (m) state.minutes = { runs: m.runs, total: m.minutes }; } catch { /* best effort */ }
   }
+  { // #5583: with a catalogue, the deploy-telemetry JSON lines of this release (FORGE_GATE_TELEMETRY file) are kept next to state.minutes; no catalogue, no write
+    const tf = process.env.FORGE_GATE_TELEMETRY;
+    try {
+      if (tf && existsSync(tf) && existsSync(join(process.cwd(), ".forge/gates.yaml"))) {
+        const recs = (await import("./release-gates.mjs")).parseTelemetry(readFileSync(tf, "utf8"));
+        if (recs.length) state.gates = [...(state.gates ?? []), ...recs];
+      }
+    } catch { /* best effort */ }
+  }
   state.status = out.status; ctx.save();
   if (lctx) await mirror(state);
   return out;
