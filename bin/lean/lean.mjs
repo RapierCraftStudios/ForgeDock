@@ -447,6 +447,43 @@ export async function runCore(o) {
   let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; a final ci-pending (or needsHuman()) puts it back
   const runId = `${issue}-${t0}`;
   let runTmp = null, sandboxEnv = {}, sandboxDown = null; // #5450: test sandboxes of this lane (testsandbox.mjs)
+  /** #5557: after the plan call, derive the classification record from Affected Files + the base-ref unit map, post FORGE:CLASSIFY and namespaced labels. Fail-open; a no-op without `.forge/release.yaml`. */
+  async function classifyStage(correct) {
+    try {
+      const { parsePolicy, validatePolicy, POLICY_PATH } = await import("./release-config.mjs");
+      const C = await import("./release-classify.mjs");
+      let text; try { text = String(await git(["show", `${base}:${POLICY_PATH}`])); } catch { return; }
+      const { policy } = parsePolicy(text);
+      if (!policy || validatePolicy(policy).length) return;
+      const md = await io.fs.read(`${wt}/${INVESTIGATION_FILE}`).catch(() => "");
+      const { affectedFilesOf } = await import("./fastforward.mjs");
+      const files = affectedFilesOf(md);
+      const texts = {};
+      for (const f of files.filter((x) => /migrations\//.test(x))) texts[f] = String(await io.fs.read(`${wt}/${f}`).catch(() => ""));
+      const facts = C.deriveFacts(policy, files, { texts });
+      let llm = null; try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); } catch { /* text-only below */ }
+      let problems = llm ? C.validateClassification(llm) : ["classification.json missing or unreadable"];
+      if (problems.length && correct) { // one correction, as for the contract; a second failure falls back to text-only
+        await correct(problems);
+        try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); problems = C.validateClassification(llm); } catch { llm = null; problems = ["classification.json missing or unreadable"]; }
+      }
+      if (problems.length) { ev({ event: "CLASSIFY_INVALID", problems }); llm = { type: "chore", severity: "P3", exists_in: "unknown", confidence: 0.3 }; }
+      const live = policy.branches?.release;
+      let liveSha = null; if (live) liveSha = String(await git(["rev-parse", `origin/${live}`]).catch(() => "")).trim() || null;
+      let rec = C.buildClassifyRecord(llm, policy, facts, { text: problems.length > 0 });
+      const run = async (command, sha) => { // repro on a detached checkout of the live sha under the run TMPDIR (#5557)
+        const dir = `${runTmp ?? process.env.TMPDIR ?? "/tmp"}/classify-live-${issue}`;
+        await git(["worktree", "add", "--detach", dir, sha]);
+        try { const x = await io.runCommand({ command, cwd: dir, timeoutMs: 120000, env: laneEnv() }); const r = x?.r ?? x; const c = r?.rc ?? r?.exit; return typeof c === "number" ? c : 1; /* runCommand reports rc */ }
+        finally { await git(["worktree", "remove", "--force", dir]).catch(() => {}); }
+      };
+      rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha, run: io.runCommand ? run : undefined });
+      if (rec.exists_in === "unknown" && rec.lane_hint === "none") rec.lane_hint = "release";
+      await io.fs.write?.(`${wt}/${C.CLASSIFICATION_FILE}`, JSON.stringify(rec, null, 1));
+      await post("FORGE:CLASSIFY", C.renderClassify(rec));
+      for (const l of C.labelsOf(rec)) { try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", l]); } catch { /* label may not exist */ } }
+    } catch (e) { ev({ event: "CLASSIFY_FAILED", error: String(e?.message ?? e).slice(0, 200) }); }
+  }
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   // #4395: lane profile. full (FORGEDOCK_FULL_SESSION=1): unchanged sessions; memory-off: no auto-memory; lane: also no CLAUDE.md, the lane file appended
   let laneProfile = { name: process.env.FORGEDOCK_FULL_SESSION === "1" ? "full" : "memory-off", text: null };
@@ -2215,6 +2252,7 @@ export async function runCore(o) {
           return sq.contract;
         };
         contract = snapContract(contract);
+        await classifyStage(sessionId ? (problems) => builder(++attemptN, `${contractCorrectionPrompt(problems)}\nThis concerns .forge-lean/classification.json: fix only the invalid fields.`, sessionId, false, planPrompt, { trigger: "contract_correction" }) : null);
         const wtRead = (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }; // #5585: noindex pages are not public
         const freezeCheckIds = await (async () => { try { return new Set(Object.keys(await checksAt(git, [base], wt))); } catch { return null; } })(); // first-pass: the base's registered post-deploy check ids
         let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
