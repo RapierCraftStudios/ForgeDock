@@ -4,7 +4,7 @@
 // plan's waves in order (all trains, then the release wave), gates the release CUT on the last train being WAVE_DONE, applies the
 // feature flag policy, keeps the milestone lane explicit, soaks the release wave at full strength and resumes from the ledger.
 import { fenced } from "./release-fence.mjs";
-import { planFromCli, ReleaseStartDECISION_RE, approvalOf, PLAN_LABEL } from "./release-plan.mjs";
+import { planFromCli, ReleaseStartDECISION_RE, approvalOf } from "./release-plan.mjs";
 
 export const WAVE_STATES = ["PENDING", "BUILT", "CUT", "LIVE", "WAVE_DONE"];
 export const FLAG_POLICIES = ["require", "warn", "off"];
@@ -20,7 +20,7 @@ export const orderWaves = (plan) => [...plan.waves.filter(isTrain), ...plan.wave
 export const waveState = (state, id) => state?.waves?.[id]?.state ?? "PENDING";
 
 /** A wave is WAVE_DONE only when verified live, merged and merged back (validated); anything less stays LIVE. */
-export const waveDone = (r) => !!(r?.verified && r.merged && r.mergedBack);
+export const waveSettled = (r) => !!(r?.verified && r.merged && r.mergedBack);
 
 /** CUT of a release wave is refused until every train of the plan is WAVE_DONE; a train CUT only needs the trains before it. Building is never gated. */
 export function cutAllowed(state, plan, wave) {
@@ -89,7 +89,7 @@ export async function startRelease(ctx) {
     if (!["live", "done"].includes(r?.status)) { say(`wave ${w.id}: ${r?.status ?? "no result"}${r?.reason ? `: ${r.reason}` : ""}`); return { status: "stopped", wave: w.id, reason: r?.reason ?? r?.status, ran }; }
     state.waves[w.id] = { ...state.waves[w.id], state: "LIVE" }; await save();
     const done = { verified: (await runners.verify(w, r))?.verified, merged: r.status === "done" || r.merged !== false, mergedBack: (await runners.mergeback(w, r))?.validated };
-    if (!waveDone(done)) { const why = !done.verified ? "not verified live" : !done.mergedBack ? "merge-back not validated" : "not merged"; say(`wave ${w.id}: LIVE but ${why}`); return { status: "stopped", wave: w.id, reason: why, ran }; }
+    if (!waveSettled(done)) { const why = !done.verified ? "not verified live" : !done.mergedBack ? "merge-back not validated" : "not merged"; say(`wave ${w.id}: LIVE but ${why}`); return { status: "stopped", wave: w.id, reason: why, ran }; }
     state.waves[w.id] = { ...state.waves[w.id], state: "WAVE_DONE" }; await save(); ran.push(w.id); say(`wave ${w.id}: WAVE_DONE`);
   }
   return { status: "done", ran };
@@ -146,4 +146,4 @@ export async function goFromCli(argv, { io, ledger, post, managed }) {
   return 0;
 }
 
-export { ReleaseStartDECISION_RE, PLAN_LABEL };
+export { ReleaseStartDECISION_RE };
