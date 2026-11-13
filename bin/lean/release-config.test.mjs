@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parsePolicy, validatePolicy, readPolicy, INIT_PROFILE, checkConfigFromCli, initFromCli, POLICY_PATH } from "./release-config.mjs";
+import { parsePolicy, validatePolicy, readPolicy, INIT_PROFILE, checkConfigFromCli, dockerfileCoverage, dockerfileSources, initFromCli, POLICY_PATH } from "./release-config.mjs";
 import { releaseFromCli } from "./release.mjs";
 
 const OK = `schema: 1
@@ -149,5 +149,27 @@ describe("rollback and events keys (#5563)", () => {
     assert.match(check(`${OK}rollback: {ladder: [nuke]}\n`).join("\n"), /ladder\[0\].*not one of/);
     assert.match(check(`${OK}rollback: {triggers: [moon]}\n`).join("\n"), /triggers\[0\]/);
     assert.match(check(`${OK}rollback: {sql: x}\n`).join("\n"), /rollback\.sql: unknown key/);
+  });
+});
+
+describe("check-config --coverage and contracts[].regenerate (#5570, Q9)", () => {
+  const POL = `${OK.replace("api: {paths", "api: {dockerfile: services/api/Dockerfile, paths")}`;
+  const mkio = (docker) => ({ printed: [], print(l) { this.printed.push(l); }, git(a) { const k = a[1].split(":").slice(1).join(":"); if (k === POLICY_PATH) return POL; if (k === "services/api/Dockerfile") return docker; throw new Error("missing"); } });
+  it("parses COPY/ADD sources, skipping --from copies and urls", () => {
+    assert.deepEqual(dockerfileSources("FROM x\nCOPY --from=build /out /app\nCOPY a/ b.txt /app/\nADD https://x/y /z\nCOPY . /all\n"), ["a/", "b.txt"]);
+  });
+  it("fails on a Dockerfile copying an unmapped path and passes once it is mapped", () => {
+    const bad = mkio("FROM x\nCOPY services/api /app\nCOPY libs/secret /app/libs\n");
+    assert.equal(checkConfigFromCli(["--coverage"], { io: bad }), 1);
+    assert.match(bad.printed.join("\n"), /copies libs\/secret/);
+    assert.deepEqual(dockerfileCoverage(parsePolicy(POL).policy, "COPY services/api /app\nCOPY shared /s\n"), []);
+    const good = mkio("FROM x\nCOPY services/api /app\nCOPY shared /s\n");
+    assert.equal(checkConfigFromCli(["--coverage"], { io: good }), 0);
+  });
+  it("without --coverage the Dockerfile is not read", () => assert.equal(checkConfigFromCli([], { io: mkio("COPY nowhere /x\n") }), 0));
+  it("accepts an optional contracts[].regenerate and rejects a wrong type", () => {
+    const c = (r) => validatePolicy(parsePolicy(`${OK}contracts:\n  - {producer: api, consumers: [web], paths: ["c/**"], regenerate: ${r}}\n`).policy);
+    assert.deepEqual(c('"make gen"'), []);
+    assert.match(c("[1]").join(), /regenerate/);
   });
 });

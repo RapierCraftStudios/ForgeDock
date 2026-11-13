@@ -214,3 +214,9 @@ export async function recordSync(ctx, rec, now = Date.now()) {
   const { milestones, duplicates, ...audit } = rec;
   return updateActive(ctx, ["sync"], () => ({ patch: { sync: { ...rec, at } }, control: { at, verb: "sync", ...audit, milestones: milestones?.length ?? 0, duplicates: duplicates?.length ?? 0 } }));
 }
+
+/** #5570: a landed train wave (lane `train`, state, rolled units, branch, merge sha) kept in `_active.train` so a repo-side check can read it; the service deploy invalidates the rollout record. */
+export async function recordTrain(ctx, rec, now = Date.now()) {
+  const at = new Date(now).toISOString();
+  return updateActive(ctx, ["train"], (active) => ({ patch: { train: { ...(active.train ?? {}), [rec.release ?? "-"]: { ...rec, lane: "train", rollout_invalidated: true, at } } }, control: { at, verb: "train", lane: "train", release: rec.release ?? null, state: rec.state ?? null, units: rec.units?.length ?? 0, rollout_invalidated: true } }));
+}

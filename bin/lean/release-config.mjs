@@ -13,6 +13,7 @@ import { load, JSON_SCHEMA } from "../vendor/js-yaml/js-yaml.mjs";
 import { readReleaseConfig } from "./release.mjs";
 import { readBranches } from "./lane.mjs";
 import { catalogueFindings } from "./release-gates.mjs";
+import { matchesAny } from "./release-unitmap.mjs";
 
 export const POLICY_PATH = ".forge/release.yaml";
 /** Migration locations and destructive statements the rollback ladder looks for in migration file text (I8, #5563); text only, nothing is executed. */
@@ -39,9 +40,9 @@ export const POLICY_SCHEMA = obj({
   branches: obj({ default: S, integration: SN, train: S, release: S, hotfix: S }),
   trust: obj({ actors: list(), require_verified_commits: B }),
   state: obj({ ledger_prefix: S, lease_ttl_s: N, heartbeat_s: N }),
-  units: { t: "map", v: obj({ paths: list(), image: SN, criticality: en("low", "medium", "high"), tests: list(), verify: list(), service_pipeline: B, single_host_ok: B }) },
+  units: { t: "map", v: obj({ paths: list(), image: SN, criticality: en("low", "medium", "high"), tests: list(), verify: list(), service_pipeline: B, single_host_ok: B, dockerfile: SN, surface: en("service", "web", "edge") }) },
   couplings: list(obj({ paths: list(), affects: list() })),
-  contracts: list(obj({ producer: S, consumers: list(), paths: list(), additive_only: B })),
+  contracts: list(obj({ producer: S, consumers: list(), paths: list(), additive_only: B, regenerate: SN })),
   forces: list(obj({ paths: list(), pipeline: en("full", "service", "hotfix"), reason: S })),
   classify: obj({ min_confidence: N, text_only_cap: N, triage_max_per_hour: N, exists_in_evidence: en("mechanical", "llm") }),
   risk: obj({ rules: list(obj({ when: obj({ migration: B, paths: list(), contract: B, rolled_units_gt: N, diff_lines_gt: N, requires: S }), risk: en("low", "medium", "high"), forces: S })) }),
@@ -148,7 +149,39 @@ export function readPolicy({ io, defaultBranch, cwd = process.cwd(), ref }) {
 const GATES_PATH_LABEL = ".forge/gates.yaml";
 const flagOf = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 
-/** `forgedock release check-config [--ref <git ref>]`: exit 0 valid (or file absent: flat keys), 1 on any finding. */
+/** COPY/ADD source paths of a Dockerfile (build-stage copies via `--from` and URLs excluded). */
+export function dockerfileSources(text) {
+  const out = [];
+  for (const line of String(text ?? "").replace(/\\\n/g, " ").split("\n")) {
+    const m = /^\s*(?:COPY|ADD)\s+(.*)$/i.exec(line);
+    if (!m) continue;
+    const parts = m[1].trim().split(/\s+/);
+    if (parts.some((p) => /^--from=/i.test(p))) continue;
+    const args = parts.filter((p) => !p.startsWith("--") && !p.startsWith("["));
+    out.push(...args.slice(0, -1).filter((p) => !/^[a-z]+:\/\//i.test(p) && p !== "."));
+  }
+  return out;
+}
+
+/** Q9: the paths a unit's Dockerfile copies that no `units.<id>.paths` or `couplings[].paths` entry maps. */
+export function dockerfileCoverage(policy, dockerfileText) {
+  const globs = [...Object.values(policy?.units ?? {}).flatMap((u) => u?.paths ?? []), ...(policy?.couplings ?? []).flatMap((c) => c.paths ?? [])];
+  return dockerfileSources(dockerfileText).map((s) => s.replace(/^\.\//, "").replace(/\/+$/, "")).filter((s) => !matchesAny(globs, s) && !matchesAny(globs, `${s}/x`));
+}
+
+/** `check-config --coverage` findings: one per unmapped copied path of each unit's `dockerfile`. */
+function coverageFindings(io, policy, ref) {
+  const out = [];
+  for (const [id, u] of Object.entries(policy?.units ?? {})) {
+    if (!u?.dockerfile) continue;
+    let text;
+    try { text = io.git(["show", `${ref}:${u.dockerfile}`]); } catch { out.push(`coverage: units.${id}.dockerfile ${u.dockerfile} is not readable at ${ref}`); continue; }
+    dockerfileCoverage(policy, text).forEach((p) => out.push(`coverage: units.${id} Dockerfile copies ${p}, which no units.<id>.paths or couplings entry maps`));
+  }
+  return out;
+}
+
+/** `forgedock release check-config [--ref <git ref>] [--coverage]`: exit 0 valid (or file absent: flat keys), 1 on any finding. */
 export function checkConfigFromCli(argv, { io, cwd = process.cwd() }) {
   const defaultBranch = readBranches(cwd).default || "main";
   const ref = flagOf(argv, "--ref");
@@ -160,7 +193,8 @@ export function checkConfigFromCli(argv, { io, cwd = process.cwd() }) {
     gatesLines().forEach((l) => io.print(l));
     return gf?.length ? 1 : 0;
   }
-  const findings = [...r.findings, ...(gf ?? []).map((f) => `${GATES_PATH_LABEL}: ${f}`)];
+  const cov = argv.includes("--coverage") && r.policy ? coverageFindings(io, r.policy, ref ?? `origin/${defaultBranch}`) : [];
+  const findings = [...r.findings, ...cov, ...(gf ?? []).map((f) => `${GATES_PATH_LABEL}: ${f}`)];
   findings.forEach((f) => io.print(`release check-config: ${f}`));
   io.print(findings.length ? `release check-config: FAILED (${findings.length})` : `release check-config: ok (sha256 ${r.sha.slice(0, 12)})`);
   return findings.length ? 1 : 0;
