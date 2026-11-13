@@ -131,6 +131,8 @@ export function aggregateAdversarial(rows, meta) {
       oracle_pass_rate: oracle.length ? r4(oracle.filter((r) => r.oracle_pass === true).length / oracle.length) : null,
       cost_usd: r4(sumOf(mine, "cost_usd")),
       wall_ms: sumOf(mine, "wall_ms"),
+      start_ms: sumOf(mine, "start_ms"), // #5620: sandbox start wait, to compare execution.warm_sandboxes on/off
+      start_unobserved: mine.filter((r) => !Number.isFinite(r.start_ms)).length,
       light_unobserved: mine.filter((r) => r.light_unobserved === true).length, // #5541
     };
   }
@@ -147,6 +149,8 @@ export function renderScorecard({ meta, arms }) {
     ["Oracle pass rate", (a) => (a.oracle_pass_rate == null ? "n/a" : `${a.oracle_pass_rate} (n=${a.oracle_n})`)],
     ["Cost (USD, sum)", (a) => String(a.cost_usd)],
     ["Wall time (ms, sum)", (a) => String(a.wall_ms)],
+    ["Sandbox start (ms, sum)", (a) => String(a.start_ms)],
+    ["Lanes with no start timing (start_unobserved)", (a) => String(a.start_unobserved)],
     ["Lanes with no `light` in the result (light_unobserved)", (a) => String(a.light_unobserved)],
   ];
   return [

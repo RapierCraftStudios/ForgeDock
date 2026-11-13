@@ -60,6 +60,7 @@ Use `--arms control` or `--issues id,id` to rerun part of the set, and `--keep` 
 | Integration points missed | For each `integration` row, the number of `must_touch` paths absent from the diff against the base. |
 | Oracle pass rate | Over the rows with an oracle (`valid`): the upstream fix tests pass after being overlaid on the arm's head. |
 | Cost and wall time | Sum of `cost_usd` and `wall_ms`, as in `lightlane-bench.md`. |
+| Sandbox start | Sum of `start_ms`, the lane result's `phases.sandbox_start.ms` (#5620), to compare runs with and without `execution.warm_sandboxes`. Rows with no phases (the control arm, a missing result file) count in `start_unobserved`. |
 
 Grading is deterministic: the diff paths and added lines, never an LLM. The scorecard records the run date, the model and the corpus revision (`version@base+<hash of the corpus file>`).
 

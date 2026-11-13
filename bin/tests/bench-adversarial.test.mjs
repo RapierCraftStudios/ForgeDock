@@ -59,11 +59,21 @@ test("aggregateAdversarial and renderScorecard report the five metrics per arm w
   ];
   const meta = { run_date: "2026-11-10", model: "claude-opus-5-5", corpus_revision: "adversarial-v1@670b715+abcd1234" };
   const a = aggregateAdversarial(rows, meta);
-  assert.deepEqual(a.arms.full, { n: 4, invalid_n: 2, wrong_implemented: 0, duplicate_created: 0, integration_missed: 1, oracle_n: 1, oracle_pass_rate: 1, cost_usd: 5, wall_ms: 40, light_unobserved: 0 });
+  assert.deepEqual(a.arms.full, { n: 4, invalid_n: 2, wrong_implemented: 0, duplicate_created: 0, integration_missed: 1, oracle_n: 1, oracle_pass_rate: 1, cost_usd: 5, wall_ms: 40, start_ms: 0, start_unobserved: 4, light_unobserved: 0 });
   assert.deepEqual([a.arms.control.wrong_implemented, a.arms.control.duplicate_created, a.arms.control.integration_missed, a.arms.control.oracle_pass_rate, a.arms.control.cost_usd], [2, 1, 3, 0, 6]);
   const md = renderScorecard(a);
   for (const s of ["2026-11-10", "claude-opus-5-5", "adversarial-v1@670b715+abcd1234", "Wrong issues implemented", "Duplicate implementations", "Integration points missed", "Oracle pass rate", "Cost", "Wall time", "| full | control |"]) assert.ok(md.includes(s), s);
   assert.equal(aggregateAdversarial([], meta).arms.full.oracle_pass_rate, null);
+});
+
+test("aggregateAdversarial sums start_ms and counts rows without one as start_unobserved (#5620)", () => {
+  const meta = { run_date: "2026-11-10", model: "m", corpus_revision: "r" };
+  const a = aggregateAdversarial([g("full", { start_ms: 3000 }), g("full", { start_ms: 1500 }), g("full", { start_ms: null }), g("control", {})], meta);
+  assert.equal(a.arms.full.start_ms, 4500); assert.equal(a.arms.full.start_unobserved, 1);
+  assert.equal(a.arms.control.start_ms, 0); assert.equal(a.arms.control.start_unobserved, 1);
+  const md = renderScorecard(a);
+  assert.ok(md.includes("| Sandbox start (ms, sum) | 4500 | 0 |"), md);
+  assert.ok(md.includes("start_unobserved"));
 });
 
 test("calibrateEvidence checks each evidence pattern against the file at the base", async () => {
