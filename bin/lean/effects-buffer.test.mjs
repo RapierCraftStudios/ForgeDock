@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { writeFileSync, statSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execCapped, runWithInput, makeLeanIo } from "./effects.mjs";
@@ -43,12 +44,12 @@ test("runSetup non-zero exit still reports its code", async () => {
 });
 
 test("a git diff larger than 16 MB streams to a file via --output", () => {
-  const d = mkdtempSync(join(tmpdir(), "buf5599-"));
-  try {
+  const d = tmpDir("buf5599-");
+  {
     const g = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: d, stdio: "pipe" });
     g("init", "-q"); writeFileSync(join(d, "a.txt"), "a\n"); g("add", "."); g("commit", "-qm", "a");
     writeFileSync(join(d, "a.txt"), "line\n".repeat(4 * MB)); g("add", "."); g("commit", "-qm", "b");
     g("diff", "--binary", `--output=${join(d, "p.patch")}`, "HEAD~1...HEAD");
     assert.ok(statSync(join(d, "p.patch")).size > 16 * MB);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  }
 });
