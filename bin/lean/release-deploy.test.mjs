@@ -120,6 +120,13 @@ describe("deploy observation and recovery (#5560)", () => {
     assert.match(d[0], /unit=api/); assert.match(d[0], /forge_epoch=3/);
     assert.ok(calls.some((r) => r.key.endsWith(`:deploy:3:deploy:${SHA}`)));
   });
+  it("R2: a dispatch intent without a visible run is never redispatched on resume", async () => {
+    const { w, io } = world({ runs: [] });
+    const pol = { ...POLICY, pipelines: { service: { workflow: "deploy.yml", trigger: "dispatch" } } };
+    const intents = [{ key: `r:deploy:2:deploy:${SHA}`, action: "dispatch", epoch: 2 }];
+    const out = await deployStep(mk(io, { fence: fence(), state: { intents, steps: { "post-merge": { result: { merge: SHA } } } }, config: { deploy: pol, deployPipeline: "service", deployBounds: { pollMs: 1, runPollMs: 1 } } }));
+    assert.ok(out.blocked); assert.equal(w.gh.filter((g) => g.startsWith("workflow run")).length, 0);
+  });
   it("a skipped push run is expected: it is not a run, so the deploy is dispatched", async () => {
     const { w, io } = world({ runs: [{ databaseId: 5, status: "completed", conclusion: "skipped" }] }); const orig = io.gh;
     io.gh = async (a) => { const r = await orig(a); if (a[0] === "workflow") w.runs = [{ databaseId: 12, status: "completed", conclusion: "success" }]; return r; };

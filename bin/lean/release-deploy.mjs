@@ -78,6 +78,10 @@ async function runFor(ctx, { workflow, sha, inputs, key, startPolls, b }) {
   const look = () => latestRun({ io, repo, workflow, sha });
   let run = await poll(io, startPolls, b.pollMs, look);
   if (run) return { run, dispatched: false };
+  if ((ctx.state.intents ?? []).some((i) => i.action === "dispatch" && String(i.key).endsWith(`:${key}`))) { // a dispatch intent (any epoch, done or not) may have taken effect: wait for its run, never repeat it (I7)
+    run = await poll(io, Math.max(startPolls, Math.ceil((ctx.config.deploy?.start_timeout_s ?? 60) * 1000 / b.pollMs)), b.pollMs, look);
+    return run ? { run, dispatched: false } : { err: `a ${workflow} dispatch for ${sha.slice(0, 8)} was already recorded but no run appeared; check the Actions tab, then resume (never redispatched)` };
+  }
   const f = await fenced(ctx.fence, { action: "dispatch", key: idemKey(ctx, key) }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
   if (f.refused) return { err: `dispatch ${f.refused}` };
   run = await poll(io, startPolls, b.pollMs, look);
