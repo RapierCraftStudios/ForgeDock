@@ -7,7 +7,7 @@
  * watches. Selectors, caps and the lane rule are pure functions; gh, the clock and lane/batch launching are injected (`io`).
  * `mode: per-issue` runs `forgedock run-issue` per claim; `mode: batch` `--add`s claims into one long-lived orchestrate
  * batch (batch.mjs `addIssues`, so K, the `Depends on` DAG and the report apply) and starts a new one after it reports.
- * No LLM calls.
+ * No LLM calls, except `mode: triage` (#5558, issuewatch-triage.mjs), which only classifies and labels and never claims.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -19,6 +19,7 @@ import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_ST
 import { postDeployOnly } from "./prefilter.mjs";
 import { designHold } from "./pagegate.mjs"; // #5442
 import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
+import { triageTick } from "./issuewatch-triage.mjs";
 import { releaseRoot } from "./release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { decisionContext, decisionsActive, decisionStep, decisionCounts, formatDecisionDryRun, claimsUsed } from "./issuewatch-decisions.mjs";
@@ -29,7 +30,7 @@ import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
 import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness, alertDeadWatches, resolveOnPath } from "./issuewatch-parity.mjs";
 
-const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause", "max_remediations"];
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause", "max_remediations", "triage.max_per_hour", "triage"];
 export const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
@@ -89,13 +90,19 @@ export function validateWatch(name, cfg = {}) {
  sweep_needs_human: cfg.sweep_needs_human === true || String(cfg.sweep_needs_human).toLowerCase() === "true",
     trust_app: cfg.trust_app === true || String(cfg.trust_app).toLowerCase() === "true", trust_app_labels: list(cfg.trust_app_labels),
     skip_labels: cfg.skip_labels === undefined ? (cfg.mode === "batch" ? DEFAULT_SKIP_LABELS : []) : list(cfg.skip_labels), // #5313: the bash watcher's skip list; batch watches take it by default
-    release_pause: cfg.release_pause === undefined ? cfg.mode === "batch" : /^true$/i.test(String(cfg.release_pause)) };
+    release_pause: cfg.release_pause === undefined ? ["batch", "triage"].includes(cfg.mode) : /^true$/i.test(String(cfg.release_pause)) };
   if (cfg.sweep_needs_human !== undefined && !/^(true|false)$/i.test(String(cfg.sweep_needs_human))) throw new Error(`watch ${name}: sweep_needs_human must be true or false`);
   if (cfg.release_pause !== undefined && !/^(true|false)$/i.test(String(cfg.release_pause))) throw new Error(`watch ${name}: release_pause must be true or false`);
   if (searchesPullRequests(w.search)) throw new Error(`watch ${name}: search must not select pull requests (a watch claims issues only)`);
   if (cfg.trust_app !== undefined && !/^(true|false)$/i.test(String(cfg.trust_app))) throw new Error(`watch ${name}: trust_app must be true or false`);
   if (w.trust_app_labels.length && !w.trust_app) throw new Error(`watch ${name}: trust_app_labels needs trust_app: true`);
-  if (!["per-issue", "batch", "release"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue, batch or release`);
+  if (!["per-issue", "batch", "release", "triage"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue, batch, release or triage`);
+  const tcfg = cfg.triage && typeof cfg.triage === "object" ? cfg.triage : {}; // #5558: `triage.max_per_hour` (flat key) or `triage: {max_per_hour: n}`
+  const tph = cfg["triage.max_per_hour"] ?? tcfg.max_per_hour;
+  for (const k of Object.keys(tcfg)) if (k !== "max_per_hour") throw new Error(`watch ${name}: unknown triage key ${k}`);
+  if (tph !== undefined && !(Number.isInteger(Number(tph)) && Number(tph) >= 1)) throw new Error(`watch ${name}: triage.max_per_hour must be a positive integer`);
+  if (tph !== undefined && w.mode !== "triage") throw new Error(`watch ${name}: triage.max_per_hour needs mode: triage`);
+  w.triage_max_per_hour = tph === undefined ? null : Number(tph);
   if (w.mode === "release") validateRelease(name, cfg, w, int);
   else for (const k of ["threshold", "immediate", "max_release_issues", "theme_map", "tracker"]) if (cfg[k] !== undefined) throw new Error(`watch ${name}: ${k} needs mode: release`);
   if (!["none", "defer-only"].includes(w.include_followups)) throw new Error(`watch ${name}: include_followups must be none or defer-only`);
@@ -492,6 +499,22 @@ async function releaseStep({ watch, repo, io, state, dir, branches = {}, default
     policy: { path: p.policyPath, text: p.policyText }, dryRun });
 }
 
+/** `mode: triage` pass (#5558): lists new open issues and hands them to triageTick, which gets no claim, launch or batch seam. */
+async function triageStep({ watch, repo, io, state, defaults = [], cwd = process.cwd() }) {
+  let policy = io.triagePolicy ?? null;
+  if (!policy) {
+    try { const { readPolicy } = await import("./release-config.mjs"); policy = readPolicy({ io: { git: (a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }) }, defaultBranch: defaults[0] ?? "main", cwd }).policy; } catch { /* no policy: defaults */ }
+  }
+  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "100", "--json", "number,title,body,labels,author,createdAt,comments"];
+  if (watch.search) args.push("--search", watch.search);
+  let assoc = new Map();
+  const listOpen = async () => {
+    assoc = await listAssociations(io.gh, repo);
+    return JSON.parse(String(await io.gh(args))).filter((i) => !isPullRequest(i) && matchesSelectors(i, watch)).map((i) => ({ ...i, authorAssociation: assoc.get(i.number) }));
+  };
+  return triageTick({ watch, repo, io: { gh: io.gh, now: io.now, triageClassify: io.triageClassify, pause: io.triagePause }, state, listOpen, trusted: (i) => classifyIssue(i, watch) === "claim", policy });
+}
+
 /** Append a post-deploy-only follow-up to the rollup issue's checklist, once per follow-up. */
 async function fold({ issue, watch, repo, io, state }) {
   if (state.folded.includes(issue.number)) return;
@@ -577,12 +600,12 @@ export async function runWatch({ watch, repo, io, dir, branches, defaults, once 
         await io.sleep(intervalMs); continue;
       }
       state.paused = null;
-      if (state.phase === "running" && decisionsActive(watch, ctx.policy)) { // #4793: a failed round must not stop the watch
+      if (state.phase === "running" && watch.mode !== "triage" && decisionsActive(watch, ctx.policy)) { // triage never decides or launches (#5558); // #4793: a failed round must not stop the watch
         try { await decisionStep({ watch, repo, io, state, ctx, shared, launch }); state.decisionError = null; } catch (e) { state.decisionError = String(e?.message ?? e).slice(0, 200); }
       }
       let passErr = null;
       try { // #5425: an error in one pass is recorded and shown by `status`; the next pass runs
-        if (watch.mode === "release") await releaseStep({ watch, repo, io, state, dir, branches, defaults, cwd }); else await tick({ watch, repo, io, state, dir, branches, defaults, handles });
+        if (watch.mode === "triage") await triageStep({ watch, repo, io, state, defaults, cwd }); else if (watch.mode === "release") await releaseStep({ watch, repo, io, state, dir, branches, defaults, cwd }); else await tick({ watch, repo, io, state, dir, branches, defaults, handles });
         state.passError = null;
       } catch (e) {
         passErr = e; state.passError = `${new Date(io.now()).toISOString()} ${String(e?.message ?? e).slice(0, 200)}`;
@@ -608,6 +631,10 @@ function realIo(repo, env = process.env) {
     classify: (issues, themes) => { // the one LLM judgment of release mode: issues no theme_map rule classifies
       const prompt = `Classify each GitHub issue into exactly one theme of [${themes.join(", ")}], or "general" when none fits. Reply with only a JSON object {"<number>": "<theme>"}.\n\n${issues.map((i) => `#${i.number} ${i.title}\n${String(i.body ?? "").slice(0, 600)}`).join("\n---\n")}`;
       return JSON.parse(/\{[\s\S]*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }))[0]);
+    },
+    triageClassify: (issue) => { // #5558: the one small model call of triage mode, text only
+      const prompt = `Classify this GitHub issue from its text alone. Reply with only a JSON object {"type":"bug|feature|chore|docs|infra|incident","severity":"P0|P1|P2|P3","lane_hint":"none|release|hotfix|train|integration","confidence":0..1}.\n\n#${issue.number} ${issue.title}\n${String(issue.body ?? "").slice(0, 4000)}`;
+      return JSON.parse(/\{[^{}]*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: CLAUDE_MAX_BUFFER, timeout: JUDGE_TIMEOUT_MS }))[0]);
     },
     judge: ({ decision, options, policy, policyPath, precedent }) => { // #4793: the one LLM judgment of the decision stage
       const prompt = judgePrompt({ decision, options, policy, policyPath, precedent });
@@ -737,6 +764,7 @@ export async function issueWatchFromCli(argv, deps = {}) {
     return { ok: true };
   }
   const ctx = decisionContext({ loadPolicy, readFile, cwd }), shared = { matches: matchesSelectors, fold, labelNames, isBot, TRUSTED };
+  if (argv.includes("--dry-run") && watch.mode === "triage") { print("triage mode: classifies and labels new issues only; a dry run makes no model call and no write"); return { ok: true, dryRun: { triage: true } }; }
   if (argv.includes("--dry-run") && watch.mode !== "release") { // #5088 would-claim/skip with reasons, then #4793 the needs-human classification; nothing written
     const real = deps.io ?? realIo(repo, env), branches = readBranches(cwd);
     const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });

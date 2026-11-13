@@ -7,6 +7,7 @@
  * retries. With no command set every function here is a no-op. No model call. Effects go through `ctx.io`.
  */
 import { fileBlocker, tail } from "./release-rehearsal.mjs";
+import { fenced } from "./release-fence.mjs";
 
 export const PREFLIGHT_TIMEOUT_MS = 20 * 60_000;
 const json = (s) => JSON.parse(String(s || "null"));
@@ -34,6 +35,22 @@ export async function runHostPreflight(ctx, { head, pr }) {
   return kept;
 }
 
+const shq = (f) => `'${String(f).replace(/'/g, `'\\''`)}'`;
+
+/**
+ * Targeted preflight (#5566): runs `preflight.command` with `{files}` replaced by the quoted target set. A command without `{files}`
+ * is not targeted, so it covers nothing: the caller counts that as unvalidated. Files no blocker issue (the caller decides).
+ * @returns {Promise<{ok, head, command, covered: string[], code}>}
+ */
+export async function runTargetedPreflight(ctx, { head, target }) {
+  const cfg = ctx.config?.preflight;
+  if (!cfg) return { ok: false, head, covered: [], why: "no release.preflight_command configured" };
+  const targeted = cfg.command.includes("{files}");
+  const command = cfg.command.split("{files}").join(target.map(shq).join(" "));
+  const run = await ctx.io.rehearse(command, { timeout: cfg.timeoutMs });
+  return { ok: !!run.ok, head, command, covered: run.ok && targeted ? [...target] : [], code: run.code ?? null };
+}
+
 const stopOf = (r) => ({ stopped: true, why: `release preflight failed at ${r.head} (release-blocker #${r.issue}); fix it, then resume`, ...r });
 
 /** Step before `release-pr`: preflight on the staging head, so no release PR is opened on a failing head. */
@@ -55,4 +72,25 @@ export async function markReadyStep(ctx) {
   if (!r.ok && r.blocking) return stopOf(r);
   if (view?.isDraft) await io.gh(["pr", "ready", String(pr), "--repo", repo]);
   return { ...r, ready: true, wasDraft: !!view?.isDraft };
+}
+
+/**
+ * #5567: CI and the review panel start together on the same head. When `ci.fix` is configured (`co_start` or `full_run_workflow`),
+ * the draft release PR is marked ready before the review (the host preflight already passed on this head), and the repo's uncached
+ * full run is requested in that same pass through the configured workflow, fenced like any dispatch. Unconfigured: nothing happens.
+ * @returns {{skipped: true}|{ready: boolean, fullRun: boolean}|{refused: string}}
+ */
+export async function coStartCi(ctx, { pr }) {
+  const fix = ctx.config?.fix;
+  if (!fix?.coStart) return { skipped: true };
+  const { io, repo } = ctx;
+  const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid,headRefName,isDraft"]));
+  if (view?.isDraft) await io.gh(["pr", "ready", String(pr), "--repo", repo]);
+  let fullRun = false;
+  if (fix.fullRunWorkflow) {
+    const f = await fenced(ctx.fence, { action: "dispatch", key: `fullrun:${pr}:${view?.headRefOid}` }, (epoch) => io.gh(["workflow", "run", fix.fullRunWorkflow, "--repo", repo, "--ref", view?.headRefName, ...(epoch != null ? ["-f", `forge_epoch=${epoch}`] : [])]));
+    if (f.refused) return { refused: f.refused };
+    fullRun = true;
+  }
+  return { ready: true, wasDraft: !!view?.isDraft, fullRun };
 }

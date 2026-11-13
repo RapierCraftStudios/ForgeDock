@@ -1,0 +1,182 @@
+{
+  "bin/auth/app-manifest.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/auth/app-token.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/engine-cli.mjs": {
+    "no-use-before-define": {
+      "count": 10
+    }
+  },
+  "bin/engine.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/engine/phases.mjs": {
+    "no-use-before-define": {
+      "count": 3
+    }
+  },
+  "bin/gc.mjs": {
+    "no-use-before-define": {
+      "count": 4
+    }
+  },
+  "bin/journey.mjs": {
+    "no-use-before-define": {
+      "count": 5
+    }
+  },
+  "bin/lean/capwait.test.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/ci-budget.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/conformance.mjs": {
+    "no-use-before-define": {
+      "count": 17
+    }
+  },
+  "bin/lean/conformance.test.mjs": {
+    "no-use-before-define": {
+      "count": 10
+    }
+  },
+  "bin/lean/context.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/depcache.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/lean/heavy.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/issuewatch-reconcile.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/issuewatch.mjs": {
+    "no-use-before-define": {
+      "count": 4
+    }
+  },
+  "bin/lean/lean.mjs": {
+    "no-use-before-define": {
+      "count": 27
+    }
+  },
+  "bin/lean/orchestrate.mjs": {
+    "no-use-before-define": {
+      "count": 13
+    }
+  },
+  "bin/lean/orphan-pr.test.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/precheck.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/lean/prefilter.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/lean/prompts.mjs": {
+    "no-use-before-define": {
+      "count": 4
+    }
+  },
+  "bin/lean/release-fence.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/lean/release-review.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/lean/release-status.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/lean/release.mjs": {
+    "no-use-before-define": {
+      "count": 7
+    }
+  },
+  "bin/lean/sequence.mjs": {
+    "no-use-before-define": {
+      "count": 3
+    }
+  },
+  "bin/lean/statuscomment.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "bin/pool/agent.mjs": {
+    "no-use-before-define": {
+      "count": 11
+    }
+  },
+  "bin/stats/efficiency.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/stats/github-source.mjs": {
+    "no-use-before-define": {
+      "count": 4
+    }
+  },
+  "bin/tests/gc.test.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "bin/tests/pre-tool-use.test.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "scripts/build-knowledge-index.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  },
+  "scripts/ci-local/run.mjs": {
+    "no-use-before-define": {
+      "count": 1
+    }
+  },
+  "scripts/ci-local/scoping.mjs": {
+    "no-use-before-define": {
+      "count": 2
+    }
+  }
+}

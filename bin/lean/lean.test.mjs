@@ -1225,7 +1225,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
     assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
-    assert.match(nhBody(w), /still invalid after one correction/);
+    assert.match(nhBody(w), /still invalid after \d+ correction\(s\)/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
     assert.equal((await run(w2)).terminalReason, "merged");
   });
@@ -2178,8 +2178,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2600, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
+    assert.ok(approxTokens(plan) <= 2650, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1875, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2668,7 +2668,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2500, `plan prompt is ${approxTokens(plan)} tokens`); // 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2550, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 1850, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -3490,6 +3490,32 @@ describe("base-sync (#4100)", () => {
     assert.equal(w.merges.length, 1);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     noRebaseNoForce(w);
+  });
+
+  it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      return git(a, o);
+    };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1, "no re-review for a documentation-only conflict");
+    assert.match(syncComment(w), /not required \(documentation-only conflicts; lane code diff unchanged\)/);
+  });
+
+  it("#5583 follow-up: a documentation-only conflict whose resolution changed the code diff is re-reviewed", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git; let n = 0;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return `diff --git a/src/foo.js b/src/foo.js\n+fix${n++}`;
+      return git(a, o);
+    };
+    await run(w);
+    assert.equal(reviewers(w).length, 2, "re-review: the resolution touched code");
   });
 
   it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
@@ -7888,7 +7914,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 1850, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`);
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2500, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2550, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -8663,6 +8689,69 @@ describe("design gate routing in the lane (#5330 R11, R13, R15)", () => {
       assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
       assert.ok(!builders(w).some((c) => /Design gate:/.test(c[4])));
     }
+  });
+});
+
+describe("classification record in the plan prompt (#5557)", () => {
+  it("asks only for the judgment fields and never for units or migrations", () => {
+    const p = builderPlanPrompt(7);
+    assert.match(p, /classification\.json/);
+    assert.doesNotMatch(p.split("classification.json")[1].split("\n")[0], /units|migrations|risk/);
+  });
+});
+
+describe("FORGE:CLASSIFY wiring (#5557)", () => {
+  const POLICY = "schema: 1\nbranches: {default: main}\nunits:\n  foo: {paths: [\"src/**\"]}\n";
+  const CLS = JSON.stringify({ type: "bug", severity: "P2", exists_in: "unknown", flag: "none", confidence: 0.8, units: ["LLM-LIED"] });
+  const withPolicy = (w) => { const g = w.io.git; w.io.git = async (a, o) => (a[0] === "show" && /\.forge\/release\.yaml$/.test(a.at(-1)) ? POLICY : g(a, o)); };
+  it("posts FORGE:CLASSIFY with code-derived units and namespaced labels when a release policy exists", async () => {
+    const w = world(); withPolicy(w); const rd = w.io.fs.read; w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? CLS : rd(p));
+    await run(w);
+    const c = w.comments.find((x) => x.includes("FORGE:CLASSIFY"));
+    assert.ok(c, "FORGE:CLASSIFY posted");
+    assert.match(c, /"units": \[\s*"foo"\s*\]/); assert.doesNotMatch(c, /LLM-LIED/);
+    assert.ok(w.edits.some((e) => e.includes("unit:foo")) && w.edits.some((e) => e.includes("type:bug")), "namespaced labels added");
+  });
+  it("a live claim without verifiable evidence is downgraded and gets the lane:release label", async () => {
+    const w = world(); withPolicy(w); const rd = w.io.fs.read;
+    w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "bug", severity: "P2", exists_in: "live", flag: "none", confidence: 0.8 }) : rd(p));
+    await run(w);
+    const flat = w.edits.flat().map(String).join(" ");
+    assert.ok(flat.includes("lane:release"), "lane:release label issued");
+    assert.ok(flat.includes("where:unknown") && !flat.includes("where:live"), "downgraded to unknown");
+  });
+  it("issues every label namespace incl. priority:, and an invalid record triggers the correction loop", async () => {
+    const w = world(); withPolicy(w); const rd = w.io.fs.read;
+    w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "bug", severity: "P2", exists_in: "unknown" }) : rd(p));
+    await run(w);
+    const flat = w.edits.flat().map(String).join(" ");
+    for (const ns of ["type:", "priority:P2", "where:", "unit:foo", "mig:", "risk:"]) assert.ok(flat.includes(ns), ns);
+    const bad = world(); withPolicy(bad); const rb = bad.io.fs.read;
+    bad.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "nope", severity: "P2", exists_in: "unknown" }) : rb(p));
+    await run(bad);
+    assert.ok(builders(bad).some((c) => String(c[4]).includes("concerns .forge-lean/classification.json")), "the correction resume was issued for the invalid record");
+    assert.ok(!builders(w).some((c) => String(c[4]).includes("concerns .forge-lean/classification.json")), "a valid record needs no correction");
+    const c = bad.comments.find((x) => x.includes("FORGE:CLASSIFY"));
+    assert.ok(c && /text-only/.test(c), "a second invalid record falls back to text-only after the one correction");
+  });
+  it("a repro that passes (runCommand rc 0) on the live sha downgrades exists_in: live; a failing one (rc 1) keeps it", async () => {
+    const LIVE = JSON.stringify({ type: "bug", severity: "P2", exists_in: "live", flag: "none", confidence: 0.8, exists_in_evidence: { cite: "src/a.js:1", repro: { command: "node r.js", red_on_live: true, green_after: null } } });
+    const go = async (rc) => {
+      const w = world(); const g = w.io.git, rd = w.io.fs.read;
+      w.io.git = async (a, o) => (a[0] === "show" && /\.forge\/release\.yaml$/.test(a.at(-1)) ? POLICY.replace("default: main", "default: main, release: rel") : a[0] === "rev-parse" && /origin\/rel$/.test(a.at(-1)) ? "abc123\n" : a[0] === "cat-file" ? "" : a[0] === "show" && /^abc123:/.test(a.at(-1)) ? "line1\n" : a[0] === "worktree" ? "" : g(a, o));
+      w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? LIVE : rd(p));
+      w.io.runCommand = async () => ({ rc, output: "" });
+      await run(w);
+      return w.comments.find((x) => x.includes("FORGE:CLASSIFY")) ?? "";
+    };
+    assert.match(await go(0), /"exists_in": "unknown"/);
+    assert.match(await go(1), /"exists_in": "live"/);
+  });
+  it("is a no-op without .forge/release.yaml", async () => {
+    const w = world();
+    await run(w);
+    assert.ok(!w.comments.some((x) => x.includes("FORGE:CLASSIFY")));
+    assert.ok(!w.edits.some((e) => e.some((x) => /^(type|unit|where|mig|risk):/.test(String(x)))));
   });
 });
 

@@ -77,6 +77,7 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
     review: verdict ? { verdict, head: pr?.head ?? "unknown" } : "unknown",
     merge_sha: unk(state.steps?.promotion?.result?.sha ?? state.merge_sha),
     deploy: state.deploy ? { run: unk(state.deploy.run), stage: unk(state.deploy.stage), attempt: unk(state.deploy.attempt) } : "unknown",
+    waiting_host: state.conductorWaiting ?? [], // #5564: host-only items the conductor left for a host driver
     rollback_target: unk(state.rollback?.target), auto_rollback: state.rollback?.armed === undefined ? "unknown" : state.rollback.armed ? "armed" : "off",
     release: state.release ? { snapshot: state.release.snapshot ?? null, branch: state.release.branch ?? null, issues: issueNumbers(state), picks: (state.release.picks ?? []).length } : null,
   };
@@ -129,6 +130,7 @@ export function renderReleaseStatus(s) {
     lines.push(`  review: ${show(s.review)}`, `  merge: ${s.merge_sha}`, `  deploy: ${show(s.deploy)}`, `  rollback: target=${s.rollback_target} auto=${s.auto_rollback}`);
     if (s.release) lines.push(`  release set: ${s.release.issues.map((n) => `#${n}`).join(" ") || "(none recorded)"}  picks=${s.release.picks}`);
   }
+  if (s.waiting_host?.length) lines.push(`  waiting on a host: ${s.waiting_host.join(", ")}`);
   lines.push("  next:", ...s.next_actions.map((a) => `    ${a}`));
   return lines.join("\n");
 }
@@ -166,7 +168,7 @@ function classificationOf(comments) {
 const hasLabel = (names, r) => names.includes(r.label);
 
 /** `explain #N`: the ordered rule trace for one issue. `watch`: issue_watch config; `policy`: {skip_labels, min_confidence, risk_rules[], forces[]}; `controls`: controls.jsonl entries (`{verb, after, actor}`); `lanes`: `_active.lanes` (`{<issue>: {force, actor}}`). */
-export async function explainIssue({ io, repo, number, state, watch = {}, policy = {}, controls = [], lanes = {}, planner = PLANNER_RULES }) {
+export async function explainIssue({ io, repo, number, state, watch = {}, policy = {}, controls = [], lanes = {}, planner = PLANNER_RULES, plan = null }) {
   resetSteps();
   const issue = json(await io.gh(["issue", "view", String(number), "--repo", repo, "--json", "number,title,body,labels,comments,createdAt"]));
   const open = json(await io.gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", "500", "--json", "number,title,body,labels,createdAt"])) ?? [];
@@ -191,7 +193,9 @@ export async function explainIssue({ io, repo, number, state, watch = {}, policy
   trace.push(item("depends_on", "release.managed", res(prereq.length === 0), prereq.length ? `open prerequisites ${prereq.map((n) => `#${n}`).join(", ")} must ship first` : "no open prerequisite", prereq.length ? [`close or ship ${prereq.map((n) => `#${n}`).join(", ")}`] : []));
   const member = (state ? issueNumbers(state) : []).includes(issue.number);
   trace.push(item("release_set", "release.mode", res(member), state ? (member ? `in the recorded release set of ${state.id}` : `not in the recorded release set of ${state.id}`) : "no release recorded", member || skip.length ? [] : ["include it in the next release cut"]));
-  if (planner.length) for (const fn of planner) { const p = fn({ issue, state }); trace.push(item(p.rule, p.config_key, p.result, p.detail ?? "", p.would_change ?? [])); }
+  const inPlan = plan?.issues?.[number], cut = plan?.excluded?.find((x) => x.number === number); // #5559: a computed plan (release-plan.mjs buildPlan) answers for the issue
+  if (plan) trace.push(item("planner", "release.plan", cut ? "fail" : inPlan ? "pass" : "n/a", cut ? `excluded [${cut.key}]: ${cut.detail}` : inPlan ? `planned in ${inPlan.lane} lane: ${inPlan.reason}` : "not a candidate of this plan", cut ? [`resolve ${cut.key}`] : []));
+  else if (planner.length) for (const fn of planner) { const p = fn({ issue, state }); trace.push(item(p.rule, p.config_key, p.result, p.detail ?? "", p.would_change ?? [])); }
   else trace.push(item("planner", "release.planner", "n/a", "planner: not installed"));
   const lastLane = controls.filter((c) => c.verb === "lane" && c.after?.[number] !== undefined).at(-1);
   const rec = lanes[number] ?? (lastLane ? { force: lastLane.after[number], actor: lastLane.actor } : null);

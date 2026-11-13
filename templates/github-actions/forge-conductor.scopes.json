@@ -1,0 +1,7 @@
+{
+  "schema": "forgedock.release.conductor-scopes/v1",
+  "token": "GITHUB_TOKEN of the conductor workflow",
+  "permissions": { "actions": "write", "contents": "write", "issues": "write" },
+  "allows": ["read workflow runs (actions)", "workflow dispatch and rerun (actions: write)", "write the forge-ledger/* branches (contents: write, limited by ledger rulesets)", "lease comment and needs-agent issue (issues: write)"],
+  "forbids": ["production secrets", "pull-requests: write", "merge", "id-token: write"]
+}

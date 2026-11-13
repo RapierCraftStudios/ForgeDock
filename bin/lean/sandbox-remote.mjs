@@ -212,6 +212,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     relays,
     serviceRelay,
     async start({ issue, args = [], env: laneEnv = env, secrets = settings.secrets ?? [] }) {
+      if (settings.laneToolsErrors?.length) throw Object.assign(new Error(settings.laneToolsErrors.join("; ")), { code: "lane_tools.invalid" }); // #5650
       const id = idFor(issue);
       // Each allowlisted secret from the env, else the keychain (#4254); nothing else from the host.
       const resolved = {};
@@ -224,6 +225,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
+        ...(settings.laneTools?.length ? { lane_tools: settings.laneTools } : {}), // #5650: per-repo lane image
         ...(warm ? { warm } : {}), // #4912: the pool agent keeps this many warm sandboxes for the repo
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
         // The host's git identity: without it the lane image falls back to a placeholder author that fails DCO.

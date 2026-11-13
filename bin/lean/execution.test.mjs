@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
 import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -1122,5 +1123,29 @@ describe("remote/pool credential resolver (#5131)", () => {
     await t.capacity();
     assert.equal(hit.seen[0].auth, "Bearer router-tok");
     assert.throws(() => remoteTransportFor({}, { env: {}, router: null }), (e) => e.code === "execution.provider.misconfigured");
+  });
+});
+
+describe("#5650: execution.lane_tools", () => {
+  it("parses name and name@version, sorted and deduped", () => {
+    assert.deepEqual(parseExecution({ lane_tools: ["promtool@2.54.1", "playwright", "playwright"] }).laneTools, ["playwright", "promtool@2.54.1"]);
+    assert.deepEqual(parseExecution({ lane_tools: "postgresql-client, python@3.12" }).laneTools, ["postgresql-client", "python@3.12"]);
+  });
+  it("invalid entries are dropped and reported by name; empty or absent leaves the shape unchanged", () => {
+    const e = parseExecution({ lane_tools: ["ok", "bad;rm", ""] });
+    assert.deepEqual(e.laneTools, ["ok"]);
+    assert.equal(e.laneToolsErrors.length, 2);
+    assert.ok(e.laneToolsErrors[0].includes("bad;rm"));
+    for (const sec of [{}, { lane_tools: [] }]) { const x = parseExecution(sec); assert.equal("laneTools" in x, false); assert.equal("laneToolsErrors" in x, false); }
+  });
+  it("the remote launch spec carries lane_tools only when set, and start refuses invalid entries", async () => {
+    const mk = (settings) => { const launched = []; const p = remoteProvider({ batch: { id: "b", logFile: () => "/dev/null" }, repo: "o/r", settings, transport: { launch: async (s) => launched.push(s), status: async () => ({ state: "running" }) }, credentials: () => "", gitIdentity: () => ({}) }); return { p, launched }; };
+    const a = mk({ laneTools: ["promtool@2.54.1"] }); await a.p.start({ issue: 1, args: ["--lane", "main"] });
+    assert.deepEqual(a.launched[0].lane_tools, ["promtool@2.54.1"]);
+    const b = mk({}); await b.p.start({ issue: 1, args: [] });
+    assert.equal("lane_tools" in b.launched[0], false);
+    const c = mk({ laneToolsErrors: ['invalid execution.lane_tools entry "x;y"'] });
+    await assert.rejects(c.p.start({ issue: 1 }), (err) => err.code === "lane_tools.invalid" && err.message.includes("x;y"));
+    assert.equal(c.launched.length, 0);
   });
 });

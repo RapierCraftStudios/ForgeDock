@@ -176,6 +176,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### Recommendation
 ### Related Issues
 ### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
+${LEAN_DIR}/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}
 
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
@@ -194,7 +195,7 @@ A validate or repro command must not read a $TMPDIR file it did not create: each
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with "Build reads:", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.
 
-Blast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add \`"regression":[{"id":"G1","command":"","covers":""}]\` (engine runs it as validate). A post-deploy row needs a registered \`check\` and \`local_infeasible_why\`; developing or fixing the signal is never post-deploy.
+Blast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add \`"regression":[{"id":"G1","command":"","covers":""}]\` (engine runs it as validate). A post-deploy row needs \`local_infeasible_why\` and a \`check\` id from .forge/post-deploy-checks.json on the base, or a deliverable adding it there. Never narrow a requirement that needs another open issue's code: block {"kind":"dependency","issues":[N]}. developing or fixing the signal is never post-deploy.
 
 An added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in ${INVESTIGATION_FILE}. No decision may swap e2e for mocked tests without a forge-probe.
 

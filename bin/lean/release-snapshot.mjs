@@ -9,6 +9,8 @@
  * (`(args, {env, input}) => stdout`, throws on failure) and `io.gh`, so the module is testable with a real temp repo.
  */
 const REMOTE = "origin";
+/** Head movement after the cut (#5567): the fix push, a recorded `main-sync` cherry-pick of a staging commit, or a mechanical `revert`. */
+export const PICK_KINDS = ["fix", "main-sync", "revert"];
 import { BLOCKER_LABEL } from "./release-rehearsal.mjs";
 import { roleRefusal } from "./release-credentials.mjs";
 /** #5561 (I12): a push to release/* or train/* refuses for a lane-role context, except the one fix push; no credential given means the driver (the release host). */
@@ -45,7 +47,7 @@ export function branchName(pattern, now, n) {
   return name;
 }
 
-const isAncestor = (git, a, b) => { try { git(["merge-base", "--is-ancestor", a, b]); return true; } catch { return false; } };
+export const isAncestor = (git, a, b) => { try { git(["merge-base", "--is-ancestor", a, b]); return true; } catch { return false; } };
 const fetchRef = (git, ref) => git(["fetch", "--quiet", REMOTE, `+refs/heads/${ref}:refs/remotes/${REMOTE}/${ref}`]);
 const tipOf = (git, ref) => git(["rev-parse", `refs/remotes/${REMOTE}/${ref}`]).trim();
 const committer = (git) => {
@@ -122,7 +124,7 @@ export async function pickFixes(ctx, { issues = [] } = {}) {
     const [an, ae, ad] = git(["log", "-1", "--format=%an%n%ae%n%aI", orig]).trim().split("\n");
     const msg = `${git(["log", "-1", "--format=%B", orig]).trimEnd()}\n\n(cherry picked from commit ${orig})\n`;
     const sha = git(["commit-tree", tree, "-p", head, "-F", "-"], { input: msg, env: { GIT_AUTHOR_NAME: an, GIT_AUTHOR_EMAIL: ae, GIT_AUTHOR_DATE: ad, ...committer(git) } }).trim();
-    rec.picks.push({ sha, orig, pr: p.number });
+    rec.picks.push({ sha, orig, pr: p.number, kind: "fix" });
     picked.push(p.number);
     head = sha;
   }
@@ -133,20 +135,67 @@ export async function pickFixes(ctx, { issues = [] } = {}) {
   return { picked };
 }
 
+/**
+ * #5567: the mechanical revert of the newest pick (the round-1 fix commit): a commit whose tree is the tree before that pick, recorded
+ * as a `revert` pick naming the reverted commit. No new code; `checkChain` verifies the tree. @returns {{reverted: string}|{err: string}}
+ */
+export async function revertLast(ctx) {
+  const { git, state } = ctx;
+  const rec = state.release;
+  if (!rec?.picks?.length) return { err: "no recorded pick to revert" };
+  const last = rec.picks.at(-1);
+  if (last.kind === "revert") return { err: "the newest pick is already a revert" };
+  const parent = git(["rev-parse", `${last.sha}^`]).trim();
+  const tree = git(["rev-parse", `${parent}^{tree}`]).trim();
+  const msg = `Revert "${git(["log", "-1", "--format=%s", last.sha]).trim()}"\n\n(reverts commit ${last.sha})\n`;
+  const sha = git(["commit-tree", tree, "-p", last.sha, "-F", "-"], { input: msg, env: committer(git) }).trim();
+  rec.picks.push({ sha, orig: last.sha, kind: "revert" });
+  ctx.save();
+  git(["push", "--quiet", REMOTE, `${sha}:refs/heads/${rec.branch}`]);
+  await writeRecord(ctx);
+  return { reverted: last.sha };
+}
+
 /** `fix_mode: recut`: move the (unmerged) release branch to the current staging tip and start the record's picks over. */
 export async function recut(ctx) {
   const { git, staging, state } = ctx;
   const rec = state.release;
   fetchRef(git, staging);
   const tip = tipOf(git, staging);
-  if (tip === (rec.picks.at(-1)?.sha ?? rec.snapshot) && !rec.picks.length) return { recut: false };
   const noPush = pushRefusal(ctx.fence?.lctx?.credential ?? ctx.credential, rec.branch); if (noPush) return { recut: false, refused: noPush };
-  rec.recuts = (rec.recuts ?? 0) + 1;
-  rec.snapshot = tip; rec.picks = []; rec.range = { ...rec.range, head: tip };
+  const unchanged = tip === (rec.picks.at(-1)?.sha ?? rec.snapshot) && !rec.picks.length;
+  let head = unchanged ? tip : null;
+  if (!unchanged) {
+    rec.recuts = (rec.recuts ?? 0) + 1;
+    rec.snapshot = tip; rec.picks = []; rec.range = { ...rec.range, head: tip };
+    head = tip;
+  }
+  const sync = ctx.def ? syncDefault(ctx, head) : null; // #5565: a p0 that landed on the default branch after the cut comes in as one main-sync pick
+  if (sync?.err) return { recut: false, err: sync.err };
+  if (sync) { head = sync.sha; rec.picks.push({ sha: sync.sha, orig: sync.orig, kind: "main-sync", merge: true }); rec.range = { ...rec.range, head }; }
+  if (unchanged && !sync) return { recut: false };
   ctx.save();
-  git(["push", "--quiet", "--force", REMOTE, `${tip}:refs/heads/${rec.branch}`]);
+  git(["push", "--quiet", "--force", REMOTE, `${head}:refs/heads/${rec.branch}`]);
   await writeRecord(ctx);
-  return { recut: true, snapshot: tip };
+  return { recut: true, snapshot: tip, ...(sync ? { mainSync: sync.orig } : {}) };
+}
+
+/** #5565: true when the default branch has commits the release head does not contain (a p0 landed after the cut); the release merge refuses then. */
+export function defaultBehind({ git, def, head }) {
+  fetchRef(git, def);
+  return !isAncestor(git, `${REMOTE}/${def}`, head);
+}
+
+/** Merge the default-branch tip into `head` (plumbing, no working tree) unless it is already an ancestor. @returns {{sha, orig}|{err}|null} */
+function syncDefault(ctx, head) {
+  const { git, def } = ctx;
+  fetchRef(git, def);
+  const orig = tipOf(git, def);
+  if (isAncestor(git, orig, head)) return null;
+  let tree;
+  try { tree = git(["merge-tree", "--write-tree", head, orig]).split("\n")[0].trim(); } catch { return { err: `merging ${def} into ${ctx.state.release.branch} conflicts: resolve it by hand` }; }
+  const sha = git(["commit-tree", tree, "-p", head, "-p", orig, "-F", "-"], { input: `Merge ${def} into ${ctx.state.release.branch} (main-sync)\n`, env: committer(git) }).trim();
+  return { sha, orig };
 }
 
 /**
@@ -162,14 +211,27 @@ export function checkChain({ git, record, sha, staging, exact = false }) {
     if (!record?.snapshot) return no("no FORGE:RELEASE record");
     if (!isAncestor(git, record.snapshot, stagingTip)) return no(`snapshot ${record.snapshot} is not on ${staging}`);
     if (sha !== record.snapshot && !isAncestor(git, record.snapshot, sha)) return no(`${sha} does not descend from the snapshot ${record.snapshot}`);
-    const rows = git(["rev-list", "--reverse", "--parents", `${record.snapshot}..${sha}`]).trim().split("\n").filter(Boolean).map((l) => l.split(/\s+/));
+    const rows = git(["rev-list", "--reverse", "--first-parent", "--parents", `${record.snapshot}..${sha}`]).trim().split("\n").filter(Boolean).map((l) => l.split(/\s+/));
     if (rows.length > record.picks.length) return no(`${rows.length} commit(s) on the release branch, ${record.picks.length} recorded cherry-pick(s): ${rows.slice(record.picks.length).map((r) => r[0].slice(0, 12)).join(", ")} not recorded`);
     if (exact && rows.length !== record.picks.length) return no(`head is at ${rows.length} of ${record.picks.length} recorded cherry-picks`);
     let prev = record.snapshot;
     for (const [i, [c, ...parents]] of rows.entries()) {
       const pick = record.picks[i];
       if (c !== pick.sha) return no(`commit ${c.slice(0, 12)} is not the recorded pick ${pick.sha.slice(0, 12)}`);
+      if (pick.kind === "main-sync" && pick.merge) { // #5565: the default branch merged in after a p0 landed: parents are the previous pick and the recorded default tip
+        if (parents.length !== 2 || parents[0] !== prev || parents[1] !== pick.orig) return no(`commit ${c.slice(0, 12)} is not the recorded merge of ${String(pick.orig).slice(0, 12)} onto ${prev.slice(0, 12)}`);
+        prev = c;
+        continue;
+      }
       if (parents.length !== 1 || parents[0] !== prev) return no(`commit ${c.slice(0, 12)} is not a linear child of ${prev.slice(0, 12)}`);
+      if (pick.kind && !PICK_KINDS.includes(pick.kind)) return no(`commit ${c.slice(0, 12)} has the unrecorded pick kind ${JSON.stringify(pick.kind)}`);
+      if (pick.kind === "revert") { // #5567: a mechanical revert of the previous pick: same tree as before it, and it names it
+        if (pick.orig !== prev) return no(`revert ${c.slice(0, 12)} does not revert the previous pick`);
+        if (!git(["log", "-1", "--format=%B", c]).includes(`(reverts commit ${pick.orig})`)) return no(`revert ${c.slice(0, 12)} does not name ${pick.orig.slice(0, 12)}`);
+        if (git(["rev-parse", `${c}^{tree}`]).trim() !== git(["rev-parse", `${pick.orig}~1^{tree}`]).trim()) return no(`revert ${c.slice(0, 12)} is not the mechanical revert of ${pick.orig.slice(0, 12)}`);
+        prev = c;
+        continue;
+      }
       if (!isAncestor(git, pick.orig, stagingTip)) return no(`${pick.orig} is not a ${staging} commit`);
       if (!git(["log", "-1", "--format=%B", c]).includes(`(cherry picked from commit ${pick.orig})`)) return no(`commit ${c.slice(0, 12)} does not name ${pick.orig} as its cherry-pick source`);
       if (git(["rev-parse", `${c}^{tree}`]).trim() !== pickTree(git, prev, pick.orig)) return no(`commit ${c.slice(0, 12)} differs from the cherry-pick of ${pick.orig.slice(0, 12)}`);

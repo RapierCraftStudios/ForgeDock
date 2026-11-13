@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { runRelease, withStubs, readReleaseConfig, newReleaseId } from "./release.mjs";
-import { parsePreflightConfig, markReadyStep } from "./release-preflight.mjs";
+import { parsePreflightConfig, markReadyStep, coStartCi } from "./release-preflight.mjs";
 import { fixStep } from "./release-review.mjs";
 
 const DISK = [{ mount: "/", type: "ext4" }];
@@ -100,7 +100,7 @@ describe("release host preflight (#5277)", () => {
     const mk = (pfOk) => {
       const io = fakeIo({ preflightOk: () => pfOk });
       const seam = {
-        headOf: async () => HEAD, runLane: async () => ({ terminalReason: "merged" }), fileCiIssue: async () => 3,
+        headOf: async () => HEAD, runLane: async () => ({ terminalReason: "merged" }), fileFixIssue: async () => 3, failedJobs: async () => [],
         calls: [],
       };
       return { io, seam, ctx: { io: Object.assign(io, { review: seam }), repo: REPO, def: "main", staging: "staging", config: CFG, save() {}, state: { steps: { review: { result: { pr: 9, marker: "FORGE:GATE_FAILURE", verdict: "X", head: "b".repeat(40), blocking: [11], ciFailing: 0 } } } } } };
@@ -110,5 +110,21 @@ describe("release host preflight (#5277)", () => {
     assert.equal(out.blocked, true);
     assert.match(out.reason, /host preflight failed/);
     assert.equal(red.io.ran.length, 1);
+  });
+});
+
+describe("co-start CI (#5567)", () => {
+  it("unconfigured: zero writes (no gh call at all)", async () => {
+    const calls = [];
+    const r = await coStartCi({ io: { gh: async (a) => { calls.push(a); return "{}"; } }, repo: REPO, config: {} }, { pr: 9 });
+    assert.deepEqual(r, { skipped: true });
+    assert.deepEqual(calls, []);
+  });
+  it("configured: marks the draft ready and requests the full run on the same head", async () => {
+    const calls = [];
+    const gh = async (a) => { calls.push(a.join(" ")); return a[1] === "view" ? JSON.stringify({ headRefOid: HEAD, headRefName: "release/x", isDraft: true }) : ""; };
+    const r = await coStartCi({ io: { gh }, repo: REPO, config: { fix: { coStart: true, fullRunWorkflow: "full.yml" } } }, { pr: 9 });
+    assert.deepEqual(r, { ready: true, wasDraft: true, fullRun: true });
+    assert.ok(calls.some((c) => c.startsWith("pr ready")) && calls.some((c) => c.startsWith("workflow run full.yml")));
   });
 });

@@ -35,7 +35,7 @@ describe("release deploy stages (#5560)", () => {
     const { io } = world(); const c = mk(io, {}, null);
     assert.deepEqual(await deployStep(c), { skipped: true }); assert.equal(c.state.deploy, undefined);
   });
-  it("MERGED -> LIVE: records the rollback target, observes the run, passes LIVE_CHECK, and never writes FORGE:VERIFIED (#5562)", async () => {
+  it("MERGED -> LIVE: records the rollback target, observes the run, passes LIVE_CHECK, and, without a verify policy, writes no FORGE:VERIFIED (#5562)", async () => {
     const { w, io } = world(); const c = mk(io);
     const out = await deployStep(c);
     assert.equal(out.live, true); assert.equal(c.state.deploy.target.sha, OLD); assert.equal(c.state.deploy.phase, "LIVE");
@@ -177,6 +177,28 @@ describe("deploy reconcile (#5560)", () => {
     const out = await deployStep(c);
     assert.equal(out.blocked, true); assert.match(out.reason, /LIVE_CHECK failed/);
     assert.equal(w.gh.filter((g) => g.startsWith("workflow run")).length, 0);
+  });
+});
+
+describe("deploy VERIFYING (#5562)", () => {
+  it("a configured verify policy gates LIVE: the VERIFIED marker is written and the issue closes only after the layers pass", async () => {
+    const { w, io } = world(); const issue = { state: "OPEN", body: "", comments: [] };
+    const og = io.gh; io.gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "view") return JSON.stringify(issue);
+      if (a[0] === "issue" && a[1] === "comment") { issue.comments.push({ body: a[a.indexOf("--body") + 1] }); return ""; }
+      if (a[0] === "issue" && a[1] === "close") { issue.state = "CLOSED"; return ""; }
+      return og(a);
+    };
+    const c = mk(io); c.config.verify = { close_requires: "verified" }; c.state.release = { issues: [7] };
+    const out = await deployStep(c);
+    assert.equal(out.live, true); assert.equal(out.verify.verified, true); assert.equal(issue.state, "CLOSED");
+    assert.ok(issue.comments.some((m) => m.body.includes(`FORGE:VERIFIED ${SHA}`)));
+  });
+  it("a blocked verification keeps the release out of LIVE", async () => {
+    const { io } = world(); const c = mk(io); c.config.verify = { results: [{ workflow: "smoke.yml", kind: "smoke" }] };
+    const og = io.gh; io.gh = async (a) => (a.includes("smoke.yml") ? "[]" : og(a));
+    const out = await deployStep(c);
+    assert.equal(out.blocked, true); assert.match(out.reason, /no completed run/); assert.equal(c.state.deploy.phase, "VERIFYING");
   });
 });
 

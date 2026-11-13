@@ -779,6 +779,8 @@ release:
 
 `forgedock release verify <sha> [--repo owner/repo]` reads the `FORGE:RELEASE` record from the PR that contains `<sha>` and exits 0 only when `<sha>` is the snapshot plus recorded picks, each a clean cherry-pick of a `branches.staging` commit (same tree as `git cherry-pick`), so a repo workflow that trusted `head.ref == staging` can call it instead.
 
+`forgedock release verify <release id>` (#5562) re-runs the deploy verification of a release that passed LIVE_CHECK; a release id (`rYYYYMMDD-HHMMSS-N`) is never mistaken for a sha. Policy `verify` block (default branch, `.forge/release.yaml`): `results` (list of `{workflow, kind: smoke|edge|convergence}`, layer 1), `workflow` (verification workflow dispatched through the epoch fence, layer 2), `slis` (layer 3, entries `{name, tolerance, worse: higher|lower, abs}` read through an injected read-only metric source; without one the layer reports `sli: skipped (no host)`), `post_deploy_checks_file` (layer 4, each issue's `[check:id]` runs once; entries with `for` are windowed and become rollup follow-ups), `flags` (layer 5, `{flag, off_command}` verified in the off state, never activated) and `close_requires: verified|deployed`. With `verified` (default once the block is set) an issue is closed only after a `FORGE:VERIFIED <deploy sha>` comment; `deployed` closes without it. Soak minutes by risk class: low 10, medium 20, full 30, p0 15, overridden by `lanes.<lane>.soak_min` (a number or a map by class). An empty `verify` block leaves VERIFYING a bare transition to LIVE.
+
 ### `.forge/release.yaml` (#5551)
 
 Nested release policy (`schema: 1`) lives in a committed `.forge/release.yaml`, not in the host-local forge.yaml. It is read from the default branch with `git show origin/<default>:.forge/release.yaml`, never from the PR head or the worktree, so a PR cannot weaken its own gates. The flat `release.*` keys above stay the fallback when the file is absent there. Sections: `branches`, `trust`, `state`, `units`, `couplings`, `contracts`, `forces`, `classify`, `risk`, `plan`, `lanes`, `merge`, `ci`, `preflight`, `deploy`, `verify`, `rollback`, `controls`.
@@ -833,6 +835,22 @@ budget:
 
 The release state (and so the ledger) records `lane` and `minutes: {runs, total}`, where total is the sum of ceil(job minutes) of the Actions runs created since the release started, read from the jobs API.
 
+
+### Deploy gate catalogue and false-block telemetry (#5583)
+
+Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-op with zero writes. `forgedock release check-config` validates the file when present. Fields per gate under `gates:` (`schema: 1`): `id`, `protects_against` (origin issue), `where`, `determinism`, `pre_merge_artifact` (fixture), `version`, `mode` (`block|skip|rollback|freeze|warn|red`), `owner`, `review_by` (`YYYY-MM-DD`); admission also needs `on_uncertainty: inconclusive`, `failure_triggers` and `proportionality`.
+
+`.forge/release.yaml` `gates:`: `demote_fb_rate` (percent, default 5), `demote_window` (runs, default 20), `safety` (never demoted; default `migration-immutability`, `identity-preflight`, `backup-freshness`, `health-auto-restore`, plus the unskippable classes).
+
+A `deploy-telemetry` job prints one JSON line per gate per run: `{"schema":"forgedock.release.gate/v1","gate":"<id>","outcome":"pass|fail|inconclusive|skip","class":"TP|FB|unknown","minutes":<n>,"evidence":"<text>"}`. A `TP`/`FB` class without `evidence` is stored as `unknown`. `forgedock release gates record <release-id> --file <jsonl>` stores the lines in the release state (`gates`). When `FORGE_GATE_TELEMETRY` names such a JSON-lines file and a catalogue exists, the release run stores its lines in `state.gates` next to `state.minutes` automatically; `historyFromRoot` exposes them as its `gates` property.
+
+| Command | Description |
+|---------|-------------|
+| `release gates [--since 30d] [--json]` | Per gate: `runs`, `fails`, `fb`, `fb_share` (FB runs / runs, in percent), `minutes`. Text: a tab-separated header `gate runs fails fb fb_share minutes` and one row per gate. JSON: one line `{"schema":"forgedock.release.gates/v1","gates":[{gate,runs,fails,fb,minutes,fb_share}]}`. |
+| `release gates check [--base <ref>]` | Fails for a gate added or changed against the base ref (default `origin/<default>`) that lacks the fixture, version, `on_uncertainty: inconclusive`, failure trigger with proportionality, or owner and `review_by`. |
+| `release gates demote` | A gate whose FB rate over the last `demote_window` runs (a full window) exceeds `demote_fb_rate` is demoted to `warn` for 14 days via the audited `release demote` control, and an issue is filed. Safety gates are never demoted. |
+| `release promote <gate> --fixture <ref> --reason <text>` | Re-promotes a demoted gate; refused without a fixture reference. |
+
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
 
 Repos that set `preflight_command` should skip their Actions CI while the release PR is a draft, so the paid run happens once, on the final head:
@@ -847,6 +865,16 @@ jobs:
 ```
 
 **Commands that use this section**: `forgedock release`
+
+### Gate-only fix lane: `release control regate` (#5584)
+
+`forgedock release control regate <release id> --ref <fix branch|sha> --reason "..." [--gate-fix-ref <hotfix branch>]` re-evaluates the gates of the same release sha (same image digests, no rebuild, no migration rerun) with the gate code of `--ref`, so a fix limited to gate artifacts does not need a new merge cycle. Nothing runs unless the verb is called. The fix still goes through CI and review once; it never skips the merge cycle for code that ships in images.
+
+- **Classifier**: the diff between the release's merged sha and `--ref` is gate-only only when every path matches `gates.paths` (default `scripts/deploy/**`, `scripts/lib/**`, `scripts/prod-smoke-test.sh`, `**/gate-fixtures/**`, `tests/gates/**`). A `.github/workflows/*.yml` file qualifies only when every changed hunk lies in a step named in `gates.workflow_steps` (default none). A migration path (`**/migrations/**`, `**/migrate/**`, `*.sql`), an image path (`Dockerfile*`, `docker-compose*.yml`) or any other app path sends the fix to the normal lane.
+- **Dispatch**: one `gh workflow run` of `verify.workflow` at `--ref` through the epoch fence, inputs `sha` (the release sha), `regate=true`, `gate_sha` and `forge_epoch`. The engine never sets `override_freeze` (I26); LIVE_CHECK (I28) still applies to the result.
+- **`gate_fix_ref`** (hotfix same-release gate fix): with `--gate-fix-ref`, the dispatch also carries `gate_fix_ref=<branch>`, which lets a hotfix-branch gate fix replace the default-branch preflight copy. It is recorded in the audit line and in `state.regates`.
+- **Refusals** (nothing is written or dispatched): no recorded live record/rollback target (`state.deploy.target`); `deploy.freeze_variable` set by the run (not set before the deploy) while migration files lie between the rollback target and the release sha; a fix that is not gate-only; a ref already re-evaluated.
+- **Audit**: every use appends a `controls.jsonl` line (`verb: regate`) with the actor, the fix sha, the release sha and `gate_sha` (sha1 over the changed gate paths and their blobs at `--ref`); the release state keeps `regates[]`, and gate telemetry recorded afterwards carries that `gate_sha`.
 
 ## `issue_watch` (OPTIONAL)
 
@@ -1014,6 +1042,7 @@ lean:
   fix_model: claude-sonnet-5-5   # optional model of fresh fix-round sessions (default: the reviewer model)
   builder_routing: on            # on (default) | off: route the build to a mid-tier model by the frozen contract
   builder_mid_model: claude-sonnet-5-5   # optional mid-tier builder model (default claude-sonnet-5-5)
+  contract_max_corrections: 3   # #5623: builder correction rounds for a builder-correctable invalid contract before it ends contract.invalid (which a batch then requeues once with a fresh plan)
   light:
     mode: shadow     # off | shadow (default) | on: light-lane eligibility (#4448; lane wiring #4450)
     max_lines: 40    # upgrade to the full lane above this many non-test diff lines

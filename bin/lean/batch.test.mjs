@@ -1893,3 +1893,17 @@ describe("#5469: holds carry an owner and an expiry", () => {
     assert.ok(old.readCancel()); assert.equal(fresh.readCancel(), null);
   });
 });
+
+describe("batch scan cache (#5531)", () => {
+  it("#5531: pendingIssues re-reads after the state file changes; isTerminal sees report and cancel", () => {
+    const root = tmpDir("batch-cache-"), b = openBatch(root, "b20261031-000000-7001");
+    b.writePlan({ daemon: true });
+    b.store.save({ v: 1, order: [1], pending: [1] });
+    assert.deepEqual(b.pendingIssues(), [1]);
+    b.store.save({ v: 1, order: [1, 2], pending: [1, 2] });
+    assert.deepEqual(b.pendingIssues(), [1, 2]);
+    assert.equal(b.isTerminal(), false);
+    b.requestCancel({ reason: "x" });
+    assert.equal(b.isTerminal(), true);
+  });
+});

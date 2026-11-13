@@ -226,3 +226,33 @@ describe("release fencing through the job (#5553)", () => {
     }
   });
 });
+
+describe("claimDeploy (#5565)", async () => {
+  const { claimDeploy, releaseDeploy } = await import("./release-ledger.mjs");
+  it("refuses an overlapping deploy, preempts only on request, releases", async () => {
+    const gh = fakeGh();
+    const io = { api: gh.api, now: () => gh.now, sleep: async () => {} };
+    const ctx = { io, repo: REPO, credential: "driver" };
+    assert.equal((await claimDeploy(ctx, { release: "r1" })).ok, true);
+    assert.equal((await claimDeploy(ctx, { release: "r1" })).ok, true);
+    assert.match((await claimDeploy(ctx, { release: "r2" })).queued, /DEPLOYING/);
+    const p = await claimDeploy(ctx, { release: "r2", preempt: true });
+    assert.equal(p.preempted, "r1");
+    await releaseDeploy(ctx, "r2");
+    assert.equal((await claimDeploy(ctx, { release: "r3" })).ok, true);
+  });
+});
+
+describe("recordSync (#5566)", async () => {
+  const { recordSync } = await import("./release-ledger.mjs");
+  it("keeps the sync in _active.sync and appends one audit line", async () => {
+    const g = fakeGh(), ctx = ctxOf(g);
+    const r = await recordSync(ctx, { pr: 7, conflicted: true, target: ["a.js"], milestones: [{ branch: "milestone/x" }], duplicates: [] }, 0);
+    assert.equal(r.ok, true);
+    assert.equal(r.active.sync.pr, 7);
+    const files = g.trees.get(g.commits.get(g.refs.get(ACTIVE)).tree);
+    const line = JSON.parse(files["controls.jsonl"].trim());
+    assert.equal(line.verb, "sync");
+    assert.equal(line.milestones, 1);
+  });
+});

@@ -23,7 +23,7 @@ export function makeWarm({ store, sb, own, now, launch, destroy, view, log = con
   function configure({ spec, cpus, mem_gb, limit = null, n }) {
     const key = keyOf(spec), want = Math.min(MAX_WARM, Number.isInteger(n) ? n : 0);
     if (want <= 0) { delete wanted()[key]; store.save(); return { key, n: 0 }; }
-    wanted()[key] = { n: want, cpus, mem_gb, limit, spec: { image: spec.image ?? null, repo: spec.repo ?? null, cache: spec.cache ?? null, docker: Boolean(spec.docker) } };
+    wanted()[key] = { n: want, cpus, mem_gb, limit, spec: { image: spec.image ?? null, repo: spec.repo ?? null, cache: spec.cache ?? null, docker: Boolean(spec.docker), ...(spec.lane_tools?.length ? { lane_tools: spec.lane_tools } : {}) } };
     store.save();
     return { key, n: want };
   }

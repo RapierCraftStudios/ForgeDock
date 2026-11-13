@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
- * Deploy stages of `forgedock release` (#5560, epic #5549 Phase 3): MERGED -> DEPLOYING -> LIVE_CHECK -> RECOVERING -> VERIFYING -> LIVE (verification layers and FORGE:VERIFIED are #5562).
+ * Deploy stages of `forgedock release` (#5560, epic #5549 Phase 3): MERGED -> DEPLOYING -> LIVE_CHECK -> RECOVERING -> VERIFYING -> LIVE (verification layers, FORGE:VERIFIED and close-after-verified live in release-verify.mjs, #5562).
  * Off unless the policy has `deploy.pipelines` (`ctx.config.deploy`): without it the step is `{skipped}` and leaves no trace.
  * Every step is observe -> decide -> fenced act -> verify, and progress lives in `state.deploy`, so a resume re-observes GitHub
  * (the run, the live record, the freeze variable) before it acts and repeats no dispatch or rerun. Waits are bounded and end in
@@ -12,8 +12,9 @@
 import { fenced } from "./release-fence.mjs";
 import { buildDispatchArgs } from "./release-control.mjs";
 import { INFRA_SIGNATURES } from "./release-flakes.mjs";
+import { verifyStep, verifyConfigured } from "./release-verify.mjs";
 
-const BOUNDS = { pollMs: 10_000, runPollMs: 20_000, defaultStageS: 3600, rerunMax: 2, maxAttempts: 3 };
+export const BOUNDS = { pollMs: 10_000, runPollMs: 20_000, defaultStageS: 3600, rerunMax: 2, maxAttempts: 3 };
 const json = (s) => JSON.parse(String(s || "null"));
 const blocked = (reason) => ({ blocked: true, reason });
 const tail = (s, n = 400) => String(s ?? "").trim().slice(-n);
@@ -36,7 +37,7 @@ export function liveMatches(live, mergeSha, expected) {
   return units.length ? units.every(([u, d]) => live.images?.[u] === d) : sameSha(live.sha, mergeSha);
 }
 
-async function readTarget(io, cmd) {
+export async function readTarget(io, cmd) {
   if (!cmd) return null;
   const r = await io.rehearse(cmd, { timeout: 120_000 });
   return r?.ok ? parseLiveRelease(r.output) : null;
@@ -73,7 +74,7 @@ async function poll(io, polls, ms, fn) {
 const idemKey = (ctx, what) => `${ctx.fence?.lease?.release ?? ctx.state.id ?? "-"}:deploy:${ctx.fence?.lease?.epoch ?? 0}:${what}`;
 
 /** A dispatch (fenced, write-ahead intent) and the run it makes; observe first so a crashed driver never dispatches twice. */
-async function runFor(ctx, { workflow, sha, inputs, key, startPolls, b }) {
+export async function runFor(ctx, { workflow, sha, inputs, key, startPolls, b }) {
   const { io, repo } = ctx;
   const look = () => latestRun({ io, repo, workflow, sha });
   let run = await poll(io, startPolls, b.pollMs, look);
@@ -82,13 +83,13 @@ async function runFor(ctx, { workflow, sha, inputs, key, startPolls, b }) {
     run = await poll(io, Math.max(startPolls, Math.ceil((ctx.config.deploy?.start_timeout_s ?? 60) * 1000 / b.pollMs)), b.pollMs, look);
     return run ? { run, dispatched: false } : { err: `a ${workflow} dispatch for ${sha.slice(0, 8)} was already recorded but no run appeared; check the Actions tab, then resume (never redispatched)` };
   }
-  const f = await fenced(ctx.fence, { action: "dispatch", key: idemKey(ctx, key) }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
+  const f = await fenced(ctx.fence, { action: "dispatch", key: idemKey(ctx, key) }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.deployRef ?? ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
   if (f.refused) return { err: `dispatch ${f.refused}` };
   run = await poll(io, startPolls, b.pollMs, look);
   return run ? { run, dispatched: true } : { err: `no ${workflow} run for ${sha.slice(0, 8)} after a dispatch on ${ctx.def}; check the Actions tab, then resume` };
 }
 
-async function finished(ctx, workflow, sha, polls, b) {
+export async function finished(ctx, workflow, sha, polls, b) {
   const { io, repo } = ctx;
   return poll(io, polls, b.runPollMs, async () => { const r = await latestRun({ io, repo, workflow, sha }); return r?.status === "completed" ? r : null; });
 }
@@ -194,10 +195,15 @@ export async function deployStep(ctx) {
     }
   }
 
+  let verify = null;
   if (st.phase !== "LIVE") {
     st.phase = "VERIFYING"; ctx.save();
-    st.phase = "LIVE"; ctx.save(); // verification layers and FORGE:VERIFIED are #5562
+    if (verifyConfigured(ctx.config.verify)) { // #5562: layers, FORGE:VERIFIED, guarded close; unconfigured stays a bare transition
+      verify = await verifyStep(ctx, sha);
+      if (verify.blocked) return { ...blocked(verify.reason), ...(verify.hold ? { hold: verify.hold } : {}), ...(verify.rollback ? { rollback: verify.rollback } : {}) };
+    }
+    st.phase = "LIVE"; ctx.save();
   }
   io.print?.(`release: live at ${sha.slice(0, 8)} (run ${st.runId}, ${st.reruns} rerun(s))`);
-  return { live: true, merge: sha, run: st.runId, reruns: st.reruns };
+  return { live: true, merge: sha, run: st.runId, reruns: st.reruns, ...(verify ? { verify } : {}) };
 }

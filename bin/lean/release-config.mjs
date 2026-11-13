@@ -12,8 +12,12 @@ import { createHash } from "node:crypto";
 import { load, JSON_SCHEMA } from "../vendor/js-yaml/js-yaml.mjs";
 import { readReleaseConfig } from "./release.mjs";
 import { readBranches } from "./lane.mjs";
+import { catalogueFindings } from "./release-gates.mjs";
 
 export const POLICY_PATH = ".forge/release.yaml";
+/** Migration locations and destructive statements the rollback ladder looks for in migration file text (I8, #5563); text only, nothing is executed. */
+export const MIGRATION_PATHS = ["**/migrations/**", "**/migrate/**", "*.sql"];
+export const DESTRUCTIVE_SQL = /\b(DROP\s+(TABLE|COLUMN|SCHEMA|INDEX|CONSTRAINT)|TRUNCATE|DELETE\s+FROM|ALTER\s+TABLE[^;]*\b(DROP|RENAME)\b|RENAME\s+(TO|COLUMN))\b/i;
 export const DEFERRED_KEYS = ["plan.auto_if", "retention_days", "ci.forbid_per_issue_steps", "couplings[].refine", "ci.provider=command", "risk.weights"];
 
 export const INIT_PROFILE = `schema: 1
@@ -45,12 +49,17 @@ export const POLICY_SCHEMA = obj({
   lanes: { t: "map", v: obj({ pipeline: S, ci_tier: S, approval: S, budget: S, base: en("live", "integration", "default"), units_max: N, max_risk: en("low", "medium", "high"), train_max_issues: N, train_max_units: N, soak_min: { t: "any" }, flag_policy: en("require", "warn", "off"), requires: list() }) },
   credentials: obj({ gate_app: SN, lane_env_strip: list() }),
   merge: obj({ approval: en("confirm", "with-plan", "auto"), method: en("merge-commit", "squash", "rebase"), trailers: list() }),
-  ci: obj({ provider: en("github-actions", "command"), required_checks: ANY, selection: ANY, rerun_budget_min: N, fix: ANY, flake: obj({ quarantine_after: N, window_days: N }), unskippable: list(), tiers: { t: "map", v: obj({ jobs: list() }) }, nightly: ANY, budget: ANY }),
+  ci: obj({ provider: en("github-actions", "command"), required_checks: ANY, selection: ANY, rerun_budget_min: N, fix: obj({ max_rounds: I, co_start: B, full_run_workflow: S }), flake: obj({ quarantine_after: N, window_days: N }), unskippable: list(), tiers: { t: "map", v: obj({ jobs: list() }) }, nightly: ANY, budget: ANY }),
   preflight: obj({ commands: list(), timeout_s: N, blocking: B }),
   deploy: obj({ live_release_command: S, freeze_variable: S, concurrency_group: S, start_timeout_s: N, stage_timeout_s: N, expected_digests_command: S, recovery: obj({ rerun_max: I, max_attempts: I, signatures: list() }), pipelines: { t: "map", v: PIPELINE } }),
-  verify: obj({ slis: list(ANY), post_deploy_checks_file: S, close_requires: en("verified", "deployed") }),
-  rollback: obj({ triggers: list(), ladder: list(), refuse_across: list(), open_revert_pr: B }),
+  verify: obj({ workflow: S, results: list(obj({ workflow: S, kind: en("smoke", "edge", "convergence") })), flags: list(obj({ flag: S, off_command: S })), slis: list(ANY), post_deploy_checks_file: S, close_requires: en("verified", "deployed") }),
+  rollback: obj({
+    triggers: list(en("smoke", "health", "livecheck", "sli", "crashloop", "human")), ladder: list(en("flag", "unit", "full", "stop")), refuse_across: list(en("destructive_migration")), open_revert_pr: B,
+    flags: list(obj({ flag: S, kill_command: S })), unit_workflow: S, unit_action: S, full_workflow: S, health_command: S, result_command: S,
+  }),
+  events: obj({ webhook_url: S }),
   quarantine: obj({ days: N, max: N }),
+  gates: obj({ demote_fb_rate: N, demote_window: I, safety: list(), paths: list(), workflow_steps: list() }),
   controls: obj({ intake: ANY, conductor: ANY, exempt: ANY }),
 });
 
@@ -136,24 +145,42 @@ export function readPolicy({ io, defaultBranch, cwd = process.cwd(), ref }) {
   return { source: "file", policy: findings.length ? null : policy, findings, sha: createHash("sha256").update(text).digest("hex") };
 }
 
+const GATES_PATH_LABEL = ".forge/gates.yaml";
 const flagOf = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 
 /** `forgedock release check-config [--ref <git ref>]`: exit 0 valid (or file absent: flat keys), 1 on any finding. */
 export function checkConfigFromCli(argv, { io, cwd = process.cwd() }) {
   const defaultBranch = readBranches(cwd).default || "main";
-  const r = readPolicy({ io, defaultBranch, cwd, ref: flagOf(argv, "--ref") });
-  if (r.source === "forge.yaml") { io.print(`release check-config: no ${POLICY_PATH} on origin/${defaultBranch}; using forge.yaml release.* keys`); return 0; }
-  r.findings.forEach((f) => io.print(`release check-config: ${f}`));
-  io.print(r.findings.length ? `release check-config: FAILED (${r.findings.length})` : `release check-config: ok (sha256 ${r.sha.slice(0, 12)})`);
-  return r.findings.length ? 1 : 0;
+  const ref = flagOf(argv, "--ref");
+  const gf = catalogueFindings(io, ref ?? `origin/${defaultBranch}`); // #5583: .forge/gates.yaml, validated when present
+  const gatesLines = () => (gf ?? []).map((f) => `release check-config: ${GATES_PATH_LABEL}: ${f}`);
+  const r = readPolicy({ io, defaultBranch, cwd, ref });
+  if (r.source === "forge.yaml") {
+    io.print(`release check-config: no ${POLICY_PATH} on origin/${defaultBranch}; using forge.yaml release.* keys`);
+    gatesLines().forEach((l) => io.print(l));
+    return gf?.length ? 1 : 0;
+  }
+  const findings = [...r.findings, ...(gf ?? []).map((f) => `${GATES_PATH_LABEL}: ${f}`)];
+  findings.forEach((f) => io.print(`release check-config: ${f}`));
+  io.print(findings.length ? `release check-config: FAILED (${findings.length})` : `release check-config: ok (sha256 ${r.sha.slice(0, 12)})`);
+  return findings.length ? 1 : 0;
 }
 
-/** `forgedock release init`: writes the zero-config profile (7.4) to `.forge/release.yaml` and nothing else; never overwrites. */
-export function initFromCli(_argv, { io, cwd = process.cwd() }) {
+/** `forgedock release init [--conductor]`: writes the zero-config profile (7.4) to `.forge/release.yaml` and nothing else; never overwrites. */
+export function initFromCli(argv, { io, cwd = process.cwd() }) {
   const file = join(cwd, POLICY_PATH);
+  if (argv?.includes("--conductor")) return initConductor(file, { io, cwd }); // #5564: async; the plain init stays synchronous
   if (existsSync(file)) { io.print(`release init: ${POLICY_PATH} exists; not overwriting`); return 1; }
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, INIT_PROFILE);
   io.print(`release init: wrote ${POLICY_PATH}`);
   return 0;
+}
+
+/** `release init --conductor`: the policy file (left alone when present) plus the version-pinned conductor workflow. */
+async function initConductor(file, { io, cwd }) {
+  const { installConductor } = await import("./release-conductor.mjs");
+  let pol = null; try { pol = parsePolicy(readFileSync(file, "utf8")).policy; } catch { /* no policy yet: defaults */ }
+  if (!existsSync(file)) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, INIT_PROFILE); io.print(`release init: wrote ${POLICY_PATH}`); }
+  return installConductor({ io, cwd, policy: pol });
 }

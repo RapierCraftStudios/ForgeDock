@@ -48,6 +48,13 @@ import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
+/** #5623: a contract problem the builder can fix in its own session (shape, typed fields, test-plan rules, check ids), as
+ * opposed to one that needs the issue changed (quote not verbatim) or a person. */
+export function contractSelfCorrectable(problems) {
+  const list = Array.isArray(problems) ? problems : [];
+  return list.length > 0 && !list.every((x) => /: quote is not verbatim/.test(String(x)));
+}
+
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
@@ -279,7 +286,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, routeReachability = null, docsConfig = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -440,6 +447,43 @@ export async function runCore(o) {
   let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; a final ci-pending (or needsHuman()) puts it back
   const runId = `${issue}-${t0}`;
   let runTmp = null, sandboxEnv = {}, sandboxDown = null; // #5450: test sandboxes of this lane (testsandbox.mjs)
+  /** #5557: after the plan call, derive the classification record from Affected Files + the base-ref unit map, post FORGE:CLASSIFY and namespaced labels. Fail-open; a no-op without `.forge/release.yaml`. */
+  async function classifyStage(correct) {
+    try {
+      const { parsePolicy, validatePolicy, POLICY_PATH } = await import("./release-config.mjs");
+      const C = await import("./release-classify.mjs");
+      let text; try { text = String(await git(["show", `${base}:${POLICY_PATH}`])); } catch { return; }
+      const { policy } = parsePolicy(text);
+      if (!policy || validatePolicy(policy).length) return;
+      const md = await io.fs.read(`${wt}/${INVESTIGATION_FILE}`).catch(() => "");
+      const { affectedFilesOf } = await import("./fastforward.mjs");
+      const files = affectedFilesOf(md);
+      const texts = {};
+      for (const f of files.filter((x) => /migrations\//.test(x))) texts[f] = String(await io.fs.read(`${wt}/${f}`).catch(() => ""));
+      const facts = C.deriveFacts(policy, files, { texts });
+      let llm = null; try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); } catch { /* text-only below */ }
+      let problems = llm ? C.validateClassification(llm) : ["classification.json missing or unreadable"];
+      if (problems.length && correct) { // one correction, as for the contract; a second failure falls back to text-only
+        await correct(problems);
+        try { llm = JSON.parse(await io.fs.read(`${wt}/${C.CLASSIFICATION_FILE}`)); problems = C.validateClassification(llm); } catch { llm = null; problems = ["classification.json missing or unreadable"]; }
+      }
+      if (problems.length) { ev({ event: "CLASSIFY_INVALID", problems }); llm = { type: "chore", severity: "P3", exists_in: "unknown", confidence: 0.3 }; }
+      const live = policy.branches?.release;
+      let liveSha = null; if (live) liveSha = String(await git(["rev-parse", `origin/${live}`]).catch(() => "")).trim() || null;
+      let rec = C.buildClassifyRecord(llm, policy, facts, { text: problems.length > 0 });
+      const run = async (command, sha) => { // repro on a detached checkout of the live sha under the run TMPDIR (#5557)
+        const dir = `${runTmp ?? process.env.TMPDIR ?? "/tmp"}/classify-live-${issue}`;
+        await git(["worktree", "add", "--detach", dir, sha]);
+        try { const x = await io.runCommand({ command, cwd: dir, timeoutMs: 120000, env: laneEnv() }); const r = x?.r ?? x; const c = r?.rc ?? r?.exit; return typeof c === "number" ? c : 1; /* runCommand reports rc */ }
+        finally { await git(["worktree", "remove", "--force", dir]).catch(() => {}); }
+      };
+      rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha, run: io.runCommand ? run : undefined });
+      if (rec.exists_in === "unknown" && rec.lane_hint === "none") rec.lane_hint = "release";
+      await io.fs.write?.(`${wt}/${C.CLASSIFICATION_FILE}`, JSON.stringify(rec, null, 1));
+      await post("FORGE:CLASSIFY", C.renderClassify(rec));
+      for (const l of C.labelsOf(rec)) { try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", l]); } catch { /* label may not exist */ } }
+    } catch (e) { ev({ event: "CLASSIFY_FAILED", error: String(e?.message ?? e).slice(0, 200) }); }
+  }
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   // #4395: lane profile. full (FORGEDOCK_FULL_SESSION=1): unchanged sessions; memory-off: no auto-memory; lane: also no CLAUDE.md, the lane file appended
   let laneProfile = { name: process.env.FORGEDOCK_FULL_SESSION === "1" ? "full" : "memory-off", text: null };
@@ -2208,8 +2252,10 @@ export async function runCore(o) {
           return sq.contract;
         };
         contract = snapContract(contract);
+        await classifyStage(sessionId ? (problems) => builder(++attemptN, `${contractCorrectionPrompt(problems)}\nThis concerns .forge-lean/classification.json: fix only the invalid fields.`, sessionId, false, planPrompt, { trigger: "contract_correction" }) : null);
         const wtRead = (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }; // #5585: noindex pages are not public
-        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead });
+        const freezeCheckIds = await (async () => { try { return new Set(Object.keys(await checksAt(git, [base], wt))); } catch { return null; } })(); // first-pass: the base's registered post-deploy check ids
+        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let misses = missed;
         const correctContract = async (problems, note) => {
@@ -2219,13 +2265,21 @@ export async function runCore(o) {
           await persistGenChecks();
           await refreshIssue("contract validation");
           contract = snapContract(contract);
-          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead });
+          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
         };
         if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
           await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
           if (missed.length) misses = await preflightValidates(contract);
         }
-        if (!vc.ok && sessionId && onlyTestPlanProblems(vc.problems)) await correctContract(vc.problems, "test-plan rules only, resumed a second time"); // #5587
+        // #5623: builder-correctable contract problems get up to contractMaxCorrections rounds (default 3), each with only the
+        // problems still open; the round ends early when a correction changes nothing (same problem set twice).
+        let rounds = vc.ok ? 0 : 1, lastProblems = null;
+        while (!vc.ok && sessionId && rounds < contractMaxCorrections && contractSelfCorrectable(vc.problems)) {
+          const key = JSON.stringify([...vc.problems].sort());
+          if (key === lastProblems) break;
+          lastProblems = key; rounds++;
+          await correctContract(vc.problems, `${vc.problems.length} problem(s) still open, correction round ${rounds} of ${contractMaxCorrections}`);
+        }
         if (!vc.ok) ev({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }), await emit({ event: "CONTRACT_INVALID_RULES", rules: contractRuleCounts(vc.problems) }); // #5587: per-rule counts for the batch false-park rate
         planMisses = misses;
         if (missed.length) {
@@ -2236,7 +2290,7 @@ export async function runCore(o) {
           }
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after ${rounds} correction(s):\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
@@ -3416,6 +3470,19 @@ export async function runCore(o) {
     };
     let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
+    /** #5583 follow-up: the builder resolved a base-sync whose conflicts were all documentation files, and the lane's non-doc
+     * diff against the new base equals its non-doc diff against the old fork point (so no code changed in the resolution). */
+    const DOC_FILE_RE = /\.(md|mdx|markdown|rst|adoc|txt)$/i, DOC_EXCLUDES = ["md", "mdx", "markdown", "rst", "adoc", "txt"].map((e) => `:(exclude)*.${e}`);
+    const docsOnlyConflict = async (conflicted, laneBefore) => {
+      if (!conflicted.length || !conflicted.every((f) => DOC_FILE_RE.test(f))) return false;
+      try {
+        const fork = await gitOut(["merge-base", laneBefore, "HEAD^2"]);
+        if (!/^[0-9a-f]{7,}$/.test(fork)) return false; // gitOut swallows errors as "": never treat that as "unchanged"
+        const was = await gitOut(["diff", fork, laneBefore, "--", ".", ...DOC_EXCLUDES]);
+        const now = await gitOut(["diff", "HEAD^2", "HEAD", "--", ".", ...DOC_EXCLUDES]);
+        return was === now;
+      } catch { return false; }
+    };
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
     const syncRow = [];
@@ -3439,7 +3506,7 @@ export async function runCore(o) {
       // #4386: conflicts only in sequence files (numbered, journal, snapshot, their index) resolve without a builder
       // #4588: union / JSON-map / generated files resolve first; only the files left go to the sequence resolver
       const bm = o.baseMerge, cr = !clean && io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files, cfg: bm }).catch(() => null) : null;
-      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false;
+      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false, docsOnlySync = false;
       if (cr?.resolved?.length && !seqFiles.length) { try { await git(["commit", "--no-edit"]); crDone = true; } catch { /* the builder finishes the merge */ } }
       if (cr?.note) T.decisions.push(`Base-sync ${syncs}: ${cr.note}`);
       const rs = !clean && !crDone && seqFiles.length && io.sequenceResolve ? ((await io.sequenceResolve({ cwd: wt, files: seqFiles }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? {}) : null;
@@ -3467,6 +3534,8 @@ export async function runCore(o) {
         how = `builder resolved ${files.length} conflicted file(s) and committed the merge`;
         const r2 = await readResult();
         tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
+        docsOnlySync = await docsOnlyConflict(files, before); // #5583 follow-up
+        if (docsOnlySync) { T.decisions.push(`Base-sync ${syncs}: conflicts only in documentation (${files.join(", ")}) and the lane's code diff is unchanged; no re-review`); tests = "not required (documentation-only conflicts; lane code diff unchanged)"; }
       }
       const sq = await sequenceHandoff(`base-sync ${syncs}`, detResolved ? { laneRef: before } : {}); // #4322: a clean text merge can still bring a taken number
       if (sq?.done) return sq.done;
@@ -3493,6 +3562,7 @@ export async function runCore(o) {
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
       const engineOnly = !ciFixes && !pm.fixed && !dupFixed && (clean || detResolved) && (!sq?.renumbered || sq.deterministic); // #4386: no builder touched the delta
       if (!isSplit && engineOnly && (detResolved || sq?.deterministic)) rereview = "not required (deterministic renumber + base merge)";
+      else if (!isSplit && docsOnlySync && !ciFixes && !pm.fixed && !dupFixed && !sq?.renumbered) rereview = "not required (documentation-only conflicts; lane code diff unchanged)";
       else if (!isSplit && (!clean || sq?.renumbered || ciFixes || pm.fixed || dupFixed)) {
         let rv = await doReview();
         if (rv.env) return await envNeedsHuman(rv.env);

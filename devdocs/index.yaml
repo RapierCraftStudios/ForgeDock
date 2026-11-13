@@ -46,17 +46,35 @@ domains:
         token_cost: 1100
 
   release-pipeline:
-    description: "Managed release: nightly results, nightly-red issues, block_release, Actions minutes per release, budget.on_exceed (#5569)"
+    description: "Managed release (planner: bin/lean/release-plan.mjs): nightly results, nightly-red issues, block_release, Actions minutes per release, budget.on_exceed (#5569)"
     docs:
       - path: decisions/5569-release-nightly-budget.md
         authority: recommended
         token_cost: 500
+      - path: decisions/5583-release-gates.md
+        authority: recommended
+        token_cost: 400
+      - path: decisions/5565-release-p0.md
+        authority: recommended
+        token_cost: 400
       - path: decisions/5560-release-deploy.md
         authority: recommended
         token_cost: 600
+      - path: decisions/5562-release-verify.md
+        authority: recommended
+        token_cost: 500
       - path: decisions/5568-release-flakes.md
         authority: recommended
         token_cost: 400
+      - path: decisions/5564-release-conductor.md
+        authority: recommended
+        token_cost: 450
+      - path: decisions/5584-release-regate.md
+        authority: recommended
+        token_cost: 400
+      - path: decisions/5559-release-plan.md
+        authority: recommended
+        token_cost: 450
 
   devdocs:
     description: "Devdocs system, frontmatter schema, selective loading, index format"
