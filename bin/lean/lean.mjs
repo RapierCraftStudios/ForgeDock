@@ -29,6 +29,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
+import { hasRecipe, installLaneTools } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -2350,6 +2351,17 @@ export async function runCore(o) {
             tm = toolMisses(await preflightValidates(frozen).catch(() => []));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           } catch { /* keep the original miss */ }
+        }
+        if (tm.tools.length) { // #5652: a recipe-backed tool is installed in this sandbox and re-probed before any host re-placement
+          const withRecipe = tm.tools.filter(hasRecipe), noRecipe = tm.tools.filter((t) => !hasRecipe(t));
+          if (withRecipe.length && io.runCommand) {
+            const ins = await installLaneTools(withRecipe, { run: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: a.timeoutMs, env: laneEnv() }), root: process.getuid?.() === 0 });
+            ev({ event: "REMOTE_TOOLS_INSTALLED", tools: withRecipe, ok: ins.ok });
+            if (!ins.ok) return await needsHuman(`Installing ${ins.tool} in the remote sandbox failed (execution.lane_tools recipe); not re-placed on the host. Install stderr tail:\n${ins.stderrTail}`, OUTCOME_CODES.ENV_TOOL_MISSING);
+            tm = toolMisses(await preflightValidates(frozen).catch(() => []));
+            ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
+          }
+          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES).`, OUTCOME_CODES.ENV_TOOL_MISSING);
         }
         if (tm.tools.length) {
           ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });
