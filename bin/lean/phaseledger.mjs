@@ -9,9 +9,14 @@
  * `phase_<id>_ms|_model_ms|_usd|_wait_<cause>_ms` keys for it and `unflattenPhases` reads them back.
  * #5349: `wait` is the phase's non-model time by cause (WAIT_CAUSES); what no typed wait explains is `command` (`sandbox` in
  * sandbox_start), so model_ms + the wait causes close to ms.
+ * #5649: `contract` (contract authoring and corrections) and `fix` (review/CI fix rounds) are their own phases; the batch summary
+ * compares each phase's median/p75 with the previous 7 days of batches (`comparePhases`, `readBaselineRows`).
  */
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
-export const LANE_PHASES = Object.freeze(["queue_wait", "sandbox_start", "deps_install", "validate", "plan", "implement", "precheck", "review", "ci_wait", "base_sync", "merge"]);
+export const LANE_PHASES = Object.freeze(["queue_wait", "sandbox_start", "deps_install", "validate", "plan", "contract", "implement", "precheck", "review", "fix", "ci_wait", "base_sync", "merge"]);
 /** Why a lane was not in a model call: queued for a heavy slot, paused for host load, rate-limited, sandbox start, or running a command. */
 export const WAIT_CAUSES = Object.freeze(["heavy_queue", "host_load", "rate_limit", "sandbox", "command"]);
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
@@ -125,7 +130,7 @@ export function summarizePhases(list) {
     if (!by[id]) continue;
     const sum = by[id].reduce((a, b) => a + b, 0);
     total += sum;
-    phases[id] = { n: by[id].length, p50: pct(by[id], 50), p90: pct(by[id], 90), sum };
+    phases[id] = { n: by[id].length, p50: pct(by[id], 50), p75: pct(by[id], 75), p90: pct(by[id], 90), sum };
   }
   let largest = null;
   for (const [id, v] of Object.entries(phases)) if (!largest || v.sum > phases[largest].sum) largest = id;
@@ -161,6 +166,64 @@ export function formatLedgerSummary(rows) {
     const parts = Object.entries(s.phases).map(([id, v]) => `${id} ${min(v.p50)}/${min(v.p90)}`);
     return `phases (p50/p90 per lane, ${s.n} lane${s.n === 1 ? "" : "s"}): ${parts.join(", ")}; largest: ${s.largest.phase} (${Math.round(s.largest.share * 100)}% of ledger time)`;
   } catch { return "phases (wall time): n/a"; }
+}
+
+const DAY_MS = 86400000, GROWTH = 0.25;
+const merged = (r) => r?.outcome === "merged";
+
+/**
+ * #5649: per phase the current median/p75 and the baseline's, with the median delta (ratio - 1, null without a baseline), plus
+ * the lane wall time (merged rows' `minutes`) the same way. `prevRows` null/empty (no prior batches) gives `prev: null` everywhere.
+ * Pure; rows without a ledger are skipped; a phase on one side only keeps the other side null.
+ */
+export function comparePhases(curRows, prevRows) {
+  const side = (rows) => ({ s: summarizePhases((rows ?? []).map((r) => r?.phases)), wall: (rows ?? []).filter(merged).map((r) => r.minutes).filter(isNum).map((m) => m * 60000) });
+  const c = side(curRows), p = side(prevRows);
+  const stat = (v) => (v ? { median: v.p50, p75: v.p75, n: v.n } : null);
+  const delta = (cur, prev) => (cur && prev && prev.median > 0 ? cur.median / prev.median - 1 : null);
+  const phases = {};
+  for (const id of LANE_PHASES) {
+    const cur = stat(c.s.phases[id]), prev = stat(p.s.phases[id]);
+    if (cur || prev) phases[id] = { cur, prev, delta: delta(cur, prev) };
+  }
+  const w = (a) => (a.length ? { median: pct(a, 50), p75: pct(a, 75), n: a.length } : null);
+  const wall = { cur: w(c.wall), prev: w(p.wall) };
+  wall.delta = delta(wall.cur, wall.prev);
+  return { phases, wall, baseline: Boolean(p.s.n || p.wall.length) };
+}
+
+/**
+ * #5649: the lane rows of the batches under `root` (default `~/.forge/batches`) whose last progress is within the previous
+ * `days` days, excluding batch `excludeId`; the last row per issue of each batch. Read-only; null when it cannot be read.
+ */
+export function readBaselineRows({ root = process.env.FORGEDOCK_BATCH_DIR || join(homedir(), ".forge", "batches"), excludeId = null, now = Date.now(), days = 7 } = {}) {
+  try {
+    const out = [];
+    for (const id of readdirSync(root)) {
+      if (id === excludeId) continue;
+      try {
+        const f = join(root, id, "log.jsonl");
+        if (now - statSync(f).mtimeMs > days * DAY_MS) continue;
+        const last = new Map();
+        for (const l of readFileSync(f, "utf8").split("\n")) { try { const r = l && JSON.parse(l); if (r && r.issue != null) last.set(r.issue, r); } catch { /* skip */ } }
+        out.push(...last.values());
+      } catch { /* a batch without a log */ }
+    }
+    return out;
+  } catch { return null; }
+}
+
+/** #5649: one line per phase, `<phase> median Xm (prev7d Ym) p75 Xm (prev7d Ym)`, `!` after a median that grew over 25%; then lane wall. */
+export function formatPhaseComparison(curRows, prevRows) {
+  try {
+    const c = comparePhases(curRows, prevRows);
+    const m = (v, k) => (v ? min(v[k]) : "n/a");
+    const wm = (v, k) => (v ? `${v[k].toFixed(1)}m` : "n/a");
+    const line = (id, v, f) => `${id} median ${f(v.cur, "median")} (prev7d ${f(v.prev, "median")}) p75 ${f(v.cur, "p75")} (prev7d ${f(v.prev, "p75")})${v.delta != null && v.delta > GROWTH ? ` ! median +${Math.round(v.delta * 100)}%` : ""}`;
+    const lines = Object.entries(c.phases).map(([id, v]) => line(id, v, m));
+    if (c.wall.cur || c.wall.prev) lines.push(line("lane wall (merged)", { ...c.wall, cur: c.wall.cur && { median: c.wall.cur.median / 60000, p75: c.wall.cur.p75 / 60000 }, prev: c.wall.prev && { median: c.wall.prev.median / 60000, p75: c.wall.prev.p75 / 60000 } }, wm));
+    return lines.length ? lines : ["phases vs prev7d: n/a"];
+  } catch { return ["phases vs prev7d: n/a"]; }
 }
 
 /** #5435: the local `sandbox_start` budget (issue: p50 <= 3 s on the bench corpus). */
