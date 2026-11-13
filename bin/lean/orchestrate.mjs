@@ -382,6 +382,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
   // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
+  const hostFallbackOn = () => remote?.hostFallback !== false; // #5652: unset keeps the host re-placement
   const placeOf = (n) => {
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
@@ -389,7 +390,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #5423: the lane now provisions the sandbox before ending tool_missing, so the first tool-missing recovery of a remote run retries remotely (not parked behind host load); a repeat goes to the host
     const rec = recovering.get(n);
     if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
-    if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
     { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
@@ -943,7 +945,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         row.detail = `Environment defect: the recovery attempt failed with the same \`${row.code}\` as the run before it, so no further rebuild is spent; run the command below on the host with the project's real dependencies.\n${String(row.detail ?? "")}`;
         decided({ issue: n, what: `no further recovery for ${row.code}: the same failure repeated`, why: firstLine(row.detail), alternative: "requeue another recovery lane that rebuilds against the same frozen command" });
       }
-      if (!repeatEnv && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+      // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
+      const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
+      if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      if (!repeatEnv && !noHostRecovery && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
         classUsed.set(`${n}:${cls}`, attempt);
         // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt

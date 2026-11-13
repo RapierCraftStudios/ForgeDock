@@ -41,6 +41,35 @@ export function validateLaneTools(raw) {
   return { tools: [...tools].sort(), errors };
 }
 
+/** True when `name` has a lane_tools recipe (#5652). */
+export function hasRecipe(name) { return Object.hasOwn(RECIPES, String(name)); }
+
+/**
+ * In-sandbox install commands (#5652) for one tool: the recipe's Dockerfile `RUN` steps as shell commands, `sudo` prefixed
+ * when the sandbox user is not root. Empty for a tool with no recipe. Pure; the image build keeps using `steps`.
+ */
+export function installCommands(entry, { root = true } = {}) {
+  const { name, version } = parseLaneTool(entry);
+  if (!hasRecipe(name)) return [];
+  const sh = (s) => s.replace(/^RUN\s+/, "");
+  return RECIPES[name].steps(version).map((s) => (root ? sh(s) : `sudo sh -c ${JSON.stringify(sh(s))}`));
+}
+
+/**
+ * Installs `tools` in the running sandbox through the injected `run({command, timeoutMs})` -> {rc, stdout, stderr}.
+ * Never throws: {ok:true} or {ok:false, tool, stderrTail}.
+ */
+export async function installLaneTools(tools, { run, root = true, timeoutMs = 600000 }) {
+  for (const t of tools) {
+    for (const command of installCommands(t, { root })) {
+      let r;
+      try { r = await run({ command, timeoutMs }); } catch (e) { r = { rc: 1, stderr: String(e?.message ?? e) }; }
+      if ((r?.rc ?? 0) !== 0) return { ok: false, tool: t, stderrTail: String(r?.stderr || r?.stdout || "").trim().split("\n").slice(-8).join("\n").slice(-600) };
+    }
+  }
+  return { ok: true };
+}
+
 /** Fails fast (before any docker call) for a tool with no recipe or an unsupported version. */
 export function checkRecipes(tools) {
   for (const e of tools) {
