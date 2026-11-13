@@ -477,8 +477,10 @@ const NEG_MOCK_PLAN_RE = /\b(?:no|not|never|without|non|avoid\w*)[ -]+(?:\w+[ -]
 const deliverableWords = (d) => planWords(`${d?.change ?? ""} ${d?.path ?? ""}`);
 /** #5445: the deliverable whose words cover the largest share of the proof's, as {id, pct, ratio}, or null. Pure. */
 export function proofEchoDetail(proof, deliverables) {
-  const pw = planWords(proof);
-  if (!pw.size) return null;
+  // #5592: code identifiers (`name`, camelCase, snake_case, name()) only name the thing under test; they never count towards an echo,
+  // and a proof with fewer than 3 words left says too little to be a restatement.
+  const pw = planWords(String(proof ?? "").replace(/`[^`]*`|\b\w+\(\)|\b[a-z]+[A-Z]\w*|\b\w+_\w+/g, " "));
+  if (pw.size < 3) return null;
   let best = null;
   for (const d of deliverables) { const dw = deliverableWords(d); let n = 0; for (const w of pw) if (dw.has(w)) n++; const ratio = n / pw.size; if (!best || ratio > best.ratio) best = { id: d?.id ?? d?.path ?? "?", pct: Math.round(ratio * 100), ratio }; }
   return best;
@@ -541,7 +543,7 @@ export function testPlanProblems(c, { required = false } = {}) {
       const mocked = mockedDeliverable(t.level_reason, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
       if (mocked) problems.push(`${id}: test_plan level_reason mocks \"${mocked.phrase}\", which is in deliverable ${mocked.id}; level_reason must not contain the words mock/stub/fake unless negated or aimed outside the deliverables; describe the real component exercised and where the I/O boundary is; allowed: a real instance of ${mocked.id}'s component, with stubs only at its I/O boundary (clock, network, browser factory) and, for DB code, a real database session`);
     }
-    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason`);
+    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason; a test id is a file path plus test name, e.g. \`tests/test_scrape.py::test_listing_returns_json\` or \`test/scrape.test.js#listing returns json\`, not a sentence`);
     else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject`);
     if (blank(t.command)) problems.push(`${id}: test_plan needs the exact command validate runs`);
     else {
@@ -613,7 +615,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
-    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
+    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix), e.g. {"path":"tests/test_scrape.py","id":"test_listing_returns_json","command":"pytest tests/test_scrape.py::test_listing_returns_json"}, or "none" with a repro_test_reason; free text is not a test id`);
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));

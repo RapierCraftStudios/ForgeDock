@@ -1711,7 +1711,7 @@ from the host by a major version (`setup-node` 18 vs host 26: version drift, lis
 DEGRADED, never FAIL, and its clock starts when the job starts executing, not while it waits for a machine slot.
 
 **Exact scoping** (runs only what the change can affect): job-level path filters from the CI definition (including
-`dorny/paths-filter` outputs) gate whole jobs; per-file linters (shellcheck, eslint, prettier, ruff, black, flake8, ...) run
+`dorny/paths-filter` outputs) gate whole jobs (generate such a filter step in git mode: `actions/checkout` with `fetch-depth: 0`, and `token: ''` with `base:` set on `dorny/paths-filter`, because the default PR files API times out on large diffs and every gated suite is then skipped, #5592); per-file linters (shellcheck, eslint, prettier, ruff, black, flake8, ...) run
 on the changed files only; tests use the ecosystem selector (`jest --findRelatedTests`, `vitest related`, `go` affected
 packages with reverse dependencies, `cargo test -p` affected crates, Maven `-pl ... -amd`, `nx affected`, `turbo --filter`) or a
 git-grep reference graph for file-list runners (pytest, mocha, `node --test`, bats, rspec, direct `*.test.*` invocations);
