@@ -317,23 +317,31 @@ export function sumWaits(text, waits = {}) {
   return { waits, queueMax };
 }
 
+/** #5592: the real command a ForgeDock heavy shim (`exec node heavy.mjs run --name n -- 'real' "$@"`) was written for, or null when `text` is no shim. */
+export function shimTarget(text) {
+  const t = String(text ?? "");
+  if (!t.startsWith(SHIM_HEADER)) return null;
+  const m = /--\s+'((?:[^']|'\\'')*)'\s+"\$@"/.exec(t);
+  return m ? m[1].replace(/'\\''/g, "'") : null;
+}
+
 /**
- * Admission-time form of the guardChain loop (#4866): every PATH dir holding a pass-through wrapper for a heavy-shimmed tool
- * with no real binary behind it (so the wrapper's own `command -v` lands back on the shim). Returns [{name, dir}].
+ * Admission-time form of the guardChain loop (#4866): PATH dirs where a heavy shim of ours for a tool execs a pass-through
+ * wrapper (its own `command -v` lands back on the shim). Returns [{name, dir}].
+ * #5592: a pass-through wrapper with no real binary on PATH behind it is NOT a loop: writeHeavyShims writes no shim over such
+ * a wrapper (it skips the name with a warning), so the wrapper runs unshimmed. Only a shim that already points at one loops;
+ * a wrapper the shim already covers (real binary found past it, or a shim on PATH) never does.
  */
 export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = head, skip = [] } = {}) {
   const out = [];
   const dirs = String(path ?? "").split(delimiter).filter(Boolean);
   for (const name of names) {
-    const wrappers = [];
     for (const d of dirs) {
       if (skip.includes(d)) continue;
       const f = find(name, d, []);
-      if (f && isPassThroughWrapper(read(f), name)) wrappers.push(d);
+      const target = f ? shimTarget(read(f)) : null;
+      if (target && isPassThroughWrapper(read(target), name)) out.push({ name, dir: d });
     }
-    if (!wrappers.length) continue;
-    const real = find(name, path, [...skip, ...wrappers]);
-    if (!real) for (const dir of wrappers) out.push({ name, dir });
   }
   return out;
 }
@@ -364,6 +372,15 @@ export function guardChain(name, cmd, env, read = head) {
   return { cmd, env: { ...env, FORGE_HEAVY_DEPTH: String(depth + 1), FORGE_HEAVY_CHAIN: [...chain, `${name}:${cmd}`].join("|") } };
 }
 
+/** #5598: `docker run|create` gets `--label <FORGE_REAP_LABEL>` so the validate runner can remove the container when it kills a timed-out step. */
+export function labelDockerArgs(name, args, env = {}) {
+  const label = env.FORGE_REAP_LABEL;
+  if (!label || name !== "docker") return args;
+  const i = args.findIndex((a) => !a.startsWith("-"));
+  if (i < 0 || !(args[i] === "run" || args[i] === "create") || args.includes(label)) return args;
+  return [...args.slice(0, i + 1), "--label", label, ...args.slice(i + 1)];
+}
+
 /**
  * CLI body: `run --name <n> -- <real> args...`. Pass-through when FORGE_HEAVY_HELD is set or the step is llm; else
  * acquire, run with FORGE_HEAVY_HELD=1 and FORGE_HOST_PARALLELISM from live holders, release, propagate the exit.
@@ -378,7 +395,7 @@ export async function runWrapped(argv, { env: env0 = process.env, open = openHea
   const c = heavyConfig({}, env);
   const g0 = guardChain(name, cmd, env);
   if (g0.error) { process.stderr.write(`${g0.error}\n`); return { code: 126, signal: null }; }
-  cmd = g0.cmd; env = g0.env;
+  cmd = g0.cmd; env = g0.env; args = labelDockerArgs(name, args, env);
   if (env.FORGE_HEAVY_HELD || env.FORGE_HEAVY_DISABLED === "1" || classifyStep(name, args) === "llm") return run(cmd, args, env);
   const hostP = host ?? defaultHost();
   const h = open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP });
