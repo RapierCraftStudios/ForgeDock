@@ -4,7 +4,7 @@
 // plan's waves in order (all trains, then the release wave), gates the release CUT on the last train being WAVE_DONE, applies the
 // feature flag policy, keeps the milestone lane explicit, soaks the release wave at full strength and resumes from the ledger.
 import { fenced } from "./release-fence.mjs";
-import { planFromCli, DECISION_RE, approvalOf, PLAN_LABEL } from "./release-plan.mjs";
+import { planFromCli, ReleaseStartDECISION_RE, approvalOf, PLAN_LABEL } from "./release-plan.mjs";
 
 export const WAVE_STATES = ["PENDING", "BUILT", "CUT", "LIVE", "WAVE_DONE"];
 export const FLAG_POLICIES = ["require", "warn", "off"];
@@ -146,4 +146,4 @@ export async function goFromCli(argv, { io, ledger, post, managed }) {
   return 0;
 }
 
-export { DECISION_RE, PLAN_LABEL };
+export { ReleaseStartDECISION_RE, PLAN_LABEL };
