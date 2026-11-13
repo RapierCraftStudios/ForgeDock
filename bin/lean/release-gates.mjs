@@ -17,7 +17,7 @@ import { readActive } from "./release-ledger.mjs";
 export const GATES_PATH = ".forge/gates.yaml";
 export const GATE_MODES = ["block", "skip", "rollback", "freeze", "warn", "red"];
 export const OUTCOMES = ["pass", "fail", "inconclusive", "skip"];
-export const CLASSES = ["TP", "FB", "unknown"];
+export const GATE_CLASSES = ["TP", "FB", "unknown"];
 export const TELEMETRY_SCHEMA = "forgedock.release.gate/v1";
 export const REPORT_SCHEMA = "forgedock.release.gates/v1";
 export const DEMOTE_MODES = ["warn", "inconclusive"];
@@ -120,7 +120,7 @@ export function summarize(records, { sinceMs = null, now = Date.now() } = {}) {
 }
 
 /** Text lines (one table row per gate) or the JSON document of a summary. */
-export function formatReport(rows, { json = false } = {}) {
+export function formatGatesReport(rows, { json = false } = {}) {
   if (json) return [JSON.stringify({ schema: REPORT_SCHEMA, gates: rows })];
   if (!rows.length) return ["release gates: no gate records"];
   return ["gate\truns\tfails\tfb\tfb_share\tminutes", ...rows.map((r) => `${r.gate}\t${r.runs}\t${r.fails}\t${r.fb}\t${r.fb_share}%\t${r.minutes}`)];
@@ -147,7 +147,7 @@ export function planDemotions(records, cfg, { gateModes = {}, now = Date.now() }
 }
 
 /** The mode a gate runs in now: its catalogue mode unless a live demotion lowers it. */
-export const effectiveMode = (gate, mode, gateModes, now = Date.now()) => (liveDemotion(gateModes?.[gate], now) ? gateModes[gate].mode : mode);
+export const effectiveGateMode = (gate, mode, gateModes, now = Date.now()) => (liveDemotion(gateModes?.[gate], now) ? gateModes[gate].mode : mode);
 
 /**
  * Demote every planned gate: file one issue, then `runControl("demote")` (audited, with expiry). @returns {{gate, ok, issue?, error?}[]}
@@ -225,6 +225,6 @@ export async function gatesFromCli(argv, ctx) {
   const since = flagOf(argv, "--since");
   const sinceMs = since == null ? null : parseSince(since);
   if (since != null && sinceMs == null) { io.print(`release gates: --since must be <N>d or <N>h, got ${since}`); return 1; }
-  formatReport(summarize(history, { sinceMs, now: io.now?.() }), { json: argv.includes("--json") }).forEach((l) => io.print(l));
+  formatGatesReport(summarize(history, { sinceMs, now: io.now?.() }), { json: argv.includes("--json") }).forEach((l) => io.print(l));
   return 0;
 }

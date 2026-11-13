@@ -6,8 +6,8 @@ import { mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  validateCatalogue, parseCatalogue, gateRecord, telemetryLine, parseTelemetry, summarize, formatReport, planDemotions, applyDemotions,
-  parseGatesConfig, isSafetyGate, admission, gatesFromCli, effectiveMode, REQUIRED,
+  validateCatalogue, parseCatalogue, gateRecord, telemetryLine, parseTelemetry, summarize, formatGatesReport, planDemotions, applyDemotions,
+  parseGatesConfig, isSafetyGate, admission, gatesFromCli, effectiveGateMode, REQUIRED,
 } from "./release-gates.mjs";
 import { runControl } from "./release-control.mjs";
 
@@ -58,8 +58,8 @@ describe("demotion", () => {
     assert.deepEqual(planDemotions([...runs("a", 50, 50), ...runs("a", 100, 0)], cfg), []);
     const live = { a: { until: new Date(T0 + 1e9).toISOString(), mode: "warn" } };
     assert.deepEqual(planDemotions(runs("a", 100, 9), cfg, { gateModes: live, now: T0 }), []);
-    assert.equal(effectiveMode("a", "block", live, T0), "warn");
-    assert.equal(effectiveMode("a", "block", live, T0 + 2e9), "block");
+    assert.equal(effectiveGateMode("a", "block", live, T0), "warn");
+    assert.equal(effectiveGateMode("a", "block", live, T0 + 2e9), "block");
   });
   it("applyDemotions files an issue and records an audited, expiring demotion; promotion without fixture is refused", async () => {
     const state = { files: {}, controls: "", issues: [], active: { epoch: 1, lease: null } };
@@ -113,8 +113,8 @@ describe("report and cli", () => {
     assert.deepEqual(rows, [{ gate: "a", runs: 4, fails: 1, fb: 1, minutes: 8, fb_share: 25 }, { gate: "b", runs: 2, fails: 0, fb: 0, minutes: 4, fb_share: 0 }]);
   });
   it("text and json goldens", () => {
-    assert.deepEqual(formatReport(rows), ["gate\truns\tfails\tfb\tfb_share\tminutes", "a\t4\t1\t1\t25%\t8", "b\t2\t0\t0\t0%\t4"]);
-    assert.equal(formatReport(rows, { json: true })[0], '{"schema":"forgedock.release.gates/v1","gates":[{"gate":"a","runs":4,"fails":1,"fb":1,"minutes":8,"fb_share":25},{"gate":"b","runs":2,"fails":0,"fb":0,"minutes":4,"fb_share":0}]}');
+    assert.deepEqual(formatGatesReport(rows), ["gate\truns\tfails\tfb\tfb_share\tminutes", "a\t4\t1\t1\t25%\t8", "b\t2\t0\t0\t0%\t4"]);
+    assert.equal(formatGatesReport(rows, { json: true })[0], '{"schema":"forgedock.release.gates/v1","gates":[{"gate":"a","runs":4,"fails":1,"fb":1,"minutes":8,"fb_share":25},{"gate":"b","runs":2,"fails":0,"fb":0,"minutes":4,"fb_share":0}]}');
   });
   const mk = (git) => { const io = { out: [], calls: [], now: () => T0, print(l) { this.out.push(l); }, git, gh: async (a) => { io.calls.push(a); return ""; }, api: async (...a) => { io.calls.push(a); return {}; } }; return io; };
   it("with no catalogue every subcommand is a no-op with zero writes", async () => {
