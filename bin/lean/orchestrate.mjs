@@ -1264,7 +1264,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   // #4592: re-read the hold set; one decision and one row when it changes.
   const holdExpiring = (list) => { let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; } return !!expireHolds && list.some((n) => Number.isFinite(Date.parse(info?.[n]?.expiresAt))); }; // #5469
-  const refreshHeld = () => {
+  // #5632: a function declaration (hoisted): finish/recovery callbacks of a resumed batch can call it before this line runs
+  function refreshHeld() {
     if (!getHeld) return;
     if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
       let due = []; try { due = expireHolds() ?? []; } catch { due = []; }
@@ -1289,7 +1290,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       decided({ issue: null, what: `released ${fmt(freed)} (forgedock orchestrate --release)`, why: "operator request", alternative: "resume the batch" });
       update({ issue: null, outcome: "release", detail: fmt(freed) });
     }
-  };
+ }
   // #4773: re-read the issues carrying the blocked label; one decision and row per change. A failed read keeps the last set.
   let blocked = new Set();
   const blockedHit = new Set(); // blocked issues that were pending this pass

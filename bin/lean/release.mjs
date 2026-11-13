@@ -27,10 +27,11 @@ import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFr
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
-import { holdCheck, exemptionsSection, VERBS as CONTROL_VERBS } from "./release-control.mjs";
+import { holdCheck, exemptionsSection, runControl, VERBS as CONTROL_VERBS } from "./release-control.mjs";
 import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
 import { readActive } from "./release-ledger.mjs";
 import { statusFromCli, policyFromYaml } from "./release-status.mjs";
+import { parseFixConfig } from "./release-fixloop.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge", "deploy"];
@@ -356,6 +357,10 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   };
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.rollbackTrigger = (t) => { state.rollbackPending = { reason: t.reason, sha: t.sha }; rel.save(state); io.print?.(`release ${id}: rollback trigger recorded; run \`forgedock release rollback ${id} --reason "${String(t.reason).replace(/"/g, "'")}"\``); }; // #5563
+  if (lctx) { // #5567: the fix loop's HELD goes through the control path; an infra-flake rerun through the fenced rerun
+    ctx.hold = (ask) => runControl("hold", [id, "--reason", ask], { io, repo, policy: null, actor: holder, host: holder });
+    ctx.rerunInfra = ({ head }) => rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy: config.policy });
+  }
   ctx.save();
   let out;
   try {
@@ -508,6 +513,7 @@ export async function releaseFromCli(argv, deps = {}) {
     const { readPolicy } = await import("./release-config.mjs");
     const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
     if (pol?.deploy) config.deploy = pol.deploy;
+    config.policy = pol; config.fix = parseFixConfig(pol?.ci?.fix); // #5567: ci.fix.max_rounds / co_start / full_run_workflow
     config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
     if (pol?.verify) { // #5562: verification layers; risk class picks the soak minutes
       config.verify = pol.verify;
