@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+const RECOVERING_LABEL = "workflow:recovering";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
@@ -2398,7 +2399,6 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
   };
 }
 
-const RECOVERING_LABEL = "workflow:recovering";
 
 /**
  * #5647: a recovery lane is queued, so the issue shows `workflow:recovering` instead of `needs-human`. The label is added and read
