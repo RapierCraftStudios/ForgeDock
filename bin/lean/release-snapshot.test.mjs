@@ -233,3 +233,17 @@ describe("cherry-picks and the verifier (#5276)", () => {
     assert.equal(parseRecord(twice).a, 2);
   });
 });
+
+describe("lane role may not push release branches (#5561, I12)", () => {
+  it("cutSnapshot, recut and cleanupSnapshot refuse a lane credential naming role and action; pickFixes allows only the fix push", async () => {
+    const s = await setup();
+    const refused = await cutSnapshot({ io: s.io, git: s.git, repo: "o/r", staging: "staging", def: "main", id: "r1", credential: "lane" });
+    assert.match(refused.refused, /role lane may not push on release\//);
+    const c = await cut(s);
+    s.ctx.credential = "lane";
+    s.commit("n.txt", "n\n", "feat: n");
+    assert.match((await recut(s.ctx)).refused, /role lane may not push/);
+    assert.match(cleanupSnapshot({ git: s.git, branch: c.branch, credential: "lane" }).why, /role lane may not push/);
+    assert.equal(cleanupSnapshot({ git: s.git, branch: c.branch }).deleted, true);
+  });
+});

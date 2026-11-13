@@ -124,5 +124,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "30d"
+  },
+  "remote-lane-tool-recipe-no-host-fallback": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|contains(\"host capability: recovering env.tool_missing\"))]|length')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

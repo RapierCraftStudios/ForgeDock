@@ -34,6 +34,8 @@ import { readActive } from "./release-ledger.mjs";
 import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { parseFixConfig } from "./release-fixloop.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
+import { roleRefusal } from "./release-credentials.mjs";
+import { mergeGuard } from "./release-gate.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge", "deploy"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
@@ -299,6 +301,7 @@ async function promotionStep(ctx) {
     let behind = false; try { behind = defaultBehind({ git: io.git, def: ctx.def, head }); } catch { /* unreadable: the chain check above already read the repo */ }
     if (behind) return { stopped: true, why: `${ctx.def} is not an ancestor of release head ${String(head).slice(0, 8)}: a p0 landed after the cut; recut the release (release.fix_mode: recut) to merge ${ctx.def} in`, head };
   }
+  if (ctx.fence) return managedPromotion(ctx, { pr, head });
   let gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
   if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate, fence: ctx.fence });
@@ -314,6 +317,28 @@ async function promotionStep(ctx) {
   const f = await fenced(ctx.fence, { action: "merge", key: `merge:${pr}:${head}` }, (epoch) => io.gh(["pr", "merge", String(pr), "--repo", repo, "--merge", "--match-head-commit", head, ...(epoch != null ? ["--body", epochTrailer(epoch)] : [])]));
   if (f.refused) return { refused: f.refused, head, gate };
   return { merged: true, head, gate };
+}
+
+const MERGE_FLAG = { "merge-commit": "--merge", squash: "--squash", rebase: "--rebase" };
+
+/** #5561 (I1, I12): the managed merge. The gate is the `forge/release-gate` check run from the configured app, never the GATE_PASS marker. */
+export async function managedPromotion(ctx, { pr, head }) {
+  const { io, repo, state, opts } = ctx;
+  const refusedRole = roleRefusal(ctx.fence.lctx.credential, "merge", { branch: ctx.def });
+  if (refusedRole) return { refused: refusedRole, head };
+  const { readPolicy } = await import("./release-config.mjs"); // lazy: release-config imports this module
+  const policy = readPolicy({ io, defaultBranch: ctx.def }).policy;
+  const g = await (io.mergeGuard ?? mergeGuard)({ io, repo, head, state, policy, staging: ctx.staging });
+  if (!g.ok) {
+    if (policy && /failure|not green/.test(g.why)) await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy }); // #5568: transient infra only; the next resume re-checks the guard
+    return { stopped: true, why: `merge guard: ${g.why}`, head };
+  }
+  const flag = MERGE_FLAG[policy.merge?.method ?? "merge-commit"];
+  const cmd = `gh pr merge ${pr} --repo ${repo} ${flag} --match-head-commit ${head}`;
+  if (!opts.merge && !ctx.config.autoMerge) { io.print(`Release gate passed on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "release gate passed; promotion is opt-in (--merge or release.auto_merge)", cmd, head }; }
+  const f = await fenced(ctx.fence, { action: "merge", key: `merge:${pr}:${head}` }, (epoch) => io.gh(["pr", "merge", String(pr), "--repo", repo, flag, "--match-head-commit", head, "--body", [`Forge-Release: ${state.id}`, ...(epoch != null ? [epochTrailer(epoch)] : [])].join("\n")]));
+  if (f.refused) return { refused: f.refused, head };
+  return { merged: true, head };
 }
 
 const OPTIONAL_STEPS = ["host-preflight", "mark-ready", "deploy"];
@@ -368,13 +393,14 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     ctx.fence = { lctx, lease: l.lease, record, now: () => new Date(io.now()).toISOString() };
     return null;
   };
-  const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
+  const ctx = { laneStrip: [], io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
   ctx.rollbackTrigger = (t) => { state.rollbackPending = { reason: t.reason, sha: t.sha }; rel.save(state); io.print?.(`release ${id}: rollback trigger recorded; run \`forgedock release rollback ${id} --reason "${String(t.reason).replace(/"/g, "'")}"\``); }; // #5563
   if (lctx) { // #5567: the fix loop's HELD goes through the control path; an infra-flake rerun through the fenced rerun
     ctx.hold = (ask) => runControl("hold", [id, "--reason", ask], { io, repo, policy: null, actor: holder, host: holder });
     ctx.rerunInfra = ({ head }) => rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy: config.policy });
   }
   ctx.save();
+  if (lctx && io.git) { const { readPolicy } = await import("./release-config.mjs"); ctx.laneStrip = readPolicy({ io, defaultBranch: ctx.def }).policy?.credentials?.lane_env_strip ?? []; }
   let out;
   try {
     for (const step of RELEASE_STEPS) {
