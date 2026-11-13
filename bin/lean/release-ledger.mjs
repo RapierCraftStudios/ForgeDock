@@ -12,6 +12,7 @@
  * Off unless forge.yaml `release.managed` is on; nothing here runs otherwise.
  */
 import { SECRET_PAIR_RE, SECRET_SHAPE_RE } from "./conformance.mjs";
+import { roleRefusal } from "./release-credentials.mjs";
 
 export const LEDGER_PREFIX = "forge-ledger/";
 export const ACTIVE = "_active";
@@ -46,7 +47,7 @@ const readFile = async ({ io, repo }, branch, path) => {
 };
 
 /** The driver credential writes the ledger; a lane credential never does (I12). */
-const assertDriver = (ctx) => { if (ctx.credential !== "driver") throw Object.assign(new Error("ledger writes need the driver credential"), { refused: "not-driver" }); };
+const assertDriver = (ctx) => { const why = roleRefusal(ctx.credential, "ledger-write"); if (why) throw Object.assign(new Error(`ledger writes need the driver credential (${why})`), { refused: "not-driver" }); };
 
 /**
  * One commit of `files` ({path: text}, redacted) on `branch` on top of `parent` (null = orphan, creates the branch).

@@ -12,6 +12,10 @@ const REMOTE = "origin";
 /** Head movement after the cut (#5567): the fix push, a recorded `main-sync` cherry-pick of a staging commit, or a mechanical `revert`. */
 export const PICK_KINDS = ["fix", "main-sync", "revert"];
 import { BLOCKER_LABEL } from "./release-rehearsal.mjs";
+import { roleRefusal } from "./release-credentials.mjs";
+/** #5561 (I12): a push to release/* or train/* refuses for a lane-role context, except the one fix push; no credential given means the driver (the release host). */
+const pushRefusal = (credential, branch, fixPush = false) => roleRefusal(credential ?? "driver", "push", { branch, fixPush });
+
 export const DEFAULT_PATTERN = "release/{date}-{n}";
 const MARKER = "FORGE:RELEASE";
 const REF_RE = /^[A-Za-z0-9._/-]+$/;
@@ -62,7 +66,7 @@ function pickTree(git, onto, orig) {
  * Cut `branch` from the staging tip. One release in flight: any branch under the pattern prefix refuses.
  * @returns {{refused: string}|{branch, record}}
  */
-export async function cutSnapshot({ io, git, repo, staging, def, pattern = DEFAULT_PATTERN, id, bundle = [] }) {
+export async function cutSnapshot({ io, git, repo, staging, def, pattern = DEFAULT_PATTERN, id, bundle = [], credential }) {
   const prefix = patternPrefix(pattern);
   const live = git(["ls-remote", "--heads", REMOTE, `${prefix}*`]).trim().split("\n").filter(Boolean).map((l) => l.split(/\s+/)[1]?.replace("refs/heads/", ""));
   if (live.length) return { refused: `a release branch is already in flight (${live.join(", ")}); one release per repo: finish it with forgedock release --resume <id> or delete the branch` };
@@ -71,6 +75,7 @@ export async function cutSnapshot({ io, git, repo, staging, def, pattern = DEFAU
   const branch = branchName(pattern, io.now(), prior + 1);
   fetchRef(git, staging); fetchRef(git, def);
   const snapshot = tipOf(git, staging);
+  const noPush = pushRefusal(credential, branch); if (noPush) return { refused: noPush };
   git(["push", "--quiet", REMOTE, `${snapshot}:refs/heads/${branch}`]);
   const issues = [...new Set(bundle.flatMap((p) => (p.closingIssuesReferences ?? []).map((i) => i.number)))].sort((a, b) => a - b);
   return { branch, record: { v: 1, id, branch, snapshot, range: { base: tipOf(git, def), head: snapshot }, bundle: bundle.map((p) => p.number), issues, picks: [] } };
@@ -103,6 +108,7 @@ export async function pickFixes(ctx, { issues = [] } = {}) {
   const { io, git, repo, staging, state } = ctx;
   const rec = state.release;
   if (!rec) return { err: "no FORGE:RELEASE record in the release state" };
+  const noPush = pushRefusal(ctx.fence?.lctx?.credential ?? ctx.credential, rec.branch, true); if (noPush) return { err: noPush };
   const push = (sha) => git(["push", "--quiet", REMOTE, `${sha}:refs/heads/${rec.branch}`]);
   if (rec.picks.length) { try { push(rec.picks.at(-1).sha); } catch { /* already there, or the objects are gone: the checks below decide */ } }
   fetchRef(git, staging);
@@ -156,6 +162,7 @@ export async function recut(ctx) {
   const rec = state.release;
   fetchRef(git, staging);
   const tip = tipOf(git, staging);
+  const noPush = pushRefusal(ctx.fence?.lctx?.credential ?? ctx.credential, rec.branch); if (noPush) return { recut: false, refused: noPush };
   const unchanged = tip === (rec.picks.at(-1)?.sha ?? rec.snapshot) && !rec.picks.length;
   let head = unchanged ? tip : null;
   if (!unchanged) {
@@ -245,6 +252,7 @@ export async function verifyRelease({ io, git, repo, staging, sha }) {
 }
 
 /** Delete the release branch after post-merge; a missing branch is fine. */
-export function cleanupSnapshot({ git, branch }) {
+export function cleanupSnapshot({ git, branch, credential }) {
+  const noPush = pushRefusal(credential, branch); if (noPush) return { deleted: false, why: noPush };
   try { git(["push", "--quiet", REMOTE, "--delete", branch]); return { deleted: true }; } catch (e) { return { deleted: false, why: String(e.message).split("\n")[0] }; }
 }
