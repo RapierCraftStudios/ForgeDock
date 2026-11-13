@@ -317,23 +317,31 @@ export function sumWaits(text, waits = {}) {
   return { waits, queueMax };
 }
 
+/** #5592: the real command a ForgeDock heavy shim (`exec node heavy.mjs run --name n -- 'real' "$@"`) was written for, or null when `text` is no shim. */
+export function shimTarget(text) {
+  const t = String(text ?? "");
+  if (!t.startsWith(SHIM_HEADER)) return null;
+  const m = /--\s+'((?:[^']|'\\'')*)'\s+"\$@"/.exec(t);
+  return m ? m[1].replace(/'\\''/g, "'") : null;
+}
+
 /**
- * Admission-time form of the guardChain loop (#4866): every PATH dir holding a pass-through wrapper for a heavy-shimmed tool
- * with no real binary behind it (so the wrapper's own `command -v` lands back on the shim). Returns [{name, dir}].
+ * Admission-time form of the guardChain loop (#4866): PATH dirs where a heavy shim of ours for a tool execs a pass-through
+ * wrapper (its own `command -v` lands back on the shim). Returns [{name, dir}].
+ * #5592: a pass-through wrapper with no real binary on PATH behind it is NOT a loop: writeHeavyShims writes no shim over such
+ * a wrapper (it skips the name with a warning), so the wrapper runs unshimmed. Only a shim that already points at one loops;
+ * a wrapper the shim already covers (real binary found past it, or a shim on PATH) never does.
  */
 export function findShimLoops(path, { names = HEAVY_BINS, find = which, read = head, skip = [] } = {}) {
   const out = [];
   const dirs = String(path ?? "").split(delimiter).filter(Boolean);
   for (const name of names) {
-    const wrappers = [];
     for (const d of dirs) {
       if (skip.includes(d)) continue;
       const f = find(name, d, []);
-      if (f && isPassThroughWrapper(read(f), name)) wrappers.push(d);
+      const target = f ? shimTarget(read(f)) : null;
+      if (target && isPassThroughWrapper(read(target), name)) out.push({ name, dir: d });
     }
-    if (!wrappers.length) continue;
-    const real = find(name, path, [...skip, ...wrappers]);
-    if (!real) for (const dir of wrappers) out.push({ name, dir });
   }
   return out;
 }
