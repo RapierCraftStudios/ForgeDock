@@ -343,11 +343,11 @@ export async function reapContainers(label, { timeoutMs = 20000, env = process.e
 
 export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, graceMs = 2000 }) {
   const reapLabel = `forgedock.reap=${randomBytes(8).toString("hex")}`;
-  const inner = new Promise((done) => {
+  const inner = new Promise((finish) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
     try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel } }); }
-    catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
+    catch (e) { finish({ rc: 127, output: String(e?.message ?? e) }); return; }
     const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
     child.stdout.on("data", add); child.stderr.on("data", add);
