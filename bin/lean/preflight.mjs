@@ -10,6 +10,8 @@
  * env leaves empty (#4325).
  */
 import { builtinModules } from "node:module";
+import { existsSync } from "node:fs";
+import { join, dirname, delimiter } from "node:path";
 import { missingTool } from "./conformance.mjs";
 
 export const PREFLIGHT_CAP = 20;
@@ -315,3 +317,28 @@ const PYTEST_FIXTURES = new Set(["caplog", "capsys", "capfd", "capsysbinary", "c
 export function isExecutableName(t) {
   return !/[A-Z]/.test(t) && !t.includes("_") && !PYTEST_FIXTURES.has(t);
 }
+
+/**
+ * #5592: the project-local executable dirs a lane can run tools from: `node_modules/.bin` and a Python in-project `.venv/bin`
+ * at the worktree root and next to every tracked manifest (`files`: tracked paths; package.json, pyproject.toml, poetry.lock,
+ * uv.lock mark a project dir, so `services/<svc>/.venv/bin` in a monorepo counts). Only dirs that exist; nearest-to-root first.
+ * The tool probe and the heavy-shim writer resolve through these (appended after PATH), so both agree on what is runnable.
+ */
+export function projectBinDirs(wt, files = [], { exists = existsSync, cap = 24 } = {}) {
+  const dirs = new Set(["."]);
+  for (const f of files) {
+    const base = String(f).split("/").pop();
+    if (["package.json", "pyproject.toml", "poetry.lock", "uv.lock"].includes(base) && !String(f).split("/").includes("node_modules")) dirs.add(dirname(f));
+  }
+  const out = [];
+  for (const d of [...dirs].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))) {
+    for (const rel of [".venv/bin", "node_modules/.bin"]) {
+      const p = d === "." ? join(wt, rel) : join(wt, d, rel);
+      if (exists(p) && out.length < cap) out.push(p);
+    }
+  }
+  return out;
+}
+
+/** #5592: `base` PATH with the project-local executable dirs appended (never ahead of what the lane already resolves). */
+export const withLocalBins = (base, dirs) => [...String(base ?? "").split(delimiter).filter(Boolean), ...dirs.filter((d) => !String(base ?? "").split(delimiter).includes(d))].join(delimiter);
