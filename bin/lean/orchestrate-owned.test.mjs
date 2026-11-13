@@ -43,17 +43,30 @@ describe("cross-batch ownership (#5471)", () => {
     assert.equal(ownerOf(root, "o/r", 6, "bB"), null);
     assert.deepEqual(b.readAdded(), [5, 6]);
   });
-  it("requeue refuses an issue another live batch runs or has pending; an idle hold is handed over (#5597)", async () => {
+  it("requeue refuses an issue another live batch runs; a batch that only holds it does not own it (#5592)", async () => {
     const root = tmpDir("owned-requeue-");
-    seed(root, "bA", { order: [5, 7, 8], pending: [7, 8], running: { 5: {} }, held: [7] });
-    const b = seed(root, "bB", { order: [5, 7, 8], results: { 5: { outcome: "needs-human" }, 7: { outcome: "needs-human" }, 8: { outcome: "needs-human" } } });
-    assert.equal(ownerOf(root, "o/r", 7, "bB"), null);
-    assert.equal(dispatchOwner(root, "o/r", 7, "bB"), null, "a lower-id batch's idle hold does not defer dispatch");
-    assert.equal(ownerOf(root, "o/r", 8, "bB"), "bA");
-    const res = await queued(quiet(() => orchestrateFromCli(["--requeue", "bB", "5", "7", "8", "--reason", "r"], { batchRoot: root, io })));
+    seed(root, "bA", { order: [5, 7], pending: [7], running: { 5: {} }, held: [7] });
+    const b = seed(root, "bB", { order: [5, 7], results: { 5: { outcome: "needs-human" }, 7: { outcome: "needs-human" } } });
+    assert.equal(ownerOf(root, "o/r", 7, "bB"), null, "held only: not an owner");
+    const res = await queued(quiet(() => orchestrateFromCli(["--requeue", "bB", "5", "7", "--reason", "r"], { batchRoot: root, io })));
     assert.deepEqual(res.requeued, [7]);
-    assert.deepEqual(res.refused.map((x) => [x.issue, x.reason]), [[5, "owned by bA"], [8, "owned by bA"]]);
+    assert.deepEqual(res.refused.map((x) => [x.issue, x.reason]), [[5, "owned by bA"]]);
     assert.deepEqual(b.readRequeued().map((e) => e.issue), [7]);
+  });
+  it("#5592: held in A, force-started in B: B requeues it; A's refusal names B instead of a bare 'not terminal'", async () => {
+    const root = tmpDir("owned-moved-");
+    const a = seed(root, "bA", { order: [7], pending: [7], held: [7] });
+    seed(root, "bB", { order: [7], results: { 7: { outcome: "needs-human" } } });
+    const res = await queued(quiet(() => orchestrateFromCli(["--requeue", "bB", "7", "--reason", "r"], { batchRoot: root, io })));
+    assert.deepEqual(res.requeued, [7]);
+    seed(root, "bC", { order: [7], running: { 7: {} } });
+    assert.deepEqual(a.requeue([7]).refused.map((x) => x.reason), ["not terminal: held here, run by bC; requeue it there"]);
+  });
+  it("#5597: held in A and nothing runs it elsewhere: --requeue in A releases the hold", async () => {
+    const root = tmpDir("owned-release-");
+    const a = seed(root, "bA", { order: [7, 8], pending: [7, 8], held: [7] });
+    assert.deepEqual(a.requeue([7, 8]).requeued, [7]);
+    assert.deepEqual(a.readHeld(), []);
   });
   it("dispatch defers an issue another batch runs (or holds pending with a lower id) and admits it once the owner is done", async () => {
     const root = tmpDir("owned-dispatch-");

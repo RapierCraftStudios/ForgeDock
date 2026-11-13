@@ -123,8 +123,7 @@ export const ACTIVE_BATCH_STALE_MS = 3 * 60 * 60 * 1000;
 /**
  * #5241: the batches of `repo` that own `issue`: `cancelled` ones (a `cancel` file) and `active` ones (no report, not
  * cancelled, state saved within `staleMs`) holding it pending or running. `exceptId` is never counted.
- * `held` (#5597): an idle operator hold, not running: it does not own the issue against another batch's requeue or dispatch.
- * @returns {Array<{id:string, cancelled:boolean, running:boolean, held:boolean}>}
+ * @returns {Array<{id:string, cancelled:boolean, running:boolean}>}
  */
 export function batchesOwning(root, repo, issue, { exceptId = null, now = Date.now(), staleMs = ACTIVE_BATCH_STALE_MS } = {}) {
   const out = [];
@@ -139,8 +138,8 @@ export function batchesOwning(root, repo, issue, { exceptId = null, now = Date.n
     if (b.readCancel()) { out.push({ id, cancelled: true, running }); continue; }
     const last = b.lastProgressMs();
     const live = !b.readReport() && last !== null && now - last <= staleMs;
-    const held = b.readHeld().includes(issue);
-    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue)) || held)) out.push({ id, cancelled: false, running, held: !running && held });
+    // #5592: a batch that only HOLDS the issue (pending but held) does not run it, so it is not an owner: the batch that now runs it is.
+    if (live && (running || (Array.isArray(st.pending) && st.pending.includes(issue) && !b.readHeld().includes(issue)))) out.push({ id, cancelled: false, running });
   }
   return out;
 }
@@ -153,10 +152,10 @@ export const cancelledOwners = (root, repo, issue, exceptId = null, opts = {}) =
 export const activeBatchOf = (root, repo, issue, opts = {}) => batchesOwning(root, repo, issue, opts).find((o) => !o.cancelled)?.id ?? null;
 
 /** #5471: the id of another live batch of `repo` that has `issue` pending, running or held (`exceptId` = the asking batch), else null. */
-export const ownerOf = (root, repo, issue, exceptId = null, opts = {}) => batchesOwning(root, repo, issue, { ...opts, exceptId }).find((o) => !o.cancelled && !o.held)?.id ?? null; // #5597: an idle hold is handed over, not owned
+export const ownerOf = (root, repo, issue, exceptId = null, opts = {}) => activeBatchOf(root, repo, issue, { ...opts, exceptId });
 /** #5471: the batch that wins `issue` at dispatch: one running it, else one holding it pending/held with a lower id (so two batches never both defer). */
 export const dispatchOwner = (root, repo, issue, exceptId, opts = {}) => {
-  const live = batchesOwning(root, repo, issue, { ...opts, exceptId }).filter((o) => !o.cancelled && !o.held); // #5597
+  const live = batchesOwning(root, repo, issue, { ...opts, exceptId }).filter((o) => !o.cancelled);
   return (live.find((o) => o.running) ?? live.find((o) => o.id < exceptId))?.id ?? null;
 };
 
@@ -241,15 +240,20 @@ export function openBatch(root, id) {
       // #5241: a pending issue waiting out a deferral (notBefore) whose lease a cancelled batch of the repo holds is released too
       const leaseOrphaned = (n) => st.results?.[n] === undefined && Array.isArray(st.pending) && st.pending.includes(n) && Number.isFinite(st.notBefore?.[n])
         && cancelledOwners(dirname(dir), readJson(f("plan.json"))?.repo, n, id).length > 0;
-      // #5597: a held pending issue (no result yet) is released by --requeue: the operator's hold goes so the next pass admits it.
-      const heldIdle = (n) => st.results?.[n] === undefined && Array.isArray(st.pending) && st.pending.includes(n) && !(st.running && Object.hasOwn(st.running, String(n))) && self.readHeld().includes(n);
+      // #5597: a held pending issue (no result yet) that no other live batch runs is released by --requeue: the hold goes so the next pass admits it.
+      const heldIdle = (n) => st.results?.[n] === undefined && Array.isArray(st.pending) && st.pending.includes(n) && !(st.running && Object.hasOwn(st.running, String(n))) && self.readHeld().includes(n)
+        && !activeBatchOf(dirname(dir), readJson(f("plan.json"))?.repo, n, { exceptId: id });
       const requeued = [], refused = [];
       for (const x of Array.isArray(list) ? list : []) {
         const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
         if (!Number.isSafeInteger(n) || n < 1) refused.push({ issue: x, reason: "not an integer" });
         else if (!order.has(n)) refused.push({ issue: n, reason: "not in batch" });
         else if (pend.has(n)) refused.push({ issue: n, reason: "already requeued" });
-        else if (!REQUEUABLE(st.results?.[n]?.outcome) && !quotaPaused(n) && !leaseOrphaned(n) && !heldIdle(n)) refused.push({ issue: n, reason: "not terminal" });
+        else if (!REQUEUABLE(st.results?.[n]?.outcome) && !quotaPaused(n) && !leaseOrphaned(n) && !heldIdle(n)) {
+          // #5592: held here while another batch runs it: say so, and release the hold here (`--release`) or requeue in that batch
+          const other = st.results?.[n] === undefined && self.readHeld().includes(n) ? activeBatchOf(dirname(dir), readJson(f("plan.json"))?.repo, n, { exceptId: id }) : null;
+          refused.push({ issue: n, reason: other ? `not terminal: held here, run by ${other}; requeue it there` : "not terminal" });
+        }
         else { if (heldIdle(n)) self.releaseIssues([n]); pend.add(n); requeued.push(n); }
       }
       if (requeued.length) {

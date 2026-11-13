@@ -9,6 +9,7 @@ import { parseDocsConfig } from "./lean/docsgate.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
 import { parseDesignConfig } from "./lean/design-gate.mjs";
 import { execFileSync } from "node:child_process";
+import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -1793,12 +1794,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
     { // #5442: page work waits for an approved design: a design:* issue is never dispatched (--force does not lift it)
       const held = new Map();
-      for (const n of issues) {
+      // #5592: bounded-concurrency label reads, not one serial gh call per issue (starved admission on a loaded host)
+      const hs = await mapLimit(issues, 6, async (n) => {
         let v = null;
         try { v = JSON.parse(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])); } catch { v = null; }
-        const h = designHold(v?.labels);
-        if (h) held.set(n, h);
-      }
+        return designHold(v?.labels);
+      });
+      issues.forEach((n, i) => { if (hs[i]) held.set(n, hs[i]); });
       for (const [n, h] of held) sink.line(`skipped: #${n} design_pending (${h}); run /design, design:approved lifts the hold`);
       if (held.size) {
         if (held.size === issues.length) throw new Error(`every issue is design_pending (${[...held.values()].join(", ")}); run /design first`);
