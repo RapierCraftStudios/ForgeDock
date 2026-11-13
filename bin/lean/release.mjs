@@ -452,7 +452,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -470,6 +470,19 @@ export async function releaseFromCli(argv, deps = {}) {
     if (!state) throw new Error(`no release ${argv[1]} in ${releaseRoot(env)}`);
     const r = await verifyReleaseById({ io, state, save: () => rel.save(state), def, policy: readPolicy({ io, defaultBranch: def, cwd }).policy, lane: flag(argv, "--lane") ?? state.lane });
     return r.verified ? 0 : BLOCKED_EXIT;
+  }
+  if (argv[0] === "plan") { // #5559: the read-only release planner; loaded lazily like the other managed-release modules
+    const { planFromCli } = await import("./release-plan.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const def = readBranches(cwd).default || "main", rp = readPolicy({ io, defaultBranch: def, cwd });
+    let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
+    const rc = readReleaseConfig(raw), repo = flag(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
+    const ctx = { io, repo, credential: "driver" };
+    return planFromCli([...argv.slice(1).filter((a, i, all) => a !== "--repo" && all[i - 1] !== "--repo"), "--repo", repo], {
+      io, policy: rp.policy, policySha: rp.sha, managed: !!rc.managed, newId: newReleaseId(io.now()), history: historyFromRoot(releaseRoot(env)), budget: { cfg: parseBudgetConfig(parseForgeYaml(raw)?.budget) },
+      readLanes: rc.managed && io.api ? async () => (await readActive(ctx).catch(() => ({}))).lanes : undefined,
+      ledger: async ({ id, plan }) => { await createReleaseLedger(ctx, id, { v: 1, id, repo, kind: "plan", status: "planned", plan }); },
+    });
   }
   if (argv[0] === "rollback") { // #5563: the rollback ladder; loaded lazily like the other managed-release modules
     const { rollbackFromCli } = await import("./release-rollback.mjs");
