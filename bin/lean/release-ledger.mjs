@@ -174,3 +174,35 @@ export async function listLedgers({ io, repo }) {
   try { refs = (await io.api("GET", `repos/${repo}/git/matching-refs/heads/${LEDGER_PREFIX}`)) ?? []; } catch (e) { if (!isMissing(e)) throw e; }
   return refs.map((r) => String(r.ref).slice(`refs/heads/${LEDGER_PREFIX}`.length)).filter((id) => id !== ACTIVE && ID_RE.test(id));
 }
+
+/**
+ * #5565: one DEPLOYING release at a time. Claims `_active.deploying` for `release`; another release's claim refuses (`{queued}`) unless
+ * `preempt`, which takes it over and writes an audit line (`p0-preempt`) to controls.jsonl. @returns {{ok: true, preempted?: string} | {queued: string} | {lost: true}}
+ */
+export async function claimDeploy(ctx, { release, preempt = false, actor = "engine", reason = "", now = Date.now() }) {
+  let preempted = null;
+  const at = new Date(now).toISOString();
+  const r = await updateActive(ctx, ["deploying"], async (active) => {
+    const cur = active.deploying;
+    if (cur && cur.release !== release) {
+      if (!preempt) return { refuse: `release ${cur.release} is DEPLOYING; deploys never overlap (pass --preempt to cancel it)` };
+      preempted = cur.release;
+      return { patch: { deploying: { release, since: at } }, control: { at, actor, verb: "p0-preempt", release, preempted: cur.release, reason } };
+    }
+    return { patch: { deploying: { release, since: cur?.since ?? at } } };
+  });
+  if (r.refused) return { queued: r.refused };
+  if (!r.ok) return { lost: true };
+  return { ok: true, ...(preempted ? { preempted } : {}) };
+}
+
+/** Release the DEPLOYING claim when it is still `release`'s. */
+export async function releaseDeploy(ctx, release) {
+  return updateActive(ctx, ["deploying"], (active) => (active.deploying?.release === release ? { patch: { deploying: null } } : { refuse: "not the deploying release" }));
+}
+
+/** #5565 (I10): a p0 started while the default branch != live; the divergence is kept in `_active.p0` with an audit line. */
+export async function recordP0Divergence(ctx, rec, now = Date.now()) {
+  const at = new Date(now).toISOString();
+  return updateActive(ctx, ["p0"], (active) => ({ patch: { p0: { ...(active.p0 ?? {}), [rec.release ?? "-"]: { ...rec, at } } }, control: { at, verb: "p0-divergence", ...rec } }));
+}

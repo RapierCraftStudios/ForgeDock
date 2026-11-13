@@ -65,6 +65,12 @@
     "timeout": 120,
     "for": "30d"
   },
+  "schedd-status-under-load": {
+    "run": "s=$(date +%s%N); node bin/engine-cli.mjs schedd status >/dev/null; e=$(date +%s%N); test $(( (e-s)/1000000 )) -lt 3000",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "7d"
+  },
   "stats-conformance-outcomes-alterlab-10min": {
     "run": "timeout 600 npx --no-install forgedock stats --conformance-outcomes --repo RapierCraftStudios/AlterLab --since \"$(date -u -d '35 days ago' +%F)\" --no-cache --json >/dev/null",
     "pass": "exit 0",
@@ -93,6 +99,12 @@
     "run": "test \"$(gh pr list --state all --head staging --limit 20 --json comments --jq '[.[].comments[]|select(.body|contains(\"FORGE:GATE_\"))]|length')\" -ge 1",
     "pass": "exit 0",
     "timeout": 120,
+    "for": "30d"
+  },
+  "release-p0-drill": {
+    "run": "test \"$(gh pr list --state merged --search 'head:p0/' --limit 20 --json number --jq length)\" -ge 1 && git fetch -q origin && git merge-base --is-ancestor \"$(npx --no-install forgedock release status --json | jq -r '.live // empty')\" origin/main",
+    "pass": "exit 0",
+    "timeout": 180,
     "for": "30d"
   }
 }

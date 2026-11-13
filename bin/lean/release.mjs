@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { writeAtomic, assertDiskPath, batchRoot, listBatches, openBatch, isLaneAlive } from "./batch.mjs";
 import { readBranches, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { ghRunner } from "./issuewatch.mjs";
@@ -24,7 +25,7 @@ import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
 import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, gateHistoryFromRoot, releaseMinutes } from "./release-minutes.mjs";
-import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
+import { cutSnapshot, writeRecord, checkChain, verifyRelease, defaultBehind, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
 import { holdCheck, exemptionsSection, runControl, VERBS as CONTROL_VERBS } from "./release-control.mjs";
@@ -286,6 +287,10 @@ async function promotionStep(ctx) {
     const chain = checkChain({ git: io.git, record: state.release, sha: head, staging: ctx.staging, exact: true });
     if (!chain.ok) return { stopped: true, why: `release head ${head} is not snapshot + recorded cherry-picks: ${chain.why}`, head };
   }
+  if (state.release && ctx.config.managed && io.git) { // #5565: a p0 may have landed on the default branch after the cut; the merge refuses until it is in the head (recut brings it in)
+    let behind = false; try { behind = defaultBehind({ git: io.git, def: ctx.def, head }); } catch { /* unreadable: the chain check above already read the repo */ }
+    if (behind) return { stopped: true, why: `${ctx.def} is not an ancestor of release head ${String(head).slice(0, 8)}: a p0 landed after the cut; recut the release (release.fix_mode: recut) to merge ${ctx.def} in`, head };
+  }
   let gate = await gateState({ io, repo, pr, head });
   if (gate.marker !== "pass") return { stopped: true, why: `no FORGE:GATE_PASS on #${pr} (last marker: ${gate.marker ?? "none"})`, head };
   if (gate.deployGate !== "success" && gate.deployGate !== "failure") gate = await awaitGate({ io, repo, pr, head, gate, fence: ctx.fence });
@@ -398,7 +403,8 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     try {
       if (tf && existsSync(tf) && existsSync(join(process.cwd(), ".forge/gates.yaml"))) {
         const recs = (await import("./release-gates.mjs")).parseTelemetry(readFileSync(tf, "utf8"));
-        if (recs.length) state.gates = [...(state.gates ?? []), ...recs];
+        const gs = state.regates?.at(-1)?.gate_sha; // #5584: which gate-script sha evaluated these gates
+        if (recs.length) state.gates = [...(state.gates ?? []), ...recs.map((r) => (gs && !r.gate_sha ? { ...r, gate_sha: gs } : r))];
       }
     } catch { /* best effort */ }
   }
@@ -438,7 +444,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -463,6 +469,23 @@ export async function releaseFromCli(argv, deps = {}) {
     if (!ID_RE.test(String(argv[1] ?? ""))) throw new Error(`rollback needs a release id; ${RELEASE_USAGE}`);
     const def = readBranches(cwd).default || "main";
     return rollbackFromCli(argv.slice(1), { io, rel: openRelease(releaseRoot(env), argv[1]), policy: readPolicy({ io, defaultBranch: def, cwd }).policy, def, actor: deps.actor, host: deps.host });
+  }
+  if (argv[0] === "p0") { // #5565: the managed P0 lane; loaded lazily like the other managed-release modules
+    const { p0FromCli } = await import("./release-p0.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const def = readBranches(cwd).default || "main", policy = readPolicy({ io, defaultBranch: def, cwd }).policy;
+    let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
+    const rc = readReleaseConfig(raw), id = newReleaseId(io.now());
+    const config = { ...rc, deploy: policy?.deploy, verify: policy?.verify, verifySoak: policy?.lanes?.p0?.soak_min };
+    const ask = deps.ask ?? ((q) => new Promise((res) => { const rl = createInterface({ input: process.stdin, output: process.stdout }); rl.question(q, (a) => { rl.close(); res(a); }); }));
+    return p0FromCli(argv.slice(1), { io, rel: openRelease(releaseRoot(env), id), id, config, policy, def, actor: deps.actor, host: deps.host, ask });
+  }
+  if (argv[0] === "recover") { // #5564: the conductor's host-less recovery; loaded lazily like the other managed-release modules
+    const { recoverFromCli } = await import("./release-conductor.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    if (!ID_RE.test(String(argv[1] ?? ""))) throw new Error(`recover needs a release id; ${RELEASE_USAGE}`);
+    const def = readBranches(cwd).default || "main";
+    return recoverFromCli(argv.slice(1), { io, policy: readPolicy({ io, defaultBranch: def, cwd }).policy ?? {}, def, actor: deps.actor ?? env.GITHUB_ACTOR, host: deps.host });
   }
   if (argv[0] === "gates") { // #5583: catalogue, telemetry report, admission check; release-gates is loaded lazily
     const g = await import("./release-gates.mjs");
@@ -493,7 +516,9 @@ export async function releaseFromCli(argv, deps = {}) {
     const { controlFromCli } = await import("./release-control.mjs");
     const { readPolicy } = await import("./release-config.mjs");
     const policy = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
-    return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
+    const cargs = argv.slice(argv[0] === "control" ? 2 : 1);
+    const rel = cv === "regate" && cargs[0] && ID_RE.test(cargs[0]) ? openRelease(releaseRoot(env), cargs[0]) : undefined; // #5584: regate reads the release's recorded deploy target
+    return controlFromCli(cv, cargs, { io, policy, actor: deps.actor, host: deps.host, rel });
   }
   if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane", "--interval"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane" || argv[i - 1] === "--interval"));
@@ -513,6 +538,9 @@ export async function releaseFromCli(argv, deps = {}) {
     const { readPolicy } = await import("./release-config.mjs");
     const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
     if (pol?.deploy) config.deploy = pol.deploy;
+    const { conductorGuard } = await import("./release-conductor.mjs"); // #5564: a configured conductor must exist on the default branch
+    const noConductor = conductorGuard({ io, policy: pol, def: readBranches(cwd).default || "main" });
+    if (noConductor) { io.print(`release: refused: ${noConductor}`); return 1; }
     config.policy = pol; config.fix = parseFixConfig(pol?.ci?.fix); // #5567: ci.fix.max_rounds / co_start / full_run_workflow
     config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
     if (pol?.verify) { // #5562: verification layers; risk class picks the soak minutes

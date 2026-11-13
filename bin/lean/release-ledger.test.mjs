@@ -224,3 +224,19 @@ describe("release fencing through the job (#5553)", () => {
     }
   });
 });
+
+describe("claimDeploy (#5565)", async () => {
+  const { claimDeploy, releaseDeploy } = await import("./release-ledger.mjs");
+  it("refuses an overlapping deploy, preempts only on request, releases", async () => {
+    const gh = fakeGh();
+    const io = { api: gh.api, now: () => gh.now, sleep: async () => {} };
+    const ctx = { io, repo: REPO, credential: "driver" };
+    assert.equal((await claimDeploy(ctx, { release: "r1" })).ok, true);
+    assert.equal((await claimDeploy(ctx, { release: "r1" })).ok, true);
+    assert.match((await claimDeploy(ctx, { release: "r2" })).queued, /DEPLOYING/);
+    const p = await claimDeploy(ctx, { release: "r2", preempt: true });
+    assert.equal(p.preempted, "r1");
+    await releaseDeploy(ctx, "r2");
+    assert.equal((await claimDeploy(ctx, { release: "r3" })).ok, true);
+  });
+});

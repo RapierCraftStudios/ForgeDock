@@ -77,6 +77,7 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
     review: verdict ? { verdict, head: pr?.head ?? "unknown" } : "unknown",
     merge_sha: unk(state.steps?.promotion?.result?.sha ?? state.merge_sha),
     deploy: state.deploy ? { run: unk(state.deploy.run), stage: unk(state.deploy.stage), attempt: unk(state.deploy.attempt) } : "unknown",
+    waiting_host: state.conductorWaiting ?? [], // #5564: host-only items the conductor left for a host driver
     rollback_target: unk(state.rollback?.target), auto_rollback: state.rollback?.armed === undefined ? "unknown" : state.rollback.armed ? "armed" : "off",
     release: state.release ? { snapshot: state.release.snapshot ?? null, branch: state.release.branch ?? null, issues: issueNumbers(state), picks: (state.release.picks ?? []).length } : null,
   };
@@ -129,6 +130,7 @@ export function renderReleaseStatus(s) {
     lines.push(`  review: ${show(s.review)}`, `  merge: ${s.merge_sha}`, `  deploy: ${show(s.deploy)}`, `  rollback: target=${s.rollback_target} auto=${s.auto_rollback}`);
     if (s.release) lines.push(`  release set: ${s.release.issues.map((n) => `#${n}`).join(" ") || "(none recorded)"}  picks=${s.release.picks}`);
   }
+  if (s.waiting_host?.length) lines.push(`  waiting on a host: ${s.waiting_host.join(", ")}`);
   lines.push("  next:", ...s.next_actions.map((a) => `    ${a}`));
   return lines.join("\n");
 }
