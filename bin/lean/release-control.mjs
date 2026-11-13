@@ -10,15 +10,17 @@
  */
 import { hostname } from "node:os";
 import { readActive, readLedger, updateActive } from "./release-ledger.mjs";
+import { isSafetyGate, parseGatesConfig, DEMOTE_MODES } from "./release-gates.mjs";
 import { UNSKIPPABLE_CLASSES, isUnskippable, parseFlakeConfig, canQuarantine } from "./release-flakes.mjs";
 
 export const CONTROL_SCHEMA = "forgedock.release.control/v1";
 export const CONTROL_MARKER = "FORGE:CONTROL";
-export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze"];
+export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote"];
 export { UNSKIPPABLE_CLASSES as UNSKIPPABLE };
 export const EXEMPT_MAX_H = { skip: 24, quarantine: 14 * 24 };
 export const LANES = ["train", "release", "p0", "exclude"];
-const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze"];
+const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes"];
+export const DEMOTE_MAX_H = 30 * 24;
 const BREAK_GLASS = /^(override_freeze|acknowledge_hotfix_revert|override_.*|acknowledge_.*)$/;
 
 /** Argv of `gh workflow run`; rejects a break-glass input (I26). */
@@ -44,7 +46,7 @@ export async function holdCheck(lctx, id) {
 }
 
 const flagOf = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-const FLAGS = ["--repo", "--reason", "--mode", "--issue", "--until", "--force"];
+const FLAGS = ["--repo", "--reason", "--mode", "--issue", "--until", "--force", "--fixture"];
 const positionals = (argv) => argv.filter((a, i) => !a.startsWith("--") && !FLAGS.includes(argv[i - 1]));
 const ttlHours = (s) => { const m = /^(\d+)([hd])$/.exec(String(s ?? "")); return m ? Number(m[1]) * (m[2] === "d" ? 24 : 1) : null; };
 
@@ -113,6 +115,27 @@ export async function runControl(verb, argv, ctx) {
       }
       return { patch: { exemptions: { ...(a.exemptions ?? {}), [check]: entry } }, before: a.exemptions?.[check] ?? null, after: entry };
     };
+  } else if (verb === "demote" || verb === "promote") { // #5583: false-block policy on a deploy gate, same audited path
+    const gate = pos[0];
+    if (!gate) return fail(`${verb}: gate id required`);
+    if (verb === "demote") {
+      const mode = flagOf(argv, "--mode"), issue = flagOf(argv, "--issue"), hours = ttlHours(flagOf(argv, "--until"));
+      if (!DEMOTE_MODES.includes(mode)) return fail(`demote: --mode must be ${DEMOTE_MODES.join(" or ")}`);
+      if (!/^#?\d+$/.test(issue ?? "")) return fail("demote: --issue N is required");
+      if (hours == null) return fail("demote: --until <Nh|Nd> is required");
+      if (hours > DEMOTE_MAX_H) return fail(`demote: expires in at most ${DEMOTE_MAX_H}h (got ${hours}h)`);
+      if (isSafetyGate(gate, parseGatesConfig(policy).safety)) return fail(`demote: ${gate} is on the safety allowlist and is never demoted`);
+      const entry = { mode, issue: String(issue).replace("#", ""), reason, actor, at, until: new Date((ctx.now ?? Date.now()) + hours * 3_600_000).toISOString() };
+      apply = (a) => ({ patch: { gateModes: { ...(a.gateModes ?? {}), [gate]: entry } }, before: a.gateModes?.[gate] ?? null, after: entry });
+    } else {
+      const fixture = flagOf(argv, "--fixture");
+      if (!fixture || !fixture.trim() || fixture.startsWith("--")) return fail("promote: --fixture <ref> is required (re-promotion needs a fixture reference)");
+      apply = (a) => {
+        if (!a.gateModes?.[gate]) return { refuse: `promote: ${gate} is not demoted` };
+        const next = { ...a.gateModes }; delete next[gate];
+        return { patch: { gateModes: next }, before: a.gateModes[gate], after: { promoted: true, fixture } };
+      };
+    }
   } else { // freeze | unfreeze: the repo's own deploy variable (6.4), not a second mechanism
     const name = policy?.deploy?.freeze_variable;
     if (!name) return fail(`${verb}: policy deploy.freeze_variable is not set`);
