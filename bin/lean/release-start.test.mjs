@@ -140,4 +140,32 @@ describe("startFromCli / goFromCli", () => {
     assert.equal(await startFromCli([], { io: i, managed: false, ledger }), 0);
     assert.equal(wrote, 0);
   });
+  it("a refused wave lease stops the run before any effect", async () => {
+    const b = mk({ ctx: { takeFence: async () => ({ refused: "lease lost" }) } });
+    const r = await startRelease(b.ctx);
+    assert.deepEqual([r.status, r.reason], ["refused", "lease lost"]);
+    assert.ok(!b.log.some((l) => l.startsWith("train:")));
+  });
+  it("each wave takes its own fence and the effect runs under it", async () => {
+    const taken = [], recorded = [];
+    const fence = { lctx: { io: { api: async () => ({}) } }, lease: { epoch: 1 }, record: async (r) => recorded.push(r), now: () => "t" };
+    const { ctx } = mk({ ctx: { takeFence: async (st) => { taken.push(st); return { fence }; } } });
+    ctx.fence = null;
+    await startRelease(ctx).catch(() => null); // the fence gate reads the ledger, which this fake io does not serve; only the per-wave take is asserted
+    assert.equal(taken.length, 1);
+    assert.equal(taken[0], ctx.state);
+  });
+  it("prints activation_missing for a kept-off key until `go --activate` records it", async () => {
+    const { ctx, state, out } = mk({ runners: { rollouts: async () => ({ feature: true, added: ["new_flag"], offKeys: ["new_flag"] }) } });
+    state.id = "r1"; state.plan = plan;
+    await startRelease(ctx);
+    assert.ok(out.some((l) => l.startsWith("activation_missing: default-off new_flag")));
+    const posted = []; let written = null;
+    const ledger = { read: async () => ({ state, head: "h" }), write: async (_i, st) => { written = st; return { ok: true, sha: "h2" }; } };
+    const i = { print() {} };
+    assert.equal(await goFromCli(["r1", "--activate", "other"], { io: i, ledger, post: async (b) => posted.push(b), managed: true }), 1);
+    assert.equal(await goFromCli(["r1", "--activate", "new_flag"], { io: i, ledger, post: async (b) => posted.push(b), managed: true, actor: "owner" }), 0);
+    assert.equal(written.activations[0].key, "new_flag");
+    assert.deepEqual(posted, ["<!-- FORGE:DECISION activate new_flag -->"]);
+  });
 });

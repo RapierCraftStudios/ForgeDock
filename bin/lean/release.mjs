@@ -478,7 +478,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release start [--plan <id|hash>] [--approve] [--wave train|release|all] [--milestone <slug>] [--repo owner/repo] | forgedock release go <id> [--plan|--merge] [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] [--coverage] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release start [--plan <id|hash>] [--approve] [--wave train|release|all] [--milestone <slug>] [--repo owner/repo] | forgedock release go <id> [--plan|--merge|--activate <key>] [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] [--coverage] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -524,16 +524,29 @@ export async function releaseFromCli(argv, deps = {}) {
     const ledger = { read: (id) => readLedger(ctx, id), create: (id, st) => createReleaseLedger(ctx, id, st), write: (id, st, head) => writeRelease(ctx, id, st, head), list: async () => (await (await import("./release-ledger.mjs")).listLedgers({ io, repo })).map((l) => l.id ?? l) };
     const tracker = async () => JSON.parse(String(await io.gh(["issue", "list", "--repo", repo, "--label", PLAN_LABEL, "--state", "open", "--json", "number,comments"])) || "[]");
     const post = async (body) => { const t = (await tracker())[0]; if (!t) throw new Error(`no open issue labelled ${PLAN_LABEL} to carry the decision`); await io.gh(["issue", "comment", String(t.number), "--repo", repo, "--body", body]); };
-    if (argv[0] === "go") return goFromCli(rest, { io, ledger, post, managed });
+    if (argv[0] === "go") return goFromCli(rest, { io, ledger, post, managed, actor: deps.actor });
     const id = newReleaseId(io.now()), state = { id };
     const prOf = async (n) => Number(JSON.parse(String(await io.gh(["pr", "list", "--repo", repo, "--state", "open", "--search", `#${n} in:body`, "--json", "number"])) || "[]")[0]?.number) || null;
+    const { takeFence } = await import("./release-rollback.mjs"), { readRollouts, detectNewOffKeys } = await import("./activation.mjs");
+    const rollouts = readRollouts(cwd);
+    const takeWaveFence = async (st) => { // the wave lease; intents land in the plan state; the lease comment goes on the plan tracker
+      const t = (await tracker())[0];
+      return takeFence({ io, repo, state: { id: st.id, steps: { "release-pr": { result: { pr: t?.number } } }, intents: (st.intents ??= []) }, save: () => {} }, io.holder ?? `host-${process.pid}`);
+    };
     const runners = {
+      rollouts: async (w, plan) => { // feature wave: new default-off rollout keys come from the wave PRs' diffs of the forge.yaml rollouts.files registry
+        const feature = w.issues.some((n) => String(plan.issues?.[n]?.reason ?? "").startsWith("feature"));
+        if (!feature || !rollouts) return { feature, added: [], offKeys: [] };
+        const diffs = await Promise.all(w.issues.map(async (n) => { const pr = await prOf(n); return pr ? String(await io.gh(["pr", "diff", String(pr), "--repo", repo])) : ""; }));
+        const offKeys = detectNewOffKeys(rollouts, diffs.join("\n"));
+        return { feature, added: offKeys, offKeys };
+      },
       train: async (w) => runReleaseTrain({ io, repo, def, state, save: () => {}, config: { deploy: rp.policy?.deploy }, policy: rp.policy, actor: deps.actor, host: deps.host, date: new Date(io.now()).toISOString().slice(0, 10), n: 1 }, await Promise.all(w.issues.map(async (n) => ({ issue: n, pr: await prOf(n), record: {} })))),
       release: async (w, o) => { const r = await runRelease({ io, repo, opts: { merge: true, lane: "release" }, config: { ...rc, policy: rp.policy, deploy: rp.policy?.deploy, verify: rp.policy?.verify, verifyRisk: o.soak }, branches: readBranches(cwd), root, id }); return { status: r.status === "done" ? "done" : r.status, reason: r.reason }; },
       verify: async (w, r) => ({ verified: r.status === "done" || (await verifyReleaseById({ io, state, save: () => {}, def, policy: rp.policy, lane: "train" })).verified }),
       mergeback: async () => ({ validated: syncValidated(state.sync) || state.sync == null }),
     };
-    return startFromCli(rest, { io, policy: rp.policy, policySha: rp.sha, managed, newId: id, history: historyFromRoot(root), budget: { cfg: parseBudgetConfig(parseForgeYaml(raw)?.budget) }, ledger, runners,
+    return startFromCli(rest, { io, policy: rp.policy, policySha: rp.sha, managed, newId: id, history: historyFromRoot(root), budget: { cfg: parseBudgetConfig(parseForgeYaml(raw)?.budget) }, ledger, runners, takeFence: takeWaveFence,
       decisions: async () => (await tracker()).flatMap((i) => (i.comments ?? []).map((c) => ({ author: c.author?.login, body: c.body }))), post, actor: deps.actor });
   }
   if (argv[0] === "rollback") { // #5563: the rollback ladder; loaded lazily like the other managed-release modules

@@ -21,6 +21,10 @@ created: 2026-11-13
 - **Approval**: `release go <id> [--plan|--merge]` posts `<!-- FORGE:DECISION plan|merge <hash> -->` on the `release-plan` tracker; `start --approve` does the same. `approvalOf` still decides (trusted actors, hash-bound).
 - Unmanaged repos: `start` and `go` print and write nothing.
 
+- **Rollouts seam (wired)**: `release.mjs` derives a feature wave's new default-off rollout keys with `activation.mjs` `readRollouts` + `detectNewOffKeys` over the wave PRs' diffs (forge.yaml `rollouts.files`); a feature wave (plan reason `feature ...`) with none is "missing". Without a registry the key set is empty.
+- **Activation**: a kept-off key prints `activation_missing` until `release go <id> --activate <key>` records it in `state.activations` (and posts `FORGE:DECISION activate <key>`).
+- **Fence**: each wave takes a fresh lease (`takeFence`, tracker issue carries the lease comment) just before its fenced effect, because the train takes its own epoch inside; intents are recorded in the plan state.
+
 ## Consequences
 
-The default `rollouts` seam is not wired from the CLI yet (a repo without it gets no flag-policy action); activation recording is a library step.
+Added rollout keys are the new default-off keys only (I25: new keys ship off).

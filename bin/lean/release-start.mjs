@@ -75,11 +75,17 @@ export async function startRelease(ctx) {
     if (waveState(state, w.id) === "WAVE_DONE") { say(`wave ${w.id}: already WAVE_DONE, skipped`); continue; }
     const gate = cutAllowed(state, plan, w);
     if (!gate.ok) { say(`release start: ${gate.reason}`); return { status: "refused", wave: w.id, reason: gate.reason, ran }; }
-    const lane = isTrain(w) ? "train" : "release", fp = flagPolicyOutcome(policy, lane, await runners.rollouts?.(w));
+    const lane = isTrain(w) ? "train" : "release", fp = flagPolicyOutcome(policy, lane, await runners.rollouts?.(w, plan));
     if (fp.action === "error") return { status: "refused", wave: w.id, reason: `features.flag_policy=require: feature wave ${w.id} adds no rollout key`, ran };
     if (fp.action === "warn") say(`WARN: feature wave ${w.id} adds no rollout key (features.flag_policy=warn)`);
-    if (fp.keepOff.length) { say(`wave ${w.id}: default-off key(s) ${fp.keepOff.join(", ")} stay off at deploy; activate with a recorded step`); (state.waves[w.id] ??= {}).keepOff = fp.keepOff; }
-    const f = waveState(state, w.id) === "LIVE" ? { value: { status: "live" } } : await fenced(ctx.fence, { action: "wave", key: `wave:${plan.plan_hash}:${w.id}` }, async () => {
+    if (fp.keepOff.length) { // I25: the key stays off at deploy; the activation_missing line stays until `release go <id> --activate <key>` records it
+      const pending = fp.keepOff.filter((k) => !(state.activations ?? []).some((a) => a.key === k));
+      (state.waves[w.id] ??= {}).keepOff = fp.keepOff;
+      if (pending.length) say(`activation_missing: default-off ${pending.join(", ")} stays off at deploy; record activation with: forgedock release go ${state.id} --activate <key>`);
+    }
+    const fl = waveState(state, w.id) === "LIVE" || !ctx.takeFence ? { fence: ctx.fence } : await ctx.takeFence(state); // a fresh lease per wave: the train takes its own epoch inside
+    if (fl.refused) return { status: "refused", wave: w.id, reason: fl.refused, ran };
+    const f = waveState(state, w.id) === "LIVE" ? { value: { status: "live" } } : await fenced(fl.fence, { action: "wave", key: `wave:${plan.plan_hash}:${w.id}` }, async () => {
       state.waves[w.id] = { ...state.waves[w.id], state: "CUT" }; await save();
       const r = isTrain(w) ? await runners.train(w) : await runners.release(w, { soak: "full", pipeline: w.pipeline ?? "full", base: w.base });
       return r;
@@ -128,18 +134,28 @@ export async function startFromCli(argv, deps) {
   if (argv.includes("--approve") && approval.state !== "approved") { await deps.post(PLAN_DECISION(plan.plan_hash)); approval = await decisions(); }
   const state = rec.state;
   const save = async () => { const w = await deps.ledger.write(rec.id, state, rec.head); if (w?.ok) rec.head = w.sha; };
-  const r = await startRelease({ io, plan, approval, state, save, managed, wave, policy: deps.policy, fence: deps.fence, runners: deps.runners });
+  const r = await startRelease({ io, plan, approval, state, save, managed, wave, policy: deps.policy, fence: deps.fence, takeFence: deps.takeFence, runners: deps.runners });
   io.print(`release start ${rec.id}: ${r.status}${r.reason ? `: ${r.reason}` : ""}`);
   return r.status === "done" || r.status === "unmanaged" || r.status === "awaiting-approval" ? 0 : 1;
 }
 
-/** `forgedock release go <id> [--plan|--merge]`: writes the typed approval comment (`--plan` default) bound to the plan hash. */
-export async function goFromCli(argv, { io, ledger, post, managed }) {
+/** `forgedock release go <id> [--plan|--merge|--activate <key>]`: writes the typed approval comment (`--plan` default) bound to the plan hash. */
+export async function goFromCli(argv, { io, ledger, post, managed, actor, now = () => new Date().toISOString() }) {
   const id = argv[0];
   if (!id || id.startsWith("--")) throw new Error("release go needs a release id; usage: forgedock release go <id> [--plan|--merge]");
   if (!managed) { io.print("release go: unmanaged repo, nothing written (release.managed is off)"); return 0; }
   const rec = await ledger.read(id);
   if (!rec?.state?.plan) { io.print(`release go: no plan record for ${id}`); return 1; }
+  const act = flagOf(argv, "--activate");
+  if (act) { // the separate recorded activation step of a default-off rollout key (I25)
+    if (!(rec.state.waves && Object.values(rec.state.waves).some((w) => (w.keepOff ?? []).includes(act)))) { io.print(`release go: ${act} is not a default-off key of a wave of ${id}`); return 1; }
+    recordActivation(rec.state, act, actor ?? null, now());
+    const w = await ledger.write(id, rec.state, rec.head);
+    if (!w?.ok) { io.print(`release go: could not record activation (ledger moved); retry`); return 1; }
+    await post(`<!-- FORGE:DECISION activate ${act} -->`);
+    io.print(`release go ${id}: activation of ${act} recorded`);
+    return 0;
+  }
   const hash = rec.state.plan.plan_hash, merge = argv.includes("--merge");
   await post(merge ? MERGE_DECISION(hash) : PLAN_DECISION(hash));
   io.print(`release go ${id}: ${merge ? "merge" : "plan"} approval recorded for ${hash.slice(0, 12)}`);
