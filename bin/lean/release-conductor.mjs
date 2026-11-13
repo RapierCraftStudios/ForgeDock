@@ -17,7 +17,7 @@ import { runRollback, takeFence } from "./release-rollback.mjs";
 import { riskClass } from "./release-verify.mjs";
 
 export const CONDUCTOR_TTL_S = 900;
-export const WORKFLOW_PATH = ".github/workflows/forge-conductor.yml";
+export const CONDUCTOR_WORKFLOW_PATH = ".github/workflows/forge-conductor.yml";
 export const CONDUCTOR_MARKER = "FORGE:CONDUCTOR";
 const TEMPLATE = new URL("../../templates/github-actions/forge-conductor.yml", import.meta.url);
 
@@ -54,7 +54,7 @@ export function conductorConfig(policy) {
 /** Bootstrap guard (R10): a reason to refuse starting a managed release, or null. */
 export function conductorGuard({ io, policy, def }) {
   if (!conductorConfig(policy).enabled) return null;
-  try { io.git(["show", `origin/${def}:${WORKFLOW_PATH}`]); return null; } catch { return `controls.conductor is enabled but ${WORKFLOW_PATH} is absent from origin/${def}; run \`forgedock release init --conductor\` and merge it first`; }
+  try { io.git(["show", `origin/${def}:${CONDUCTOR_WORKFLOW_PATH}`]); return null; } catch { return `controls.conductor is enabled but ${CONDUCTOR_WORKFLOW_PATH} is absent from origin/${def}; run \`forgedock release init --conductor\` and merge it first`; }
 }
 
 /** The template with the exact forgedock version, the watchdog cron and the deploy workflow names filled in. */
@@ -64,13 +64,13 @@ export function renderConductor({ version, cron = "0 */6 * * *", workflows = ["D
 
 /** `release init --conductor`: write the pinned workflow into the repo (never overwrites). @returns exit code */
 export function installConductor({ io, cwd, policy }) {
-  const file = join(cwd, WORKFLOW_PATH);
-  if (existsSync(file)) { io.print(`release init: ${WORKFLOW_PATH} exists; not overwriting`); return 1; }
+  const file = join(cwd, CONDUCTOR_WORKFLOW_PATH);
+  if (existsSync(file)) { io.print(`release init: ${CONDUCTOR_WORKFLOW_PATH} exists; not overwriting`); return 1; }
   const { version } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
   const c = conductorConfig(policy);
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, renderConductor({ version, cron: c.watchdogCron, workflows: c.workflows }));
-  io.print(`release init: wrote ${WORKFLOW_PATH} (forgedock@${version}); merge it to the default branch, then set controls.conductor.enabled`);
+  io.print(`release init: wrote ${CONDUCTOR_WORKFLOW_PATH} (forgedock@${version}); merge it to the default branch, then set controls.conductor.enabled`);
   return 0;
 }
 

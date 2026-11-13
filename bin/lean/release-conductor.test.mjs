@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CAPABILITIES, REFUSED, capability, conductorConfig, conductorGuard, renderConductor, installConductor, recover, recoverFromCli, WORKFLOW_PATH } from "./release-conductor.mjs";
+import { CAPABILITIES, REFUSED, capability, conductorConfig, conductorGuard, renderConductor, installConductor, recover, recoverFromCli, CONDUCTOR_WORKFLOW_PATH } from "./release-conductor.mjs";
 import { fenced } from "./release-fence.mjs";
 import { renderReleaseStatus } from "./release-status.mjs";
 import { initFromCli } from "./release-config.mjs";
@@ -172,7 +172,7 @@ describe("conductor template (#5564)", () => {
 describe("bootstrap guard and init --conductor (#5564)", () => {
   const on = { controls: { conductor: { enabled: true } } };
   it("refuses while the workflow is absent from the default branch", () => {
-    const gitHas = (has) => ({ git: (a) => { if (!has) throw new Error("not found"); assert.equal(a[1], `origin/main:${WORKFLOW_PATH}`); return "x"; } });
+    const gitHas = (has) => ({ git: (a) => { if (!has) throw new Error("not found"); assert.equal(a[1], `origin/main:${CONDUCTOR_WORKFLOW_PATH}`); return "x"; } });
     assert.match(conductorGuard({ io: gitHas(false), policy: on, def: "main" }), /absent from origin\/main/);
     assert.equal(conductorGuard({ io: gitHas(true), policy: on, def: "main" }), null);
     assert.equal(conductorGuard({ io: gitHas(false), policy: {}, def: "main" }), null);
@@ -186,7 +186,7 @@ describe("bootstrap guard and init --conductor (#5564)", () => {
     const out = [], io = { print: (l) => out.push(l) };
     assert.equal(await initFromCli(["--conductor"], { io, cwd }), 0);
     const { version } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
-    assert.ok(readFileSync(join(cwd, WORKFLOW_PATH), "utf8").includes(`forgedock@${version} release recover`));
+    assert.ok(readFileSync(join(cwd, CONDUCTOR_WORKFLOW_PATH), "utf8").includes(`forgedock@${version} release recover`));
     assert.equal(installConductor({ io, cwd, policy: null }), 1);
     assert.equal(initFromCli([], { io, cwd }), 1); // policy file now exists
     assert.ok(existsSync(join(cwd, ".forge/release.yaml")));
