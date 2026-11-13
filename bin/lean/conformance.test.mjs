@@ -2082,3 +2082,18 @@ describe("#5547 live-infra, paid and host-load e2e rows", () => {
     assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "post-deploy" }), { body: "<!-- FORGE:CONTRACT -->\n{}" }]).applied.length, 0, "a decision older than the contract is ignored");
   });
 });
+
+describe("#5623: builder-correctable contract problems", () => {
+  it("contractSelfCorrectable: shape problems are builder-correctable; a quote-only mismatch is not", async () => {
+    const { contractSelfCorrectable } = await import("./lean.mjs");
+    assert.equal(contractSelfCorrectable(["R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim", "R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim"]), false);
+    assert.equal(contractSelfCorrectable([]), false);
+  });
+  it("classifyNeedsHuman: contract.invalid is recoverable (one fresh-plan requeue), with or without an issue edit", async () => {
+    const { classifyNeedsHuman, OUTCOME_CODES } = await import("../engine/outcome-codes.mjs");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID, issueEdited: true }), "recoverable");
+  });
+});
