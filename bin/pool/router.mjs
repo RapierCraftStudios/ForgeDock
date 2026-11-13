@@ -190,12 +190,14 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const size = sizeFor(spec);
     const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.cpus_free >= size.cpus && c.mem_free_gb >= size.mem_gb)
       .sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     for (const c of fits) {
       const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
-      if (r.status === 503) continue; // raced with another launch; try the next host
+      if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
       if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
       return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
     }
+    if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
 

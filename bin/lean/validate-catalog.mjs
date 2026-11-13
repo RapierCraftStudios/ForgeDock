@@ -7,6 +7,8 @@
  * base-drift classifier. Pure; lean.mjs owns every effect.
  */
 
+import { venvPythonRewrite } from "./preflight.mjs";
+
 /** Default CI sources read for the derived catalogue (repo-relative). */
 export const DEFAULT_CATALOG_SOURCES = [".github/workflows/ci.yml", "scripts/ci-local.sh"];
 
@@ -92,3 +94,17 @@ export function equivalentRuns(frozen, sub) {
 const DRIFT_RE = /(?:generated|artifact|snapshot)s?\b[^\n]*\b(?:out of date|out-of-date|stale|differ|drift|not up to date)|\b(?:out of date|stale)\b[^\n]*\b(?:generated|regenerate)|run [`'"]?[^\n]*\bgenerate[\w:-]*[`'"]? to (?:update|regenerate)/i;
 /** True when a validate failure's output reads as a stale generated artifact (a regenerate case), not a failing test. */
 export const isDriftFailure = (output) => DRIFT_RE.test(String(output ?? ""));
+
+/**
+ * #5683: the repro and validate commands that run a bare `python -m pytest` / `pytest` inside a sub-project with a tracked
+ * Python manifest and a `.venv` run through that venv's interpreter. Returns {contract, applied[{id, from, to}]}.
+ */
+export function rewriteSubprojectVenv(contract, files, exists) {
+  if (!contract || typeof contract !== "object") return { contract, applied: [] };
+  const applied = [], fix = (id, cmd) => { const to = venvPythonRewrite(cmd, files, exists); if (to !== cmd) applied.push({ id, from: cmd, to }); return to; };
+  const out = { ...contract };
+  if (Array.isArray(contract.validate)) out.validate = contract.validate.map((v) => (v && typeof v.command === "string" ? { ...v, command: fix(v.id, v.command) } : v));
+  const t = contract.repro_test;
+  if (t && typeof t === "object" && typeof t.command === "string") out.repro_test = { ...t, command: fix("repro_test", t.command) };
+  return applied.length ? { contract: out, applied } : { contract, applied };
+}

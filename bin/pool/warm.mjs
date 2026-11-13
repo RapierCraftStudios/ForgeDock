@@ -28,8 +28,19 @@ export function makeWarm({ store, sb, own, now, launch, destroy, view, log = con
     return { key, n: want };
   }
   const list = () => recs().map((r) => ({ id: r.id, key: r.warm, state: r.state, ready: isReady(r), cpus: r.cpus, mem_gb: r.mem_gb }));
-  /** Start sandboxes until each repo has its n (ready or still preparing). Refused launches (capacity) are retried on the next call. */
-  async function replenish() {
+  /**
+   * Start sandboxes until each repo has its n (ready or still preparing). Refused launches (capacity) are retried on the next call.
+   * Single-flight: a sandbox counts as warm only once its launch returns, so concurrent passes (every lane launch, claim and
+   * reaper tick calls this) each saw 0 and over-filled the pool (11 for n=1 when launches were slow). A call during a pass
+   * joins it and schedules one more pass for config that changed meanwhile.
+   */
+  let inflight = null, again = false;
+  function replenish() {
+    if (inflight) { again = true; return inflight; }
+    inflight = (async () => { do { again = false; await replenishPass(); } while (again); })().finally(() => { inflight = null; });
+    return inflight;
+  }
+  async function replenishPass() {
     for (const [key, w] of Object.entries(wanted())) {
       for (let have = recs(key).length; have < w.n; have++) {
         const id = `warm-${key}-${randomBytes(3).toString("hex")}`;

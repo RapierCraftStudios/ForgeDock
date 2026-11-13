@@ -11,7 +11,7 @@
  */
 import { builtinModules } from "node:module";
 import { existsSync } from "node:fs";
-import { join, dirname, delimiter } from "node:path";
+import { join, dirname, delimiter, relative } from "node:path";
 import { missingTool } from "./conformance.mjs";
 
 export const PREFLIGHT_CAP = 20;
@@ -345,3 +345,64 @@ export function projectBinDirs(wt, files = [], { exists = existsSync, cap = 24 }
 
 /** #5592: `base` PATH with the project-local executable dirs appended (never ahead of what the lane already resolves). */
 export const withLocalBins = (base, dirs) => [...String(base ?? "").split(delimiter).filter(Boolean), ...dirs.filter((d) => !String(base ?? "").split(delimiter).includes(d))].join(delimiter);
+
+const PY_MANIFESTS = new Set(["pyproject.toml", "poetry.lock", "uv.lock", "requirements.txt"]);
+const normPy = (n) => String(n).toLowerCase().replace(/[-_.]+/g, "-");
+const reEsc = (n) => String(n).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** #5683: does manifest text `text` (package.json, pyproject.toml, a requirements file) declare `name` as a dependency? */
+function manifestDeclares(base, text, name) {
+  if (base === "package.json") {
+    try { const j = JSON.parse(text); return ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].some((k) => j?.[k] && Object.hasOwn(j[k], name)); } catch { return false; }
+  }
+  const n = reEsc(normPy(name)).replace(/-/g, "[-_.]+");
+  if (base === "pyproject.toml") return new RegExp(`["']\\s*${n}(?:\\[[^\\]]*\\])?\\s*(?:[<>=!~;@ ,]|["'])|^\\s*${n}\\s*=`, "im").test(text);
+  return new RegExp(`^\\s*${n}(?:\\[[^\\]]*\\])?\\s*(?:[<>=!~;@#]|$)`, "im").test(text);
+}
+/**
+ * #5683: the sub-project dir whose tracked manifest (package.json deps/devDeps/peerDeps, pyproject dependencies, a requirements
+ * file) declares `name`, or null. A declared test-plan env name that has an owner is a project dependency the lane prepares
+ * (deps.prepare), never a host tool or a lane_tools recipe. `files`: tracked paths; `readFile(path)`: manifest text. Pure.
+ */
+export function manifestDepOwner(name, files = [], readFile = () => "") {
+  for (const f of files) {
+    const parts = String(f).split("/"), base = parts[parts.length - 1];
+    if (parts.includes("node_modules") || !(base === "package.json" || base === "pyproject.toml" || /^requirements[\w.-]*\.txt$/.test(base))) continue;
+    let text = ""; try { text = String(readFile(f) ?? ""); } catch { continue; }
+    if (manifestDeclares(base.startsWith("requirements") ? "requirements.txt" : base, text, name)) return dirname(f);
+  }
+  return null;
+}
+
+/** nearest ancestor dir (of `dir`, up to the root ".") holding a tracked Python manifest, or null. */
+function nearestPyProject(dir, files) {
+  const have = new Set(files.filter((f) => PY_MANIFESTS.has(String(f).split("/").pop()) || /(^|\/)requirements[\w.-]*\.txt$/.test(f)).map((f) => dirname(f)));
+  for (let d = dir; ; d = dirname(d)) { if (have.has(d)) return d; if (d === "." || d === "/") return null; }
+}
+const PYTEST_SEG = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*)(?:python3?(?:\.\d+)?\s+-m\s+pytest|pytest)\b/;
+/**
+ * #5683: a bare `python -m pytest` / `pytest` in a sub-project that has a tracked Python manifest and an in-project `.venv`
+ * runs through that venv's interpreter. The sub-project is the `cd X &&` directory, else the nearest manifest of the first
+ * test path, else the root. `exists(rel)`: repo-relative path check. Unchanged when no manifest or venv applies. Pure.
+ */
+export function venvPythonRewrite(command, files = [], exists = () => false) {
+  const parts = String(command ?? "").split(/(&&|\|\||;|\||\n)/);
+  let cwd = ".", changed = false;
+  const out = parts.map((seg, i) => {
+    if (i % 2) return seg;
+    const cd = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/.exec(seg);
+    if (cd) { const t = (cd[1] ?? cd[2] ?? cd[3]).replace(/^\.\//, "").replace(/\/+$/, ""); cwd = t.startsWith("/") || t.startsWith("$") || t.startsWith("..") ? "?" : join(cwd === "?" ? "." : cwd, t) || "."; return seg; }
+    const m = PYTEST_SEG.exec(seg);
+    if (!m || cwd === "?") return seg;
+    const rest = seg.slice(m[0].length);
+    const tp = rest.split(/\s+/).map((x) => x.replace(/::.*$/, "").replace(/^\.\//, "")).find((x) => x && !x.startsWith("-") && /[\w-]\/|\.py$/.test(x) && !x.startsWith("/"));
+    const origin = cwd !== "." ? cwd : tp ? dirname(tp) : ".";
+    const proj = nearestPyProject(origin, files);
+    if (proj === null) return seg;
+    const venv = join(proj, ".venv/bin/python");
+    if (!exists(venv)) return seg;
+    const rel = cwd === "." ? venv : relative(cwd, venv);
+    changed = true;
+    return `${m[1]}${rel} -m pytest${rest}`;
+  });
+  return changed ? out.join("") : String(command ?? "");
+}
