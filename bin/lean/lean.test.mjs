@@ -1225,7 +1225,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
     assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
-    assert.match(nhBody(w), /still invalid after one correction/);
+    assert.match(nhBody(w), /still invalid after \d+ correction\(s\)/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
     assert.equal((await run(w2)).terminalReason, "merged");
   });
@@ -3490,6 +3490,32 @@ describe("base-sync (#4100)", () => {
     assert.equal(w.merges.length, 1);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     noRebaseNoForce(w);
+  });
+
+  it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      return git(a, o);
+    };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1, "no re-review for a documentation-only conflict");
+    assert.match(syncComment(w), /not required \(documentation-only conflicts; lane code diff unchanged\)/);
+  });
+
+  it("#5583 follow-up: a documentation-only conflict whose resolution changed the code diff is re-reviewed", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
+    const git = w.io.git; let n = 0;
+    w.io.git = async (a, o) => {
+      if (a[0] === "merge-base" && a[1] !== "--is-ancestor") return "f0f0f0f0f0f0f0f0";
+      if (a[0] === "diff" && a.includes(":(exclude)*.md")) return `diff --git a/src/foo.js b/src/foo.js\n+fix${n++}`;
+      return git(a, o);
+    };
+    await run(w);
+    assert.equal(reviewers(w).length, 2, "re-review: the resolution touched code");
   });
 
   it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
@@ -7759,6 +7785,13 @@ describe("resume digest in builder prompts (#4400)", () => {
       assert.match(p, /Binding decisions posted after the contract froze/);
       assert.match(p, /deliver the nightly timer/);
       assert.doesNotMatch(p, /untrusted override|older decision/);
+    });
+
+    it("#5547 a structured post-deploy decision after the freeze amends the recovered frozen contract", async () => {
+      const sd = { body: `<!-- FORGE:DECISION ${JSON.stringify({ requirement: CONTRACT.requirements[0].id, disposition: "post-deploy" })} -->\n## Decision\npaid run`, ...BOT };
+      const w = withDecisions([CONTRACT_C, sd, { body: factsRec, ...BOT }]);
+      await run(w);
+      assert.match(traj(w).join("\n"), new RegExp(`FORGE:DECISION applied to the frozen contract: ${CONTRACT.requirements[0].id} tracked post-deploy`));
     });
 
     it("context_pack off still passes the decision", async () => {

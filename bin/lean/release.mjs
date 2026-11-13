@@ -8,7 +8,7 @@
  * live in release-review.mjs / release-postmerge.mjs (stubs that block until their parts land). Promotion is opt-in: without
  * `--merge` or forge.yaml `release.auto_merge: true` the job stops at GATE_PASS and prints the merge command.
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,19 +18,22 @@ import { ghRunner } from "./issuewatch.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
+import { deployStep } from "./release-deploy.mjs";
+import { riskClass } from "./release-verify.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
-import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
+import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, gateHistoryFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
 import { holdCheck, exemptionsSection, VERBS as CONTROL_VERBS } from "./release-control.mjs";
 import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
 import { readActive } from "./release-ledger.mjs";
+import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
-export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
+export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge", "deploy"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -299,7 +302,7 @@ async function promotionStep(ctx) {
   return { merged: true, head, gate };
 }
 
-const OPTIONAL_STEPS = ["host-preflight", "mark-ready"];
+const OPTIONAL_STEPS = ["host-preflight", "mark-ready", "deploy"];
 
 const STEP_FNS = {
   preflight: preflightStep,
@@ -311,6 +314,7 @@ const STEP_FNS = {
   rehearsal: (ctx) => rehearsalStep(ctx),
   promotion: promotionStep,
   "post-merge": (ctx) => postMergeStep(ctx),
+  deploy: (ctx) => deployStep(ctx),
 };
 
 /** The step table with `over` replacing steps by name (tests stub the steps that need a real repo). */
@@ -383,6 +387,15 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
   if (lctx) { // #5569: Actions minutes of this release (sum of ceil per job), mirrored to the ledger below
     try { const m = await releaseMinutes({ gh: (a) => io.gh(a), repo, sinceMs: Date.parse(state.startedAt) }); if (m) state.minutes = { runs: m.runs, total: m.minutes }; } catch { /* best effort */ }
   }
+  { // #5583: with a catalogue, the deploy-telemetry JSON lines of this release (FORGE_GATE_TELEMETRY file) are kept next to state.minutes; no catalogue, no write
+    const tf = process.env.FORGE_GATE_TELEMETRY;
+    try {
+      if (tf && existsSync(tf) && existsSync(join(process.cwd(), ".forge/gates.yaml"))) {
+        const recs = (await import("./release-gates.mjs")).parseTelemetry(readFileSync(tf, "utf8"));
+        if (recs.length) state.gates = [...(state.gates ?? []), ...recs];
+      }
+    } catch { /* best effort */ }
+  }
   state.status = out.status; ctx.save();
   if (lctx) await mirror(state);
   return out;
@@ -419,7 +432,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -430,7 +443,34 @@ export async function releaseFromCli(argv, deps = {}) {
     for (const l of waveReport(historyFromRoot(releaseRoot(env)), parseBudgetConfig(y.budget)).lines) io.print(l);
     return 0;
   }
+  if (argv[0] === "verify" && ID_RE.test(String(argv[1] ?? ""))) { // #5562: a release id re-runs the deploy verification; a sha keeps the snapshot-chain check
+    const { verifyReleaseById } = await import("./release-verify.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const def = readBranches(cwd).default || "main", rel = openRelease(releaseRoot(env), argv[1]), state = rel.load();
+    if (!state) throw new Error(`no release ${argv[1]} in ${releaseRoot(env)}`);
+    const r = await verifyReleaseById({ io, state, save: () => rel.save(state), def, policy: readPolicy({ io, defaultBranch: def, cwd }).policy, lane: flag(argv, "--lane") ?? state.lane });
+    return r.verified ? 0 : BLOCKED_EXIT;
+  }
+  if (argv[0] === "gates") { // #5583: catalogue, telemetry report, admission check; release-gates is loaded lazily
+    const g = await import("./release-gates.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const defaultBranch = readBranches(cwd).default || "main", root = releaseRoot(env);
+    if (argv[1] === "record") { // merge a deploy-telemetry JSON-lines file into the release state; no catalogue, no write
+      const id = argv[2], file = flag(argv, "--file");
+      if (!id || !file || !existsSync(join(cwd, g.GATES_PATH))) { io.print(`release gates record: needs <release-id>, --file and ${g.GATES_PATH}`); return 1; }
+      const rel = openRelease(root, id), st = rel.load();
+      if (!st) { io.print(`release gates record: no release ${id}`); return 1; }
+      const recs = g.parseTelemetry(readFileSync(file, "utf8"));
+      rel.save({ ...st, gates: [...(st.gates ?? []), ...recs] });
+      io.print(`release gates record: ${recs.length} record(s) into ${id}`);
+      return 0;
+    }
+    const policy = readPolicy({ io, defaultBranch, cwd }).policy;
+    const repo = flag(argv, "--repo") ?? (argv[1] === "demote" ? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner : undefined);
+    return g.gatesFromCli(argv.slice(1), { io, cwd, defaultBranch, policy, repo, history: gateHistoryFromRoot(root) });
+  }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
+  if (argv[0] === "status" || argv[0] === "explain") return statusCli(argv, { io, cwd, env, deps });
   if (argv[0] === "check-config" || argv[0] === "init") { // #5551: policy file, loaded lazily (release-config imports this module)
     const { checkConfigFromCli, initFromCli } = await import("./release-config.mjs");
     return (argv[0] === "init" ? initFromCli : checkConfigFromCli)(argv.slice(1), { io, cwd });
@@ -443,8 +483,12 @@ export async function releaseFromCli(argv, deps = {}) {
     return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
   }
   if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
-  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane"));
+  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane", "--interval"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane" || argv[i - 1] === "--interval"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
+  if (argv.includes("--watch")) { // the bare flag delegates to the status loop (#5554)
+    const pick = (f) => (flag(argv, f) ? [f, flag(argv, f)] : []);
+    return statusCli(["status", ...(flag(argv, "--resume") ? [flag(argv, "--resume")] : []), "--watch", ...pick("--repo"), ...pick("--interval")], { io, cwd, env, deps });
+  }
   const root = releaseRoot(env);
   const resume = flag(argv, "--resume");
   let id = resume ?? newReleaseId(io.now());
@@ -452,6 +496,17 @@ export async function releaseFromCli(argv, deps = {}) {
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
   const config = readReleaseConfig(raw);
   if (config.managed) config.ciPolicy = readCiPolicy(cwd);
+  if (config.managed) { // #5560: deploy stages come from the default-branch policy only (I13)
+    const { readPolicy } = await import("./release-config.mjs");
+    const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
+    if (pol?.deploy) config.deploy = pol.deploy;
+    config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
+    if (pol?.verify) { // #5562: verification layers; risk class picks the soak minutes
+      config.verify = pol.verify;
+      config.verifyRisk = riskClass(flag(argv, "--lane"), config.deployPipeline);
+      config.verifySoak = pol.lanes?.[flag(argv, "--lane")]?.soak_min;
+    }
+  }
   if (resume) {
     const st = openRelease(root, resume).load();
     if (!st && !config.managed) throw new Error(`no release ${resume} in ${root}`); // managed: the ledger may hold it (another host)
@@ -478,4 +533,13 @@ async function verifyFromCli(argv, { io, cwd }) {
   const r = await verifyRelease({ io, git: io.git, repo, staging: readBranches(cwd).staging || DEFAULT_STAGING_BRANCH, sha: full });
   io.print(r.ok ? `release verify ${full}: ok (snapshot + ${r.picks} cherry-pick(s), PR #${r.pr})` : `release verify ${full}: FAILED: ${r.why}`);
   return r.ok ? 0 : 1;
+}
+
+/** `release status|explain` (#5554): read-only; the local cache and the gate read are handed to release-status.mjs. */
+function statusCli(argv, { io, cwd, env, deps }) {
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* defaults */ }
+  const root = releaseRoot(env);
+  const local = { load: (id) => (ID_RE.test(String(id)) ? openRelease(root, id).load() : null), ids: () => { try { return readdirSync(root).filter((d) => ID_RE.test(d)); } catch { return []; } } };
+  const { policy, watch } = policyFromYaml(raw);
+  return statusFromCli(argv, { io, config: readReleaseConfig(raw), local, gateState, watch: deps.watch ?? watch, policy: deps.policy ?? policy, maxPolls: deps.maxPolls });
 }

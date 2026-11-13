@@ -265,10 +265,29 @@ function ecosystemTests(sctx, tests) {
 // Which of testFiles can this change reach? { selected, total, widen } ; widen is a reason string or ''.
 // `universe` is the repo-wide test set used only for the SEC-3 reach check: a step that runs ONE test must not widen just
 // because the change does not reach that test, only because it reaches no test anywhere. Selection stays within testFiles.
+// #5583 follow-up: a test that enumerates the tree itself (git ls-files, find -name/-path, git grep), directly or through a
+// script it names, is a repo-wide lint: any change can trip it (a new file that breaks a convention names no test), so the
+// reference graph can never select it. Such tests are always selected; they are cheap scans by nature.
+const TREE_SCAN_RE = /\bgit\s+(ls-files|grep)\b|\bfind\s+\S+(\s+-maxdepth\s+\d+)?\s+-(name|path|iname|type)\b/;
+export function treeScanTest(sctx, t) {
+  const memo = (sctx.cache.treeScan ??= new Map());
+  if (memo.has(t)) return memo.get(t);
+  const read = (f) => { try { return fs.readFileSync(path.join(sctx.repo, f), 'utf8'); } catch { return ''; } };
+  const body = read(t);
+  let hit = TREE_SCAN_RE.test(body);
+  if (!hit) { // one hop: scripts the test names (e.g. foo.test.sh runs foo.sh)
+    const named = [...new Set(body.match(/[\w./-]+\.(sh|bash|mjs|js|py)\b/g) ?? [])].flatMap((x) => x.split('/').map((_, i, a) => a.slice(i).join('/'))).filter((x) => x && x !== t && sctx.present.has(x)); // every path suffix: $ROOT/scripts/x.sh -> scripts/x.sh
+    hit = named.some((f) => TREE_SCAN_RE.test(read(f)));
+  }
+  memo.set(t, hit);
+  return hit;
+}
+
 export function impactedTests(sctx, testFiles, universe = testFiles) {
   const r = reach(sctx);
   if (r.widen) return { selected: [...testFiles], total: testFiles.length, widen: r.widen };
   const selected = new Set();
+  if (sctx.changed.length) for (const t of testFiles) if (sctx.present.has(t) && treeScanTest(sctx, t)) selected.add(t);
   for (const t of testFiles) if (r.files.has(t) && sctx.present.has(t)) selected.add(t);
   for (const f of sctx.changed) if (!isTestFile(f)) for (const t of siblingTests(f, testFiles)) selected.add(t);
   // forge#4040 (SEC-3, per file): every changed non-test source file must itself reach at least one test (reverse-reference

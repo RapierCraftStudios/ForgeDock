@@ -2023,3 +2023,77 @@ describe("#5524 URL-less production-only e2e/manual rows", () => {
     assert.equal(deferChecklessPostDeploy(cv.contract).contract.requirements[0].disposition, "defer");
   });
 });
+import { applyRequirementDecisions } from "./conformance.mjs";
+describe("#5547 live-infra, paid and host-load e2e rows", () => {
+  const Q5541 = "re-run `bench-adversarial.mjs run … --arms full,control` on legion, ≤ 1.3× control cost [type:e2e]";
+  const Q5531 = "Under a synthetic load of 4× nproc CPU hogs, `schedd status` answers in < 1 s [type:e2e]";
+  const LOCAL = "The signup page works against the local stack in a browser under load [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }, { id: "R2", quote, disposition: "deliver" }], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] });
+  it("#5547 prodOnlyE2e recognises live-infra shapes, not local rows", () => {
+    for (const q of [Q5541, Q5531, "a paid run of the batch completes [type:manual]", "on a rented GPU box the job finishes [type:e2e]", "on the remote cluster the job finishes [type:e2e]", "a sandbox pool run passes [type:e2e]", "host-level load keeps p99 low [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
+    for (const q of [LOCAL, "sandbox run over 24h [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5547 live-infra rows convert to a post-deploy defer owned by the orchestrator", () => {
+    for (const q of [Q5541, Q5531]) {
+      const out = autoPostDeployE2e(mk(q));
+      assert.deepEqual(out.converted.map((x) => x.id), ["R2"]);
+      const d = deferChecklessPostDeploy(out.contract);
+      assert.deepEqual(d.converted, ["R2"]);
+      assert.equal(d.contract.requirements[1].disposition, "defer");
+      assert.equal(d.contract.requirements[1].bucket, "owner:orchestrator");
+      assert.equal(d.contract.requirements[0].disposition, "deliver");
+    }
+    assert.equal(autoPostDeployE2e(mk(LOCAL)).converted.length, 0);
+  });
+  it("#5547 the classifier keys on shape, not on host or repo names", () => {
+    for (const q of ["on myhost the job finishes [type:e2e]", "legion of users sign up locally [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5547 replay: #5531 R2 unchanged converts at review and the lane conforms", () => {
+    const contract = mk(Q5531);
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${Q5531}` };
+    const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: Q5531, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
+    const d = decide(r, lctx);
+    assert.equal(d.state, "nonconforming");
+    const ids = loneE2eRows(d.failures);
+    assert.deepEqual(ids, ["R2"]);
+    const eff = deferChecklessPostDeploy(autoPostDeployE2e(contract, ids).contract).contract;
+    assert.equal(eff.requirements[1].disposition, "defer");
+    const d2 = decide({ ...r, requirements: [good.requirements[0], { id: "R2", status: "deferred", evidence: "-", deferral_ok: true }] }, { ...lctx, contract: eff });
+    assert.equal(d2.state, "conforms", JSON.stringify(d2.failures));
+  });
+  it("#5547 a quote that only mentions the tag in a mid-sentence code span is not an e2e row; a trailing backticked tag still is", () => {
+    const R1 = "An `[type:e2e]`/`[type:manual]` row whose quote names a live benchmark, a paid run, remote infra (legion, computeshare, a sandbox pool) or host-level load is converted to a tracked `post-deploy` defer";
+    assert.equal(autoPostDeployE2e(mk(R1)).converted.length, 0, "the mention is not converted to post-deploy");
+    const contract = mk(R1);
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${R1}` };
+    const r = { ...good, issue_coverage: [...good.issue_coverage, { quote: R1, status: "covered" }], requirements: [good.requirements[0], { id: "R2", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }] };
+    assert.ok(!decide(r, lctx).failures.some((f) => f.kind === "e2e_row"), "no e2e_unverified for a tag mention");
+    assert.deepEqual(autoPostDeployE2e(mk("on a remote host the live benchmark finishes `[type:e2e]`")).converted.map((x) => x.id), ["R2"]);
+  });
+  it("#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched", () => {
+    const contract = mk(Q5531);
+    const dec = (j) => ({ body: `<!-- FORGE:DECISION ${JSON.stringify(j)} -->\n## Decision` });
+    const out = applyRequirementDecisions(contract, [{ body: "<!-- FORGE:CONTRACT -->\n{}" }, dec({ requirement: "R2", disposition: "post-deploy" }), { body: "FORGE:DECISION prose" }]);
+    assert.deepEqual(out.applied, ["R2"]);
+    assert.equal(out.contract.requirements[1].disposition, "post-deploy");
+    assert.equal(deferChecklessPostDeploy(out.contract).contract.requirements[1].bucket, "owner:orchestrator");
+    assert.equal(out.contract.requirements[0].disposition, "deliver");
+    assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "deliver" })]).applied.length, 0);
+    assert.equal(applyRequirementDecisions(contract, [dec({ requirement: "R2", disposition: "post-deploy" }), { body: "<!-- FORGE:CONTRACT -->\n{}" }]).applied.length, 0, "a decision older than the contract is ignored");
+  });
+});
+
+describe("#5623: builder-correctable contract problems", () => {
+  it("contractSelfCorrectable: shape problems are builder-correctable; a quote-only mismatch is not", async () => {
+    const { contractSelfCorrectable } = await import("./lean.mjs");
+    assert.equal(contractSelfCorrectable(["R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim", "R7: test_plan no-repro needs a reason the reviewer can reject"]), true);
+    assert.equal(contractSelfCorrectable(["R1: quote is not verbatim"]), false);
+    assert.equal(contractSelfCorrectable([]), false);
+  });
+  it("classifyNeedsHuman: contract.invalid is recoverable (one fresh-plan requeue), with or without an issue edit", async () => {
+    const { classifyNeedsHuman, OUTCOME_CODES } = await import("../engine/outcome-codes.mjs");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: OUTCOME_CODES.CONTRACT_INVALID, issueEdited: true }), "recoverable");
+  });
+});

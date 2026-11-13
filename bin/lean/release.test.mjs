@@ -226,7 +226,7 @@ describe("release job (#5211)", () => {
     assert.equal(readReleaseConfig("release:\n  managed: true\n").managed, true);
     const apiCalls = [], ghCalls = [], io = { print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async (a) => { ghCalls.push(a); return ""; }, api: async (...a) => { apiCalls.push(a); return {}; } };
     const ok = async () => ({});
-    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok } });
+    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok, deploy: async () => ({ skipped: true }) } });
     assert.equal(out.status, "done");
     assert.deepEqual(apiCalls, []);
     assert.deepEqual(ghCalls, []);
@@ -444,6 +444,10 @@ describe("snapshot releases (#5276)", () => {
     assert.equal(create[create.indexOf("--head") + 1], "staging");
   });
 
+  it("#5562: `release verify <id>` is routed to the deploy verification, not the sha check", async () => {
+    const io = { gh: async () => { throw new Error("gh must not be called"); }, print() {}, git: () => "", now: () => 0 };
+    await assert.rejects(releaseFromCli(["verify", "r20260101-000000-1"], { io, cwd: tmp(), env: { ...process.env, FORGEDOCK_RELEASE_DIR: tmp() } }), /no release r20260101-000000-1/);
+  });
   it("R10: `release verify <sha>` exits 0 for a head that is the snapshot, 1 for a PR without a record", async () => {
     const rec = { v: 1, snapshot: S, picks: [] };
     const mk = (body) => { const io = fakeIo({ pm: (a) => (a[0] === "api" ? JSON.stringify([{ number: 9, body }]) : undefined) }); io.git = gitFake(); io.git = ((g) => (a, o) => (a[0] === "rev-parse" && !a[1].startsWith("refs/") ? `${S}\n` : g(a, o)))(io.git); return io; };

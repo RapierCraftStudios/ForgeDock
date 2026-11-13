@@ -50,6 +50,14 @@ describe("release minutes (#5569)", () => {
     assert.deepEqual(historyFromRoot(root), [{ lane: "release", minutes: 480 }]);
     assert.deepEqual(historyFromRoot(join(root, "none")), []);
   });
+  it("historyFromRoot carries the gate records on a non-enumerable gates property (#5583)", () => {
+    const root = tmpDir("rm");
+    mkdirSync(join(root, "a")); writeFileSync(join(root, "a", "state.json"), JSON.stringify({ minutes: { total: 5 }, startedAt: "t", gates: [{ gate: "g", outcome: "fail", class: "FB", minutes: 2 }] }));
+    const h = historyFromRoot(root);
+    assert.deepEqual(h, [{ lane: "release", minutes: 5 }]);
+    assert.deepEqual(h.gates.map((g) => [g.gate, g.release]), [["g", "a"]]);
+    assert.deepEqual(historyFromRoot(join(root, "none")).gates, []);
+  });
 });
 
 describe("release report (#5569)", () => {

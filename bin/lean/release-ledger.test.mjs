@@ -136,7 +136,7 @@ describe("release ledger (#5550)", () => {
     const g = fakeGh(), seen = [];
     const mkIo = () => ({ print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async () => { throw new Error("no gh"); }, api: g.api });
     const step = (name, die) => async () => { if (die) throw new Error("kill -9"); seen.push(name); return {}; };
-    const all = (dieAt) => ({ preflight: step("preflight"), "host-preflight": async () => ({ skipped: true }), "release-pr": async () => { if (dieAt === "release-pr") throw new Error("kill -9"); seen.push("release-pr"); return { pr: 7 }; }, review: step("review"), fixes: step("fixes"), "mark-ready": async () => ({ skipped: true }), rehearsal: async () => ({ skipped: true }), promotion: step("promotion"), "post-merge": step("post-merge") });
+    const all = (dieAt) => ({ preflight: step("preflight"), "host-preflight": async () => ({ skipped: true }), deploy: async () => ({ skipped: true }), "release-pr": async () => { if (dieAt === "release-pr") throw new Error("kill -9"); seen.push("release-pr"); return { pr: 7 }; }, review: step("review"), fixes: step("fixes"), "mark-ready": async () => ({ skipped: true }), rehearsal: async () => ({ skipped: true }), promotion: step("promotion"), "post-merge": step("post-merge") });
     const run = (io, dieAt, root) => runRelease({ io, repo: REPO, root, mounts: DISK, id: ID, opts: {}, config: { managed: true }, branches: {}, steps: all(dieAt) });
     await assert.rejects(() => run(mkIo(), "release-pr", tmpDir("ledgerA-")), /kill -9/);
     assert.deepEqual(seen, ["preflight"]);
@@ -213,13 +213,13 @@ describe("release fencing through the job (#5553)", () => {
     for (const dieAt of RELEASE_STEPS) {
       const g = fakeGh(), calls = [], ran = [];
       const track = (name, fn) => async (...a) => { if (name === dieAt && !ran.includes(`die:${name}`)) { ran.push(`die:${name}`); throw new Error("kill -9"); } ran.push(name); return fn(...a); };
-      const base = { preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok };
+      const base = { preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok, deploy: skip };
       const wrapped = withStubs(Object.fromEntries(Object.entries(withStubs(base)).map(([k, fn]) => [k, track(k, fn)])));
       await assert.rejects(() => go(mkIo(g, "hostA", calls), wrapped, tmpDir("fe1-")), /kill -9/, dieAt);
       const out = await go(mkIo(g, "hostB", calls), wrapped, tmpDir("fe2-")); // another host, empty disk
       assert.equal(out.status, "done", dieAt);
       assert.equal(calls.length, 1, `${dieAt}: one merge`);
-      const done = ran.filter((r) => !r.startsWith("die:") && !["host-preflight", "mark-ready", "rehearsal"].includes(r)); // unconfigured steps leave no trace and may re-run
+      const done = ran.filter((r) => !r.startsWith("die:") && !["host-preflight", "mark-ready", "rehearsal", "deploy"].includes(r)); // unconfigured steps leave no trace and may re-run
       assert.equal(new Set(done).size, done.length, `${dieAt}: no step ran twice (${done})`);
     }
   });
