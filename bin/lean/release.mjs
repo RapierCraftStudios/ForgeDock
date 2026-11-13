@@ -356,6 +356,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     return null;
   };
   const ctx = { io, repo, opts: state.opts, config, state, staging: branches.staging || DEFAULT_STAGING_BRANCH, def: branches.default || "main", git: io.git, save: () => rel.save(state) };
+  ctx.rollbackTrigger = (t) => { state.rollbackPending = { reason: t.reason, sha: t.sha }; rel.save(state); io.print?.(`release ${id}: rollback trigger recorded; run \`forgedock release rollback ${id} --reason "${String(t.reason).replace(/"/g, "'")}"\``); }; // #5563
   if (lctx) { // #5567: the fix loop's HELD goes through the control path; an infra-flake rerun through the fenced rerun
     ctx.hold = (ask) => runControl("hold", [id, "--reason", ask], { io, repo, policy: null, actor: holder, host: holder });
     ctx.rerunInfra = ({ head }) => rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy: config.policy });
@@ -397,7 +398,8 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     try {
       if (tf && existsSync(tf) && existsSync(join(process.cwd(), ".forge/gates.yaml"))) {
         const recs = (await import("./release-gates.mjs")).parseTelemetry(readFileSync(tf, "utf8"));
-        if (recs.length) state.gates = [...(state.gates ?? []), ...recs];
+        const gs = state.regates?.at(-1)?.gate_sha; // #5584: which gate-script sha evaluated these gates
+        if (recs.length) state.gates = [...(state.gates ?? []), ...recs.map((r) => (gs && !r.gate_sha ? { ...r, gate_sha: gs } : r))];
       }
     } catch { /* best effort */ }
   }
@@ -437,7 +439,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -455,6 +457,13 @@ export async function releaseFromCli(argv, deps = {}) {
     if (!state) throw new Error(`no release ${argv[1]} in ${releaseRoot(env)}`);
     const r = await verifyReleaseById({ io, state, save: () => rel.save(state), def, policy: readPolicy({ io, defaultBranch: def, cwd }).policy, lane: flag(argv, "--lane") ?? state.lane });
     return r.verified ? 0 : BLOCKED_EXIT;
+  }
+  if (argv[0] === "rollback") { // #5563: the rollback ladder; loaded lazily like the other managed-release modules
+    const { rollbackFromCli } = await import("./release-rollback.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    if (!ID_RE.test(String(argv[1] ?? ""))) throw new Error(`rollback needs a release id; ${RELEASE_USAGE}`);
+    const def = readBranches(cwd).default || "main";
+    return rollbackFromCli(argv.slice(1), { io, rel: openRelease(releaseRoot(env), argv[1]), policy: readPolicy({ io, defaultBranch: def, cwd }).policy, def, actor: deps.actor, host: deps.host });
   }
   if (argv[0] === "gates") { // #5583: catalogue, telemetry report, admission check; release-gates is loaded lazily
     const g = await import("./release-gates.mjs");
@@ -485,7 +494,9 @@ export async function releaseFromCli(argv, deps = {}) {
     const { controlFromCli } = await import("./release-control.mjs");
     const { readPolicy } = await import("./release-config.mjs");
     const policy = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
-    return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
+    const cargs = argv.slice(argv[0] === "control" ? 2 : 1);
+    const rel = cv === "regate" && cargs[0] && ID_RE.test(cargs[0]) ? openRelease(releaseRoot(env), cargs[0]) : undefined; // #5584: regate reads the release's recorded deploy target
+    return controlFromCli(cv, cargs, { io, policy, actor: deps.actor, host: deps.host, rel });
   }
   if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane", "--interval"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane" || argv[i - 1] === "--interval"));

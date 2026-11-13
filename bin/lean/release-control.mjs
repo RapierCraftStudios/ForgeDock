@@ -15,11 +15,11 @@ import { UNSKIPPABLE_CLASSES, isUnskippable, parseFlakeConfig, canQuarantine } f
 
 export const CONTROL_SCHEMA = "forgedock.release.control/v1";
 export const CONTROL_MARKER = "FORGE:CONTROL";
-export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote"];
+export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote", "rollback", "regate"];
 export { UNSKIPPABLE_CLASSES as UNSKIPPABLE };
 export const EXEMPT_MAX_H = { skip: 24, quarantine: 14 * 24 };
 export const LANES = ["train", "release", "p0", "exclude"];
-const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes"];
+const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes", "rollbacks", "regates"];
 export const DEMOTE_MAX_H = 30 * 24;
 const BREAK_GLASS = /^(override_freeze|acknowledge_hotfix_revert|override_.*|acknowledge_.*)$/;
 
@@ -46,7 +46,7 @@ export async function holdCheck(lctx, id) {
 }
 
 const flagOf = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-const FLAGS = ["--repo", "--reason", "--mode", "--issue", "--until", "--force", "--fixture"];
+const FLAGS = ["--repo", "--reason", "--mode", "--issue", "--until", "--force", "--fixture", "--to", "--ref", "--gate-fix-ref"];
 const positionals = (argv) => argv.filter((a, i) => !a.startsWith("--") && !FLAGS.includes(argv[i - 1]));
 const ttlHours = (s) => { const m = /^(\d+)([hd])$/.exec(String(s ?? "")); return m ? Number(m[1]) * (m[2] === "d" ? 24 : 1) : null; };
 
@@ -115,6 +115,22 @@ export async function runControl(verb, argv, ctx) {
       }
       return { patch: { exemptions: { ...(a.exemptions ?? {}), [check]: entry } }, before: a.exemptions?.[check] ?? null, after: entry };
     };
+  } else if (verb === "rollback") { // #5563: the audited record of a rollback request; the ladder itself is release-rollback.mjs
+    const id = pos[0], to = flagOf(argv, "--to");
+    if (!id) return fail("rollback: release id required");
+    if (to && !["flag", "unit", "full"].includes(to)) return fail("rollback: --to must be flag, unit or full");
+    apply = (a) => { const entry = { reason, actor, at, to: to ?? null }; return { patch: { rollbacks: { ...(a.rollbacks ?? {}), [id]: entry } }, before: a.rollbacks?.[id] ?? null, after: entry }; };
+  } else if (verb === "regate") { // #5584: gate-only fix lane; refusals come first, then one audited commit, then one fenced dispatch
+    const id = pos[0];
+    if (!id) return fail("regate: release id required");
+    const state = ctx.state ?? ctx.rel?.load?.();
+    if (!state) return fail(`regate: no release ${id}`);
+    const R = await import("./release-regate.mjs");
+    const p = await R.regatePlan({ io, repo, policy, state }, { ref: flagOf(argv, "--ref"), gateFixRef: flagOf(argv, "--gate-fix-ref") });
+    if (p.refuse) return fail(`regate: ${p.refuse}`);
+    const entry = { reason, actor, at, ref: p.plan.ref, sha: p.plan.sha, gate_sha: p.plan.gateSha, gate_fix_ref: p.plan.gateFixRef };
+    apply = (a) => ({ patch: { regates: { ...(a.regates ?? {}), [id]: entry } }, before: a.regates?.[id] ?? null, after: entry });
+    ctx.afterCommit = async () => { ctx.regateResult = await R.regateDispatch({ io, repo, state, fence: ctx.fence, save: () => ctx.rel?.save?.(state) }, p.plan, { actor, host }); };
   } else if (verb === "demote" || verb === "promote") { // #5583: false-block policy on a deploy gate, same audited path
     const gate = pos[0];
     if (!gate) return fail(`${verb}: gate id required`);
@@ -152,6 +168,7 @@ export async function runControl(verb, argv, ctx) {
   });
   if (!r.ok) return fail(r.refused ?? `could not commit the control (lost the race after ${r.attempts} attempts)`);
   if (ctx.afterCommit) await ctx.afterCommit();
+  if (ctx.regateResult?.refused) return { ...fail(`regate: ${ctx.regateResult.refused}`), entry: line };
   const issue = r.active.lease?.issue;
   let comment = null;
   if (issue) {
@@ -162,9 +179,9 @@ export async function runControl(verb, argv, ctx) {
 }
 
 /** CLI: `[--repo R] [--json]` plus the verb's flags; prints one line or the JSON result; @returns the exit code. */
-export async function controlFromCli(verb, argv, { io, policy, actor, host }) {
+export async function controlFromCli(verb, argv, { io, policy, actor, host, rel }) {
   const repo = flagOf(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
-  const r = await runControl(verb, argv.filter((a) => a !== "--json"), { io, repo, policy, actor, host, now: io.now?.() });
+  const r = await runControl(verb, argv.filter((a) => a !== "--json"), { io, repo, policy, actor, host, rel, now: io.now?.() });
   if (argv.includes("--json")) io.print(JSON.stringify(r));
   else io.print(r.ok ? `release ${verb}: recorded (${r.entry.at})` : `release ${verb}: refused: ${r.error}`);
   return r.ok ? 0 : 1;

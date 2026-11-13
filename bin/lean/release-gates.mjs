@@ -22,6 +22,7 @@ export const TELEMETRY_SCHEMA = "forgedock.release.gate/v1";
 export const REPORT_SCHEMA = "forgedock.release.gates/v1";
 export const DEMOTE_MODES = ["warn", "inconclusive"];
 export const SAFETY_DEFAULT = ["migration-immutability", "identity-preflight", "backup-freshness", "health-auto-restore"];
+export const GATE_PATHS_DEFAULT = ["scripts/deploy/**", "scripts/lib/**", "scripts/prod-smoke-test.sh", "**/gate-fixtures/**", "tests/gates/**"];
 export const REQUIRED = ["id", "protects_against", "where", "determinism", "pre_merge_artifact", "version", "mode", "owner", "review_by"];
 const OPTIONAL = ["on_uncertainty", "failure_triggers", "proportionality"];
 const DAY_MS = 86_400_000;
@@ -71,6 +72,8 @@ export function parseGatesConfig(policy) {
     demoteFbRate: Number(g.demote_fb_rate) >= 0 && g.demote_fb_rate != null ? Number(g.demote_fb_rate) : 5,
     demoteWindow: Number.isInteger(g.demote_window) && g.demote_window > 0 ? g.demote_window : 20,
     safety: Array.isArray(g.safety) ? g.safety.map(String) : SAFETY_DEFAULT,
+    paths: Array.isArray(g.paths) && g.paths.length ? g.paths.map(String) : GATE_PATHS_DEFAULT, // #5584: the gate-only allowlist
+    workflowSteps: Array.isArray(g.workflow_steps) ? g.workflow_steps.map(String) : [],
   };
 }
 
@@ -79,11 +82,12 @@ export const isSafetyGate = (gate, safety = SAFETY_DEFAULT) =>
   isUnskippable(String(gate)) || safety.some((s) => gate === s || String(gate).startsWith(`${s}:`) || String(gate).startsWith(`${s}/`));
 
 /** One telemetry record, or null for an unknown gate or outcome. A TP/FB class needs a non-empty `evidence`, else `unknown`. */
-export function gateRecord({ gate, outcome, class: cls, evidence, minutes = 0 }) {
+export function gateRecord({ gate, outcome, class: cls, evidence, minutes = 0, gate_sha: gateSha }) {
   if (!gate || !OUTCOMES.includes(outcome)) return null;
   const ev = typeof evidence === "string" ? evidence.trim() : "";
   const r = { gate: String(gate), outcome, class: (cls === "TP" || cls === "FB") && ev ? cls : "unknown", minutes: Number(minutes) > 0 ? Number(minutes) : 0 };
   if (ev) r.evidence = ev;
+  if (typeof gateSha === "string" && /^[0-9a-f]{7,64}$/i.test(gateSha)) r.gate_sha = gateSha; // #5584: the gate-script sha that evaluated this gate
   return r;
 }
 
