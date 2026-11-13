@@ -1404,7 +1404,7 @@ describe("mutation check (#4913)", () => {
   it("reverts only non-test files, reruns, then restores from HEAD (reset + clean of those paths)", async () => {
     const h = harness(); const r = await h.go();
     assert.deepEqual(r.results.map((x) => x.status), ["survived"]);
-    assert.ok(h.calls.some((x) => x.startsWith("diff --binary origin/staging...HEAD -- src/b.js") && !x.includes("test/a")));
+    assert.ok(h.calls.some((x) => x.startsWith("diff --binary --output=/t/mutation-" + process.pid + ".patch origin/staging...HEAD -- src/b.js") && !x.includes("test/a")));
     assert.deepEqual(h.calls.filter((x) => /^(apply|run|reset|clean)/.test(x)), ["apply -R --whitespace=nowarn /t/mutation-" + process.pid + ".patch", "run", "reset -q --hard HEAD", "clean -fdq -- src/b.js"]);
   });
   it("a failing rerun is killed; the tree is restored even when the command throws", async () => {

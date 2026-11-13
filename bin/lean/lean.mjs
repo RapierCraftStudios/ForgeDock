@@ -1063,9 +1063,15 @@ export async function runCore(o) {
     throw Object.assign(new Error(`lane branch ${branch} is being written by another session`), { deferCode: OUTCOME_CODES.HOST_BUSY, retryInSeconds: 120, deferDetail: `another session (pid ${lock.holder?.pid ?? "?"}, ${lock.holder?.owner ?? "?"}) holds the writer lock of ${branch}; retried later` });
   }
   /** #4390: the restart summary: `git diff --stat` and hunks against the lane base, and the last `forgedock check` record. */
+  /** #5599: the lane diff for the restart note, kept to 1 MB with an explicit marker; an overflow or git failure is never an empty diff. */
+  async function cappedDiff() {
+    const MAX = 1024 * 1024;
+    try { const d = String(await git(["diff", `${base}...HEAD`, "--", ".", `:!${LEAN_DIR}`])); return d.length > MAX ? `${d.slice(0, MAX)}\n[diff truncated at ${MAX} bytes of ${d.length}]\n` : d; }
+    catch (e) { return `[diff unavailable: ${String(e?.message ?? e).slice(0, 200)}]`; }
+  }
   async function restartFacts() {
     const ex = [".", `:!${LEAN_DIR}`];
-    const stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => "")), diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
+    const stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => "")), diff = await cappedDiff();
     let check = "";
     try { check = String(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)); } catch { /* none recorded */ }
     return { stat, diff, base, check };

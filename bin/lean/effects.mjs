@@ -32,16 +32,40 @@ import { detectApiShape } from "./apishape.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
+/**
+ * #5599: argv-only child whose stdout/stderr are kept to `cap` bytes (the `head` or the `tail`), never killed for output size
+ * (execFile's maxBuffer kills the child). Resolves {stdout, stderr, truncated}; a non-zero exit, timeout or spawn error
+ * rejects with `code`, `killed`, `stdout`, `stderr` attached. An EPIPE on stdin never crashes the lane.
+ */
+export function execCapped(bin, args, { cwd, env, timeout = 0, input, cap = 8 * 1024 * 1024, keep = "head" } = {}) {
+  return new Promise((res, rej) => {
+    const out = { stdout: "", stderr: "" };
+    let truncated = false, killed = false, timer = null;
+    const child = spawn(bin, args, { cwd, ...(env ? { env } : {}), stdio: ["pipe", "pipe", "pipe"] });
+    const feed = (k) => (b) => {
+      const t = out[k] + b.toString("utf8");
+      if (t.length <= cap) { out[k] = t; return; }
+      truncated = true;
+      out[k] = keep === "tail" ? t.slice(-cap) : t.slice(0, cap);
+    };
+    child.stdout.on("data", feed("stdout"));
+    child.stderr.on("data", feed("stderr"));
+    child.stdin.on("error", () => {});
+    child.stdin.end(input ?? "");
+    if (timeout > 0) timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, timeout);
+    const done = (err) => {
+      clearTimeout(timer);
+      if (err || killed) return rej(Object.assign(err ?? new Error(`${bin} timed out after ${timeout}ms`), { killed, stdout: out.stdout, stderr: out.stderr, truncated }));
+      res({ stdout: out.stdout, stderr: out.stderr, truncated });
+    };
+    child.on("error", (e) => done(e));
+    child.on("close", (code, signal) => done(code === 0 ? null : Object.assign(new Error(`${bin} exited ${code ?? signal}`), { code: code ?? signal })));
+  });
+}
+
 /** Argv-only child with stdin input; resolves stdout, rejects on a non-zero exit with stderr attached. */
 export function runWithInput(bin, args, input, timeout = 120000, env = undefined) {
-  return new Promise((res, rej) => {
-    const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
-      if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res(String(stdout));
-    });
-    // A child that exits before reading stdin closes the pipe: EPIPE must reject via the exit callback, never crash the lane.
-    child.stdin.on("error", () => {});
-    child.stdin.end(input);
-  });
+  return execCapped(bin, args, { timeout, input, env, cap: 10 * 1024 * 1024 }).then((r) => r.stdout);
 }
 
 /** Claude CLI session runner: fresh session, or `--resume <id>` for the builder. Resolves usage + session_id. */
@@ -345,7 +369,10 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
 export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
-  const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
+  const run = (bin) => async (args, opts = {}) => {
+    try { return (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout; }
+    catch (e) { if (e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") e.message = `${bin} ${String(args?.[0] ?? "")} output exceeded 100 MB (stdout maxBuffer)`; throw e; } // #5599: say so, never a bare kill
+  };
   /** #5235: paths the other open PRs on `lane` carry (gh only, no fetch); [] on any failure. */
   const openPrFiles = async (cwd, lane) => {
     try {
@@ -434,19 +461,19 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
      * Resolves {exit, stdout, stderr} (output tails); a non-zero exit, timeout or spawn error never throws.
      */
     runSetup({ cwd, command, env = null, timeoutMs = 15 * 60000 }) {
-      return new Promise((res) => {
-        execFile("bash", ["-c", command], { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const tail = (x) => String(x ?? "").slice(-2000);
-          if (!err) return res({ exit: 0, stdout: tail(stdout), stderr: tail(stderr) });
+      const tail = (x) => String(x ?? "").slice(-2000);
+      // #5599: a chatty setup is capped to its tail, never killed for output size.
+      return execCapped("bash", ["-c", command], { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs, cap: 64 * 1024, keep: "tail" }).then(
+        (r) => ({ exit: 0, stdout: tail(r.stdout), stderr: tail(r.stderr) }),
+        (err) => {
           const exit = Number.isInteger(err.code) ? err.code : 1;
           const why = err.killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : typeof err.code === "string" ? err.code : "";
-          res({ exit: exit === 0 ? 1 : exit, stdout: tail(stdout), stderr: tail([stderr, why].filter(Boolean).join("\n")) });
+          return { exit: exit === 0 ? 1 : exit, stdout: tail(err.stdout), stderr: tail([err.stderr, why].filter(Boolean).join("\n")) };
         });
-      });
     },
     /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
     async structureDelta({ cwd, base }) {
-      try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+      try { return JSON.parse((await execCapped("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, cap: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
     /** #4450: public-API-shape changes of base...HEAD in cwd (bin/lean/apishape.mjs); any failure is {status: "unknown"} (an upgrade). */
     async apiShape({ cwd, base }) {
@@ -459,7 +486,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given; config = the host forge.yaml, #5163); null on any failure. */
     async hotspots({ cwd, base = null, paths = [], config = null }) {
       const args = [script("hotspots.sh"), ...(config ? ["--config", config] : []), ...(base ? ["--base", base] : []), "--", ...paths];
-      try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+      try { return JSON.parse((await execCapped("bash", args, { cwd, timeout: 30000, cap: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
     /** #4322: tests enumerating the members of the given paths, and new members those tests miss (bin/lean/enumerating.mjs); [] on failure. */
     enumeratingTests: ({ cwd, paths = [] }) => enumeratingTests({ git: (a) => run("git")(a, { cwd }), cwd, paths }),
@@ -510,7 +537,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
       try {
-        const m = /BASE=(\w+) HEAD=(\w+)(?: PRISTINE=(\w+))?/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
+        const m = /BASE=(\w+) HEAD=(\w+)(?: PRISTINE=(\w+))?/.exec(String((await execCapped("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, cap: 4 * 1024 * 1024, keep: "tail", ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
         return m ? { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}) } : null; // #5544: pristine only when the base's own test version failed
       } catch { return null; }
     },
@@ -523,7 +550,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
       const s = join(cwd, "scripts", "check-devdocs-freshness.sh");
       if (!existsSync(s)) return null;
       try {
-        const r = await pexec("bash", [s, base], { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PR_BODY: "" } });
+        const r = await execCapped("bash", [s, base], { cwd, timeout: 60000, cap: 4 * 1024 * 1024, env: { ...process.env, PR_BODY: "" } });
         return { ok: true, output: String(r.stdout ?? "") };
       } catch (e) {
         if (e?.code !== 1) return null;

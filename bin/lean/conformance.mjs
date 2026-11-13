@@ -1919,7 +1919,7 @@ export async function runMutationCheck({ targets, files, base, git, runCommand, 
   const patch = `${tmp}/mutation-${process.pid}.patch`;
   let reverted = false, restoreFailed = "";
   try {
-    fs.writeFileSync(patch, await git(["diff", "--binary", `${base}...HEAD`, "--", ...nonTest]));
+    await git(["diff", "--binary", `--output=${patch}`, `${base}...HEAD`, "--", ...nonTest]); // #5599: streamed to the file, never buffered
     try { await git(["apply", "-R", "--whitespace=nowarn", patch]); reverted = true; } catch { return skip("could not revert the change"); }
     for (const t of targets) for (const c of t.commands) {
       const left = capMs - (now() - t0);
