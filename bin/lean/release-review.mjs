@@ -18,6 +18,7 @@ import { reviewStagingJson, reviewStagingIo, CI_EXCLUDED_CHECKS } from "../revie
 import { pickFixes, recut, revertLast } from "./release-snapshot.mjs";
 import { parseFixConfig, collectFindings, blockingOf, compileBrief, roundsAt, recordRound, secondPush, secondPushOf, holdForOwner, jobsToRerun, inputHash, deferredOf } from "./release-fixloop.mjs";
 import { coStartCi } from "./release-preflight.mjs";
+import { laneEnv } from "./release-credentials.mjs";
 
 /** Delta passes after a head move: past it the job blocks for the manual path. Fix rounds are `ci.fix.max_rounds` (release-fixloop.mjs, default 1, #5567). */
 export const MAX_DELTA_PASSES = 2;
@@ -298,8 +299,9 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
-export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), makeRunner = null, gh: ghIn = null }) {
+export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = process.cwd(), makeRunner = null, gh: ghIn = null }) {
   const rs = { ...reviewStagingIo(), cwd, env };
+  const lane = laneEnv(env, laneStrip); // #5561: reviewer, fix and lane sandboxes never see the driver token
   const sd = env.FORGE_SCRATCHPAD || join(cwd, ".forge-scratch");
   let runner = null, shimEnv = null;
   // Reviewer briefs say `forgedock ...`: pin that name to this release job's own build, whatever is installed globally.
@@ -308,7 +310,7 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), ma
     const dir = mkdtempSync(join(tmpdir(), "release-forgedock-"));
     writeFileSync(join(dir, "forgedock"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "bin", "forgedock.mjs")}" "$@"\n`, { mode: 0o755 });
     process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
-    return (shimEnv = { ...env, PATH: `${dir}${delimiter}${env.PATH ?? ""}` });
+    return (shimEnv = { ...lane, PATH: `${dir}${delimiter}${lane.PATH ?? ""}` });
   };
   const gh = ghIn ?? ((args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env }));
   return {
@@ -386,7 +388,7 @@ export function realSeam({ repo, def, env = process.env, cwd = process.cwd(), ma
     runLane: ({ issue, lane }) => new Promise((resolve) => {
       const dir = mkdtempSync(join(tmpdir(), "release-lane-"));
       const rf = join(dir, "result.json");
-      const child = spawn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env, stdio: "ignore" });
+      const child = spawn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: lane, stdio: "ignore" });
       const timer = setTimeout(() => child.kill("SIGTERM"), LANE_MS);
       const done = () => { clearTimeout(timer); let r = null; try { r = JSON.parse(readFileSync(rf, "utf8")); } catch { /* no result */ } rmSync(dir, { recursive: true, force: true }); resolve(r); };
       child.on("error", done); child.on("exit", done);

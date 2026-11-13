@@ -12,6 +12,7 @@
  * Off unless forge.yaml `release.managed` is on; nothing here runs otherwise.
  */
 import { SECRET_PAIR_RE, SECRET_SHAPE_RE } from "./conformance.mjs";
+import { roleRefusal } from "./release-credentials.mjs";
 
 export const LEDGER_PREFIX = "forge-ledger/";
 export const ACTIVE = "_active";
@@ -46,7 +47,7 @@ const readFile = async ({ io, repo }, branch, path) => {
 };
 
 /** The driver credential writes the ledger; a lane credential never does (I12). */
-const assertDriver = (ctx) => { if (ctx.credential !== "driver") throw Object.assign(new Error("ledger writes need the driver credential"), { refused: "not-driver" }); };
+const assertDriver = (ctx) => { const why = roleRefusal(ctx.credential, "ledger-write"); if (why) throw Object.assign(new Error(`ledger writes need the driver credential (${why})`), { refused: "not-driver" }); };
 
 /**
  * One commit of `files` ({path: text}, redacted) on `branch` on top of `parent` (null = orphan, creates the branch).
@@ -212,4 +213,10 @@ export async function recordSync(ctx, rec, now = Date.now()) {
   const at = new Date(now).toISOString();
   const { milestones, duplicates, ...audit } = rec;
   return updateActive(ctx, ["sync"], () => ({ patch: { sync: { ...rec, at } }, control: { at, verb: "sync", ...audit, milestones: milestones?.length ?? 0, duplicates: duplicates?.length ?? 0 } }));
+}
+
+/** #5570: a landed train wave (lane `train`, state, rolled units, branch, merge sha) kept in `_active.train` so a repo-side check can read it; the service deploy invalidates the rollout record. */
+export async function recordTrain(ctx, rec, now = Date.now()) {
+  const at = new Date(now).toISOString();
+  return updateActive(ctx, ["train"], (active) => ({ patch: { train: { ...(active.train ?? {}), [rec.release ?? "-"]: { ...rec, lane: "train", rollout_invalidated: true, at } } }, control: { at, verb: "train", lane: "train", release: rec.release ?? null, state: rec.state ?? null, units: rec.units?.length ?? 0, rollout_invalidated: true } }));
 }

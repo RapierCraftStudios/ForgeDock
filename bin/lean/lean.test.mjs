@@ -906,6 +906,45 @@ describe("core work-on", () => {
     assert.ok(!l.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(l.edits));
   });
 
+  describe("#5652 in-sandbox recipe install", () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const withTool = (tool) => ({ ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: `${tool} check x` }] });
+    const probing = (w, tool, installed) => { w.io.probeCommand = async (a) => ({ rc: new RegExp(tool).test(JSON.stringify(a)) && !installed() ? 127 : 0, output: "" }); };
+    it("a recipe-backed tool is installed in the sandbox and re-probed: the lane continues, no needs-human", async () => {
+      const w = world({ contract: withTool("promtool") }); let ok = false; const cmds = [];
+      const base = w.io.runCommand;
+      w.io.runCommand = async (a) => { if (/promtool/.test(a.command) && /tar -xz/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
+      probing(w, "promtool", () => ok);
+      const r = await run(w, { dir: tmpDir("lean-5652a-"), ...remote });
+      assert.equal(cmds.length, 1);
+      assert.notEqual(r.code, "env.tool_missing");
+      assert.notEqual(r.terminalReason, "needs-human");
+    });
+    it("a tool with no recipe ends the lane naming it, saying no recipe exists and pointing to execution.lane_tools", async () => {
+      const w = world({ contract: withTool("zzcheck") }); probing(w, "zzcheck", () => false);
+      const r = await run(w, { dir: tmpDir("lean-5652b-"), ...remote });
+      assert.equal(r.code, "env.tool_missing");
+      const txt = w.comments.map((c) => c.body ?? c).join("\n");
+      assert.match(txt, /lacks zzcheck, and no lane_tools recipe exists for it/);
+      assert.match(txt, /execution\.lane_tools/);
+    });
+    it("a failed in-sandbox install ends the lane with the stderr tail", async () => {
+      const w = world({ contract: withTool("promtool") }); probing(w, "promtool", () => false);
+      const base = w.io.runCommand;
+      w.io.runCommand = async (a) => (/tar -xz/.test(a.command) ? { rc: 2, stderr: "curl: (22) 404 not found" } : base(a));
+      const r = await run(w, { dir: tmpDir("lean-5652c-"), ...remote });
+      assert.equal(r.code, "env.tool_missing");
+      assert.match(w.comments.map((c) => c.body ?? c).join("\n"), /Installing promtool in the remote sandbox failed[\s\S]*404 not found/);
+    });
+    it("regression: a declared host capability still ends env.capability_remote without installing", async () => {
+      const w = world({ contract: withTool("promtool") }); let installs = 0; const base = w.io.runCommand;
+      w.io.runCommand = async (a) => { if (/tar -xz/.test(a.command)) installs++; return base(a); };
+      const r = await run(w, { dir: tmpDir("lean-5652d-"), ...remote, hostCaps: { hostCapabilities: ["promtool"] } });
+      assert.equal(r.code, "env.capability_remote");
+      assert.equal(installs, 0);
+    });
+  });
+
   it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
     const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };

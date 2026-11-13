@@ -176,7 +176,7 @@ export async function deployStep(ctx) {
   if (st.phase !== "LIVE_CHECKED" && st.phase !== "LIVE") {
     for (;;) {
       st.phase = "DEPLOYING"; ctx.save();
-      const r = await runFor(ctx, { workflow: pipe.workflow, sha, inputs: pipe.inputs ?? {}, key: `deploy:${sha}`, startPolls: pipe.trigger === "dispatch" ? 1 : Math.max(1, Math.ceil((d.start_timeout_s ?? 60) * 1000 / b.pollMs)), b });
+      const r = await runFor(ctx, { workflow: pipe.workflow, sha, inputs: { ...(pipe.inputs ?? {}), ...(ctx.config.trainDispatch ? { merge_sha: sha, units: ctx.config.trainDispatch.units.join(",") } : {}) }, key: `deploy:${sha}`, startPolls: pipe.trigger === "dispatch" ? 1 : Math.max(1, Math.ceil((d.start_timeout_s ?? 60) * 1000 / b.pollMs)), b });
       if (r.err) return blocked(r.err);
       st.runId = r.run.databaseId; ctx.save();
       const done = await finished(ctx, pipe.workflow, sha, Math.ceil(stageS(d) * 1000 / b.runPollMs), b);

@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
@@ -768,6 +768,21 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
     assert.equal(res.rows[1].detail, "--placement|local|--placement-reason|docs-only lane");
     assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
+  });
+});
+
+describe("#5652: host fallback policy", () => {
+  it("parseExecution reads execution.host_fallback only when explicit", () => {
+    assert.equal(parseExecution({ mode: "remote" }).hostFallback, undefined);
+    assert.equal(parseExecution({ mode: "remote", host_fallback: "true" }).hostFallback, true);
+    assert.equal(parseExecution({ mode: "remote", host_fallback: "false" }).hostFallback, false);
+  });
+  it("hostFallbackAllowed: role orchestrator is off, role unset is on, explicit opt-in overrides", () => {
+    assert.equal(hostFallbackAllowed({ hostRole: "orchestrator" }), false);
+    assert.equal(hostFallbackAllowed({}), true);
+    assert.equal(hostFallbackAllowed({ hostRole: "worker" }), true);
+    assert.equal(hostFallbackAllowed({ hostRole: "orchestrator", hostFallback: true }), true);
+    assert.equal(hostFallbackAllowed({ hostFallback: false }), false);
   });
 });
 
