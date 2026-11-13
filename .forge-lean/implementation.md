@@ -17,3 +17,5 @@ No behavior change.
 
 ## Stale-sibling check
 The 10 flagged tests do not enumerate release-* modules; recorded release-status as not_members in result.json.
+- V2 `node --test bin/lean/release-snapshot.test.mjs bin/lean/release-preflight.test.mjs bin/lean/issuewatch-release.test.mjs`: exit 0 (39 pass, 0 fail)
+- G1 `node --test bin/lean/release-ledger.test.mjs bin/lean/release.test.mjs`: exit 0 (57 pass, 0 fail)
