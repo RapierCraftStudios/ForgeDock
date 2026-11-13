@@ -58,7 +58,7 @@ export const POLICY_SCHEMA = obj({
   }),
   events: obj({ webhook_url: S }),
   quarantine: obj({ days: N, max: N }),
-  gates: obj({ demote_fb_rate: N, demote_window: I, safety: list() }),
+  gates: obj({ demote_fb_rate: N, demote_window: I, safety: list(), paths: list(), workflow_steps: list() }),
   controls: obj({ intake: ANY, conductor: ANY, exempt: ANY }),
 });
 

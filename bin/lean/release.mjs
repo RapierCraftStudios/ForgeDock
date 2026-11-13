@@ -398,7 +398,8 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
     try {
       if (tf && existsSync(tf) && existsSync(join(process.cwd(), ".forge/gates.yaml"))) {
         const recs = (await import("./release-gates.mjs")).parseTelemetry(readFileSync(tf, "utf8"));
-        if (recs.length) state.gates = [...(state.gates ?? []), ...recs];
+        const gs = state.regates?.at(-1)?.gate_sha; // #5584: which gate-script sha evaluated these gates
+        if (recs.length) state.gates = [...(state.gates ?? []), ...recs.map((r) => (gs && !r.gate_sha ? { ...r, gate_sha: gs } : r))];
       }
     } catch { /* best effort */ }
   }
@@ -493,7 +494,9 @@ export async function releaseFromCli(argv, deps = {}) {
     const { controlFromCli } = await import("./release-control.mjs");
     const { readPolicy } = await import("./release-config.mjs");
     const policy = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
-    return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
+    const cargs = argv.slice(argv[0] === "control" ? 2 : 1);
+    const rel = cv === "regate" && cargs[0] && ID_RE.test(cargs[0]) ? openRelease(releaseRoot(env), cargs[0]) : undefined; // #5584: regate reads the release's recorded deploy target
+    return controlFromCli(cv, cargs, { io, policy, actor: deps.actor, host: deps.host, rel });
   }
   if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane", "--interval"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane" || argv[i - 1] === "--interval"));
