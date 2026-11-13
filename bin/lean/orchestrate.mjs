@@ -311,7 +311,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null }) {
   const saved = store?.load?.() ?? null;
@@ -955,6 +955,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         recoveries.set(n, (recoveries.get(n) ?? 0) + 1); recovering.set(n, { code, attempt, max, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
           detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.placement?.where ? { where: row.placement.where } : {}), ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
+        // #5647: the first lane labelled needs-human before the batch chose to recover; swap it for workflow:recovering while the recovery runs
+        if (typeof markRecovering === "function") { try { await markRecovering({ issue: n, code, attempt, max }); } catch { /* best effort: needs-human stays */ } }
         decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${max}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
         update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${max}: ${firstLine(row.detail)}` });

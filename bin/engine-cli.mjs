@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+const RECOVERING_LABEL = "workflow:recovering";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
@@ -2183,6 +2184,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
+      markRecovering: deps.markRecovering ?? makeMarkRecovering({ gh: (a) => leanIo.gh(a), repo }), // #5647
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
       dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
@@ -2389,13 +2391,41 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       if (predicate && await prem.evalPredicate(predicate, { repo, io: { gh, pkgVersion: prem.registryPkgVersion }, now: now() }) === true) return "skipped";
       const reg = await prem.registerAsk({ repo, io: { gh }, issue, ask: String(evidence ?? "") });
       const extra = [prem.premiseAnnotation(predicate), reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : ""].filter(Boolean).join("\n");
-      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`]); } catch { return "failed"; }
+      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`, "--remove-label", RECOVERING_LABEL]); } catch { return "failed"; } // #5647: needs-human and recovering never coexist
       try {
         const { capComment } = await import("./lean/render.mjs");
         await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN external=true -->\n## Needs human (external)\nOwner: ${external.owner || "unassigned (name an owner)"}\nUnblock condition: ${external.unblock || "unstated (name the condition that unblocks this issue)"}\n${extra ? `${extra}\n` : ""}${evidence}${!reg.existing && reg.entry ? `\n\n${reg.entry}` : ""}`)]);
       } catch { /* best effort */ }
       return true;
     }
+  };
+}
+
+
+/**
+ * #5647: a recovery lane is queued, so the issue shows `workflow:recovering` instead of `needs-human`. The label is added and read
+ * back before needs-human goes (a failure rolls the add back and keeps needs-human); then one FORGE:RECOVERING comment is upserted.
+ * Returns true | "failed".
+ */
+export function makeMarkRecovering({ gh, repo }) {
+  return async ({ issue, code, attempt, max }) => {
+    const n = String(issue);
+    try { await gh(["label", "create", RECOVERING_LABEL, "-R", repo, "--force", "--color", "C5DEF5", "--description", "Pipeline: automatic recovery in flight. Managed by ForgeDock."]); } catch { /* exists, or no rights: the add says */ }
+    try {
+      await gh(["issue", "edit", n, "-R", repo, "--add-label", RECOVERING_LABEL]);
+      const names = (JSON.parse(await gh(["issue", "view", n, "-R", repo, "--json", "labels"]))?.labels ?? []).map((l) => l?.name);
+      if (!names.includes(RECOVERING_LABEL)) throw new Error("label not applied");
+      await gh(["issue", "edit", n, "-R", repo, "--remove-label", "needs-human,needs-human:external"]);
+    } catch {
+      try { await gh(["issue", "edit", n, "-R", repo, "--remove-label", RECOVERING_LABEL]); } catch { /* needs-human is still on */ }
+      return "failed";
+    }
+    try {
+      const { capComment } = await import("./lean/render.mjs");
+      const { postUpsert } = await import("./lean/statuscomment.mjs");
+      await postUpsert({ gh, repo, issue, markers: ["FORGE:RECOVERING"], cap: capComment, body: `## Recovering (attempt ${attempt}/${max})\nrecovering (${code}), attempt ${attempt}/${max}: the watchdog is rebuilding this issue; \`needs-human\` appears only if recovery is exhausted.` });
+    } catch { /* best effort */ }
+    return true;
   };
 }
 

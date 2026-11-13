@@ -14,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (p) => readFileSync(join(ROOT, p), "utf8");
 
 // Engine-managed terminal marker set by the engine itself, never via transition-label.sh.
-const ENGINE_ONLY = new Set(["engine-error"]);
+const ENGINE_ONLY = new Set(["engine-error", "recovering"]); // recovering: written by the batch via gh (#5647)
 
 function labelsJsonStates() {
   const data = JSON.parse(read("bin/labels.json"));

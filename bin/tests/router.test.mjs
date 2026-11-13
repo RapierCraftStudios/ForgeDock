@@ -1537,6 +1537,8 @@ describe("doctor --fix (forge#1944)", () => {
       "workflow:engine-error",
       // forge#3541: autonomous remediation pending state.
       "workflow:remediating",
+      // #5647: engine-managed recovery-in-flight state.
+      "workflow:recovering",
     ].map((name) => ({ name }));
 
     const ghStubPath = join(stubBin, "gh-stub.js");

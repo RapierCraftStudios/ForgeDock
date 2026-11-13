@@ -103,7 +103,7 @@ describe("forge#3567 transition-label.sh ensures the target label", () => {
 
   it("the built-in ensure table matches bin/labels.json for every workflow:* label and needs-human", () => {
     const sh = read("scripts/transition-label.sh");
-    const labels = JSON.parse(read("bin/labels.json")).filter((l) => l.name.startsWith("workflow:") || l.name === "needs-human");
+    const labels = JSON.parse(read("bin/labels.json")).filter((l) => (l.name.startsWith("workflow:") && l.name !== "workflow:recovering") || l.name === "needs-human");
     assert.ok(labels.length > 0);
     for (const l of labels) {
       assert.ok(
