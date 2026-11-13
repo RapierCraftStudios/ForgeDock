@@ -3227,8 +3227,8 @@ When a lane's `supersedes` decision lands (after the merge, beside `recordDecisi
 
 `release-gates.mjs` (#5583): `.forge/gates.yaml` catalogue schema (`validateCatalogue`, read with `git show <ref>:` by `catalogueFindings`, called from `release check-config`), telemetry records (`gateRecord`: a TP/FB class needs evidence, else `unknown`; stored as `state.gates`, read by `gateHistoryFromRoot` in `release-minutes.mjs`), `planDemotions`/`applyDemotions` (FB percent over the last full `gates.demote_window` runs; safety allowlist `isSafetyGate` = `gates.safety` + `isUnskippable`; demotion goes through `runControl("demote")`, promotion through `promote --fixture`, both stored under `gateModes` in `_active`), `admission` (`release gates check`) and the report (`release gates`). No catalogue: no reads of history, no writes.
 
-
 #5592: the lane's `io.git|gh|docker` (`effects.mjs` `execCapped`) cut stdout at 100 MB with a marker instead of failing `stdout maxBuffer length exceeded` (a commit removing a huge archive killed a lane after it pushed). The echo rule ignores code identifiers in a proof and needs 3+ prose words; the repro messages carry a literal test id. Generated CI path filters use git mode (docs/CONFIG.md).
+
 ## Entry 2026-11-13 — dispatch stall with free capacity, cross-batch ownership (#5592)
 
 
