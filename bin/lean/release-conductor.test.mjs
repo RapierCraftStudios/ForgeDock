@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, existsSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { CAPABILITIES, REFUSED, capability, conductorConfig, conductorGuard, renderConductor, installConductor, recover, recoverFromCli, CONDUCTOR_WORKFLOW_PATH } from "./release-conductor.mjs";
 import { fenced } from "./release-fence.mjs";
@@ -182,7 +182,7 @@ describe("bootstrap guard and init --conductor (#5564)", () => {
     assert.equal(conductorConfig({ controls: { conductor: { watchdog_cron: "0 1 * * *" } } }).watchdogCron, "0 1 * * *");
   });
   it("init --conductor writes the pinned workflow, never overwrites, and plain init is unchanged", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "conductor-"));
+    const cwd = tmpDir("conductor-");
     const out = [], io = { print: (l) => out.push(l) };
     assert.equal(await initFromCli(["--conductor"], { io, cwd }), 0);
     const { version } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
