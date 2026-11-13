@@ -26,12 +26,13 @@ describe("#5653 validate catalogue", () => {
     assert.deepEqual(r.applied.map((a) => a.id), ["V1"]);
     assert.equal(rewriteMissed(c, [], ["V1"], applyValidateRecipes).contract, c);
   });
-  it("equivalentRuns needs the same test ids and the same exit", () => {
-    const out = "a.py::t1 PASSED\na.py::t2 PASSED\n";
-    assert.equal(equivalentRuns({ rc: 1, output: out }, { rc: 1, output: out }), true);
-    assert.equal(equivalentRuns({ rc: 1, output: out }, { rc: 0, output: out }), false);
-    assert.equal(equivalentRuns({ rc: 1, output: out }, { rc: 1, output: "a.py::t1 PASSED\n" }), false);
-    assert.equal(equivalentRuns({ rc: 1, output: "boom" }, { rc: 1, output: "boom" }), false, "no ids is no evidence");
+  it("equivalentRuns needs the same passing test ids and a passing substitute", () => {
+    const out = "a.py::t1 PASSED\na.py::t2 PASSED\n", bad = "a.py::t1 PASSED\na.py::t2 FAILED\n";
+    assert.equal(equivalentRuns({ rc: 1, output: out }, { rc: 0, output: out }), true);
+    assert.equal(equivalentRuns({ rc: 1, output: out }, { rc: 1, output: out }), false, "a failing substitute is never equivalent");
+    assert.equal(equivalentRuns({ rc: 1, output: bad }, { rc: 0, output: out }), false, "a failing test in the frozen run");
+    assert.equal(equivalentRuns({ rc: 1, output: out }, { rc: 0, output: "a.py::t1 PASSED\n" }), false);
+    assert.equal(equivalentRuns({ rc: 1, output: "boom" }, { rc: 0, output: "boom" }), false, "no ids is no evidence");
     assert.deepEqual([...extractTestIds("ok 1 - one\nnot ok 2 - two # x")], ["one", "two"]);
   });
   it("classifies a stale generated artifact, not a test failure", () => {

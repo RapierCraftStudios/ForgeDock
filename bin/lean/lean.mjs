@@ -3015,17 +3015,25 @@ export async function runCore(o) {
           const note = `Validate ${v.id} hit a runner usage error; reran normalised (\`${fixed}\`): exit ${x?.rc}`;
           if (!T.decisions.includes(note)) T.decisions.push(note);
         }
-        // #5653: a stale generated artifact (base drift) is a mechanical step: run the repo's configured regenerate command, rerun once
-        if (validateRegenerate && x && x.rc !== 0 && x.rc !== 124 && isDriftFailure(x.output)) {
+        // #5653: a stale generated artifact (base drift) is mechanical: base-sync (a clean merge of the lane tip), then the repo's configured regenerate command, then one rerun
+        if (x && x.rc !== 0 && x.rc !== 124 && isDriftFailure(x.output)) {
           try {
-            const status = async () => String(await git(["status", "--porcelain"]).catch(() => "")).split("\n").filter(Boolean);
-            const before = new Set(await status());
-            await heavyStep("precheck", () => io.runCommand({ command: forgedockResolved(validateRegenerate), cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env }));
-            const added = (await status()).filter((l) => !before.has(l)); // regeneration must leave nothing new to commit: the lane's diff stays its own
-            if (!added.length) {
-              const again = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r);
-              if (again?.rc === 0) { x = again; T.decisions.push(`Validate ${v.id} failed on a stale generated artifact; \`${validateRegenerate}\` then a rerun passed (base drift, not a conformance failure)`); }
-            } else for (const l of added.filter((l) => /^ M /.test(l))) await git(["checkout", "--", l.slice(3)]).catch(() => {}); // undo only the files regeneration modified
+            const rerunV = async () => await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: forgedockResolved(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r);
+            let note = "";
+            if (Number(String(await git(["rev-list", "--count", `HEAD..${base}`]).catch(() => "0")).trim()) > 0) {
+              try { await git(["merge", "--no-edit", base]); note = `base-synced onto ${base}`; } catch { await git(["merge", "--abort"]).catch(() => {}); }
+              if (note) { const again = await rerunV(); if (again?.rc === 0) { x = again; T.decisions.push(`Validate ${v.id} failed on a stale generated artifact; ${note} and the rerun passed (base drift, not a conformance failure)`); } }
+            }
+            if (validateRegenerate && x.rc !== 0) {
+              const status = async () => String(await git(["status", "--porcelain"]).catch(() => "")).split("\n").filter(Boolean);
+              const before = new Set(await status());
+              await heavyStep("precheck", () => io.runCommand({ command: forgedockResolved(validateRegenerate), cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env }));
+              const added = (await status()).filter((l) => !before.has(l)); // regeneration must leave nothing new to commit: the lane's diff stays its own
+              if (!added.length) {
+                const again = await rerunV();
+                if (again?.rc === 0) { x = again; T.decisions.push(`Validate ${v.id} failed on a stale generated artifact; ${note ? `${note}, ` : ""}\`${validateRegenerate}\` then a rerun passed (base drift, not a conformance failure)`); }
+              } else for (const l of added.filter((l) => /^ M /.test(l))) await git(["checkout", "--", l.slice(3)]).catch(() => {}); // undo only the files regeneration modified
+            }
           } catch { /* fail-open: the original failure stands */ }
         }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };

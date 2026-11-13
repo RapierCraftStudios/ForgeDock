@@ -64,26 +64,29 @@ export function rewriteMissed(contract, entries, ids, apply) {
   return { contract: out, applied };
 }
 
-/** The test ids a runner's output names: pytest `path::name`, TAP `ok N - name`, vitest/jest `✓ name`. */
-export function extractTestIds(output) {
-  const ids = new Set();
+/** The tests a runner's output names, as Map(id -> passed): pytest `path::name PASSED`, TAP `ok N - name`, vitest/jest `✓ name`. */
+export function extractTests(output) {
+  const tests = new Map();
   for (const line of String(output ?? "").split("\n")) {
     let m;
-    if ((m = /^\s*(?:PASSED|FAILED|ERROR)?\s*([\w./-]+::[\w:.\[\]-]+)(?:\s+(?:PASSED|FAILED|ERROR))?/.exec(line)) && /::/.test(m[1])) ids.add(m[1]);
-    else if ((m = /^\s*(?:not )?ok \d+ - (.+?)(?:\s+#.*)?$/.exec(line))) ids.add(m[1].trim());
-    else if ((m = /^\s*[✓✔×✗]\s+(.+?)(?:\s+\d+\s*ms)?$/.exec(line))) ids.add(m[1].trim());
+    if ((m = /^\s*(?:(PASSED|FAILED|ERROR)\s+)?([\w./-]+::[\w:.\[\]-]+)(?:\s+(PASSED|FAILED|ERROR))?/.exec(line))) { const st = m[1] ?? m[3]; if (st) tests.set(m[2], st === "PASSED"); }
+    else if ((m = /^\s*(not )?ok \d+ - (.+?)(?:\s+#.*)?$/.exec(line))) tests.set(m[2].trim(), !m[1]);
+    else if ((m = /^\s*([✓✔×✗])\s+(.+?)(?:\s+\d+\s*ms)?$/.exec(line))) tests.set(m[2].trim(), m[1] === "✓" || m[1] === "✔");
   }
-  return ids;
+  return tests;
 }
+/** The test ids a runner's output names. */
+export const extractTestIds = (output) => new Set(extractTests(output).keys());
 
 /**
- * A substitute that ran the same test ids with the same exit as the frozen command is equivalent. `frozen` and `sub` are
- * {rc, output}; false when either is missing, names no ids, or the sets or exits differ.
+ * A substitute is equivalent to a frozen command that exited non-zero only when both ran the same test ids, every one of
+ * them passed in both runs (the frozen exit came from the runner, not a test), and the substitute exited 0. A failing
+ * test, a failing substitute, other ids or no ids is never equivalent. `frozen` and `sub` are {rc, output}.
  */
 export function equivalentRuns(frozen, sub) {
-  if (!frozen || !sub || frozen.rc !== sub.rc) return false;
-  const a = extractTestIds(frozen.output), b = extractTestIds(sub.output);
-  return a.size > 0 && a.size === b.size && [...a].every((x) => b.has(x));
+  if (!frozen || !sub || sub.rc !== 0) return false;
+  const a = extractTests(frozen.output), b = extractTests(sub.output);
+  return a.size > 0 && a.size === b.size && [...a].every(([id, ok]) => ok && b.get(id) === true);
 }
 
 const DRIFT_RE = /(?:generated|artifact|snapshot)s?\b[^\n]*\b(?:out of date|out-of-date|stale|differ|drift|not up to date)|\b(?:out of date|stale)\b[^\n]*\b(?:generated|regenerate)|run [`'"]?[^\n]*\bgenerate[\w:-]*[`'"]? to (?:update|regenerate)/i;
