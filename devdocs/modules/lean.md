@@ -3276,3 +3276,7 @@ In `orchestrate.mjs`, `refreshHeld` is now a function declaration. Finish and re
 ## Entry 2026-11-13: workflow:recovering during recovery (#5647)
 
 When the batch requeues a recoverable `needs-human` row (`orchestrate.mjs`, injected `markRecovering`, best effort), `makeMarkRecovering` (`engine-cli.mjs`) adds `workflow:recovering`, reads it back, then removes `needs-human` and `needs-human:external`; a failure rolls the add back and keeps `needs-human`. It upserts one `FORGE:RECOVERING` comment, `recovering (<code>), attempt n/N`. `makeRelabelNeedsHuman` removes `workflow:recovering` when it adds `needs-human` (exhausted recovery), and `runCore`'s terminal cleanup in `lean.mjs` strips it at the end of a recover lane, so the two labels never coexist. The label is in `bin/labels.json` but not in `ACTIVE_WORKFLOW_LABELS` or `LABEL_TRANSITIONS`.
+
+## Entry 2026-11-13: review/conformance self-recovery (#5644)
+
+`lean.mjs`: the conformance gate loop resumes the builder up to `lean.review_max_resumes` rounds (default 3) instead of one. Each round gets only the failures still open, and the loop ends early when a round leaves the failure set (code and detail) unchanged. `builderFixable` limits rounds to regression, unimplemented, omission, deferral, scope and preserve findings. `outcome-codes.mjs`: `conformance.regression` and `conformance.scope_creep` are now `recoverable`, so a batch requeues them once with a `RECOVER_HOW` note that re-plans from the frozen contract; `builder.blocked` (credentials, owner decisions) stays human.

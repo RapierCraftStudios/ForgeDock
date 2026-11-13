@@ -1043,6 +1043,7 @@ lean:
   builder_routing: on            # on (default) | off: route the build to a mid-tier model by the frozen contract
   builder_mid_model: claude-sonnet-5-5   # optional mid-tier builder model (default claude-sonnet-5-5)
   contract_max_corrections: 3   # #5623: builder correction rounds for a builder-correctable invalid contract before it ends contract.invalid (which a batch then requeues once with a fresh plan)
+  review_max_resumes: 3         # #5644: builder resume rounds, each with only the open findings, for builder-fixable review/conformance failures (regression, unimplemented, omission, deferral, scope) before needs-human; stops early when a round changes nothing
   light:
     mode: shadow     # off | shadow (default) | on: light-lane eligibility (#4448; lane wiring #4450)
     max_lines: 40    # upgrade to the full lane above this many non-test diff lines
