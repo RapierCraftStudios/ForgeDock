@@ -161,6 +161,8 @@ describe("#5447 declaredEnv", () => {
     assert.deepEqual(declaredEnv({}), []);
     // #5590: fixtures and libraries are not executables
     assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", "caplog", "FakeRedis", "tmp_path", "node", "psql"] } }), ["pytest", "node", "psql"]);
+    // a test file named in env is not a host tool (#5651 parked env.tool_missing on depcache.test.mjs)
+    assert.deepEqual(declaredEnv({ test_plan: [{ requirement: "R1", env: ["depcache.test.mjs", "conftest.py", "node", "python3.12"] }] }), ["node", "python3.12"]);
   });
 });
 
