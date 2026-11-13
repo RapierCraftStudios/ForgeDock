@@ -34,6 +34,8 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
  * Error text for a reason: pnpm prints its ERR_PNPM_* errors on stdout (#4522), so the first such line from either
  * stream leads, then the last lines of stderr and stdout; the message only when both streams are empty.
  */
+/** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
+const NO_ROOT_RE = /--no-root|current project could not be installed|No file\/folder found for package|does not contain any element/i;
 const msg = (e) => {
   const lines = (s) => String(s ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
   const err = lines(e?.stderr), out = lines(e?.stdout);
@@ -365,13 +367,23 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     }
     fs.mkdirSync(keyRoot, { recursive: true, mode: 0o700 });
 
+    // #5592: `poetry install` fails on a project that is not package-mode (root package not installable): retry once with --no-root (dependencies only).
+    const runList = async (list) => {
+      for (const [c, a] of list) {
+        try { await run(c, a, wt, laneEnv); } catch (e) {
+          if (c !== "poetry" || a[0] !== "install" || a.includes("--no-root") || !NO_ROOT_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) throw e;
+          await run(c, [...a, "--no-root"], wt, laneEnv);
+          repaired = repaired ?? "poetry install --no-root (project is not package-mode)";
+        }
+      }
+    };
     const materialize = async () => {
       let man;
       try { man = JSON.parse(String(fs.readFileSync(join(snap, "manifest.json")))); } catch { return null; }
       const created = [];
       try {
         for (const t of man.trees ?? []) { created.push(t); linkTree(join(snap, t), join(wt, t), { from: man.prefix, to: wt, binDir: binDirFor(d) }); }
-        for (const [c, a] of cmds.repair ?? []) await run(c, a, wt, laneEnv);
+        await runList(cmds.repair ?? []);
         try { fs.writeFileSync(join(snap, "last-used"), String(now())); } catch { /* best effort */ }
         return done("hit", { key });
       } catch (e) {
@@ -381,7 +393,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       }
     };
     const install = async () => {
-      try { for (const [c, a] of cmds.install) await run(c, a, wt, laneEnv); } catch (e) {
+      try { await runList(cmds.install); } catch (e) {
         rmTrees(wt, expected);
         return { failed: done("failed", { key, reason: `${e?.code === "ENOENT" ? "tool not found" : "install failed"}: ${msg(e)}` }) };
       }

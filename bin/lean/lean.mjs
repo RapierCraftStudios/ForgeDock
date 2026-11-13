@@ -28,7 +28,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -1542,7 +1542,10 @@ export async function runCore(o) {
     const tH = now();
     if (heavyOn) {
       try {
-        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path0 = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        // #5592: a tool that only exists in a project's .venv/bin or node_modules/.bin (poetry/uv in-project venv, monorepo service) is shimmed too, so the preflight probe and the shim agree
+        let tracked = []; try { tracked = String(await git(["ls-files"])).split("\n").map((x) => x.trim()).filter(Boolean); } catch { /* no git listing */ }
+        const path = withLocalBins(path0, projectBinDirs(wt, tracked));
         const names = await (io.writeHeavyShims ?? writeHeavyShims)(binDir, { path });
         if (names?.length) {
           heavyWaitsFile = join(root, "heavy-waits.jsonl");
@@ -1824,6 +1827,9 @@ export async function runCore(o) {
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
+      // #5592: tools resolve where the lane runs them from: project-local .venv/bin and node_modules/.bin (as the heavy shims do)
+      const local = projectBinDirs(wt, files);
+      if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
       if (io.probeCommand) {
         const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
