@@ -17,9 +17,9 @@ const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** policy `ci.fix` -> {maxRounds, coStart, fullRunWorkflow}; defaults: one round, no co-start, no uncached full run. */
 export function parseFixConfig(fix) {
-  const n = Number(fix?.max_rounds);
-  const wf = typeof fix?.full_run_workflow === "string" && fix.full_run_workflow.trim() ? fix.full_run_workflow.trim() : null;
-  return { maxRounds: Number.isInteger(n) && n >= 1 ? n : DEFAULT_MAX_ROUNDS, coStart: fix?.co_start === true || Boolean(wf), fullRunWorkflow: wf };
+  const n = Number(fix?.max_rounds ?? fix?.maxRounds); // accepts the policy form and an already parsed one
+  const wf = [fix?.full_run_workflow, fix?.fullRunWorkflow].find((x) => typeof x === "string" && x.trim())?.trim() ?? null;
+  return { maxRounds: Number.isInteger(n) && n >= 1 ? n : DEFAULT_MAX_ROUNDS, coStart: fix?.co_start === true || fix?.coStart === true || Boolean(wf), fullRunWorkflow: wf };
 }
 
 /**

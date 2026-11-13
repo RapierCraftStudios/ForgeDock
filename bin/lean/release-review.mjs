@@ -275,6 +275,7 @@ export async function fixStep(ctx) {
     ctx.save();
     const next = await runReview({ seam, pr: r.pr, def: ctx.def, delta: r.head });
     if (next.blocked) return next;
+    if (next.head && next.head !== head) { recordRound(ctx.state, { from: r.head, to: next.head, failedBefore: rec.ci.map((j) => j.name) }); ctx.save(); } // the reviewed head is the one the budget is keyed on
     r = next;
     ctx.state.steps.review = { ...ctx.state.steps.review, result: r };
     ctx.save();

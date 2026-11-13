@@ -178,7 +178,7 @@ describe("fixStep", () => {
     s.issueMerged = async (n) => n === 100;
     const r = await fixStep(ctx(s, { review: { result: failed } }));
     assert.equal(s.log.filter((e) => e[0] === "lane").length, 0);
-    assert.deepEqual(s.log[0], ["pre", H1]);
+    assert.deepEqual(s.log.slice(0, 2), [["fix-issue"], ["pre", H1]]);
     assert.equal(r.blocked, undefined);
   });
 
@@ -292,7 +292,7 @@ describe("fixStep one-round loop (#5567)", () => {
     const c = ctx(s, { review: { result: failed } });
     c.config = { mode: "snapshot" };
     c.git = (a) => { git.push(a); if (a[0] === "commit-tree") return `${RV}\n`; return `${"6".repeat(40)}\n`; };
-    c.io = { ...c.io, git: c.git, gh: async () => JSON.stringify({ body: "" }) };
+    c.io = { ...c.io, git: c.git, gh: async (a) => (a[1] === "list" ? "[]" : JSON.stringify({ body: "" })) };
     c.state.release = { branch: "release/x", snapshot: SNAP, range: {}, picks: [{ sha: PK, orig: "3".repeat(40), kind: "fix" }] };
     c.hold = async () => {};
     const r = await fixStep(c);
