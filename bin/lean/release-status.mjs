@@ -114,7 +114,7 @@ export function parseNextAction(cmd) {
 
 const show = (v) => (typeof v === "object" && v !== null ? Object.entries(v).map(([k, x]) => `${k}=${x}`).join(" ") : String(v));
 
-export function renderStatus(s) {
+export function renderReleaseStatus(s) {
   if (!s) return "no active release";
   const head = `${s.id}  ${s.repo}  status=${s.status}${s.next_step ? ` next=${s.next_step}` : ""}  source=${s.source}  hold=${s.hold === true ? "yes" : s.hold === false ? "no" : s.hold}  intake=${s.intake}`;
   const lines = [head];
@@ -135,7 +135,7 @@ export async function watchStatus({ collect, print, sleep, asJson = false, inter
   let last = null, prev;
   for (let n = 0; n < maxPolls; n++) {
     last = await collect();
-    const text = asJson ? JSON.stringify(last) : renderStatus(last);
+    const text = asJson ? JSON.stringify(last) : renderReleaseStatus(last);
     if (text !== prev) print(text);
     prev = text;
     if (!last || TERMINAL.includes(last.status)) break;
@@ -261,7 +261,7 @@ export async function statusFromCli(argv, deps) {
   const repo = flag(rest, "--repo") ?? json(await io.gh(["repo", "view", "--json", "nameWithOwner"])).nameWithOwner;
   const base = { io, repo, config: deps.config, local: deps.local, gateState: deps.gateState };
   const none = (s) => s ?? { schema: STATUS_SCHEMA, id: null, repo, status: "no active release", next_actions: [] };
-  const show1 = (s) => (asJson ? JSON.stringify(none(s)) : arg && !s ? `no release ${arg}` : renderStatus(s));
+  const show1 = (s) => (asJson ? JSON.stringify(none(s)) : arg && !s ? `no release ${arg}` : renderReleaseStatus(s));
   if (verb === "status") {
     const collect = () => collectStatus({ ...base, id: arg });
     if (rest.includes("--watch")) {

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { releaseFromCli, gateState } from "./release.mjs";
-import { collectStatus, renderStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, policyFromYaml, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
+import { collectStatus, renderReleaseStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, policyFromYaml, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
 
 const REPO = "o/r", ID = "r20261112-141530-4242", HEAD = "a".repeat(40);
 const STATE = { v: 1, id: ID, repo: REPO, steps: { preflight: { done: true, at: "T1" }, "release-pr": { done: true, at: "T2", result: { pr: 7, head: HEAD } }, promotion: { done: false, at: "T3" } }, release: { snapshot: "s1", issues: [12, 5], picks: [] } };
@@ -60,7 +60,7 @@ describe("release status / explain (#5554)", () => {
   });
 
   it("R4: golden text output", async () => {
-    const out = renderStatus(await collectStatus(base(fakeIo(), { id: ID })));
+    const out = renderReleaseStatus(await collectStatus(base(fakeIo(), { id: ID })));
     assert.equal(out, [
       `${ID}  o/r  status=running next=promotion  source=ledger  hold=no  intake=unknown`,
       "  wave: unknown  lane: unknown", "  lease: holder=h epoch=2 heartbeat_age_s=unknown", "  cut: s1",
