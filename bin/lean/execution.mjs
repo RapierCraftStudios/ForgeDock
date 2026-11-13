@@ -694,7 +694,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     // #5095: a 5xx from the pool router or agent is infrastructure: deferred with backoff (capped), never needs-human
-    : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true
+    : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true || (isTransportError(e) && !isCloneFailure(errText(e))) // #5656: fetch failed, ECONNRESET, ETIMEDOUT; a clone timeout keeps its own code
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_TRANSIENT, retryInSeconds: Number(e.retryInSeconds) > 0 ? Number(e.retryInSeconds) : TRANSIENT_RETRY_S,
       detail: `sandbox ${id} could not start (transient${Number.isInteger(e?.status) ? ` HTTP ${e.status}` : ""}): ${errText(e)}` }
     : isCloneFailure(errText(e)) ? cloneDeferred(id, errText(e))
