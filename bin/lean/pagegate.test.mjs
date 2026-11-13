@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePagesConfig, pageFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved } from "./pagegate.mjs";
+import { parsePagesConfig, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved } from "./pagegate.mjs";
 import { pagePlanNote, domainChecksBlock } from "./prompts.mjs";
 import { pathDomains } from "./review-trigger.mjs";
 import { validateContract, precheck } from "./conformance.mjs";
@@ -73,5 +73,43 @@ describe("design hold (#5442)", () => {
     assert.equal(designHold([{ name: "bug" }]), null);
     assert.equal(designLabelApproved([{ name: "design:approved" }]), true);
     assert.equal(designLabelApproved([]), false);
+  });
+});
+
+describe("page gate exclusions (#5585)", () => {
+  const admin = "web/src/app/(site)/admin/page.tsx", pub = storeFiles[0];
+  const ex = parsePagesConfig({ exclude: ["web/src/app/**/admin/**"], design_only: ["web/src/app/**/dash/**"] }, { hasAppPages: true });
+  const dash = "web/src/app/dash/page.tsx";
+  it("parses exclude and design_only, default empty", () => {
+    assert.deepEqual([cfg.exclude, cfg.design_only], [[], []]);
+    assert.deepEqual(ex.exclude, ["web/src/app/**/admin/**"]);
+  });
+  it("an excluded route is not a public page at contract time or in precheck", async () => {
+    assert.deepEqual(pageFiles([admin, pub], ex), [pub]);
+    assert.deepEqual(pageFiles([admin], cfg), [admin]);
+    const c = { deliverables: [{ id: "D1", path: admin, change: "x", requirements: ["R1"] }] };
+    assert.deepEqual(contractBriefProblems(c, ex), []);
+    assert.equal(contractBriefProblems(c, cfg).length, 1);
+    assert.deepEqual(await pageFailures({ cfg: ex, files: [admin], diff: `+++ b/${admin}\n+[[null]]\n`, tracked: [admin], designApproved: false }), []);
+  });
+  it("auto-excludes a noindex page or layout when the file can be read", async () => {
+    const rd = (p) => (p === admin ? "export const metadata = { robots: { index: false } }" : p === "web/app/x/layout.tsx" ? "<meta name=robots content=noindex>" : "");
+    assert.deepEqual(pageFiles([admin], cfg, { readFile: rd }), []);
+    assert.deepEqual(pageFiles(["web/app/x/page.tsx"], cfg, { readFile: rd }), []);
+    assert.deepEqual(pageFiles([admin], cfg), [admin]);
+    assert.deepEqual(pageFiles([pub], cfg, { readFile: rd }), [pub]);
+    const c = { deliverables: [{ id: "D1", path: admin, change: "x", requirements: ["R1"] }] };
+    assert.deepEqual(contractBriefProblems(c, cfg, { readFile: rd }), []);
+    assert.deepEqual(await pageFailures({ cfg, files: [admin], diff: "", readFile: rd, tracked: [admin], designApproved: false }), []);
+  });
+  it("design_only keeps the design requirement but not SEO/GEO", async () => {
+    assert.deepEqual(designOnlyFiles([dash, pub], ex), [dash]);
+    assert.deepEqual(pageFiles([dash], ex), []);
+    const c = { deliverables: [{ id: "D1", path: dash, change: "x", requirements: ["R1"] }] };
+    const p = contractBriefProblems(c, ex);
+    assert.equal(p.length, 1); assert.match(p[0], /design_spec/);
+    assert.deepEqual(contractBriefProblems({ ...c, page_gate: { design_spec: "#1 FORGE:DESIGN_SPEC" } }, ex), []);
+    const f = await pageFailures({ cfg: ex, files: [dash], diff: "", tracked: [dash], designApproved: false });
+    assert.deepEqual(f.map((x) => x.kind).sort(), ["page_design_missing", "page_visual_missing"]);
   });
 });

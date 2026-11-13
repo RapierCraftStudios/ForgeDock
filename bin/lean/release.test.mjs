@@ -46,6 +46,18 @@ function fakeIo(world = {}) {
 }
 const ok = async () => ({ ok: true });
 
+describe("unmanaged release carries no epoch (#5553)", () => {
+  it("promotion merges with the plain argv and makes no ledger call", async () => {
+    const mod = await import("./release.mjs");
+    const io = fakeIo();
+    io.api = async () => { throw new Error("no ledger call expected"); };
+    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    assert.equal(out.status, "done");
+    const merge = io.calls.find((a) => a[0] === "pr" && a[1] === "merge");
+    assert.deepEqual(merge, ["pr", "merge", "7", "--repo", REPO, "--merge", "--match-head-commit", HEAD]);
+  });
+});
+
 describe("release job (#5211)", () => {
   const promote = async (world, { opts = {}, config = {} } = {}) => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();
@@ -206,6 +218,18 @@ describe("release job (#5211)", () => {
     assert.deepEqual(readReleaseConfig("release:\n  auto_merge: true\n  artifact_check: npm view x\n  version_sync: true\n"), { autoMerge: true, artifactCheck: "npm view x", versionSync: true, publishWorkflow: null });
     assert.deepEqual(readReleaseConfig(""), { autoMerge: false, artifactCheck: null, versionSync: false, publishWorkflow: null });
     assert.equal(readReleaseConfig("release:\n  publish_workflow: pub.yml\n").publishWorkflow, "pub.yml");
+  });
+
+  it("#5550: managed is off by default (config shape unchanged) and then no ledger call or GitHub write is made", async () => {
+    assert.equal("managed" in readReleaseConfig("release:\n  auto_merge: true\n"), false);
+    assert.equal(readReleaseConfig("release:\n  managed: false\n").managed, undefined);
+    assert.equal(readReleaseConfig("release:\n  managed: true\n").managed, true);
+    const apiCalls = [], ghCalls = [], io = { print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async (a) => { ghCalls.push(a); return ""; }, api: async (...a) => { apiCalls.push(a); return {}; } };
+    const ok = async () => ({});
+    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok } });
+    assert.equal(out.status, "done");
+    assert.deepEqual(apiCalls, []);
+    assert.deepEqual(ghCalls, []);
   });
 
   it("CLI: rejects unknown options and exits 3 on a blocked step, naming the resume command", async () => {
@@ -443,5 +467,21 @@ describe("snapshot releases (#5276)", () => {
     assert.equal(snap.out.published, true);
     assert.deepEqual(snap.pushes, [["push", "--quiet", "origin", "--delete", "release/20231114-1"]]);
     assert.deepEqual((await step(undefined)).pushes, []);
+  });
+});
+
+
+describe("release control routing (#5556)", () => {
+  it("`release hold` and `release control hold` share one implementation and refuse without --reason", async () => {
+    for (const argv of [["hold", "r20260101-000000-1"], ["control", "hold", "r20260101-000000-1"]]) {
+      const out = [];
+      const io = { print: (l) => out.push(l), gh: async () => JSON.stringify({ nameWithOwner: "o/r" }), api: async () => { throw new Error("no api"); }, git: () => { throw new Error("none"); }, now: () => 1 };
+      assert.equal(await releaseFromCli([...argv, "--json"], { io, cwd: tmp() }), 1);
+      assert.match(out[0], /forgedock.release.control\/v1/);
+      assert.match(out[0], /--reason is required/);
+    }
+  });
+  it("an unknown control verb is an error", async () => {
+    await assert.rejects(releaseFromCli(["control", "nope"], { io: { print() {}, gh: async () => "" }, cwd: tmp() }), /unknown control verb/);
   });
 });

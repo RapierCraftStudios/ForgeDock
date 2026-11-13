@@ -7,7 +7,9 @@
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { parseDocsConfig } from "./lean/docsgate.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
+import { parseDesignConfig } from "./lean/design-gate.mjs";
 import { execFileSync } from "node:child_process";
+import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -582,9 +584,10 @@ export function readEnvConfig(cwd = process.cwd()) {
     let appPages = false; // #5428: default-on trigger: the repo tracks Next app/**/page.* files
     try { appPages = String(execFileSync("git", ["ls-files", "--", "*page.*"], { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] })).split("\n").some((f) => PAGE_RE.test(f)); } catch { /* not a git checkout: off */ }
     const pg = parsePagesConfig(y?.pages, { hasAppPages: appPages }); // #5428: forge.yaml pages: (off for repos without pages)
+    const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -934,7 +937,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease] [--local]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -981,6 +984,26 @@ export async function runFromCli(argv, deps = {}) {
     return res;
   }
   await assertLaneNotDefault(io, lane, repo);
+  // #5542: placement. A lane already placed (--placement, a batch lane, --adopt, --recover) or forced local runs here; otherwise a
+  // remote or hybrid `execution:` hands the single issue to the same batch placement `orchestrate` uses.
+  if (enginePath !== "full") {
+    const exec = deps.execution !== undefined ? deps.execution : readExecution();
+    const placed = placementWhere || argv.includes("--adopt") || recover || (deps.env ?? process.env).FORGEDOCK_BATCH_ID;
+    const wantsRemote = exec && (exec.mode === "remote" || (exec.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1));
+    if (argv.includes("--local")) console.log("placement: local (--local)");
+    else if (!placed && wantsRemote) {
+      console.log(`placement: ${exec.mode} execution (${exec.provider}); placed by the batch dispatcher`);
+      const res = await orchestrateFromCli([String(issue), "--parallel", "1", "--foreground", ...(repo ? ["--repo", repo] : []), ...(lane ? ["--lane", lane] : []),
+        ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])], deps);
+      const row = res?.rows?.find((r) => r.issue === issue) ?? res?.rows?.[0] ?? {};
+      let laneRes = null; // the lane's own result file carries cost_usd / wall_ms / light* that the benchmarks read
+      try { const bm = await import("./lean/batch.mjs"); laneRes = JSON.parse(readFileSync(bm.openBatch(deps.batchRoot ?? bm.batchRoot(), res.batch).resultFile(issue), "utf8")); } catch { laneRes = null; }
+      const metrics = Object.fromEntries(["cost_usd", "wall_ms", "model_ms", "light", "light_eligibility", "light_upgrade"].filter((k) => row[k] !== undefined).map((k) => [k, row[k]])); // the batch row carries them when no lane file exists (sandbox lanes)
+      const out = { ...metrics, ...(laneRes ?? {}), terminalReason: laneRes?.terminalReason ?? row.outcome ?? "engine-error", ...(row.pr != null && laneRes?.pr == null ? { pr: row.pr } : {}), ...(row.detail && !laneRes?.detail ? { detail: row.detail } : {}), ...(row.code && !laneRes?.code ? { code: row.code } : {}), ...(row.placement ? { placement: row.placement } : {}) };
+      console.log(`issue #${issue} → ${out.terminalReason}`);
+      return report(out);
+    } else if (!placed) console.log(`placement: local (${exec ? `execution mode ${exec.mode}` : "no execution configured"})`);
+  }
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
@@ -1461,7 +1484,13 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
-    res = { changed: op === "hold" ? b.holdIssues(issues, meta) : b.releaseIssues(issues) };
+    res = { changed: op === "hold" ? b.holdIssues(issues, meta) : b.releaseIssues(issues), held: null };
+  }
+  if (op === "hold" && !res.changed?.length) { // #5526: nothing newly held: name the issues that already are
+    let held = res.held;
+    if (!Array.isArray(held)) { try { held = (await import("./lean/batch.mjs")).openBatch(root, id).readHeld(); } catch { held = []; } }
+    const already = issues.filter((n) => held.includes(n));
+    if (already.length) { print(`batch ${id}: already held ${already.map((n) => `#${n}`).join(" ")}`); return { ok: true, batch: id, changed: [], alreadyHeld: already }; }
   }
   if (op === "release" && takeover) { // #5241: a released issue deferred on a cancelled batch's lease is requeued at once
     const batchMod = await import("./lean/batch.mjs"), b = batchMod.openBatch(root, id), st = b.store.load(), repo = b.readPlan()?.repo ?? null;
@@ -1765,12 +1794,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
     { // #5442: page work waits for an approved design: a design:* issue is never dispatched (--force does not lift it)
       const held = new Map();
-      for (const n of issues) {
+      // #5592: bounded-concurrency label reads, not one serial gh call per issue (starved admission on a loaded host)
+      const hs = await mapLimit(issues, 6, async (n) => {
         let v = null;
         try { v = JSON.parse(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])); } catch { v = null; }
-        const h = designHold(v?.labels);
-        if (h) held.set(n, h);
-      }
+        return designHold(v?.labels);
+      });
+      issues.forEach((n, i) => { if (hs[i]) held.set(n, hs[i]); });
       for (const [n, h] of held) sink.line(`skipped: #${n} design_pending (${h}); run /design, design:approved lifts the hold`);
       if (held.size) {
         if (held.size === issues.length) throw new Error(`every issue is design_pending (${[...held.values()].join(", ")}); run /design first`);
@@ -2140,8 +2170,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       decide: deps.decide ?? (async (d) => {
         if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
-        const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
-        try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
+        const body = `## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
+        // #5592: runner decisions are a section of the issue's one FORGE:STATUS comment (last 5 kept), not a comment per requeue
+        try { const { postStatusSection } = await import("./lean/statuscomment.mjs"); const { capComment } = await import("./lean/render.mjs"); await postStatusSection({ gh: (a) => leanIo.gh(a), repo, issue: d.issue, markers: ["FORGE:DECISION"], text: body, cap: capComment }); } catch { /* best effort: the batch log keeps the row */ }
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
@@ -2288,6 +2319,8 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
       const reopened = await lastReopen(n);
       if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
     }
+    // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue (a verify reopen returned null above)
+    if (pr !== null || state === "CLOSED") { const { clearPipelineLabels } = await import("./lean/statuscomment.mjs"); await clearPipelineLabels({ gh, repo, issue: n, labels: iss?.labels }); }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") {
       // #5152: workflow:merged / a fully closed decomposition is delivered whatever the stateReason; a decomposition still
@@ -2331,7 +2364,10 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       if (!(await parkedRelabel({ gh, repo, issue, code: parked.code })).ok) return "failed"; // #5466: needs-human stays unless the replacement labels landed
       try {
         const { capComment } = await import("./lean/render.mjs");
-        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:PARKED code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""} -->\n## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}`)]);
+        const { postUpsert } = await import("./lean/statuscomment.mjs");
+        // #5592: one PARKED comment per issue, edited in place (the marker still leads the body)
+        await postUpsert({ gh, repo, issue, markers: ["FORGE:PARKED"], attrs: `code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""}`, cap: capComment,
+          body: `## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}` });
       } catch { /* best effort */ }
       return true;
     }

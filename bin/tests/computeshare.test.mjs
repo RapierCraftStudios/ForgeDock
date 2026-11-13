@@ -700,3 +700,19 @@ test("transport.stop through router and agent signals the lane; it exits interru
   assert.ok(agent.store.data.sandboxes.i1, "stop keeps the sandbox (checkpoint) until the dispatcher destroys it");
   assert.equal(await transport.destroy("i1"), true);
 });
+
+test("agent capacity reports disk_free_gb and per-sandbox sandbox_disk_mb; router /agents merges disk_used_mb (#5535)", async () => {
+  const { agent } = agentFixture();
+  const c = agent.capacity();
+  assert.equal(typeof c.disk_free_gb, "number");
+  assert.deepEqual(c.sandbox_disk_mb, {});
+  const { router } = routerFixture({ a: { cpus_free: 2, mem_free_gb: 4, disk_free_gb: 9.5, sandbox_disk_mb: { p1: 42 } }, old: { cpus_free: 2, mem_free_gb: 4 } });
+  router.store.data.sandboxes.p1 = { agent: "a", issue: 1, batch: null };
+  router.store.data.sandboxes.p2 = { agent: "old", issue: 2, batch: null };
+  let body = "";
+  await router.handle({ method: "GET", url: "/agents", headers: { authorization: "Bearer fd" }, socket: {} }, { writeHead() {}, setHeader() {}, write(x) { body += x; }, end(x) { body += x ?? ""; } });
+  const j = JSON.parse(body);
+  assert.equal(j.sandboxes.p1.disk_used_mb, 42);
+  assert.equal("disk_used_mb" in j.sandboxes.p2, false);
+  assert.equal(j.agents.find((x) => x.name === "a").disk_free_gb, 9.5);
+});

@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered } from "./conformance.mjs";
+import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -841,6 +841,14 @@ describe("repro_test on bug lanes (#4271)", () => {
     }
     assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
     assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
+  });
+  it("#5544 BASE=RAN HEAD=RAN PRISTINE=FAILED is a test-only fix: no repro_base_green, not already fixed", () => {
+    const k = { ...C, repro_test: RT };
+    const testOnly = ["test/leak.test.js"];
+    const pc = precheck({ contract: k, result: res, changedFiles: testOnly, repro: { base: "RAN", head: "RAN", pristine: "FAILED" } });
+    assert.equal(pc.failures.some((f) => f.kind === "repro_base_green"), false);
+    assert.equal(alreadyFixedOnBase(pc.failures, testOnly), false);
+    assert.deepEqual(reproFailures(k, { base: "RAN", head: "RAN", pristine: "RAN" }).map((f) => f.kind), ["repro_base_green"]);
   });
   it("#5080 repro_base_green: BASE=RAN HEAD=RAN is its own kind, and a test-only diff with a source deliverable is never the fix", () => {
     const k = { ...C, repro_test: RT };
@@ -1821,17 +1829,39 @@ describe("test plan frozen with the contract (#5445)", () => {
     assert.equal(bug(K([row("R1", { repro: "no-repro", reason: "spec-only change" }), row("R2")])), "");
   });
   it("a proof that echoes a deliverable is rejected; one about the 403 is accepted", () => {
-    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof only restates a deliverable/);
+    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable D1 \(\d+%\); phrase it as the wrong behaviour observed on base/);
     assert.equal(proofEchoesDeliverable("the listing json URL is rewritten", D.slice(0, 1)), true);
     assert.equal(proofEchoesDeliverable("returns 200 JSON instead of 403", D.slice(0, 1)), false);
+    assert.equal(proofEchoDetail("the listing json URL is rewritten", D.slice(0, 1)).id, "D1");
+  });
+  it("#5592: naming the function under test does not make a proof an echo; a blank repro gets a literal test id example", () => {
+    const d = [{ id: "D1", path: "src/scrape.js", change: "fix fetchListing so the listing url uses old.reddit.com", requirements: ["R1"] }];
+    assert.equal(proofEchoesDeliverable("`fetchListing` returns 403 for www.reddit.com", d), false);
+    assert.equal(proofEchoesDeliverable("fetchListing() fetch_listing listing", d), false, "fewer than 3 prose words left: nothing to judge");
+    assert.equal(proofEchoesDeliverable("the listing url uses old.reddit.com", d), true);
+    assert.match(testPlanProblems(K([row("R1", { repro: "" })])).join(), /e\.g\. `tests\/test_scrape\.py::test_listing_returns_json`/);
   });
   it("level, its reason and the command are checked; mocking the bug's component is rejected", () => {
     assert.match(testPlanProblems(K([row("R1", { level: "manual" })])).join(), /level must be one of/);
     assert.match(testPlanProblems(K([row("R1", { level_reason: "" })])).join(), /level_reason/);
-    assert.match(testPlanProblems(K([row("R1", { level_reason: "mock the fetcher" })])).join(), /mocking the component/);
+    assert.match(testPlanProblems(K([row("R1", { level_reason: "mock the listing URL rewrite" })])).join(), /level_reason mocks "mock the listing URL rewrite", which is in deliverable D1; level_reason must not contain the words mock\/stub\/fake unless negated/);
+    for (const ok of ["real AsyncSession; stub only the Umami HTTP endpoint", "fake clock drives the expiry", "no mocks needed, real fixture"]) assert.equal(testPlanProblems(K([row("R1", { level_reason: ok })])).length, 0, ok);
+    assert.equal(mockedDeliverable("stub the search handler", D.slice(0, 1)), null);
+    assert.equal(mockedDeliverable("the scrape module is mocked", D.slice(0, 1)).id, "D1");
     assert.equal(testPlanProblems(K([row("R1", { level_reason: "no mocks needed, real fixture" })])).length, 0);
     assert.match(testPlanProblems(K([row("R1", { command: "" })])).join(), /exact command/);
     assert.match(testPlanProblems({ ...C, test_plan: "x" }).join(), /must be an array/);
+  });
+  it("#5587: rule ids are counted, the corrections carry the allowed level and the worked example, and only test-plan problems earn a second round", () => {
+    const mock = testPlanProblems(K([row("R1", { level_reason: "mock the listing URL rewrite" }), row("R2", { proof: "the listing json URL is rewritten", command: "" })]));
+    assert.match(mock.join("\n"), /real instance of D1's component, with stubs only at its I\/O boundary \(clock, network, browser factory\) and, for DB code, a real database session/);
+    assert.deepEqual(contractRuleCounts(mock), { "test_plan.mock": 1, "test_plan.command": 1 });
+    const echo = testPlanProblems(K([row("R1", { proof: "the listing json URL is rewritten to old.reddit.com" })]));
+    assert.match(echo.join(), /symptom observed today → assertion that fails on base and passes on head, e\.g\./);
+    assert.deepEqual(contractRuleCounts(echo), { "test_plan.echo": 1 });
+    assert.equal(onlyTestPlanProblems(mock), true);
+    assert.equal(onlyTestPlanProblems([...mock, "R1: quote is not verbatim"]), false);
+    assert.equal(onlyTestPlanProblems([]), false);
   });
   it("applyValidateRecipes rewrites test_plan commands", () => {
     const r = applyValidateRecipes(K([row("R1")]), [{ match: "^node --test", replace: "npx node --test" }]);
@@ -1926,5 +1956,70 @@ describe("#5468 production-only e2e/manual criteria become post-deploy checks", 
   it("mergeCheckEntries keeps existing entries", () => {
     const o = JSON.parse(mergeCheckEntries(JSON.stringify({ a: { run: "x" } }), { a: { run: "y" }, b: { run: "z" } }));
     assert.equal(o.a.run, "x"); assert.equal(o.b.run, "z");
+  });
+});
+
+import { interfaceDecisionFailures } from "./conformance.mjs";
+describe("interface decisions at precheck (#5338)", () => {
+  const row = { id: "H1", what: "Interface api -> worker", source: "decision", decision: "i7-2", anchors: ["worker/refund.py", "api/"] };
+  const c = { requirements: [], preserve: [row] };
+  it("flags a changed anchored file without an intact preserve report", () => {
+    const f = interfaceDecisionFailures(c, {}, ["worker/refund.py"]);
+    assert.deepEqual(f.map((x) => x.kind), ["decision_unsuperseded"]);
+    assert.match(f[0].detail, /supersedes:"i7-2"/);
+    assert.equal(interfaceDecisionFailures(c, { preserve: [{ id: "H1", status: "violated" }] }, ["api/x.py"]).length, 1);
+  });
+  it("passes when acknowledged, superseded (row removed), or no anchored file changed", () => {
+    assert.deepEqual(interfaceDecisionFailures(c, { preserve: [{ id: "H1", status: "intact" }] }, ["api/x.py"]), []);
+    assert.deepEqual(interfaceDecisionFailures({ preserve: [] }, {}, ["api/x.py"]), []);
+    assert.deepEqual(interfaceDecisionFailures(c, {}, ["web/a.ts"]), []);
+    assert.deepEqual(interfaceDecisionFailures({ preserve: [{ ...row, anchors: ["db/"] }] }, {}, ["api/x.py"]), []);
+  });
+  it("precheck surfaces it and stays ok without interface rows", () => {
+    const res = { requirements: [], validation: [] };
+    assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [row] }, result: res, changedFiles: ["api/x.py"], ignore: ["api/x.py"] }).failures.some((x) => x.kind === "decision_unsuperseded"), true);
+    assert.equal(precheck({ contract: { requirements: [], deliverables: [], preserve: [] }, result: res, changedFiles: [] }).failures.some((x) => x.kind === "decision_unsuperseded"), false);
+  });
+});
+describe("#5524 URL-less production-only e2e/manual rows", () => {
+  const Q40655 = "On OVH after deploy, a Monday report closed during the day is not re-created (verified at the next Monday) [type:manual]";
+  const Q40662 = "T1 succeeded slow ratio < 0.05 over 24h, and `JobTurnaroundSloSlowBurn` does not fire at current volume for 7 days [type:manual]";
+  const Q40486 = "Re-run the #38833 R3 probe after deploy [type:manual]";
+  const LQ = "The signup page works against the local stack in a browser over 24h [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote, disposition: "deliver" }, C.requirements[1]] });
+  it("#5524 prodOnlyE2e recognises observation windows", () => {
+    for (const q of [Q40655, Q40662, Q40486, "ratio stays low over 24h [type:manual]", "no alert for 7 days [type:manual]", "restored at the next Tuesday [type:manual]", "holds at current volume [type:manual]", "runs on OVH [type:manual]"]) assert.equal(prodOnlyE2e(q), true, q);
+    for (const q of [LQ, "works on staging for 7 days [type:e2e]", "sandbox run over 24h [type:e2e]"]) assert.equal(prodOnlyE2e(q), false, q);
+  });
+  it("#5524 URL-less production-only rows convert to checkless post-deploy", () => {
+    for (const q of [Q40655, Q40662, Q40486]) {
+      const out = autoPostDeployE2e(mk(q));
+      assert.equal(out.converted.length, 1);
+      assert.equal(out.converted[0].check, null);
+      assert.equal(out.contract.requirements[0].disposition, "post-deploy");
+      const d = deferChecklessPostDeploy(out.contract);
+      assert.deepEqual(d.converted, ["R1"]);
+      assert.equal(d.contract.requirements[0].disposition, "defer");
+      assert.equal(d.contract.requirements[0].bucket, "owner:orchestrator");
+      assert.equal(d.contract.requirements[1].disposition, "deliver");
+    }
+  });
+  it("#5524 replay: URL rows keep a check id and a local-only quote stays deliver", () => {
+    const out = autoPostDeployE2e(mk("`https://store.alterlab.io/x` returns 200 after deploy [type:e2e]"));
+    assert.match(out.contract.requirements[0].check, /^e2e-r1-/);
+    assert.equal(autoPostDeployE2e(mk(LQ)).converted.length, 0);
+    assert.equal(autoPostDeployE2e(mk(LQ)).contract.requirements[0].disposition, "deliver");
+  });
+  it("#5524 review converts URL-less lone e2e_unverified", () => {
+    const contract = { ...mk(Q40655), validate: [{ id: "V1", command: "pytest tests/test_x.py" }] };
+    const lctx = { ...ctx, contract, issueText: `${ISSUE}\n${Q40655}` };
+    const r = { ...good, issue_coverage: [{ quote: Q40655, status: "covered" }, ...good.issue_coverage.slice(1)] };
+    const d = decide(r, lctx);
+    assert.equal(d.state, "nonconforming");
+    const ids = loneE2eRows(d.failures);
+    assert.deepEqual(ids, ["R1"]);
+    const cv = autoPostDeployE2e(contract, ids);
+    assert.equal(cv.converted.length, ids.length);
+    assert.equal(deferChecklessPostDeploy(cv.contract).contract.requirements[0].disposition, "defer");
   });
 });

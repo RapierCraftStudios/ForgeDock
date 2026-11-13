@@ -15,6 +15,7 @@ import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 // forge#3833: closed outcome-code enum; every code below comes from structured evidence, never `detail` prose.
 import { OUTCOME_CODES as OC } from "./outcome-codes.mjs";
 import { parseState } from "./state.mjs";
+import { hasSection } from "../lean/statuscomment.mjs";
 
 // forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
 // failures (e.g. an exhausted retry loop where the runner itself never once
@@ -254,12 +255,12 @@ function hasPhaseComplete(comments) {
 }
 
 /**
- * close.md's own idempotency key: a trusted FORGE:TRAJECTORY comment. Shared by close.reconcile
+ * close.md's own idempotency key: a trusted FORGE:TRAJECTORY comment (or, #5592, a section of the FORGE:STATUS comment). Shared by close.reconcile
  * and close.detectOutcome so the two cannot drift. Throws on fetch error; callers fail closed.
  */
 async function hasTrajectory(issue, io) {
   const { comments } = await issueMarkers(issue, io);
-  return comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY"));
+  return comments.some((b) => hasSection(b, "FORGE:TRAJECTORY"));
 }
 
 /**
@@ -269,7 +270,7 @@ async function hasTrajectory(issue, io) {
  */
 async function hasInvestigationCloseEvidence(issue, io) {
   const { comments } = await issueMarkers(issue, io);
-  return comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY"))
+  return comments.some((b) => hasSection(b, "FORGE:TRAJECTORY"))
     || hasPhaseComplete(sliceToCurrentCycle(comments));
 }
 

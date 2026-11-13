@@ -150,3 +150,29 @@ test("#5465 a killed watch shows DEAD within 3 heartbeats and the watchdog alert
   writeFileSync(join(dir, "status.json"), JSON.stringify({ ...state(), heartbeat: beat(1000), heartbeatEveryMs: 300000 }));
   assert.equal((await alertDeadWatches({ root, now, emit })).length, 0);
 });
+
+// #5529: claude resolution of the running watcher and the status/doctor warning rows, on a real temp filesystem
+import { chmodSync } from "node:fs";
+import { resolveOnPath, watchEnvWarnings } from "./issuewatch-parity.mjs";
+
+test("#5529 resolveOnPath finds an executable claude and ignores a non-executable one", () => {
+  const d = tmpDir("iw5529-"), a = join(d, "a"), b = join(d, "b");
+  mkdirSync(a); mkdirSync(b);
+  writeFileSync(join(a, "claude"), "x"); // not executable
+  writeFileSync(join(b, "claude"), "#!/bin/sh\n"); chmodSync(join(b, "claude"), 0o755);
+  assert.equal(resolveOnPath("claude", `${a}:${b}`), join(b, "claude"));
+  assert.equal(resolveOnPath("claude", a), null);
+  assert.equal(resolveOnPath("claude", undefined), null);
+});
+
+test("#5529 watchEnvWarnings warns only for a live watcher that recorded it cannot resolve claude", () => {
+  const root = tmpDir("iw5529-"), beat = new Date(NOW).toISOString();
+  const put = (name, s) => { mkdirSync(join(root, "o__r", name), { recursive: true }); writeFileSync(join(root, "o__r", name, "status.json"), JSON.stringify({ name, repo: "o/r", phase: "running", heartbeat: beat, ...s })); };
+  put("bare", { claude: null });
+  put("ok", { claude: "/u/bin/claude" });
+  put("old", {}); // written before #5529: unknown, no warning
+  put("gone", { claude: null, phase: "exited" });
+  const lines = watchEnvWarnings(listWatches(root, NOW));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /watch bare \(o\/r\): cannot resolve claude/);
+});

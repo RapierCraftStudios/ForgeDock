@@ -415,6 +415,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const mechMax = recoveryMax && Number.isInteger(recovery?.mechanicalMaxAttempts) && recovery.mechanicalMaxAttempts > 0 ? Math.max(recovery.mechanicalMaxAttempts, recoveryMax) : recoveryMax;
   const REPEAT_ENV_CODES = [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_TOOL_MISSING]; // #5232: deterministic for a frozen command (a timeout is load, not listed)
   const sigOf = (d) => String(d ?? "").replace(/\s+/g, " ").trim();
+  // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
+  const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
+  const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
@@ -626,6 +629,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!remote?.offlineFallback) return false;
     const after = Number.isInteger(remote.capacityFallbackAfter) && remote.capacityFallbackAfter > 0 ? remote.capacityFallbackAfter : CAPACITY_FALLBACK_AFTER;
     if ((capDefers.get(n) ?? 0) < after) return false;
+    // #5592: an overloaded host holds every local admission (host_overloaded), so falling back would park the lane indefinitely: keep retrying the pool
+    if (overload) { try { if (overload()?.overloaded) return false; } catch { /* unknown load: the headroom guard decides */ } }
     if (typeof remote.headroom !== "function") return true;
     try { return remote.headroom()?.ok !== false; } catch { return false; }
   };
@@ -915,7 +920,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
       }
     }
-    if (recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
+    // #5526: the hold is re-read here (it is only read once per pass): a held issue's terminal outcome starts no recovery lane.
+    const heldNow = recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && (refreshHeld(), opHeld.has(n));
+    if (heldNow) decided({ issue: n, what: `no recovery lane for #${n}: ${heldByOperator(n)}`, why: firstLine(row.detail) || row.outcome, alternative: "recover while the operator holds it" });
+    if (recoveryMax && !heldNow && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
       let isConflicting = false;
       if (row.outcome === "ci-pending" && typeof conflicting === "function" && Number.isInteger(row.pr)) {
         try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
@@ -924,12 +932,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (prior) { const pk = `${n}:${recoveryClassOf({ code: prior.code })}`; classUsed.set(pk, Math.max(classUsed.get(pk) ?? 0, prior.attempt)); } // state saved before #4725 has no class counts
       const cls = recoveryClassOf(facts), max = maxFor(cls), used = classUsed.get(`${n}:${cls}`) ?? 0;
       // #5232: a deterministic env defect of the frozen command that a recovery attempt repeated verbatim is not rebuilt again
-      const repeatEnv = prior && REPEAT_ENV_CODES.includes(row.code) && prior.code === row.code && sigOf(prior.detail) === sigOf(row.detail);
+      const repeatEnv = prior && REPEAT_ENV_CODES.includes(row.code) && prior.code === row.code && envSig(row.code, prior.detail) === envSig(row.code, row.detail);
+      // #5592: a first env.tool_missing that ran on this host (not a remote sandbox) would be replayed with the identical frozen contract on the same host and fail identically: not launched as-is
+      const sameHostReplay = !repeatEnv && !prior && row.code === OUTCOME_CODES.ENV_TOOL_MISSING && row.placement?.where !== "remote" && toolsOf(row.detail) !== null;
+      if (sameHostReplay) {
+        row.detail = `Environment defect: the run already executed on the host that lacks ${toolsOf(row.detail)}, and a recovery would replay the identical frozen contract on that same host, so none is launched. Install the tool or fix the dependency install on the host (or amend the contract's validate/env), then requeue.\n${String(row.detail ?? "")}`;
+        decided({ issue: n, what: `no recovery for ${row.code}: the frozen contract would fail identically on the same host`, why: firstLine(row.detail), alternative: "requeue a recovery lane that replays the same frozen contract on the same host" });
+      }
       if (repeatEnv) {
         row.detail = `Environment defect: the recovery attempt failed with the same \`${row.code}\` as the run before it, so no further rebuild is spent; run the command below on the host with the project's real dependencies.\n${String(row.detail ?? "")}`;
         decided({ issue: n, what: `no further recovery for ${row.code}: the same failure repeated`, why: firstLine(row.detail), alternative: "requeue another recovery lane that rebuilds against the same frozen command" });
       }
-      if (!repeatEnv && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+      if (!repeatEnv && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
         classUsed.set(`${n}:${cls}`, attempt);
         // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
@@ -1014,6 +1028,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { gone = (await dispatchCheck(n)) ?? null; } catch { gone = null; }
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
+      // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
+      if (!cancelled && !halted) { refreshHeld(); if (opHeld.has(n)) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
@@ -1264,6 +1280,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const fmt = (ns) => ns.map((n) => `#${n}`).join(", ");
     const held = [...next].filter((n) => !opHeld.has(n)), freed = [...opHeld].filter((n) => !next.has(n));
     opHeld = next;
+    for (const n of held) if (running.has(n)) update({ issue: n, outcome: "hold", detail: `#${n} held after launch: lane still running` }); // #5526
     if (held.length) {
       decided({ issue: null, what: `held ${fmt(held)} (forgedock orchestrate --hold)`, why: "operator request", alternative: "cancel the batch" });
       update({ issue: null, outcome: "hold", detail: fmt(held) });
@@ -1518,6 +1535,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (n === null) { budgetHeld = ready.length > 0; break; }
           const g = grant(n, wanted);
           if (g === "busy") continue; // #4481: not ready any more this pass (notBefore), so `ready` drops it
+          if (!g && (notBefore.get(n) ?? 0) > t) continue; // #5592: this issue waits on its own (host overload, pool slots): the issues behind it are still tried
           if (!g) break;
           pending.splice(pending.indexOf(n), 1);
           if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
@@ -1533,6 +1551,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (running.size >= K()) break;
           const g = grant(n, wanted);
           if (g === "busy") continue; // #4481
+          if (!g && (notBefore.get(n) ?? 0) > t) continue; // #5592: per-issue wait, not a full host queue
           if (!g) break;
           pending.splice(pending.indexOf(n), 1); start(n); started++;
         }

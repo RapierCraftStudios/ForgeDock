@@ -80,11 +80,12 @@ function makeWorld(dir, script) {
   const io = {
     gh: async (a) => {
       const k = a.slice(0, 2).join(" "), n = Number(a[2]), val = (f) => a[a.indexOf(f) + 1];
+      if (a[0] === "api" && a.includes("PATCH")) { const m = /issues\/comments\/(\d+)$/.exec(a.find((x) => /issues\/comments\//.test(x)) ?? ""); const body = a[a.indexOf("-f") + 1].replace(/^body=/, ""); for (const i of Object.values(gh.issues)) if (m && i.comments[m[1] - 1] !== undefined && i.comments[m[1] - 1].startsWith("<!-- FORGE:STATUS -->")) { i.comments[m[1] - 1] = body; return "{}"; } throw new Error("no such comment"); } // #5592: the one FORGE:STATUS comment is edited in place
       if (a[0] === "api") return "";
       if (k === "repo view") return "main\n";
       if (k === "issue view" && a.includes("milestone")) return JSON.stringify({ milestone: null });
       if (k === "issue view") { const i = gh.issues[n]; return JSON.stringify({ number: i.number, title: i.title, body: i.body, state: i.state, comments: [] }); }
-      if (k === "issue comment") { gh.issues[n].comments.push(val("--body")); return `https://github.com/o/r/issues/${n}#c${gh.issues[n].comments.length}\n`; }
+      if (k === "issue comment") { gh.issues[n].comments.push(val("--body")); return `https://github.com/o/r/issues/${n}#issuecomment-${gh.issues[n].comments.length}\n`; }
       if (k === "issue edit") { for (let i = 0; i < a.length; i++) { if (a[i] === "--add-label") a[i + 1].split(",").forEach((l) => gh.issues[n].labels.add(l)); if (a[i] === "--remove-label") a[i + 1].split(",").forEach((l) => gh.issues[n].labels.delete(l)); } return ""; }
       if (k === "issue close") { Object.assign(gh.issues[n], { state: "CLOSED", reason: val("--reason") }); return ""; }
       if (k === "pr list") return "[]";
@@ -189,7 +190,7 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search", "export"]) });
     merged(o); assert.ok(o.staging.search && o.staging.export && !o.staging.billingChanged);
     assert.deepEqual([o.counts.builder, o.counts.reviewer], [2, 1]);
-    assert.deepEqual(o.markers, ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
+    assert.deepEqual(o.markers, ["FORGE:STATUS", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS"]); // #5592: STARTED and TRAJECTORY are sections of the one status comment
   });
   it("2 omission: the contract silently drops requirement 3; review catches it; issue stays open, nothing merged", async () => {
     const o = await runCase({ contract: OMIT, impl: (t) => fix(t, ["scrape", "search"]) });

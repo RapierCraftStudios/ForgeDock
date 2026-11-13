@@ -8,6 +8,7 @@ import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
 import { makeIo, readSubagentModel } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
@@ -113,12 +114,13 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 };
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
     const bin = pinnedBin || resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
-    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
+    // #5516: fullSession keeps slash commands/Skill/Task (the release test gate invokes /test-gate); otherwise the lean minimal group
+    const flags = [...(fullSession ? [] : buildLeanSessionFlags(caps)), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
     // #4843 owned models, in extraArgs so FORGEDOCK_FULL_SESSION=1 (which drops sessionFlags) keeps them (#4848 BUG-1);
     // #4456 re-read hooks: builder sessions only, and like the other session flags not in a full session
     const settings = leanSettingsFlags({ subagentModel, reread: rereadNudge && !readOnly && !noTools && process.env.FORGEDOCK_FULL_SESSION !== "1", guard: sandboxed });
@@ -295,25 +297,68 @@ export async function requiredChecksRead({ gh, repo, lane }) {
 
 export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
+/** #5592: stdout cap of a lane-path git/gh/docker call; output past it is cut, never an error. */
+export const EXEC_CAPPED_BYTES = 100 * 1024 * 1024;
+/**
+ * #5592: like `execFile` resolving stdout, but a child that prints more than `cap` bytes is stopped and its output
+ * truncated (marker appended) instead of failing with `stdout maxBuffer length exceeded`: a commit that removes a
+ * 485 MB archive made `git diff base...HEAD` kill the lane after it had pushed. A non-zero exit rejects with
+ * {stdout, stderr, code} like execFile, unless the exit came from our own stop (then the capped text is the result).
+ */
+export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_CAPPED_BYTES, spawnFn = spawn } = {}) {
+  return new Promise((res, rej) => {
+    const child = spawnFn(bin, args, { cwd, ...(env ? { env } : {}), stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = []; let size = 0, cut = false, err = "", timedOut = false;
+    const timer = timeout > 0 ? setTimeout(() => { timedOut = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }, timeout) : null;
+    child.stdout.on("data", (b) => {
+      if (cut) return;
+      const room = cap - size;
+      if (b.length > room) { if (room > 0) chunks.push(b.subarray(0, room)); size = cap; cut = true; try { child.kill("SIGTERM"); } catch { /* gone */ } return; }
+      chunks.push(b); size += b.length;
+    });
+    child.stderr.on("data", (b) => { if (err.length < 64000) err += String(b); });
+    child.on("error", (e) => { if (timer) clearTimeout(timer); rej(e); });
+    child.on("close", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      const out = Buffer.concat(chunks).toString("utf8") + (cut ? `\n[forgedock: output truncated at ${cap} bytes]\n` : "");
+      if (cut || code === 0) return res(out);
+      const e = new Error(`Command failed: ${bin} ${args.join(" ")}${timedOut ? " (timed out)" : ""}\n${err}`);
+      Object.assign(e, { code: timedOut ? null : code, signal, killed: timedOut, stdout: out, stderr: err });
+      rej(e);
+    });
+  });
+}
+
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;
 /** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env. */
-export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }) {
-  return new Promise((done) => {
+/** #5598: best-effort removal of the containers a check started (labelled by the docker shim); never throws. */
+export async function reapContainers(label, { timeoutMs = 20000, env = process.env } = {}) {
+  try {
+    const ids = String((await pexec("docker", ["ps", "-aq", "--filter", `label=${label}`], { timeout: timeoutMs, env })).stdout ?? "").split(/\s+/).filter(Boolean);
+    if (ids.length) await pexec("docker", ["rm", "-f", ...ids], { timeout: timeoutMs, env });
+    return ids;
+  } catch { return []; }
+}
+
+export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, graceMs = 2000 }) {
+  const reapLabel = `forgedock.reap=${randomBytes(8).toString("hex")}`;
+  const inner = new Promise((done) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) }); }
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel } }); }
     catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
-    const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
-    const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
+    const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
+    const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
     child.stdout.on("data", add); child.stderr.on("data", add);
-    child.on("error", (e) => { clearTimeout(timer); done({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
+    child.on("error", (e) => { clearTimeout(timer); finish({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
     child.on("close", (code) => {
       clearTimeout(timer);
       const tail = out.slice(-CHECK_OUTPUT_CAP);
-      done(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
+      finish(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
+  return inner.then(async (r) => { await reapContainers(reapLabel, { env: { ...process.env, ...(env ?? {}) } }); return r; });
 }
 
 /**
@@ -344,7 +389,7 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
 export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
-  const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
+  const run = (bin) => async (args, opts = {}) => execCapped(bin, args, { cwd: opts.cwd, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) });
   /** #5235: paths the other open PRs on `lane` carry (gh only, no fetch); [] on any failure. */
   const openPrFiles = async (cwd, lane) => {
     try {
@@ -509,8 +554,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
       try {
-        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
-        return m ? { base: m[1], head: m[2] } : null;
+        const m = /BASE=(\w+) HEAD=(\w+)(?: PRISTINE=(\w+))?/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
+        return m ? { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}) } : null; // #5544: pristine only when the base's own test version failed
       } catch { return null; }
     },
     /**
