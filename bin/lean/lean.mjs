@@ -24,6 +24,8 @@ import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
 import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
+import { botComments, findStatusComment, appendStatus, withinCap } from "./status-comment.mjs"; // #5600
+import { clearPipelineLabels } from "./parked-relabel.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -354,7 +356,9 @@ export async function runCore(o) {
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
+  let botCount = 0; // #5600: trusted FORGE comments on the issue (read at claim) plus this run's; past the cap only terminal markers post
   const post = async (marker, body, on = issue) => {
+    if (on === issue) { if (!withinCap(botCount, marker)) return null; botCount++; }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
     const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
@@ -1334,7 +1338,11 @@ export async function runCore(o) {
     const fetchP = step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
     await step("claim", async () => {
     await label("investigating");
-    await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
+    botCount = botComments(iss.comments, isTrustedIssueComment).length;
+    const prior = findStatusComment(iss.comments, isTrustedIssueComment); // #5600: a requeue edits the one status comment instead of posting another
+    const startedLine = `Started work on #${issue} (base \`${lane}\`).`;
+    if (!(prior && await appendStatus({ gh: ghw, repo, existing: prior, line: `${startedLine} (requeued${recover ? `, recovery for \`${recover.code}\`` : ""})`, render: capComment }))) await post("FORGE:STARTED", startedLine);
+    if (prior || recover || (iss.labels ?? []).some((l) => /^(needs-human|parked:|remediation-queue)/.test(l?.name ?? l))) await clearPipelineLabels({ gh: ghw, repo, issue, labels: (iss.labels ?? []).map((l) => l?.name ?? l) });
     if (recover) {
       // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", "needs-human"]); } catch { /* best effort */ }
@@ -3796,6 +3804,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`refactor:split chain issue not filed (the maintenance scan re-files the hotspot): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     await label("merged");
+    await clearPipelineLabels({ gh: ghw, repo, issue }); // #5600: a merged issue keeps no needs-human / parked:* / remediation-queue
     if (!keepOpen) { const f = await resolveFindingLabel({ io, issue, labels: iss.labels, reason: "merged" }); if (f.error) T.anomalies.push(`finding label not resolved: ${f.error}`); } // #5254
     try { // #4695/#4737: FORGE:DECISION records and supersession are persisted only after the merge
       const rec = await recordDecisions(pendingDecisions, { issue, repo, post });

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parkedRelabel } from "./parked-relabel.mjs";
+import { parkedRelabel, clearPipelineLabels } from "./parked-relabel.mjs";
 
 // A fake issue whose label set a stub `gh` edits; `missing` labels cannot be created or added.
 const fake = ({ missing = [], failVerify = false } = {}) => {
@@ -41,5 +41,25 @@ describe("#5466 parkedRelabel", () => {
     const f = fake({ failVerify: true });
     assert.equal((await f.run()).ok, false);
     assert.deepEqual([...f.labels], ["needs-human"]);
+  });
+});
+
+describe("#5600 clearPipelineLabels", () => {
+  const mk = (names) => {
+    const edits = [];
+    const gh = async (a) => { if (a[1] === "view") return JSON.stringify({ labels: names.map((name) => ({ name })) }); edits.push(a); return ""; };
+    return { edits, gh };
+  };
+  it("removes exactly needs-human, needs-human:external, remediation-queue and parked:*", async () => {
+    const { edits, gh } = mk(["bug", "needs-human", "needs-human:external", "parked:ci.red", "remediation-queue", "workflow:building"]);
+    const out = await clearPipelineLabels({ gh, repo: "o/r", issue: 7 });
+    assert.deepEqual(out, ["needs-human", "needs-human:external", "parked:ci.red", "remediation-queue"]);
+    assert.deepEqual(edits[0].filter((x, i) => edits[0][i - 1] === "--remove-label"), out);
+  });
+  it("does nothing when none is present, and swallows gh failures", async () => {
+    const { edits, gh } = mk(["bug"]);
+    assert.deepEqual(await clearPipelineLabels({ gh, repo: "o/r", issue: 7 }), []);
+    assert.equal(edits.length, 0);
+    assert.deepEqual(await clearPipelineLabels({ gh: async () => { throw new Error("x"); }, repo: "o/r", issue: 7 }), []);
   });
 });

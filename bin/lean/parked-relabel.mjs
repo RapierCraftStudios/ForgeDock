@@ -30,3 +30,18 @@ export async function parkedRelabel({ gh, repo, issue, code }) {
   try { await gh(["issue", "edit", n, "-R", repo, "--remove-label", "needs-human"]); } catch { return { ok: false, queued }; }
   return { ok: true, queued };
 }
+
+/** #5600: the labels a requeue or a merge must not leave behind (`needs-human`, `needs-human:external`, `parked:*`, `remediation-queue`). */
+export const isPipelineLabel = (l) => l === "needs-human" || l === "needs-human:external" || l === REMEDIATION_QUEUE_LABEL || String(l).startsWith("parked:");
+
+/** Removes the pipeline labels the issue carries (read back first, so nothing absent is named); best effort. Returns the removed names. */
+export async function clearPipelineLabels({ gh, repo, issue, labels = null }) {
+  const n = String(issue);
+  try {
+    const names = labels ?? (JSON.parse(await gh(["issue", "view", n, "-R", repo, "--json", "labels"]))?.labels ?? []).map((l) => l?.name);
+    const stale = names.filter(isPipelineLabel);
+    if (!stale.length) return [];
+    await gh(["issue", "edit", n, "-R", repo, ...stale.flatMap((l) => ["--remove-label", l])]);
+    return stale;
+  } catch { return []; }
+}

@@ -59,7 +59,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trusted body carries it for this lane is satisfied when that PR reads MERGED with
    that merge commit and the commit is an ancestor of `origin/<lane>` (`phases.mjs`
    `mergedToByState`), checked before the PR-list search.
-4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
+4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment; a requeue edits the existing `FORGE:STARTED` comment in place (`status-comment.mjs`, #5600) and `post` stops at 10 trusted bot comments per issue (`FORGE:NEEDS_HUMAN`/`TRAJECTORY` exempt); a requeue and a merge clear `needs-human`, `needs-human:external`, `parked:*` and `remediation-queue` (`clearPipelineLabels`, `parked-relabel.mjs`);
    resumes an open PR / remote branch. Before an existing `lean-<N>` worktree is
    removed (#4162): processes whose cwd is inside it (an orphaned runner from a
    dead run, found via `/proc`) get SIGTERM, then SIGKILL after 5 s
