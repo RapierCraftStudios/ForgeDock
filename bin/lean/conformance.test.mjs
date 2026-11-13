@@ -1829,10 +1829,19 @@ describe("test plan frozen with the contract (#5445)", () => {
     assert.equal(bug(K([row("R1", { repro: "no-repro", reason: "spec-only change" }), row("R2")])), "");
   });
   it("a proof that echoes a deliverable is rejected; one about the 403 is accepted", () => {
-    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable D1 \(\d+%\); phrase it as the wrong behaviour observed on base/);
+    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable D1 \(\d+%; repeated stems: [^)]*\); phrase it as the wrong behaviour observed on base/);
     assert.equal(proofEchoesDeliverable("the listing json URL is rewritten", D.slice(0, 1)), true);
     assert.equal(proofEchoesDeliverable("returns 200 JSON instead of 403", D.slice(0, 1)), false);
     assert.equal(proofEchoDetail("the listing json URL is rewritten", D.slice(0, 1)).id, "D1");
+  });
+  it("#5603 a proof naming the fixed function but stating the symptom is not an echo; a restatement lists the repeated words; repro message has an example id", () => {
+    const sym = "rewrite the listing URL returns 403 today, assert 200 JSON";
+    assert.equal(proofEchoesDeliverable(sym, D.slice(0, 1)), false);
+    assert.equal(proofEchoDetail(sym, D.slice(0, 1)), null);
+    assert.equal(proofEchoesDeliverable("scrape js", [{ id: "D1", path: "src/scrape.js", change: "scrape js", requirements: ["R1"] }]), false);
+    assert.equal(proofEchoesDeliverable("rewrite the listing URL to old.reddit.com", [{ id: "D1", path: "src/scrape.js", change: "rewrite the listing .json URL to old.reddit.com", requirements: ["R1"] }]), true);
+    assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /repeated stems: .*listi/);
+    assert.match(bug(K([row("R1", { repro: "" }), row("R2")])), /repro must be a test id[^\n]*tests\/test_scrape\.py::test_listing_returns_json/);
   });
   it("level, its reason and the command are checked; mocking the bug's component is rejected", () => {
     assert.match(testPlanProblems(K([row("R1", { level: "manual" })])).join(), /level must be one of/);

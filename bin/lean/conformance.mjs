@@ -475,18 +475,27 @@ const TEST_LEVELS = ["unit", "integration", "e2e", "live"];
 const planWords = (t) => new Set(String(t ?? "").toLowerCase().match(/[a-z0-9]{3,}/g)?.map((w) => w.slice(0, 5)) ?? []);
 const NEG_MOCK_PLAN_RE = /\b(?:no|not|never|without|non|avoid\w*)[ -]+(?:\w+[ -]+)?(?:mock|stub|fake)\w*/gi;
 const deliverableWords = (d) => planWords(`${d?.change ?? ""} ${d?.path ?? ""}`);
-/** #5445: the deliverable whose words cover the largest share of the proof's, as {id, pct, ratio}, or null. Pure. */
+const SYMPTOM_RE = /\b(?:today|currently|instead|not|fails?|failing|raises?|errors?|wrong|crash\w*|[45]\d\d)\b/i;
+/**
+ * #5445/#5603: the deliverable whose `change` words cover the largest share of the proof's, as {id, pct, ratio, words}, or null.
+ * Path words (names of what is fixed) never count, a proof under 3 words is never an echo, and a proof that states a wrong
+ * behaviour (SYMPTOM_RE) is a symptom statement, not a restatement. Pure.
+ */
 export function proofEchoDetail(proof, deliverables) {
   const pw = planWords(proof);
-  if (!pw.size) return null;
+  if (pw.size < 3 || SYMPTOM_RE.test(String(proof ?? ""))) return null;
   let best = null;
-  for (const d of deliverables) { const dw = deliverableWords(d); let n = 0; for (const w of pw) if (dw.has(w)) n++; const ratio = n / pw.size; if (!best || ratio > best.ratio) best = { id: d?.id ?? d?.path ?? "?", pct: Math.round(ratio * 100), ratio }; }
+  for (const d of deliverables) {
+    const dw = planWords(d?.change); const words = [...pw].filter((w) => dw.has(w)); const ratio = words.length / pw.size;
+    if (!best || ratio > best.ratio) best = { id: d?.id ?? d?.path ?? "?", pct: Math.round(ratio * 100), ratio, words };
+  }
   return best;
 }
 /** #5445: a proof whose words are (almost) all in the deliverable text of its requirement only restates the fix. Pure. */
 export function proofEchoesDeliverable(proof, deliverables) {
   return (proofEchoDetail(proof, deliverables)?.ratio ?? 0) >= 0.7;
 }
+const REPRO_EXAMPLE = 'e.g. "tests/test_scrape.py::test_listing_returns_json" or "bin/lean/x.test.mjs#listing returns json"; or "no-repro" with a reason';
 const MOCK_STOP = new Set(["only", "the", "and", "out", "with", "for", "its", "that", "this", "any", "all", "are", "was", "were", "been", "being", "than", "then", "also", "real"]);
 /**
  * #5587: the first non-negated mock/stub/fake mention in `reason` whose target (up to 4 words after the mock word, or up to 3 words
@@ -533,7 +542,7 @@ export function testPlanProblems(c, { required = false } = {}) {
     if (blank(t.proof)) problems.push(`${id}: test_plan proof must name the root-cause observable that shows the cause is fixed`);
     else {
       const echo = proofEchoDetail(t.proof, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
-      if (echo && echo.ratio >= 0.7) problems.push(`${id}: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable ${echo.id} (${echo.pct}%); phrase it as the wrong behaviour observed on base (symptom observed today → assertion that fails on base and passes on head, e.g. \"www.reddit.com listing .json returns 403 today → assert the fetch returns 200 JSON\")`);
+      if (echo && echo.ratio >= 0.7) problems.push(`${id}: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable ${echo.id} (${echo.pct}%; repeated stems: ${echo.words.join(", ")}); phrase it as the wrong behaviour observed on base (symptom observed today → assertion that fails on base and passes on head, e.g. \"www.reddit.com listing .json returns 403 today → assert the fetch returns 200 JSON\")`);
     }
     if (!TEST_LEVELS.includes(t.level)) problems.push(`${id}: test_plan level must be one of ${TEST_LEVELS.join("|")}`);
     if (blank(t.level_reason)) problems.push(`${id}: test_plan level needs a level_reason (why the cheapest level that observes the cause)`);
@@ -541,8 +550,8 @@ export function testPlanProblems(c, { required = false } = {}) {
       const mocked = mockedDeliverable(t.level_reason, dels.filter((d) => (d?.requirements ?? []).includes(t.requirement)));
       if (mocked) problems.push(`${id}: test_plan level_reason mocks \"${mocked.phrase}\", which is in deliverable ${mocked.id}; level_reason must not contain the words mock/stub/fake unless negated or aimed outside the deliverables; describe the real component exercised and where the I/O boundary is; allowed: a real instance of ${mocked.id}'s component, with stubs only at its I/O boundary (clock, network, browser factory) and, for DB code, a real database session`);
     }
-    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason`);
-    else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject`);
+    if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head), ${REPRO_EXAMPLE}`);
+    else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject, e.g. "spec-only change, no runnable behaviour"`);
     if (blank(t.command)) problems.push(`${id}: test_plan needs the exact command validate runs`);
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem(id, p));
@@ -613,7 +622,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
-    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
+    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix, e.g. {"path":"tests/test_x.py","id":"test_x_returns_json","command":"pytest tests/test_x.py -k test_x_returns_json"}) or "none" with a repro_test_reason`);
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));
