@@ -177,7 +177,8 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### Related Issues
 ### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
 ${LEAN_DIR}/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}
-If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]}. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
+
+If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<defer, post-deploy>","bucket":"<defer, post-deploy: post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|host>","check":"<post-deploy: id in .forge/post-deploy-checks.json>","evidence":"<file:line, required for not-applicable>","verify":"<optional: in_lane|out_of_band>"}],

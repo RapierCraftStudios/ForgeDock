@@ -400,7 +400,7 @@ export async function runCore(o) {
       const run = async (command, sha) => { // repro on a detached checkout of the live sha under the run TMPDIR (#5557)
         const dir = `${runTmp ?? process.env.TMPDIR ?? "/tmp"}/classify-live-${issue}`;
         await git(["worktree", "add", "--detach", dir, sha]);
-        try { const x = await io.runCommand({ command, cwd: dir, timeoutMs: 120000, env: laneEnv() }); const r = x?.r ?? x; return typeof r?.exit === "number" ? r.exit : 1; }
+        try { const x = await io.runCommand({ command, cwd: dir, timeoutMs: 120000, env: laneEnv() }); const r = x?.r ?? x; const c = r?.rc ?? r?.exit; return typeof c === "number" ? c : 1; /* runCommand reports rc */ }
         finally { await git(["worktree", "remove", "--force", dir]).catch(() => {}); }
       };
       rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha, run: io.runCommand ? run : undefined });

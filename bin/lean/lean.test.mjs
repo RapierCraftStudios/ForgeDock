@@ -8693,6 +8693,19 @@ describe("FORGE:CLASSIFY wiring (#5557)", () => {
     const c = bad.comments.find((x) => x.includes("FORGE:CLASSIFY"));
     assert.ok(c && /text-only/.test(c), "a second invalid record falls back to text-only after the one correction");
   });
+  it("a repro that passes (runCommand rc 0) on the live sha downgrades exists_in: live; a failing one (rc 1) keeps it", async () => {
+    const LIVE = JSON.stringify({ type: "bug", severity: "P2", exists_in: "live", flag: "none", confidence: 0.8, exists_in_evidence: { cite: "src/a.js:1", repro: { command: "node r.js", red_on_live: true, green_after: null } } });
+    const go = async (rc) => {
+      const w = world(); const g = w.io.git, rd = w.io.fs.read;
+      w.io.git = async (a, o) => (a[0] === "show" && /\.forge\/release\.yaml$/.test(a.at(-1)) ? POLICY.replace("default: main", "default: main, release: rel") : a[0] === "rev-parse" && /origin\/rel$/.test(a.at(-1)) ? "abc123\n" : a[0] === "cat-file" ? "" : a[0] === "show" && /^abc123:/.test(a.at(-1)) ? "line1\n" : a[0] === "worktree" ? "" : g(a, o));
+      w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? LIVE : rd(p));
+      w.io.runCommand = async () => ({ rc, output: "" });
+      await run(w);
+      return w.comments.find((x) => x.includes("FORGE:CLASSIFY")) ?? "";
+    };
+    assert.match(await go(0), /"exists_in": "unknown"/);
+    assert.match(await go(1), /"exists_in": "live"/);
+  });
   it("is a no-op without .forge/release.yaml", async () => {
     const w = world();
     await run(w);
