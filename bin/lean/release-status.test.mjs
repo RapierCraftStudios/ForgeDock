@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { releaseFromCli, gateState } from "./release.mjs";
-import { collectStatus, renderReleaseStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, policyFromYaml, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
+import { controlFromCli, VERBS } from "./release-control.mjs";
+import { CONTROL_VERBS, collectStatus, renderReleaseStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, policyFromYaml, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
 
 const REPO = "o/r", ID = "r20261112-141530-4242", HEAD = "a".repeat(40);
 const STATE = { v: 1, id: ID, repo: REPO, steps: { preflight: { done: true, at: "T1" }, "release-pr": { done: true, at: "T2", result: { pr: 7, head: HEAD } }, promotion: { done: false, at: "T3" } }, release: { snapshot: "s1", issues: [12, 5], picks: [] } };
-const GOLDEN_ISSUE = "{\"schema\":\"forgedock.release.explain/v1\",\"kind\":\"issue\",\"repo\":\"o/r\",\"issue\":40,\"lane\":\"pool\",\"classification\":\"absent\",\"trace\":[{\"step\":1,\"rule\":\"classification\",\"config_key\":\"FORGE:CLASSIFY\",\"result\":\"n/a\",\"detail\":\"classification: absent\",\"would_change\":[]},{\"step\":2,\"rule\":\"skip_labels\",\"config_key\":\"plan.skip_labels\",\"result\":\"pass\",\"detail\":\"no skip label\",\"would_change\":[]},{\"step\":3,\"rule\":\"min_confidence\",\"config_key\":\"classify.min_confidence\",\"result\":\"n/a\",\"detail\":\"no minimum configured\",\"would_change\":[]},{\"step\":4,\"rule\":\"risk.rules\",\"config_key\":\"risk.rules\",\"result\":\"n/a\",\"detail\":\"no rules configured\",\"would_change\":[]},{\"step\":5,\"rule\":\"forces\",\"config_key\":\"forces\",\"result\":\"n/a\",\"detail\":\"no rules configured\",\"would_change\":[]},{\"step\":6,\"rule\":\"priority\",\"config_key\":\"issue_watch.watches.<name>.immediate\",\"result\":\"pass\",\"detail\":\"priority P1\",\"would_change\":[]},{\"step\":7,\"rule\":\"theme\",\"config_key\":\"issue_watch.watches.<name>.theme_map\",\"result\":\"fail\",\"detail\":\"no theme rule matches\",\"would_change\":[\"add a theme_map rule (label:, scope: or path:) in forge.yaml\"]},{\"step\":8,\"rule\":\"depends_on\",\"config_key\":\"release.managed\",\"result\":\"pass\",\"detail\":\"no open prerequisite\",\"would_change\":[]},{\"step\":9,\"rule\":\"release_set\",\"config_key\":\"release.mode\",\"result\":\"fail\",\"detail\":\"no release recorded\",\"would_change\":[\"include it in the next release cut\"]},{\"step\":10,\"rule\":\"planner\",\"config_key\":\"release.planner\",\"result\":\"n/a\",\"detail\":\"planner: not installed\",\"would_change\":[]},{\"step\":11,\"rule\":\"lane\",\"config_key\":\"controls.jsonl lane | plan lane\",\"result\":\"n/a\",\"detail\":\"lane pool (plan)\",\"would_change\":[\"label or config key above, or: forgedock release lane #40 --force <lane> --reason <reason>\"]}],\"would_change\":[\"add a theme_map rule (label:, scope: or path:) in forge.yaml\",\"include it in the next release cut\",\"label or config key above, or: forgedock release lane #40 --force <lane> --reason <reason>\"],\"next_actions\":[\"forgedock release status --repo o/r --json\"]}";
+const GOLDEN_ISSUE = "{\"schema\":\"forgedock.release.explain/v1\",\"kind\":\"issue\",\"repo\":\"o/r\",\"issue\":40,\"lane\":\"pool\",\"classification\":\"absent\",\"trace\":[{\"step\":1,\"rule\":\"classification\",\"config_key\":\"FORGE:CLASSIFY\",\"result\":\"n/a\",\"detail\":\"classification: absent\",\"would_change\":[]},{\"step\":2,\"rule\":\"skip_labels\",\"config_key\":\"plan.skip_labels\",\"result\":\"pass\",\"detail\":\"no skip label\",\"would_change\":[]},{\"step\":3,\"rule\":\"min_confidence\",\"config_key\":\"classify.min_confidence\",\"result\":\"n/a\",\"detail\":\"no minimum configured\",\"would_change\":[]},{\"step\":4,\"rule\":\"risk.rules\",\"config_key\":\"risk.rules\",\"result\":\"n/a\",\"detail\":\"no rules configured\",\"would_change\":[]},{\"step\":5,\"rule\":\"forces\",\"config_key\":\"forces\",\"result\":\"n/a\",\"detail\":\"no rules configured\",\"would_change\":[]},{\"step\":6,\"rule\":\"priority\",\"config_key\":\"issue_watch.watches.<name>.immediate\",\"result\":\"pass\",\"detail\":\"priority P1\",\"would_change\":[]},{\"step\":7,\"rule\":\"theme\",\"config_key\":\"issue_watch.watches.<name>.theme_map\",\"result\":\"fail\",\"detail\":\"no theme rule matches\",\"would_change\":[\"add a theme_map rule (label:, scope: or path:) in forge.yaml\"]},{\"step\":8,\"rule\":\"depends_on\",\"config_key\":\"release.managed\",\"result\":\"pass\",\"detail\":\"no open prerequisite\",\"would_change\":[]},{\"step\":9,\"rule\":\"release_set\",\"config_key\":\"release.mode\",\"result\":\"fail\",\"detail\":\"no release recorded\",\"would_change\":[\"include it in the next release cut\"]},{\"step\":10,\"rule\":\"planner\",\"config_key\":\"release.planner\",\"result\":\"n/a\",\"detail\":\"planner: not installed\",\"would_change\":[]},{\"step\":11,\"rule\":\"lane\",\"config_key\":\"controls.jsonl lane | plan lane\",\"result\":\"n/a\",\"detail\":\"lane pool (plan)\",\"would_change\":[\"label or config key above, or: forgedock release lane #40 --force <train|release|p0|exclude> --reason <reason>\"]}],\"would_change\":[\"add a theme_map rule (label:, scope: or path:) in forge.yaml\",\"include it in the next release cut\",\"label or config key above, or: forgedock release lane #40 --force <train|release|p0|exclude> --reason <reason>\"],\"next_actions\":[\"forgedock release status --repo o/r --json\"]}";
 const GOLDEN_PR = "{\"schema\":\"forgedock.release.explain/v1\",\"kind\":\"pr\",\"repo\":\"o/r\",\"pr\":7,\"head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"pass\",\"demoted\":[],\"trace\":[{\"step\":1,\"rule\":\"gate_marker\",\"config_key\":\"release.gate\",\"result\":\"pass\",\"detail\":\"FORGE:GATE_PASS marker: pass\",\"would_change\":[]},{\"step\":2,\"rule\":\"deploy_gate\",\"config_key\":\"forge/deploy-gate\",\"result\":\"pass\",\"detail\":\"forge/deploy-gate: success\",\"would_change\":[]},{\"step\":3,\"rule\":\"check:unit\",\"config_key\":\"branches.required_checks\",\"result\":\"pass\",\"detail\":\"success\",\"would_change\":[]}],\"would_change\":[],\"next_actions\":[\"forgedock release explain 7 --repo o/r --json\"]}";
 const GOLDEN_PR_TEXT = "PR #7  head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  decision=pass\n  1. pass  gate_marker  [release.gate]  FORGE:GATE_PASS marker: pass\n  2. pass  deploy_gate  [forge/deploy-gate]  forge/deploy-gate: success\n  3. pass  check:unit  [branches.required_checks]  success\n  next:\n    forgedock release explain 7 --repo o/r --json";
 const b64 = (o) => ({ content: Buffer.from(typeof o === "string" ? o : JSON.stringify(o)).toString("base64") });
@@ -73,7 +74,8 @@ describe("release status / explain (#5554)", () => {
       `    forgedock release --resume ${ID} --repo o/r --merge`,
       `    forgedock release hold ${ID} --repo o/r --reason <reason>`,
       `    forgedock release cancel ${ID} --repo o/r --reason <reason>`,
-      `    forgedock release lane ${ID} --repo o/r --force <lane> --reason <reason>`,
+      "    forgedock release lane #5 --repo o/r --force <train|release|p0|exclude> --reason <reason>",
+      "    forgedock release lane #12 --repo o/r --force <train|release|p0|exclude> --reason <reason>",
       `    forgedock release explain 7 --repo o/r`,
       `    forgedock release explain ${ID} --repo o/r`,
       `    forgedock release status ${ID} --repo o/r --json`,
@@ -117,11 +119,13 @@ describe("release status / explain (#5554)", () => {
     const policy = { min_confidence: 0.8, risk_rules: [{ label: "risky", lane: "solo" }], forces: [{ label: "force-x" }] };
     PLANNER_RULES.length = 0; registerPlannerRule(() => ({ rule: "units_max", config_key: "plan.units_max", result: "pass", detail: "ok" }));
     try {
-      const e = await explainIssue({ io: fakeIo({ issues }), repo: REPO, number: 12, state: { id: ID, release: { issues: [12] } }, watch: { theme_map: { api: ["scope:api"] } }, policy, controls: [{ type: "lane", issue: 12, lane: "solo", actor: "op" }] });
+      const e = await explainIssue({ io: fakeIo({ issues }), repo: REPO, number: 12, state: { id: ID, release: { issues: [12] } }, watch: { theme_map: { api: ["scope:api"] } }, policy, lanes: { 12: { force: "p0", reason: "r", actor: "op", at: "T" } } });
       assert.deepEqual(e.classification, { files: ["a.js"], confidence: 0.4, source: "model", set_by: "bot" });
       assert.deepEqual(e.trace.map((t) => [t.rule, t.config_key, t.result]).slice(0, 5), [["classification", "FORGE:CLASSIFY", "pass"], ["skip_labels", "plan.skip_labels", "pass"], ["min_confidence", "classify.min_confidence", "fail"], ["risk.rules", "risk.rules[0]", "fail"], ["forces", "forces[0]", "pass"]]);
       assert.equal(e.trace.at(-2).rule, "units_max"); assert.ok(!e.trace.some((t) => t.rule === "planner"));
-      assert.equal(e.lane, "solo"); assert.match(e.trace.at(-1).detail, /control decision by op/);
+      assert.equal(e.lane, "p0"); assert.match(e.trace.at(-1).detail, /control decision by op/);
+      const viaLog = await explainIssue({ io: fakeIo({ issues }), repo: REPO, number: 12, state: null, controls: [{ verb: "lane", after: { 12: "exclude" }, actor: "ops" }, { verb: "lane", after: { 12: "train" }, actor: "ops2" }] });
+      assert.equal(viaLog.lane, "train"); assert.match(viaLog.trace.at(-1).detail, /by ops2/);
     } finally { PLANNER_RULES.length = 0; }
   });
 
@@ -143,12 +147,16 @@ describe("release status / explain (#5554)", () => {
 
   it("R6: explain <PR> lists each required check, the demotion (actor, expiry, reason, issue) and the gate decision", async () => {
     const io = fakeIo({ marker: "failure", deployGate: "failure", checks: [{ name: "lint", conclusion: "failure" }, { name: "unit", conclusion: "failure" }, { name: "e2e", conclusion: "success" }] });
-    const controls = [{ type: "exempt", check: "unit", actor: "op", until: "2026-12-01T00:00:00Z", reason: "flaky", issue: 99 }];
-    const e = await explainPr({ io, repo: REPO, pr: 7, gateState, controls });
+    const exemptions = { unit: { mode: "skip", issue: "99", reason: "flaky", actor: "op", at: "2026-11-30T00:00:00Z", until: "2026-12-01T00:00:00Z" } }; // the `_active.exemptions` record `release exempt` writes
+    io.now = () => Date.parse("2026-11-30T12:00:00Z");
+    const e = await explainPr({ io, repo: REPO, pr: 7, gateState, exemptions });
     assert.equal(e.decision, "hold");
     assert.deepEqual(e.trace.map((t) => [t.rule, t.result]), [["gate_marker", "fail"], ["deploy_gate", "fail"], ["check:e2e", "pass"], ["check:forge/deploy-gate", "fail"], ["check:lint", "fail"], ["check:unit", "n/a"]]);
-    assert.deepEqual(e.demoted, [{ check: "unit", actor: "op", expires: "2026-12-01T00:00:00Z", reason: "flaky", issue: 99 }]);
-    assert.match(e.trace.at(-1).detail, /demoted by op until 2026-12-01T00:00:00Z: flaky \(issue 99\)/);
+    assert.deepEqual(e.demoted, [{ check: "unit", mode: "skip", actor: "op", expires: "2026-12-01T00:00:00Z", reason: "flaky", issue: "99" }]);
+    assert.match(e.trace.at(-1).detail, /demoted \(skip\) by op until 2026-12-01T00:00:00Z: flaky \(issue 99\)/);
+    io.now = () => Date.parse("2026-12-02T00:00:00Z"); // expired: the check counts again
+    const late = await explainPr({ io, repo: REPO, pr: 7, gateState, exemptions });
+    assert.deepEqual(late.demoted, []); assert.equal(late.trace.at(-1).result, "fail");
     const ok = await explainPr({ io: fakeIo(), repo: REPO, pr: 7, gateState });
     assert.equal(ok.decision, "pass");
   });
@@ -164,7 +172,7 @@ describe("release status / explain (#5554)", () => {
 
   it("R2/R3: missing fields print unknown; recorded fields are shown; every next_actions command parses", async () => {
     const st = { ...STATE, wave: { n: 1, of: 3 }, lane: "fast", merge_sha: "m1", deploy: { run: 5, stage: "canary", attempt: 2 }, rollback: { target: "v1", armed: true }, steps: { ...STATE.steps, review: { done: true, result: { verdict: "pass" } }, promotion: { done: true } } };
-    const active = { lease: { holder: "h", epoch: 2, release: ID, heartbeat_at: "1970-01-01T00:00:00.100Z" }, holds: ["x"], intake: { paused: true } };
+    const active = { lease: { holder: "h", epoch: 2, release: ID, heartbeat_at: "1970-01-01T00:00:00.100Z" }, holds: { [ID]: { reason: "r", actor: "o", at: "T" } }, intake: { paused: true } };
     const io = fakeIo({ state: st, active }); io.now = () => 5100;
     const s = await collectStatus(base(io));
     assert.equal(s.wave, "1/3"); assert.equal(s.lane, "fast"); assert.equal(s.lease.heartbeat_age_s, 5); assert.equal(s.hold, true); assert.equal(s.intake, "paused");
@@ -174,7 +182,18 @@ describe("release status / explain (#5554)", () => {
     for (const k of ["wave", "lane", "cut_sha", "merge_sha", "deploy", "rollback_target", "auto_rollback", "intake"]) assert.ok(bare[k] === "unknown" || k === "cut_sha", k);
     for (const x of [s, bare]) for (const a of x.next_actions) parseNextAction(a);
     assert.ok(s.next_actions.some((a) => /release resume .* --reason <reason>/.test(a)));
-    assert.ok(s.next_actions.some((a) => /release rollback/.test(a)));
+    assert.ok(!s.next_actions.some((a) => /release rollback/.test(a)), "rollback has no CLI verb");
+    assert.ok(s.next_actions.some((a) => /release lane #12 .* --force <train\|release\|p0\|exclude> --reason <reason>/.test(a)));
+    assert.deepEqual(CONTROL_VERBS, VERBS);
+    // each command runs through the real CLI grammar: no usage refusal (read-only ones fully; control ones against a fake that rejects writes)
+    for (const a of s.next_actions) {
+      const [, , verb, ...rest] = a.replace("<reason>", "why").replace(/<train\|[^>]*>/, "release").split(/\s+/);
+      const io2 = fakeIo({ state: st, active }); let out = "";
+      if (VERBS.includes(verb)) { try { await controlFromCli(verb, rest, { io: io2, policy: null }); } catch { /* the write is refused by the fake */ } out = io2.printed.join("\n"); }
+      else if (verb === "status" || verb === "explain") { assert.equal(await releaseFromCli([verb, ...rest], { io: io2, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel") }, deps: {} }), 0, a); }
+      else assert.ok(a.includes("--resume"), a);
+      assert.doesNotMatch(out, /required|unknown control verb|must be one of|at least one/, a);
+    }
     assert.throws(() => parseNextAction("forgedock release hold x"), /needs --reason/);
     assert.throws(() => parseNextAction("forgedock release status x --bogus"), /unknown option/);
   });

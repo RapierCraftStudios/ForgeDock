@@ -10,6 +10,7 @@
  */
 import { readLedger, readActiveView as readActive } from "./release-ledger.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
+import { VERBS, LANES } from "./release-control.mjs";
 import { priorityOf, classifyTheme, closure } from "./issuewatch-release.mjs";
 
 export const STATUS_SCHEMA = "forgedock.release.status/v1";
@@ -17,9 +18,10 @@ export const EXPLAIN_SCHEMA = "forgedock.release.explain/v1";
 export const TERMINAL = ["done", "refused", "blocked", "cancelled"];
 export const SKIP_LABELS = ["epic", "needs-human", "post-deploy", "workflow:merged", "awaiting-promotion", "host-task"];
 const STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
-export const CONTROL_VERBS = ["hold", "resume", "cancel", "rollback", "lane"];
+/** The verbs `release <verb>` runs (#5556, `release-control.mjs`): the one source for what `next_actions[]` may name. */
+export const CONTROL_VERBS = VERBS;
 const OK = ["success", "neutral", "skipped"];
-const ACTION_FLAGS = ["--repo", "--merge", "--watch", "--resume", "--json", "--interval", "--reason", "--force"];
+const ACTION_FLAGS = ["--repo", "--merge", "--watch", "--resume", "--json", "--interval", "--reason", "--force", "--mode", "--issue", "--until"];
 const unk = (v) => (v === undefined || v === null || v === "" ? "unknown" : v);
 const json = (s) => JSON.parse(String(s || "null"));
 
@@ -69,7 +71,7 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
     wave: w ? `${w.n}/${w.of ?? w.m}` : "unknown", lane: unk(state.lane ?? w?.lane),
     steps, pr,
     lease: lease ? { holder: unk(lease.holder), epoch: unk(lease.epoch), heartbeat_age_s: hb ?? "unknown" } : "unknown",
-    hold: active ? (active.holds ?? []).length > 0 : "unknown",
+    hold: active ? !!(active.holds?.[id] ?? active.holds?.["*"] ?? active.cancelled?.[id]) : "unknown",
     intake: active?.intake ? (active.intake.paused ? "paused" : "open") : "unknown",
     cut_sha: unk(state.release?.snapshot),
     review: verdict ? { verdict, head: pr?.head ?? "unknown" } : "unknown",
@@ -91,9 +93,8 @@ function nextActions(s) {
     if (s.pr?.gate?.marker === "pass") out.push(`forgedock release --resume ${s.id} ${r} --merge`);
     out.push(s.hold === true ? `forgedock release resume ${s.id} ${r} --reason <reason>` : `forgedock release hold ${s.id} ${r} --reason <reason>`);
     out.push(`forgedock release cancel ${s.id} ${r} --reason <reason>`);
-    out.push(`forgedock release lane ${s.id} ${r} --force <lane> --reason <reason>`);
+    for (const n of s.release?.issues ?? []) out.push(`forgedock release lane #${n} ${r} --force <${LANES.join("|")}> --reason <reason>`);
   }
-  if (s.steps?.find((x) => x.step === "promotion")?.done) out.push(`forgedock release rollback ${s.id} ${r} --reason <reason>`);
   if (s.pr) out.push(`forgedock release explain ${s.pr.number} ${r}`);
   out.push(`forgedock release explain ${s.id} ${r}`, `forgedock release status ${s.id} ${r} --json`);
   return out;
@@ -104,11 +105,13 @@ export function parseNextAction(cmd) {
   const t = String(cmd).split(/\s+/);
   if (t[0] !== "forgedock" || t[1] !== "release") throw new Error(`not a release command: ${cmd}`);
   const verb = [...CONTROL_VERBS, "status", "explain", "verify"].includes(t[2]) ? t[2] : null;
+  if (t[2] && !t[2].startsWith("--") && !verb) throw new Error(`unknown verb ${t[2]}: ${cmd}`);
   const flags = t.filter((x) => x.startsWith("--"));
   const bad = flags.find((f) => !ACTION_FLAGS.includes(f));
   if (bad) throw new Error(`unknown option ${bad}: ${cmd}`);
   if (CONTROL_VERBS.includes(verb) && !flags.includes("--reason")) throw new Error(`${verb} needs --reason: ${cmd}`);
   if (!verb && !flags.includes("--resume")) throw new Error(`no verb or --resume: ${cmd}`);
+  if (verb === "lane" && !flags.includes("--force")) throw new Error(`lane needs --force: ${cmd}`);
   return { verb, flags };
 }
 
@@ -162,8 +165,8 @@ function classificationOf(comments) {
 
 const hasLabel = (names, r) => names.includes(r.label);
 
-/** `explain #N`: the ordered rule trace for one issue. `watch`: issue_watch config; `policy`: {skip_labels, min_confidence, risk_rules[], forces[]}; `controls`: controls.jsonl entries. */
-export async function explainIssue({ io, repo, number, state, watch = {}, policy = {}, controls = [], planner = PLANNER_RULES }) {
+/** `explain #N`: the ordered rule trace for one issue. `watch`: issue_watch config; `policy`: {skip_labels, min_confidence, risk_rules[], forces[]}; `controls`: controls.jsonl entries (`{verb, after, actor}`); `lanes`: `_active.lanes` (`{<issue>: {force, actor}}`). */
+export async function explainIssue({ io, repo, number, state, watch = {}, policy = {}, controls = [], lanes = {}, planner = PLANNER_RULES }) {
   resetSteps();
   const issue = json(await io.gh(["issue", "view", String(number), "--repo", repo, "--json", "number,title,body,labels,comments,createdAt"]));
   const open = json(await io.gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", "500", "--json", "number,title,body,labels,createdAt"])) ?? [];
@@ -190,22 +193,25 @@ export async function explainIssue({ io, repo, number, state, watch = {}, policy
   trace.push(item("release_set", "release.mode", res(member), state ? (member ? `in the recorded release set of ${state.id}` : `not in the recorded release set of ${state.id}`) : "no release recorded", member || skip.length ? [] : ["include it in the next release cut"]));
   if (planner.length) for (const fn of planner) { const p = fn({ issue, state }); trace.push(item(p.rule, p.config_key, p.result, p.detail ?? "", p.would_change ?? [])); }
   else trace.push(item("planner", "release.planner", "n/a", "planner: not installed"));
-  const ctl = controls.filter((c) => (c.type === "lane" || c.verb === "lane") && Number(String(c.issue ?? "").replace("#", "")) === number).at(-1);
+  const lastLane = controls.filter((c) => c.verb === "lane" && c.after?.[number] !== undefined).at(-1);
+  const rec = lanes[number] ?? (lastLane ? { force: lastLane.after[number], actor: lastLane.actor } : null);
+  const ctl = rec ? { lane: rec.force, actor: rec.actor } : null;
   const planned = member ? "release" : skip.length ? "excluded" : "pool";
   const lane = ctl?.lane ?? planned;
-  trace.push(item("lane", "controls.jsonl lane | plan lane", "n/a", ctl ? `lane ${lane} (control decision${ctl.actor ? ` by ${ctl.actor}` : ""})` : `lane ${lane} (plan)`, [`label or config key above, or: forgedock release lane #${number} --force <lane> --reason <reason>`]));
+  trace.push(item("lane", "controls.jsonl lane | plan lane", "n/a", ctl ? `lane ${lane} (control decision${ctl.actor ? ` by ${ctl.actor}` : ""})` : `lane ${lane} (plan)`, [`label or config key above, or: forgedock release lane #${number} --force <${LANES.join("|")}> --reason <reason>`]));
   return { schema: EXPLAIN_SCHEMA, kind: "issue", repo, issue: number, lane, classification: cls ?? "absent", trace, would_change: trace.flatMap((t) => t.would_change), next_actions: [`forgedock release status --repo ${repo} --json`] };
 }
 
 /** `explain <PR>`: every required check and its outcome at the head, the deploy gate, and any exemption (demotion) from `controls`. */
-export async function explainPr({ io, repo, pr, gateState, policy = {}, controls = [] }) {
+export async function explainPr({ io, repo, pr, gateState, policy = {}, exemptions = {} }) {
   resetSteps();
   const head = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid"]))?.headRefOid;
   const g = await gateState({ io, repo, pr, head });
   const checks = json(await io.gh(["api", `repos/${repo}/commits/${head}/check-runs`, "--jq", "[.check_runs[] | {name, conclusion}]"])) ?? [];
   const byName = new Map(checks.map((c) => [c.name, c]));
   const names = (policy.required_checks ?? checks.map((c) => c.name)).slice().sort();
-  const exempt = (n) => controls.filter((c) => ["exempt", "demote"].includes(c.type ?? c.verb) && c.check === n && (c.pr === undefined || Number(c.pr) === pr)).at(-1);
+  const exempt = (n) => exemptions?.[n] ?? null; // `_active.exemptions[check]` = {mode, issue, reason, actor, at, until}, as `release exempt` writes it (#5556)
+  const live = (e) => e && e.until && Date.parse(e.until) > io.now();
   const trace = [
     item("gate_marker", "release.gate", res(g.marker === "pass"), `FORGE:GATE_PASS marker: ${g.marker ?? "none"}`),
     item("deploy_gate", "forge/deploy-gate", res(g.deployGate === "success"), `forge/deploy-gate: ${g.deployGate ?? "none"}`),
@@ -214,10 +220,10 @@ export async function explainPr({ io, repo, pr, gateState, policy = {}, controls
   for (const n of names) {
     const c = byName.get(n), concl = c?.conclusion ?? null, ex = exempt(n);
     const ok = concl ? OK.includes(concl) : null;
-    if (ex && ok !== true) {
-      demoted.push({ check: n, actor: unk(ex.actor), expires: unk(ex.until ?? ex.expires), reason: unk(ex.reason), issue: unk(ex.issue) });
-      trace.push(item(`check:${n}`, "branches.required_checks", "n/a", `${concl ?? "missing"}; demoted by ${unk(ex.actor)} until ${unk(ex.until ?? ex.expires)}: ${unk(ex.reason)} (issue ${unk(ex.issue)})`));
-    } else trace.push(item(`check:${n}`, "branches.required_checks", ok === null ? "fail" : res(ok), c ? `${concl ?? "pending"}` : "missing", ok === true ? [] : [`make ${n} pass, or demote it: forgedock release exempt ${n} --reason <reason>`]));
+    if (live(ex) && ok !== true) {
+      demoted.push({ check: n, mode: unk(ex.mode), actor: unk(ex.actor), expires: unk(ex.until), reason: unk(ex.reason), issue: unk(ex.issue) });
+      trace.push(item(`check:${n}`, "branches.required_checks", "n/a", `${concl ?? "missing"}; demoted (${unk(ex.mode)}) by ${unk(ex.actor)} until ${unk(ex.until)}: ${unk(ex.reason)} (issue ${unk(ex.issue)})`));
+    } else trace.push(item(`check:${n}`, "branches.required_checks", ok === null ? "fail" : res(ok), c ? `${concl ?? "pending"}` : "missing", ok === true ? [] : [`make ${n} pass, or demote it: forgedock release exempt ${n} --mode skip --issue <issue> --until 24h --reason <reason>`]));
   }
   return { schema: EXPLAIN_SCHEMA, kind: "pr", repo, pr, head, decision: trace.every((t) => t.result !== "fail") ? "pass" : "hold", demoted, trace, would_change: trace.flatMap((t) => t.would_change), next_actions: [`forgedock release explain ${pr} --repo ${repo} --json`] };
 }
@@ -275,13 +281,14 @@ export async function statusFromCli(argv, deps) {
     return s ? 0 : 1;
   }
   if (!arg) throw new Error("release explain needs <id | #issue | PR>");
-  const controls = deps.config?.managed && io.api ? ((await readActive({ io, repo, credential: "driver" })).controls ?? []) : [];
+  const act = deps.config?.managed && io.api ? await readActive({ io, repo, credential: "driver" }) : {};
+  const controls = act.controls ?? [], lanes = act.lanes ?? {}, exemptions = act.exemptions ?? {};
   let out;
   if (arg.startsWith("#")) {
     const s = await collectStatus({ ...base }).catch(() => null);
-    out = await explainIssue({ io, repo, number: Number(arg.slice(1)), state: s ? { id: s.id, release: s.release } : null, watch: deps.watch, policy: deps.policy, controls });
+    out = await explainIssue({ io, repo, number: Number(arg.slice(1)), state: s ? { id: s.id, release: s.release } : null, watch: deps.watch, policy: deps.policy, controls, lanes });
   } else if (/^\d+$/.test(arg) || /\/pull\/\d+/.test(arg)) {
-    out = await explainPr({ io, repo, pr: Number(/\d+$/.exec(arg)[0]), gateState: deps.gateState, policy: deps.policy, controls });
+    out = await explainPr({ io, repo, pr: Number(/\d+$/.exec(arg)[0]), gateState: deps.gateState, policy: deps.policy, exemptions });
   } else {
     const s = await collectStatus({ ...base, id: arg });
     if (!s) { io.print(`no release ${arg}`); return 1; }
