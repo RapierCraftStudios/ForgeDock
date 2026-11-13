@@ -107,3 +107,22 @@ describe("CLI", () => {
     assert.notDeepEqual(check(`${OK}quarantine: {max: x}\n`), []);
   });
 });
+
+describe("gates catalogue and policy (#5583)", () => {
+  const GATE = `schema: 1\ngates:\n  - {id: g1, protects_against: "#1", where: deploy, determinism: high, pre_merge_artifact: f.json, version: v1, mode: block, owner: me, review_by: 2027-01-01}\n`;
+  const gio = (files) => ({ printed: [], print(l) { this.printed.push(l); }, git(a) { const t = files[a[1].split(":").slice(1).join(":")]; if (t === undefined) throw new Error("missing"); return t; } });
+  it("accepts the gates policy keys and rejects a wrong type", () => {
+    assert.deepEqual(check(OK + "gates: {demote_fb_rate: 5, demote_window: 20, safety: [a]}\n"), []);
+    assert.match(check(OK + "gates: {demote_window: 2.5}\n").join(), /demote_window/);
+  });
+  it("check-config reports catalogue errors, passes a valid one, ignores an absent one", () => {
+    const bad = gio({ ".forge/gates.yaml": GATE.replace("mode: block", "mode: nope"), [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: bad }), 1);
+    assert.match(bad.printed.join("\n"), /gates\.yaml: gates\[0\]\.mode/);
+    const good = gio({ ".forge/gates.yaml": GATE, [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: good }), 0);
+    const none = gio({ [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: none }), 0);
+    assert.doesNotMatch(none.printed.join("\n"), /gates/);
+  });
+});
