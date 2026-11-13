@@ -22,3 +22,5 @@ The managed release needs a reviewable plan an approval can bind to (#5559, epic
 ## Consequences
 
 `explain #N` reports the plan outcome when given a plan. The AlterLab snapshot review (R17) is an owner check.
+
+- `recordOf` drops `<!-- ... -->` spans by index scan (an unterminated one drops the rest), not a regex sanitizer, before reading the CLASSIFY JSON (CodeQL, release #5676).
