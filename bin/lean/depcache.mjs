@@ -189,32 +189,36 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   }
 
   /**
-   * #5590: for a Python project whose pyproject declares a range the host's default python3 is outside of, the interpreter that
-   * does satisfy it ({cmd, version}: pythonX.Y on PATH, then `uv python find`); null keeps the default (no range, default in range, none found).
+   * #5590/#5651: for a Python project whose pyproject declares a range, {py: null} (no range, or the default python3 is in range),
+   * {py: {cmd, version}} (the interpreter that satisfies it: pythonX.Y on PATH, then `uv python find`) or {missing: {range, probed}}
+   * (nothing in range: the caller stops, the out-of-range default is never used).
    */
   async function pythonFor(wt, d) {
-    if (!PY.has(d.eco)) return null;
+    if (!PY.has(d.eco)) return { py: null };
     let range = null;
     try { range = pyRange(String(fs.readFileSync(join(wt, "pyproject.toml"))), d.eco); } catch { /* no pyproject */ }
-    if (!range) return null;
+    if (!range) return { py: null };
+    const probed = [];
     const probe = async (cmd) => {
       try {
         const version = String(await exec(cmd, ["--version"], { timeoutMs: 30000 })).trim();
         const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(version);
-        return m ? { cmd, version, v: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] } : null;
-      } catch { return null; }
+        if (m) { probed.push(`${cmd} (${version})`); return { cmd, version, v: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] }; }
+      } catch { /* not installed */ }
+      probed.push(`${cmd} (not found)`);
+      return null;
     };
     const def = await probe("python3");
-    if (def && pySatisfies(range, def.v)) return null;
+    if (def && pySatisfies(range, def.v)) return { py: null };
     const minors = [14, 13, 12, 11, 10, 9, 8];
-    for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return c; }
+    for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return { py: c }; }
     for (const x of minors) {
       let path = "";
-      try { path = String(await exec("uv", ["python", "find", `3.${x}`], { timeoutMs: 30000 })).trim().split("\n")[0]; } catch { break; } // no uv
+      try { path = String(await exec("uv", ["python", "find", `3.${x}`], { timeoutMs: 30000 })).trim().split("\n")[0]; } catch { probed.push("uv python find (unavailable)"); break; } // no uv
       const c = path ? await probe(path) : null;
-      if (c && pySatisfies(range, c.v)) return c;
+      if (c && pySatisfies(range, c.v)) return { py: c };
     }
-    return null;
+    return { missing: { range, probed } };
   }
 
   async function keyOf(wt, d, pkgs, py = null) {
@@ -352,7 +356,13 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? repaired, ...(extra.published === undefined ? {} : { published: extra.published }) });
     if (d.skip) return done("skipped", { reason: d.skip });
     const pkgs = JS.has(d.eco) ? await manifests(wt) : [];
-    const py = await pythonFor(wt, d);
+    const found = await pythonFor(wt, d);
+    if (found.missing) {
+      // #5651: never resolve under an out-of-range default interpreter (poetry dies in _finalize_license_expression on python 3.14).
+      const { range, probed } = found.missing;
+      return { ...done("failed", { reason: `no python satisfying the declared range "${range}" was found (probed: ${probed.join(", ")}); install one (for example \`uv python install\`) or put pythonX.Y on PATH` }), code: "env.tool_missing" };
+    }
+    const py = found.py;
     const key = await keyOf(wt, d, pkgs, py);
     const snap = join(keyRoot, `${d.eco}-${key}`);
     const cmds = commands(d, py);

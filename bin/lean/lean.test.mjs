@@ -5833,6 +5833,12 @@ describe("shared dependency cache wiring (#4220)", () => {
     for (const st of ["prompt_assembly", "cli_init"]) assert.ok(steps.includes(st), `${st} timed`);
   });
 
+  it("#5651 launch, re-place, recovery and gate entries all install through io.deps.prepare (and so depcache's pythonFor)", () => {
+    const src = readFileSync(new URL("./lean.mjs", import.meta.url), "utf8");
+    assert.ok((src.match(/io\.deps\.prepare\(/g) ?? []).length >= 4);
+    assert.ok(!/pythonFor/.test(src), "lean.mjs has no second interpreter-selection path");
+  });
+
   it("#5434 a failed env.setup still ends needs-human and no implement session starts", async () => {
     const dir = tmpDir("deps-setupfail-");
     const w = world(); depsIo(w);

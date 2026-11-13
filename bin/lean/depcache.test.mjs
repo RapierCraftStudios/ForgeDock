@@ -589,3 +589,64 @@ describe("depcache (#5592 3c): poetry --no-root fallback", () => {
     assert.deepEqual(tried, ["install --sync"]);
   });
 });
+
+describe("depcache (#5651): no silent fallback to an out-of-range default python", () => {
+  const FINALIZE = "AttributeError: module 'packaging' has no attribute '_finalize_license_expression'";
+  /** poetry/uv installs that die the way the 3.14 host toolchain did, so an install attempted under the default python is visible. */
+  const hostExec = (pythons, tried) => {
+    const f = fakeExec({ pythons });
+    return { f, exec: async (cmd, args, o) => {
+      if ((cmd === "poetry" && args[0] === "install") || (cmd === "uv" && args[0] === "sync")) { tried.push(`${cmd} ${args.join(" ")}`); throw Object.assign(new Error("failed"), { stderr: FINALIZE }); }
+      return f.exec(cmd, args, o);
+    } };
+  };
+  const project = (eco, range) => { const base = scratch(), wt = join(base, "wt"); mkdirSync(wt, { recursive: true }); FIXTURES[eco](wt); put(join(wt, "pyproject.toml"), eco === "poetry" ? `[tool.poetry.dependencies]\npython = "${range}"\n` : `[project]\nrequires-python = "${range}"\n`); return { base, wt }; };
+
+  it("#5651 poetry project with host python outside the range and no in-range interpreter stops with env.tool_missing", async () => {
+    const tried = [];
+    const { exec, f } = hostExec({ python3: "3.14.0" }, tried);
+    const { base, wt } = project("poetry", "~3.11");
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5651" });
+    assert.equal(r.status, "failed", JSON.stringify(r));
+    assert.equal(r.code, "env.tool_missing");
+    assert.match(r.reason, /~3\.11/, "names the declared range");
+    assert.match(r.reason, /python3 \(Python 3\.14\.0\)/, "names the interpreters probed");
+    assert.match(r.reason, /uv python install/, "says how to provide one");
+    assert.deepEqual(tried, [], "the resolver never ran under the default interpreter");
+    assert.ok(!f.calls.some((c) => c.cmd === "poetry"), "no poetry call at all");
+  });
+  it("#5651 uv project with no in-range interpreter stops the same way", async () => {
+    const tried = [];
+    const { exec, f } = hostExec({ python3: "3.14.0" }, tried);
+    const { base, wt } = project("uv", ">=3.10,<3.12");
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5651uv" });
+    assert.equal(r.code, "env.tool_missing", JSON.stringify(r));
+    assert.ok(!f.calls.some((c) => c.cmd === "uv" && c.args[0] !== "python"), "no uv venv/sync call");
+  });
+  it("#5651 an in-range interpreter is handed to poetry env use and to uv venv --python", async () => {
+    for (const [eco, range, want] of [["poetry", "~3.11", "poetry env use python3.11"], ["uv", ">=3.10,<3.12", "uv venv --relocatable --python python3.11 .venv"]]) {
+      const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8" } });
+      const { base, wt } = project(eco, range);
+      const [r] = await makeDepCache({ root: join(base, "cache"), exec: f.exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: `repo-5651-${eco}` });
+      assert.notEqual(r.status, "failed", JSON.stringify(r));
+      assert.equal(f.installs().map((c) => `${c.cmd} ${c.args.join(" ")}`)[0], want);
+    }
+  });
+  it("#5651 key differs by interpreter version for the same lockfile", async () => {
+    const keys = [];
+    for (const v of ["3.11.8", "3.11.9"]) {
+      const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": v } });
+      const { base, wt } = project("poetry", "~3.11");
+      keys.push((await makeDepCache({ root: join(base, "cache"), exec: f.exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5651k" }))[0].key);
+    }
+    assert.notEqual(keys[0], keys[1]);
+  });
+  it("#5651 every prepare call (launch, re-place, recovery) probes the interpreter through the same path", async () => {
+    const tried = [];
+    const { exec, f } = hostExec({ python3: "3.14.0" }, tried);
+    const { base, wt } = project("poetry", "~3.11");
+    const cache = makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 });
+    for (const n of [1, 2, 3]) await cache.prepare({ wt, repoKey: "repo-5651e" });
+    assert.equal(f.calls.filter((c) => c.cmd === "python3" && c.args[0] === "--version").length, 3, "each entry reaches pythonFor");
+  });
+});
