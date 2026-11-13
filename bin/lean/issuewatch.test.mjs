@@ -811,3 +811,14 @@ test("#5529 the running watcher records whether it resolves claude and status wa
   assert.equal(state.claude, join(bin, "claude"));
   assert.doesNotMatch(formatStatus(state, watch, io.now()), /cannot resolve claude/);
 });
+
+test("mode: triage parses, with triage.max_per_hour (flat or nested); other modes are unchanged", () => {
+  const w = validateWatch("t", { mode: "triage", "triage.max_per_hour": "4", trust_app: true });
+  assert.equal(w.mode, "triage"); assert.equal(w.triage_max_per_hour, 4); assert.equal(w.release_pause, true);
+  assert.equal(validateWatch("t", { mode: "triage", triage: { max_per_hour: 2 } }).triage_max_per_hour, 2);
+  assert.equal(loadWatches("issue_watch:\n  watches:\n    t:\n      mode: triage\n      triage.max_per_hour: 3\n").t.triage_max_per_hour, 3);
+  assert.throws(() => validateWatch("t", { mode: "triage", "triage.max_per_hour": 0 }), /positive integer/);
+  assert.throws(() => validateWatch("t", { "triage.max_per_hour": 2 }), /needs mode: triage/);
+  assert.throws(() => validateWatch("t", { mode: "nope" }), /per-issue, batch, release or triage/);
+  assert.equal(validateWatch("t", {}).mode, "per-issue"); assert.equal(validateWatch("t", {}).release_pause, false);
+});
