@@ -30,14 +30,28 @@ export function findStatusComment(comments, trusted = () => true) {
 /** Whether a comment with `marker` may still be posted when `count` bot comments already exist. */
 export const withinCap = (count, marker, cap = BOT_COMMENT_CAP) => count < cap || [].concat(marker).some((m) => CAP_EXEMPT.includes(m));
 
+const SECTION_SPLIT = /\n(?=<!-- FORGE:[A-Z_-]+ -->\n)/;
+/** A status comment body as `{ head, sections: Map(marker -> text) }`; the head is the marker line plus the run lines. */
+export function parseStatus(body) {
+  const parts = String(body ?? "").split(SECTION_SPLIT), head = parts.shift() ?? "";
+  return { head, sections: new Map(parts.map((t) => [markerOf(t), t])) };
+}
+export const renderStatus = ({ head, sections }) => [head, ...sections.values()].join("\n");
+
 /**
- * Edit the existing status comment (appending `line`), or return null so the caller posts a first one. `render` caps the body.
- * Returns the comment url on success; a failed edit returns null (the caller posts a new comment).
+ * Edit the status comment `doc` ({ id, body }) in place: `headLine` is appended to the run lines, and `marker`'s section
+ * (a hidden `<!-- marker -->` line plus `body`) is added or replaced. `render` caps the body. Returns true when the edit
+ * landed (doc.body is then current); false means the caller posts the note as a comment of its own.
  */
-export async function appendStatus({ gh, repo, existing, line, render = (s) => s }) {
-  if (!existing?.id) return null;
+export async function upsertStatus({ gh, repo, doc, marker = null, body = "", headLine = null, render = (x) => x }) {
+  if (!doc?.id) return false;
+  const st = parseStatus(doc.body);
+  if (headLine) st.head += `\n${headLine}`;
+  if (marker) st.sections.set(marker, `<!-- ${marker} -->\n${body}`);
+  const next = render(renderStatus(st));
   try {
-    await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${existing.id}`, "-f", `body=${render(`${existing.body}\n${line}`)}`]);
-    return `https://github.com/${repo}/issues/0#issuecomment-${existing.id}`;
-  } catch { return null; }
+    await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${doc.id}`, "-f", `body=${next}`]);
+    doc.body = next;
+    return true;
+  } catch { return false; }
 }

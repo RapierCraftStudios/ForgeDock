@@ -24,7 +24,7 @@ import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
 import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
-import { botComments, findStatusComment, appendStatus, withinCap } from "./status-comment.mjs"; // #5600
+import { botComments, findStatusComment, upsertStatus, withinCap } from "./status-comment.mjs"; // #5600
 import { clearPipelineLabels } from "./parked-relabel.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
@@ -362,6 +362,23 @@ export async function runCore(o) {
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
     const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
+  };
+  /**
+   * #5600: the run's one status comment (marker FORGE:STARTED), edited in place. Found among the issue's trusted comments (a requeue
+   * reuses it) or posted once. `status(marker, body)` puts a progress note in its section; when the edit cannot land the note is posted as a comment.
+   */
+  let statusDoc = null;
+  const ensureStatus = async (first) => {
+    if (statusDoc) return false;
+    const prior = findStatusComment(iss?.comments, isTrustedIssueComment);
+    if (prior) { statusDoc = { ...prior }; return false; }
+    const id = /#issuecomment-(\d+)/.exec((await post("FORGE:STARTED", first)) ?? "")?.[1];
+    if (id) statusDoc = { id, body: capComment(`<!-- FORGE:STARTED -->\n${first}`) };
+    return true;
+  };
+  const status = async (marker, body) => {
+    try { await ensureStatus(`Run status for #${issue} (base \`${lane}\`).`); if (await upsertStatus({ gh: ghw, repo, doc: statusDoc, marker, body, render: capComment })) return; } catch { /* post it */ }
+    await post(marker, body);
   };
   /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
   const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
@@ -901,7 +918,7 @@ export async function runCore(o) {
     const { branch: b, sha, pushedTo } = laneHead;
     const line = pushedTo ? `Lane commits pushed: branch \`${pushedTo}\` at ${sha.slice(0, 10)}; a rerun or --requeue resumes from it` : `Lane commits NOT pushed: ${sha.slice(0, 10)} on \`${b}\` exists only in this lane's worktree and is lost if its sandbox is torn down`;
     T.anomalies.push(line);
-    if (!["invalid", "needs-human", "budget-exceeded"].includes(reason)) { try { await post("FORGE:LANE_BRANCH", `## Lane branch\n${line}`); } catch { /* best effort */ } }
+    if (!["invalid", "needs-human", "budget-exceeded"].includes(reason)) { try { await status("FORGE:LANE_BRANCH", `## Lane branch\n${line}`); } catch { /* best effort */ } }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over. The checkpoint commit is already pushed: do not amend, reword, squash, reset or rebase existing commits; add new commits on top.";
   const recoverNote = () => (recover ? `\n\nRecovery pass (${recover.code}): ${(RECOVER_HOW[recover.code] ?? "an earlier run ended needs-human for a mechanical reason; resolve it").replaceAll("BASE", lane)}.` : "");
@@ -1171,7 +1188,7 @@ export async function runCore(o) {
       T.decisions.push("Builder block: read-only production access is host work (host-task), not an owner ask");
       if (o.placement?.where !== "remote") { // on the host already: a host task (label host-task), never needs-human
         const why = `Host-task: the lane needs read-only production access (Builder is blocked (credentials)): ${s}\n\nNot a credential or an owner ask: run it on the host with its read-only prod tools.`;
-        try { await post("FORGE:HOST_TASK", `## Host task\n${why}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+        try { await status("FORGE:HOST_TASK", `## Host task\n${why}\n\n_${usageLine()}_`); } catch { /* best effort */ }
         try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "host-task"]); } catch { /* best effort */ }
         return await finish("host-task", why, { code: OUTCOME_CODES.ENV_CAPABILITY_REMOTE }, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
       }
@@ -1200,7 +1217,7 @@ export async function runCore(o) {
         ? `blocked by ${refs(b.blockers)} (needs-human); depends on ${refs(b.issues)}. ${s}`
         : `depends on ${refs(b.issues)} which is still open; requeue behind it. ${s}`;
       T.decisions.push(`Builder block: dependency on ${refs(b.issues)}${blocked ? ` (needs-human: ${refs(b.blockers)})` : ""}`);
-      try { await post("FORGE:DEPENDENCY", `## ${blocked ? "Blocked by" : "Waiting on"} ${refs(blocked ? b.blockers : b.issues)}\n${detail}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+      try { await status("FORGE:DEPENDENCY", `## ${blocked ? "Blocked by" : "Waiting on"} ${refs(blocked ? b.blockers : b.issues)}\n${detail}\n\n_${usageLine()}_`); } catch { /* best effort */ }
       return blocked
         ? await finish("dependency-blocked", detail, { code: OUTCOME_CODES.DEPENDENCY_BLOCKED, dependencies: b.issues, blockers: b.blockers }, OUTCOME_CODES.DEPENDENCY_BLOCKED)
         : await finish("dependency-open", detail, { code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: b.issues }, OUTCOME_CODES.DEPENDENCY_OPEN);
@@ -1273,7 +1290,7 @@ export async function runCore(o) {
     if (dep?.satisfied?.length) { // #4686: open on GitHub, but its PR is already on this lane
       const names = dep.satisfied.map((x) => `#${x.issue} (PR #${x.pr}, merge commit ${x.sha.slice(0, 12)} on origin/${lane})`).join(", ");
       T.decisions.push(`Dependency satisfied by lane merge: ${names}`);
-      try { await post("FORGE:DEPENDENCY", `## Dependency satisfied\n${names} merged into ${lane}; the issue stays open until promotion, so the **Depends on** edge is met.`); } catch { /* best effort */ }
+      try { await status("FORGE:DEPENDENCY", `## Dependency satisfied\n${names} merged into ${lane}; the issue stays open until promotion, so the **Depends on** edge is met.`); } catch { /* best effort */ }
     }
     if (dep?.open?.length) {
       return { terminalReason: "dependency-open", code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: dep.open,
@@ -1339,16 +1356,16 @@ export async function runCore(o) {
     await step("claim", async () => {
     await label("investigating");
     botCount = botComments(iss.comments, isTrustedIssueComment).length;
-    const prior = findStatusComment(iss.comments, isTrustedIssueComment); // #5600: a requeue edits the one status comment instead of posting another
     const startedLine = `Started work on #${issue} (base \`${lane}\`).`;
-    if (!(prior && await appendStatus({ gh: ghw, repo, existing: prior, line: `${startedLine} (requeued${recover ? `, recovery for \`${recover.code}\`` : ""})`, render: capComment }))) await post("FORGE:STARTED", startedLine);
-    if (prior || recover || (iss.labels ?? []).some((l) => /^(needs-human|parked:|remediation-queue)/.test(l?.name ?? l))) await clearPipelineLabels({ gh: ghw, repo, issue, labels: (iss.labels ?? []).map((l) => l?.name ?? l) });
+    const hadStatus = findStatusComment(iss.comments, isTrustedIssueComment) != null; // #5600: a requeue edits the one status comment instead of posting another
+    if (!(await ensureStatus(startedLine)) && !(await upsertStatus({ gh: ghw, repo, doc: statusDoc, headLine: `${startedLine} (requeued${recover ? `, recovery for \`${recover.code}\`` : ""})`, render: capComment }))) await post("FORGE:STARTED", startedLine);
+    if (hadStatus || recover || (iss.labels ?? []).some((l) => /^(needs-human|parked:|remediation-queue)/.test(l?.name ?? l))) await clearPipelineLabels({ gh: ghw, repo, issue, labels: (iss.labels ?? []).map((l) => l?.name ?? l) });
     if (recover) {
       // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", "needs-human"]); } catch { /* best effort */ }
       recoverUnlabelled = true;
       try {
-        await post("FORGE:DECISION", `## Decision: recovery pass for \`${recover.code}\` (attempt ${recover.attempt})\n**What**: removed \`needs-human\` and resumed the open PR / branch on \`${lane}\` (${(RECOVER_HOW[recover.code] ?? "rerun").split(".")[0]}).\n**Why**: \`${recover.code}\` is a mechanical outcome an agent can fix without operator input.\n**Alternative**: leave the issue \`needs-human\` and skip its dependents until the operator relaunches it.`);
+        await status("FORGE:DECISION", `## Decision: recovery pass for \`${recover.code}\` (attempt ${recover.attempt})\n**What**: removed \`needs-human\` and resumed the open PR / branch on \`${lane}\` (${(RECOVER_HOW[recover.code] ?? "rerun").split(".")[0]}).\n**Why**: \`${recover.code}\` is a mechanical outcome an agent can fix without operator input.\n**Alternative**: leave the issue \`needs-human\` and skip its dependents until the operator relaunches it.`);
       } catch { /* best effort */ }
       T.decisions.push(`Recovery pass for ${recover.code} (attempt ${recover.attempt}): needs-human removed, PR resumed`);
       ev({ event: "RECOVERY_START", code: recover.code, attempt: recover.attempt });
@@ -1400,7 +1417,7 @@ export async function runCore(o) {
       if (hw.host) {
         T.decisions.push("Intake: every acceptance criterion needs live production measurement or a real-browser capture (host-task), no code lane");
         const why = `Host-task: every acceptance criterion needs live production measurement or a real-browser capture:\n${hw.items.map((t) => `- ${t}`).join("\n")}\n\nNot a code lane: run it on the host with its read-only prod tools and real browser.`;
-        try { await post("FORGE:HOST_TASK", `## Host task\n${why}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+        try { await status("FORGE:HOST_TASK", `## Host task\n${why}\n\n_${usageLine()}_`); } catch { /* best effort */ }
         try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "host-task"]); } catch { /* best effort */ }
         return await finish("host-task", why, { code: OUTCOME_CODES.ENV_CAPABILITY_REMOTE }, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
       }
@@ -1707,8 +1724,8 @@ export async function runCore(o) {
         const rec = { event: "CONTEXT_PACK", mode: ctxCfg.mode, ...ctxAb, lane_type: ctxLane, sources: p.sources, found: p.found, bytes: p.bytes, items: p.items, truncated: p.truncated,
           hash: p.hash, cached: r.cached, ...(p.recall ? { recall: p.recall.present ? "present" : "absent" } : {}), ...(r.errors?.length ? { errors: r.errors } : {}) };
         ev({ ...rec, pitfalls: inPack }); await emit(rec);
-        const seen = trustedComments.some((c) => String(c?.body ?? "").startsWith("<!-- FORGE:CONTEXT -->") && String(c.body).includes(`hash ${p.hash})`));
-        if (p.items && !seen) { try { await post("FORGE:CONTEXT", renderContextRecord(p, { mode: ctxCfg.mode, laneType: ctxLane })); } catch { /* best effort */ } }
+        const seen = trustedComments.some((c) => String(c?.body ?? "").includes("<!-- FORGE:CONTEXT -->") && String(c.body).includes(`hash ${p.hash})`));
+        if (p.items && !seen) { try { await status("FORGE:CONTEXT", renderContextRecord(p, { mode: ctxCfg.mode, laneType: ctxLane })); } catch { /* best effort */ } }
         T.decisions.push(`Context pack (${ctxCfg.mode}): ${p.items} item(s), ${p.bytes} bytes${p.truncated ? `, ${p.truncated} dropped` : ""}, ${ctxCfg.mode === "on" ? "given to the builder" : "recorded only"}`);
         return p;
       } catch (e) { T.anomalies.push(`Context pack not compiled (builder prompt unchanged): ${String(e?.message ?? e).slice(0, 200)}`); return null; }
@@ -3496,7 +3513,7 @@ export async function runCore(o) {
       await reportVerify();
       syncRow.push(`${trigger}: ${clean ? "clean" : "conflicts"} (${baseSha})`);
       T.baseSync = [`${syncs} sync(s)`, syncRow.join("; ")];
-      await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
+      await status("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
       return null;
     }
     const NR_TESTS = "not reported";

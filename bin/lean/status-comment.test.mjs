@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { findStatusComment, appendStatus, withinCap, botComments, BOT_COMMENT_CAP } from "./status-comment.mjs";
+import { findStatusComment, upsertStatus, parseStatus, withinCap, botComments, BOT_COMMENT_CAP } from "./status-comment.mjs";
 
 const row = (body, n) => ({ body, url: `https://github.com/o/r/issues/7#issuecomment-${n}` });
 
@@ -13,15 +13,20 @@ describe("#5600 status comment", () => {
     assert.equal(findStatusComment([row("hello", 1)]), null);
     assert.equal(findStatusComment([row("<!-- FORGE:STARTED -->\nx", 1)], () => false), null);
   });
-  it("appendStatus PATCHes the same comment; no existing or a failed edit returns null", async () => {
+  it("upsertStatus PATCHes the same comment, replaces a section in place; no doc or a failed edit returns false", async () => {
     const calls = [];
     const gh = async (a) => { calls.push(a); };
-    const url = await appendStatus({ gh, repo: "o/r", existing: { id: "3", body: "x" }, line: "attempt 2" });
-    assert.match(url, /issuecomment-3$/);
+    const doc = { id: "3", body: "<!-- FORGE:STARTED -->\nStarted." };
+    assert.equal(await upsertStatus({ gh, repo: "o/r", doc, marker: "FORGE:CONTEXT", body: "ctx 1" }), true);
     assert.deepEqual(calls[0].slice(0, 4), ["api", "-X", "PATCH", "repos/o/r/issues/comments/3"]);
-    assert.equal(calls[0][5], "body=x\nattempt 2");
-    assert.equal(await appendStatus({ gh, repo: "o/r", existing: null, line: "y" }), null);
-    assert.equal(await appendStatus({ gh: async () => { throw new Error("x"); }, repo: "o/r", existing: { id: "3", body: "x" }, line: "y" }), null);
+    assert.equal(await upsertStatus({ gh, repo: "o/r", doc, marker: "FORGE:CONTEXT", body: "ctx 2", headLine: "requeued" }), true);
+    const st = parseStatus(doc.body);
+    assert.equal(st.head, "<!-- FORGE:STARTED -->\nStarted.\nrequeued");
+    assert.deepEqual([...st.sections.keys()], ["FORGE:CONTEXT"]);
+    assert.match(doc.body, /ctx 2/);
+    assert.doesNotMatch(doc.body, /ctx 1/);
+    assert.equal(await upsertStatus({ gh, repo: "o/r", doc: null, marker: "FORGE:X", body: "y" }), false);
+    assert.equal(await upsertStatus({ gh: async () => { throw new Error("x"); }, repo: "o/r", doc: { id: "3", body: "x" }, marker: "FORGE:X", body: "y" }), false);
   });
   it("caps bot comments at 10 but always lets terminal markers through", () => {
     assert.equal(BOT_COMMENT_CAP, 10);
