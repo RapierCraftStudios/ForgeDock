@@ -7168,7 +7168,7 @@ describe("#4362 attempt triggers", () => {
     const builderSites = at(/builder\(\+\+attemptN,/), fixSites = at(/fixRound\("/), attemptSites = at(/attempt\("(?!implement)/);
     assert.ok(builderSites.length >= 9 && fixSites.length >= 9 && attemptSites.length >= 2, "the call sites were found");
     const known = (lit, l, n) => assert.ok(lit && TRIGGERS.includes(lit), `lean.mjs:${n} passes no known trigger: ${l.trim().slice(0, 120)}`);
-    const fixLines = at(/async function fixRound\(/)[0][1];
+    const fixLines = at(/async function fixRoundRaw\(/)[0][1];
     for (const [l, n] of builderSites) {
       if (n > fixLines && n < fixLines + 10 && /trigger \}\)/.test(l)) continue; // fixRound forwards its own trigger, checked below
       known(/trigger: "([a-z_]+)"/.exec(l)?.[1], l, n);

@@ -366,7 +366,8 @@ export async function runCore(o) {
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
-    phaseLedger.addModel(phase === "review" ? "review" : stage === "plan" ? "plan" : "implement", rec.duration_ms, c.delta);
+    const ledgerNow = phaseLedger.current(); // #5649: model time of contract and fix calls lands in those phases
+    phaseLedger.addModel(phase === "review" ? "review" : ledgerNow === "contract" || ledgerNow === "fix" ? ledgerNow : stage === "plan" ? "plan" : "implement", rec.duration_ms, c.delta);
     const u = r?.usage ?? {};
     usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
@@ -2046,7 +2047,8 @@ export async function runCore(o) {
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
-    async function fixRound(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
+    function fixRound(...a) { return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
+    async function fixRoundRaw(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
       await notePitfall(trigger, failureText); await escalateOn(trigger); // #4375: learned once the same gate passes; #4394
       if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
@@ -2216,7 +2218,7 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        if (ffPlan === "contract") await builder(++attemptN, contractStepPrompt(issue, tcOpts()) + recoverNote() + decisionsNote, sessionId, true, planPrompt, { mode: "resume", trigger: "plan" }); // #5426: same session, investigation already written
+        if (ffPlan === "contract") await phaseLedger.during("contract", () => builder(++attemptN, contractStepPrompt(issue, tcOpts()) + recoverNote() + decisionsNote, sessionId, true, planPrompt, { mode: "resume", trigger: "plan" })); // #5426: same session, investigation already written
         else if (ffPlan === "full") { const tPrompt = now(), planText = planPrompt(); setupStep("prompt_assembly", tPrompt); await builder(++attemptN, planText + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionsNote, null, true, planPrompt, { trigger: "plan" }); }
         planned = true;
         result = await readResult();

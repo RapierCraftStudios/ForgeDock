@@ -1883,7 +1883,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
-  const { formatLedgerSummary } = await import("./lean/phaseledger.mjs");
+  const { formatLedgerSummary, formatPhaseComparison, readBaselineRows } = await import("./lean/phaseledger.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
@@ -2235,6 +2235,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
   report.push(formatLedgerSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows
+  try { report.push(...formatPhaseComparison(rows, readBaselineRows({ excludeId: batch.id }))); } catch { report.push("phases vs prev7d: n/a"); } // #5649: read-only baseline, never fails the report
   const precheckLine = formatPrecheckSummary(rows); // #4331
   if (precheckLine) report.push(precheckLine);
   const firstPassLine = formatFirstPassSummary(rows); // #4362
