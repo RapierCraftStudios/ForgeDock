@@ -3,9 +3,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary } from "./preflight.mjs";
+import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -165,13 +164,26 @@ describe("#5447 declaredEnv", () => {
   });
 });
 
-describe("project-local probe (#5601)", () => {
-  it("command probe searches binDirs after PATH; unchanged without them", () => {
-    const c = C("pytest -q tests/x.py");
-    assert.match(preflightProbes(c).probes.find((p) => p.tool === "pytest").probe, /^command -v -- 'pytest'/);
-    const dir = tmpDir("pp-"); mkdirSync(join(dir, ".venv/bin"), { recursive: true }); writeFileSync(join(dir, ".venv/bin/pytest"), "#!/bin/sh\n", { mode: 0o755 });
-    const probe = preflightProbes(c, { binDirs: [join(dir, ".venv/bin")] }).probes.find((p) => p.tool === "pytest").probe;
-    assert.match(probe, /^PATH="\$PATH:.*\.venv\/bin" command -v/);
-    assert.equal(spawnSync("sh", ["-c", probe], { env: { PATH: "/usr/bin:/bin" } }).status, 0);
+describe("project-local executables (#5592 3d/9)", () => {
+  const mkBin = (wt, rel, name) => { const d = join(wt, rel); mkdirSync(d, { recursive: true }); writeFileSync(join(d, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 }); };
+  it("finds root and monorepo-service .venv/bin and node_modules/.bin, existing dirs only", () => {
+    const wt = tmpDir("fd-localbin-");
+    mkBin(wt, "services/cortex/.venv/bin", "pytest"); mkBin(wt, "web/node_modules/.bin", "vitest"); mkBin(wt, ".venv/bin", "ruff");
+    const dirs = projectBinDirs(wt, ["pyproject.toml", "services/cortex/poetry.lock", "services/other/uv.lock", "web/package.json", "web/node_modules/x/package.json"]);
+    assert.deepEqual(dirs, [join(wt, ".venv/bin"), join(wt, "web/node_modules/.bin"), join(wt, "services/cortex/.venv/bin")]);
+  });
+  it("a command probe over PATH + local bins finds a venv-only pytest (the tool check no longer says 'lacks pytest')", async () => {
+    const wt = tmpDir("fd-localbin-");
+    mkBin(wt, "services/cortex/.venv/bin", "pytest-fd5592");
+    const contract = { validate: [{ id: "V1", command: "pytest-fd5592 -q" }] };
+    const { probes } = preflightProbes(contract);
+    assert.equal(probes[0].kind, "command");
+    const base = process.env.PATH;
+    assert.notEqual((await runCheckCommand({ command: probes[0].probe, cwd: wt, env: { PATH: base } })).rc, 0, "absent from plain PATH");
+    const local = projectBinDirs(wt, ["services/cortex/poetry.lock"]);
+    assert.equal((await runCheckCommand({ command: probes[0].probe, cwd: wt, env: { PATH: withLocalBins(base, local) } })).rc, 0);
+  });
+  it("local bins go after the lane PATH, never ahead, and are not duplicated", () => {
+    assert.equal(withLocalBins("/a:/b", ["/c", "/a"]), "/a:/b:/c");
   });
 });

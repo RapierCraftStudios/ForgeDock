@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availableFields, runLaneChecks, formatLaneChecks, UPGRADE_COMMAND } from "./lanecheck.mjs";
-import { findShimLoops } from "./heavy.mjs";
+import { findShimLoops, heavyShimScript } from "./heavy.mjs";
 import { orchestrate, deferPolicy } from "./orchestrate.mjs";
 import { providerLanes, isCloneFailure } from "./execution.mjs";
 
@@ -66,16 +66,21 @@ describe("pool_version", () => {
 describe("path_loop", () => {
   const wrapper = "#!/bin/sh\nexec \"$(command -v docker)\" \"$@\"\n";
   const mk = () => { const d = tmpDir("lc-"); const w = join(d, "wrap"); mkdirSync(w); writeFileSync(join(w, "docker"), wrapper); chmodSync(join(w, "docker"), 0o755); return { d, w }; };
-  it("names the wrapper dir when no real binary sits behind it", () => {
-    const { w } = mk();
-    const c = checkPathLoop({ env: { PATH: w } });
-    assert.equal(c.ok, false); assert.equal(c.code, "preflight.path_loop"); assert.ok(c.detail.includes(w));
+  it("names the shim dir when a heavy shim execs a pass-through wrapper", () => {
+    const { d, w } = mk(); const sh = join(d, "shim"); mkdirSync(sh);
+    writeFileSync(join(sh, "docker"), heavyShimScript("docker", join(w, "docker"))); chmodSync(join(sh, "docker"), 0o755);
+    const c = checkPathLoop({ env: { PATH: `${sh}:${w}` } });
+    assert.equal(c.ok, false); assert.equal(c.code, "preflight.path_loop"); assert.ok(c.detail.includes(sh));
   });
-  it("passes when the real binary is in a project .venv/bin (#5601), message names the wrapper otherwise", () => {
-    const { d, w } = mk(); const v = join(d, ".venv/bin"); mkdirSync(v, { recursive: true }); writeFileSync(join(v, "docker"), "#!/bin/sh\necho hi\n"); chmodSync(join(v, "docker"), 0o755);
-    assert.equal(checkPathLoop({ env: { PATH: w }, cwd: d }).ok, true);
-    const bad = checkPathLoop({ env: { PATH: w }, cwd: join(d, "none") });
-    assert.equal(bad.ok, false); assert.ok(bad.detail.includes(join(w, "docker")));
+  it("#5592: a batch-level wrapper with no real binary behind it does not trip (no shim is written over it)", () => {
+    const { w } = mk();
+    assert.equal(checkPathLoop({ env: { PATH: w } }).ok, true);
+  });
+  it("#5592: a wrapper our own shim already covers (shim points at the real binary) passes", () => {
+    const { d, w } = mk(); const real = join(d, "real"), sh = join(d, "shim"); mkdirSync(real); mkdirSync(sh);
+    writeFileSync(join(real, "docker"), "#!/bin/sh\necho hi\n"); chmodSync(join(real, "docker"), 0o755);
+    writeFileSync(join(sh, "docker"), heavyShimScript("docker", join(real, "docker"))); chmodSync(join(sh, "docker"), 0o755);
+    assert.equal(checkPathLoop({ env: { PATH: `${sh}:${w}:${real}` } }).ok, true);
   });
   it("passes when a real binary is behind the wrapper", () => {
     const { d, w } = mk(); const real = join(d, "real"); mkdirSync(real); writeFileSync(join(real, "docker"), "#!/bin/sh\necho hi\n"); chmodSync(join(real, "docker"), 0o755);

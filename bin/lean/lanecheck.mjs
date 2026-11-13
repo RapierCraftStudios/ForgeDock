@@ -8,7 +8,7 @@
  * doctor --lanes` prints every check. Pure: all I/O is injected (`io`), so a fixed cause clears on the next call.
  */
 import { readFileSync } from "node:fs";
-import { findShimLoops, projectBinDirs } from "./heavy.mjs";
+import { findShimLoops } from "./heavy.mjs";
 
 /** The running CLI's package version. */
 export const cliVersion = () => JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
@@ -87,12 +87,12 @@ export function checkPoolVersion({ exec, agents = null, cliVersion }) {
 }
 
 /** No PATH wrapper dir resolves a heavy-shimmed tool back to the shim. */
-export function checkPathLoop({ env = {}, loops = findShimLoops, cwd = process.cwd(), binDirs = projectBinDirs }) {
+export function checkPathLoop({ env = {}, loops = findShimLoops }) {
   const code = C.PREFLIGHT_PATH_LOOP;
   const skip = env.FORGE_HEAVY_SHIM_DIR ? [env.FORGE_HEAVY_SHIM_DIR] : [];
-  const found = loops(env.PATH ?? "", { skip, realDirs: binDirs(cwd) }); // #5601: the same project-local dirs the tool probes search
+  const found = loops(env.PATH ?? "", { skip });
   if (!found.length) return pass(code, "no PATH wrapper loops back to the heavy shim", "all");
-  return fail(code, found.map((l) => `${l.dir}/${l.name} wraps ${l.name} and resolves back to the heavy shim (no real ${l.name} on PATH or in a project .venv/bin or node_modules/.bin); remove that wrapper or put the real ${l.name} on PATH`).join("; "), "all");
+  return fail(code, found.map((l) => `${l.dir} wraps ${l.name} and resolves back to the heavy shim`).join("; "), "all");
 }
 
 /** Parse the field names `gh <cmd> --json bogus` lists as available (null when the output has no list). */

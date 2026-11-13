@@ -10,6 +10,8 @@
  * env leaves empty (#4325).
  */
 import { builtinModules } from "node:module";
+import { existsSync } from "node:fs";
+import { join, dirname, delimiter } from "node:path";
 import { missingTool } from "./conformance.mjs";
 
 export const PREFLIGHT_CAP = 20;
@@ -107,7 +109,7 @@ export function contractCommands(contract) {
   const t = contract?.repro_test;
   return t && typeof t === "object" && typeof t.command === "string" && t.command.trim() ? [...out, { id: "repro_test", command: t.command }] : out;
 }
-export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIGHT_CAP, binDirs = [] } = {}) {
+export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIGHT_CAP } = {}) {
   const changes = (Array.isArray(contract?.deliverables) ? contract.deliverables : []).map((d) => String(d?.change ?? "")).join("\n");
   const named = (name) => new RegExp(`(^|[^\\w@/.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w/-])`).test(changes);
   const skip = (name) => !name || name.includes("/") && !name.startsWith("@") || name.startsWith("$") || repoHas(name) || named(name);
@@ -116,7 +118,7 @@ export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIG
     const key = `${kind}|${tool}|${interp ?? ""}`;
     const p = byKey.get(key);
     if (p) { if (!p.ids.includes(id)) p.ids.push(id); return; }
-    const probe = kind === "command" ? `${binDirs.length ? `PATH="$PATH:${binDirs.join(":").replace(/(["$`\\])/g, "\\$1")}" ` : ""}command -v -- ${sq(tool)} >/dev/null 2>&1` // #5601: project-local executables count
+    const probe = kind === "command" ? `command -v -- ${sq(tool)} >/dev/null 2>&1`
       : kind === "python-module" ? `${sq(interp)} -c ${sq(PY_PROBE)} ${sq(tool)} >/dev/null 2>&1`
       : `node -e ${sq(NODE_PROBE)} ${sq(tool)} >/dev/null 2>&1`;
     byKey.set(key, { ids: [id], tool, kind, interp, needs: kind === "command" ? null : interp, probe });
@@ -315,3 +317,28 @@ const PYTEST_FIXTURES = new Set(["caplog", "capsys", "capfd", "capsysbinary", "c
 export function isExecutableName(t) {
   return !/[A-Z]/.test(t) && !t.includes("_") && !PYTEST_FIXTURES.has(t);
 }
+
+/**
+ * #5592: the project-local executable dirs a lane can run tools from: `node_modules/.bin` and a Python in-project `.venv/bin`
+ * at the worktree root and next to every tracked manifest (`files`: tracked paths; package.json, pyproject.toml, poetry.lock,
+ * uv.lock mark a project dir, so `services/<svc>/.venv/bin` in a monorepo counts). Only dirs that exist; nearest-to-root first.
+ * The tool probe and the heavy-shim writer resolve through these (appended after PATH), so both agree on what is runnable.
+ */
+export function projectBinDirs(wt, files = [], { exists = existsSync, cap = 24 } = {}) {
+  const dirs = new Set(["."]);
+  for (const f of files) {
+    const base = String(f).split("/").pop();
+    if (["package.json", "pyproject.toml", "poetry.lock", "uv.lock"].includes(base) && !String(f).split("/").includes("node_modules")) dirs.add(dirname(f));
+  }
+  const out = [];
+  for (const d of [...dirs].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))) {
+    for (const rel of [".venv/bin", "node_modules/.bin"]) {
+      const p = d === "." ? join(wt, rel) : join(wt, d, rel);
+      if (exists(p) && out.length < cap) out.push(p);
+    }
+  }
+  return out;
+}
+
+/** #5592: `base` PATH with the project-local executable dirs appended (never ahead of what the lane already resolves). */
+export const withLocalBins = (base, dirs) => [...String(base ?? "").split(delimiter).filter(Boolean), ...dirs.filter((d) => !String(base ?? "").split(delimiter).includes(d))].join(delimiter);
