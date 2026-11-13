@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, rmSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { DEFAULT_RISK_RULES, deriveFacts, riskOf, verifyExistsIn, buildClassifyRecord, applySourceRules, validateClassification, labelsOf, renderClassify } from "./release-classify.mjs";
@@ -79,7 +79,7 @@ describe("verifyExistsIn repro and defaults (#5557)", () => {
     assert.equal((await verifyExistsIn({ exists_in: "staging-only" }, { git })).exists_in, "staging-only");
   });
   it("round trip: a record in the prompt shape survives as live in a fixture git repo", async () => {
-    const d = mkdtempSync(join(tmpdir(), "classify-rt-"));
+    const d = tmpDir("classify-rt-");
     try {
       const g = (...a) => execFileSync("git", ["-C", d, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8" });
       g("init", "-q"); writeFileSync(join(d, "a.py"), "x = 1\ny = 2\n"); g("add", "."); g("commit", "-qm", "c");
