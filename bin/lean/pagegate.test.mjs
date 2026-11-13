@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePagesConfig, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved } from "./pagegate.mjs";
+import { parsePagesConfig, pageChange, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved } from "./pagegate.mjs";
 import { pagePlanNote, domainChecksBlock } from "./prompts.mjs";
 import { pathDomains } from "./review-trigger.mjs";
 import { validateContract, precheck } from "./conformance.mjs";
@@ -111,5 +111,42 @@ describe("page gate exclusions (#5585)", () => {
     assert.deepEqual(contractBriefProblems({ ...c, page_gate: { design_spec: "#1 FORGE:DESIGN_SPEC" } }, ex), []);
     const f = await pageFailures({ cfg: ex, files: [dash], diff: "", tracked: [dash], designApproved: false });
     assert.deepEqual(f.map((x) => x.kind).sort(), ["page_design_missing", "page_visual_missing"]);
+  });
+});
+
+describe("copy-only edits to existing pages (#5648)", () => {
+  const docs = "web/src/app/(site)/docs/api/search/page.tsx", mig = "docs/migrations/search-to-serp/page.tsx", gen = "docs/api/generated/search/page.tsx";
+  const copyDiff = (f) => `+++ b/${f}\n-    Searches Google and Bing.\n+    Searches the web.\n`;
+  const body = (f) => (f === docs || f === mig ? Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n") : "");
+  const files = [docs, mig, gen], diff = files.map(copyDiff).join("");
+  const kinds = (f) => f.map((x) => x.kind).sort();
+  it("pageChange: new, copy, rewrite, generated; unknown fails closed", () => {
+    const o = { added: [], diff, readFile: body };
+    assert.equal(pageChange(docs, o), "copy");
+    assert.equal(pageChange(gen, o), "generated");
+    assert.equal(pageChange(docs, { ...o, added: [docs] }), "new");
+    assert.equal(pageChange(docs, { ...o, added: null }), "new");
+    assert.equal(pageChange(docs, { ...o, diff: "" }), "new");
+    assert.equal(pageChange(docs, { ...o, diff: `+++ b/${docs}\n+<div className="x">hi</div>\n` }), "rewrite");
+    assert.equal(pageChange(docs, { ...o, threshold: 0.01 }), "rewrite");
+  });
+  it("copy-only modified pages need a visual check, not a design spec; generated pages need nothing", async () => {
+    const f = await pageFailures({ cfg, files, diff, readFile: body, tracked: files, added: [], designApproved: false });
+    assert.deepEqual(kinds(f), ["page_visual_missing"]);
+    assert.ok(!f.some((x) => x.detail.includes("generated")));
+    const shots = { page_gate: { screenshots: ["a-390.png", "a-1440.png"] } };
+    assert.deepEqual(await pageFailures({ cfg, files, diff, readFile: body, tracked: files, added: [], designApproved: false, result: shots }), []);
+  });
+  it("a new page, a markup rewrite, or unknown change info still needs the design spec", async () => {
+    assert.ok(kinds(await pageFailures({ cfg, files: [docs], diff, readFile: body, tracked: [docs], added: [docs], designApproved: false })).includes("page_design_missing"));
+    assert.ok(kinds(await pageFailures({ cfg, files: [docs], diff, readFile: body, tracked: [docs], designApproved: false })).includes("page_design_missing"));
+    const md = `+++ b/${docs}\n+<section className="grid">x</section>\n`;
+    assert.ok(kinds(await pageFailures({ cfg, files: [docs], diff: md, readFile: body, tracked: [docs], added: [], designApproved: false })).includes("page_design_missing"));
+  });
+  it("contract: on-base page deliverables skip the new-page briefs, generated ones too", () => {
+    const c = { deliverables: files.map((path) => ({ path })) };
+    assert.equal(contractBriefProblems(c, cfg).length, 1);
+    assert.deepEqual(contractBriefProblems(c, cfg, { baseFiles: [docs, mig, gen] }), []);
+    assert.deepEqual(contractBriefProblems({ deliverables: [{ path: gen }] }, cfg), []);
   });
 });

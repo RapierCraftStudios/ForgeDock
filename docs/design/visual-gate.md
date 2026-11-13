@@ -20,6 +20,16 @@ Opt-in per repo through forge.yaml `design.routes` (see [`docs/CONFIG.md`](../CO
 
 With `design.gate: blocking` every finding is a BLOCKER (`Visual: <route> <kind>`) and the review posts `FORGE:GATE_FAILURE`. With `advisory` the same findings are reported and the gate never fails.
 
+## Modified pages (#5648)
+
+The spec requirement follows what the diff does to a page, not its path (`pageChange` in `bin/lean/pagegate.mjs`):
+
+- **new** (added, or no added list or diff to judge by: fails closed) and **rewrite** (any markup, `className`/`style` or import/export line changed, or churn at or over `pages.rewrite_threshold`, default `0.6`, of the file) need an approved FORGE:DESIGN_SPEC.
+- **copy** (only text or data lines changed in an existing page) takes the visual-check path: no spec, no new-page SEO/GEO briefs, still the 390px and 1440px screenshots.
+- **generated** pages (a `generated/` or `__generated__/` path, a `pages.generated` glob, or an `@generated` header in the first lines) are exempt.
+
+At contract time a page deliverable already on the base is not asked for `page_gate`; the lane precheck judges it from the diff.
+
 ## Regression fixture
 
 `bin/lean/design-gate.test.mjs` and `bin/lean/visual-gate.test.mjs` hold the fixture from the 2026-11-09 Hands pages: a plain-text hero (`h1` and prose), empty Needs/Evidence/Action boxes and a bare "Get access" link. A bundle adding it fails the gate; a page with a component hero, filled cards and a real button passes.
