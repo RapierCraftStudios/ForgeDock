@@ -55,7 +55,8 @@
     "test:sh": "bash scripts/run-shell-tests.sh",
     "docs:dev": "vitepress dev docs/site",
     "docs:build": "vitepress build docs/site",
-    "docs:preview": "vitepress preview docs/site"
+    "docs:preview": "vitepress preview docs/site",
+    "lint:js": "eslint bin scripts packages"
   },
   "engines": {
     "node": ">=18"
@@ -64,6 +65,8 @@
     "@anthropic-ai/sdk": ">=0.30.0 <1"
   },
   "devDependencies": {
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
     "vitepress": "^1.6.3"
   },
   "peerDependencies": {
