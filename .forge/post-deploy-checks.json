@@ -100,5 +100,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "30d"
+  },
+  "release-p0-drill": {
+    "run": "test \"$(gh pr list --state merged --search 'head:p0/' --limit 20 --json number --jq length)\" -ge 1 && git fetch -q origin && git merge-base --is-ancestor \"$(npx --no-install forgedock release status --json | jq -r '.live // empty')\" origin/main",
+    "pass": "exit 0",
+    "timeout": 180,
+    "for": "30d"
   }
 }
