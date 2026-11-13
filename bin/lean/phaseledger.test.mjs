@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, utimesSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { phasesOf } from "./orchestrate.mjs";
 import { aggregate } from "../stats/aggregate.mjs";
@@ -152,7 +152,7 @@ describe("phase comparison vs previous 7 days (#5649)", () => {
   });
 
   it("readBaselineRows reads recent batches except the current one, last row per issue; null when unreadable", () => {
-    const root = mkdtempSync(join(tmpdir(), "bl-")), now = Date.now();
+    const root = tmpDir("bl-"), now = Date.now();
     const mk = (id, rows, ageDays) => {
       mkdirSync(join(root, id)); const f = join(root, id, "log.jsonl");
       writeFileSync(f, rows.map((r) => JSON.stringify(r)).join("\n") + "\nnot json\n");
