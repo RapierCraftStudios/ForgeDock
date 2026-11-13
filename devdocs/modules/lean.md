@@ -3220,3 +3220,7 @@ When a lane's `supersedes` decision lands (after the merge, beside `recordDecisi
 ## Entry 2026-11-12 — `.forge/release.yaml` policy and unit map (#5551)
 
 `release-config.mjs`: `readPolicy` reads only `io.git(["show","origin/<default>:.forge/release.yaml"])` (I13: a head-modified worktree copy is ignored), parses with the vendored js-yaml 4.1.0 (`bin/vendor/js-yaml/`, pin and sha256 in `PIN.md`; `JSON_SCHEMA`, duplicate keys throw), validates closed against `POLICY_SCHEMA` (unknown keys, types, enums, unreachable lanes, dangling unit ids) and rejects the deferred keys (I23, `DEFERRED_KEYS`). Absent file: `source: "forge.yaml"` with `readReleaseConfig` flat keys. `release.mjs` dispatches `release check-config` and `release init` (lazy import; release-config imports `readReleaseConfig` from release.mjs). `release-unitmap.mjs` `resolvePath(policy, path)` returns the owning unit or `"none"`, coupling fan-out, contracts and forces (own glob matcher: `**`, `*`, `?`). Bump the parser: re-vendor, update `PIN.md`.
+
+## Entry 2026-11-13 — Fix: idle holds do not own an issue across batches (#5597)
+
+`batch.mjs` `batchesOwning` flags `held` (hold file, not running); `ownerOf` and `dispatchOwner` skip held-only owners, and `batch.requeue` accepts and releases a held pending issue. Details in `modules/orchestrate.md`.
