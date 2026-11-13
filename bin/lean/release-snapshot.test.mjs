@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { cutSnapshot, pickFixes, revertLast, recut, checkChain, verifyRelease, cleanupSnapshot, parseRecord, withRecord, branchName, patternPrefix } from "./release-snapshot.mjs";
+import { cutSnapshot, pickFixes, revertLast, recut, checkChain, verifyRelease, defaultBehind, cleanupSnapshot, parseRecord, withRecord, branchName, patternPrefix } from "./release-snapshot.mjs";
 
 const ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const mk = (cwd) => (args, { env, input } = {}) => execFileSync("git", args, { cwd, encoding: "utf8", input, env: { ...process.env, ...ENV, ...env }, stdio: ["pipe", "pipe", "pipe"] });
@@ -181,6 +181,34 @@ describe("cherry-picks and the verifier (#5276)", () => {
     assert.deepEqual(s.ctx.state.release.picks, []);
     assert.equal(s.git(["ls-remote", "origin", `refs/heads/${c.branch}`]).split("\t")[0], tip);
     assert.equal(parseRecord(s.w.body).snapshot, tip);
+  });
+
+  it("#5565: a p0 landed on the default branch after the cut is recut in as exactly one main-sync pick; the chain verifies", async () => {
+    const { s, c } = await blockerWorld();
+    await pickFixes(s.ctx);
+    s.git(["checkout", "-q", "main"]);
+    writeFileSync(join(s.work, "p0.txt"), "p0\n"); s.git(["add", "."]); s.git(["commit", "-qm", "p0 fix"]); s.git(["push", "-q", "origin", "main"]);
+    const mainTip = s.git(["rev-parse", "HEAD"]).trim();
+    s.git(["checkout", "-q", "staging"]);
+    const head0 = s.git(["ls-remote", "origin", `refs/heads/${c.branch}`]).split("\t")[0];
+    assert.equal(defaultBehind({ git: s.git, def: "main", head: head0 }), true);
+    const out = await recut(s.ctx);
+    assert.equal(out.recut, true); assert.equal(out.mainSync, mainTip);
+    const rec = s.ctx.state.release;
+    assert.deepEqual(rec.picks.map((p) => p.kind), ["main-sync"]);
+    const head = s.git(["ls-remote", "origin", `refs/heads/${c.branch}`]).split("\t")[0];
+    assert.equal(head, rec.picks[0].sha);
+    assert.equal(defaultBehind({ git: s.git, def: "main", head }), false);
+    assert.deepEqual(checkChain({ git: s.git, record: rec, sha: head, staging: "staging", exact: true }), { ok: true, picks: 1 });
+    assert.equal((await recut(s.ctx)).recut, true); // idempotent: still exactly one main-sync pick
+    assert.equal(s.ctx.state.release.picks.length, 1);
+  });
+
+  it("#5565: with nothing landed on the default branch recut adds no main-sync pick", async () => {
+    const s = await setup();
+    await cut(s);
+    assert.deepEqual(await recut(s.ctx), { recut: false });
+    assert.deepEqual(s.ctx.state.release.picks, []);
   });
 
   it("R10: verifyRelease reads the record from the PR that contains the sha, then checks the chain", async () => {

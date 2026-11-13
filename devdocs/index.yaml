@@ -54,6 +54,9 @@ domains:
       - path: decisions/5583-release-gates.md
         authority: recommended
         token_cost: 400
+      - path: decisions/5565-release-p0.md
+        authority: recommended
+        token_cost: 400
       - path: decisions/5560-release-deploy.md
         authority: recommended
         token_cost: 600
