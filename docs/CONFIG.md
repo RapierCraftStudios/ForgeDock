@@ -758,7 +758,7 @@ gate:
 
 ## `release` (OPTIONAL)
 
-Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Review and fixes are not automated yet: the job stops there and tells you to use the manual path (`commands/review-pr-staging.md`). Post-merge is automated (#5213): it confirms a publish run for the merge commit (dispatching one when none appears), waits for `artifact_check`, then opens and merges the version-sync PR; a bound that runs out stops the job as blocked and `--resume <id>` retries. `forgedock release status [<id>] [--watch] [--interval s] [--json]` (bare `forgedock release --watch` runs the same loop) and `forgedock release explain <id | #issue | PR> [--json]` (#5554) are read-only: status reads the ledger (when `release.managed`) or the local cache plus the release PR's gate; `--watch` polls until the release is done, refused or blocked. `explain #N` prints the ordered rule trace (skip labels, priority, theme_map, `Depends on`, recorded release set, each with its config key), the lane and what would change it; `explain <PR>` prints the gate decision. `--json` output has schema `forgedock.release.status/v1` or `forgedock.release.explain/v1` and `next_actions[]`, the exact commands an agent may run; output carries no host name, so another host prints the same text. `status --watch [--interval s]` prints only when the output changes and stops at a terminal state; `forgedock release --watch` runs the same loop. Status prints `unknown` for any field the ledger does not hold. `explain #N` also reads the `FORGE:CLASSIFY` record (else `classification: absent`), `plan.skip_labels`, `classify.min_confidence`, `risk.rules[i]`, `forces[i]`, prints `planner: not installed` until the planner registers, and takes the lane from the latest `lane` entry in `controls.jsonl`; `explain <PR>` lists each required check with its outcome and any demotion (actor, expiry, reason, issue). `next_actions[]` carries `hold|resume|cancel` and `lane #N --force <lane>` commands (the `release-control.mjs` verbs) with `--reason <reason>` placeholders; there is no `rollback` verb yet, so none is emitted. `explain <PR>` reads the live `_active.exemptions` records (`release exempt`), `explain #N` the `_active.lanes` records.
+Settings for `forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>]` (#5208), which runs the `branches.staging` → `branches.default` release as one resumable job. State is kept in `~/.forge/releases/<id>/` (or `FORGEDOCK_RELEASE_DIR`); `--resume <id>` continues from the last completed step (preflight, release-pr, review, fixes, promotion, post-merge). Preflight refuses while lanes of the repo run or PRs to the staging branch are open, and sets the repo's batches to K=1 until the job ends. Post-merge is automated (#5213): it confirms a publish run for the merge commit (dispatching one when none appears), waits for `artifact_check`, then opens and merges the version-sync PR; a bound that runs out stops the job as blocked and `--resume <id>` retries. `forgedock release status [<id>] [--watch] [--interval s] [--json]` (bare `forgedock release --watch` runs the same loop) and `forgedock release explain <id | #issue | PR> [--json]` (#5554) are read-only: status reads the ledger (when `release.managed`) or the local cache plus the release PR's gate; `--watch` polls until the release is done, refused or blocked. `explain #N` prints the ordered rule trace (skip labels, priority, theme_map, `Depends on`, recorded release set, each with its config key), the lane and what would change it; `explain <PR>` prints the gate decision. `--json` output has schema `forgedock.release.status/v1` or `forgedock.release.explain/v1` and `next_actions[]`, the exact commands an agent may run; output carries no host name, so another host prints the same text. `status --watch [--interval s]` prints only when the output changes and stops at a terminal state; `forgedock release --watch` runs the same loop. Status prints `unknown` for any field the ledger does not hold. `explain #N` also reads the `FORGE:CLASSIFY` record (else `classification: absent`), `plan.skip_labels`, `classify.min_confidence`, `risk.rules[i]`, `forces[i]`, prints `planner: not installed` until the planner registers, and takes the lane from the latest `lane` entry in `controls.jsonl`; `explain <PR>` lists each required check with its outcome and any demotion (actor, expiry, reason, issue). `next_actions[]` carries `hold|resume|cancel` and `lane #N --force <lane>` commands (the `release-control.mjs` verbs) with `--reason <reason>` placeholders; `rollback` and the other control verbs exist (see the CLI reference) but `next_actions[]` does not emit them. `explain <PR>` reads the live `_active.exemptions` records (`release exempt`), `explain #N` the `_active.lanes` records.
 
 ```yaml
 release:
@@ -875,6 +875,217 @@ jobs:
 - **`gate_fix_ref`** (hotfix same-release gate fix): with `--gate-fix-ref`, the dispatch also carries `gate_fix_ref=<branch>`, which lets a hotfix-branch gate fix replace the default-branch preflight copy. It is recorded in the audit line and in `state.regates`.
 - **Refusals** (nothing is written or dispatched): no recorded live record/rollback target (`state.deploy.target`); `deploy.freeze_variable` set by the run (not set before the deploy) while migration files lie between the rollback target and the release sha; a fix that is not gate-only; a ref already re-evaluated.
 - **Audit**: every use appends a `controls.jsonl` line (`verb: regate`) with the actor, the fix sha, the release sha and `gate_sha` (sha1 over the changed gate paths and their blobs at `--ref`); the release state keeps `regates[]`, and gate telemetry recorded afterwards carries that `gate_sha`.
+
+### Policy reference (`.forge/release.yaml`, #5572)
+
+One row per key path of `POLICY_SCHEMA` (`bin/lean/release-config.mjs`). `<name>` is a map key you choose and `[]` a list item. A default of "none" means the key is unset and its feature is off. `bin/lean/release-docs.test.mjs` fails when a schema key is missing here or a key listed here is not in the schema, so a phase that adds a key documents it in the same change.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `schema` | 1 | required | Policy file version; must be `1`. |
+| `branches` | object | - | Branch names the release lanes use. |
+| `branches.default` | string | `main` (init profile) | The branch releases land on; the policy file is read only from here (I13). |
+| `branches.integration` | string | null | Integration branch for lanes with `base: integration`; unset makes such a lane unreachable. |
+| `branches.train` | string | none | Branch prefix or name for train waves. |
+| `branches.release` | string | none | Branch prefix or name for release waves. |
+| `branches.hotfix` | string | none | Branch prefix or name for hotfix (P0) branches. |
+| `trust` | object | - | Who the pipeline believes. |
+| `trust.actors` | array | none | Logins whose control comments and commits are trusted. |
+| `trust.require_verified_commits` | boolean | off | Refuse release commits that are not verified. |
+| `state` | object | - | Where release state lives and how leases behave. |
+| `state.ledger_prefix` | string | built-in prefix | Name prefix of the ledger entries kept on GitHub. |
+| `state.lease_ttl_s` | number | built-in | Seconds a run lease stays valid without a heartbeat. |
+| `state.heartbeat_s` | number | built-in | Seconds between lease heartbeats. |
+| `units` | map | none | Deployable units, keyed by name; each is mapped to code paths. |
+| `units.<name>.paths` | array | none | Globs of files that belong to the unit. |
+| `units.<name>.image` | string | null | Image name the unit ships as, when it has one. |
+| `units.<name>.criticality` | low\|medium\|high | none | `low`, `medium` or `high`; feeds risk. |
+| `units.<name>.tests` | array | none | Test commands or names that cover the unit. |
+| `units.<name>.verify` | array | none | Post-deploy checks that cover the unit. |
+| `units.<name>.service_pipeline` | boolean | off | The unit deploys through its own service pipeline. |
+| `units.<name>.single_host_ok` | boolean | off | The unit may run on one host. |
+| `units.<name>.dockerfile` | string | null | Dockerfile checked by `release check-config --coverage`. |
+| `units.<name>.surface` | service\|web\|edge | none | `service`, `web` or `edge`. |
+| `couplings` | array | none | Paths that force other units to roll when they change. |
+| `couplings[].paths` | array | none | Globs whose change couples units. |
+| `couplings[].affects` | array | none | Unit names rolled by that change; each must exist in `units`. |
+| `contracts` | array | none | Producer/consumer interfaces between units. |
+| `contracts[].producer` | string | none | Unit that owns the contract. |
+| `contracts[].consumers` | array | none | Units that depend on it. |
+| `contracts[].paths` | array | none | Globs of the contract files. |
+| `contracts[].additive_only` | boolean | off | Only additive changes are allowed. |
+| `contracts[].regenerate` | string | null | Command that regenerates generated contract files. |
+| `forces` | array | none | Rules that force a pipeline for matching paths. |
+| `forces[].paths` | array | none | Globs the rule matches. |
+| `forces[].pipeline` | full\|service\|hotfix | none | `full`, `service` or `hotfix`. |
+| `forces[].reason` | string | none | Text shown in `release explain`. |
+| `classify` | object | - | Issue classification (the `FORGE:CLASSIFY` record). |
+| `classify.min_confidence` | number | none | Records below this confidence are not trusted for lane choice. |
+| `classify.text_only_cap` | number | 0.5 | Confidence cap for a record built from issue text alone. |
+| `classify.triage_max_per_hour` | number | 10 | Triage classify calls per rolling hour. |
+| `classify.exists_in_evidence` | mechanical\|llm | none | `mechanical` or `llm`: how cited evidence paths are checked. |
+| `risk` | object | - | Risk rules. |
+| `risk.rules` | array | none | Ordered rules; the matching rule sets risk and may force a pipeline. |
+| `risk.rules[].when` | object | none | Conditions, all of which must hold. |
+| `risk.rules[].when.migration` | boolean | none | The change touches migrations. |
+| `risk.rules[].when.paths` | array | none | Globs the change touches. |
+| `risk.rules[].when.contract` | boolean | none | The change touches a contract. |
+| `risk.rules[].when.rolled_units_gt` | number | none | More than this many units roll. |
+| `risk.rules[].when.diff_lines_gt` | number | none | More than this many changed lines. |
+| `risk.rules[].when.requires` | string | none | Named requirement that must hold. |
+| `risk.rules[].risk` | low\|medium\|high | none | `low`, `medium` or `high`. |
+| `risk.rules[].forces` | string | none | Pipeline the rule forces. |
+| `features` | object | - | Feature wave policy (#5571). |
+| `features.flag_policy` | require\|warn\|off | none | `require` refuses a feature wave that adds no rollout key, `warn` warns, `off` does nothing; `lanes.<name>.flag_policy` wins. |
+| `plan` | object | - | The release plan. |
+| `plan.approval` | wait\|auto\|auto-if | `wait` (init profile) | `wait`, `auto` or `auto-if`; `auto-if` is rejected until its phase. |
+| `plan.skip_labels` | array | built-in labels | Issue labels kept out of a plan. |
+| `plan.require_design_gate` | boolean | off | Plan needs the design gate to pass. |
+| `plan.max_issues` | number | none | Issue cap for one plan. |
+| `plan.stale_snapshot_s` | number | none | Seconds after which a plan snapshot is stale. |
+| `lanes` | map | none | Named lanes (for example `release`, `train`, `p0`). |
+| `lanes.<name>.pipeline` | string | `existing` (init profile) | Deploy pipeline the lane runs; `existing` keeps the repo's own. |
+| `lanes.<name>.ci_tier` | string | none | CI tier; must exist in `ci.tiers` when tiers are set. |
+| `lanes.<name>.approval` | string | none | Approval mode for the lane. |
+| `lanes.<name>.budget` | string | none | Budget class for the lane. |
+| `lanes.<name>.base` | live\|integration\|default | none | `live`, `integration` or `default`. |
+| `lanes.<name>.units_max` | number | none | Maximum units per wave. |
+| `lanes.<name>.max_risk` | low\|medium\|high | none | Highest risk the lane accepts. |
+| `lanes.<name>.train_max_issues` | number | none | Issue cap per train wave. |
+| `lanes.<name>.train_max_units` | number | none | Unit cap per train wave. |
+| `lanes.<name>.soak_min` | any | none | Soak time, in minutes, before the next wave. |
+| `lanes.<name>.flag_policy` | require\|warn\|off | none | `require`, `warn` or `off`; overrides `features.flag_policy`. |
+| `lanes.<name>.requires` | array | none | Lanes or checks that must pass first. |
+| `credentials` | object | - | Credentials the gates use. |
+| `credentials.gate_app` | string | null | App identity that posts gate results. |
+| `credentials.lane_env_strip` | array | none | Environment variables removed from lane processes. |
+| `merge` | object | - | How the release PR merges. |
+| `merge.approval` | confirm\|with-plan\|auto | `confirm` (init profile) | `confirm`, `with-plan` or `auto`. |
+| `merge.method` | merge-commit\|squash\|rebase | none | `merge-commit`, `squash` or `rebase`. |
+| `merge.trailers` | array | none | Commit trailers added to the merge. |
+| `ci` | object | - | CI policy for releases. |
+| `ci.provider` | github-actions\|command | `github-actions` | `github-actions`; `command` is rejected until its phase. |
+| `ci.required_checks` | any | none | Checks required on the release PR. |
+| `ci.selection` | any | none | How CI jobs are chosen for a diff. |
+| `ci.rerun_budget_min` | number | none | Minutes of reruns the flake classifier may spend. |
+| `ci.fix` | object | - | Gate-failure fix loop. |
+| `ci.fix.max_rounds` | integer | none | Fix rounds before the release stops. |
+| `ci.fix.co_start` | boolean | none | Start the fix lane while checks still run. |
+| `ci.fix.full_run_workflow` | string | none | Workflow that runs the full suite on a fix. |
+| `ci.flake` | object | - | Flake handling (#5568). |
+| `ci.flake.quarantine_after` | number | none | Flakes of one test before it is quarantined. |
+| `ci.flake.window_days` | number | none | Days over which flakes are counted. |
+| `ci.unskippable` | array | none | Job-name substrings that can never be skipped or waived. |
+| `ci.tiers` | map | none | Named CI tiers, each a job list. |
+| `ci.tiers.<name>.jobs` | array | none | Job names in the tier. |
+| `ci.nightly` | any | none | Nightly block (#5569): `workflow`, `branch`, `block_release`, `t0_t2_hours`, `t3_t4_hours`, `t3_jobs`, `t4_jobs`, `unskippable`; see Managed release: nightly and budget. |
+| `ci.budget` | any | none | Budget block (#5569): `on_exceed` (`local-first`, `hold`, `proceed`), `ignore`, `model_release_minutes`; see Managed release: nightly and budget. |
+| `preflight` | object | - | Checks run before release. |
+| `preflight.commands` | array | none | Commands run on the host. |
+| `preflight.timeout_s` | number | none | Seconds before a command is killed. |
+| `preflight.blocking` | boolean | none | A failure stops the release. |
+| `deploy` | object | - | Deploy stage. |
+| `deploy.live_release_command` | string | none | Command that reads the live release. |
+| `deploy.freeze_variable` | string | none | Repository variable that freezes deploys. |
+| `deploy.concurrency_group` | string | none | Concurrency group of the deploy workflows. |
+| `deploy.start_timeout_s` | number | 60 | Seconds to wait for a deploy run to start. |
+| `deploy.stage_timeout_s` | number | built-in | Seconds a deploy stage may run. |
+| `deploy.expected_digests_command` | string | none | Command printing the image digests a deploy should end with. |
+| `deploy.recovery` | object | - | Deploy recovery. |
+| `deploy.recovery.rerun_max` | integer | built-in | Reruns of a failed stage. |
+| `deploy.recovery.max_attempts` | integer | built-in | Total attempts. |
+| `deploy.recovery.signatures` | array | none | Failure signatures that may be rerun. |
+| `deploy.pipelines` | map | none | Named deploy pipelines. |
+| `deploy.pipelines.<name>.workflow` | string | none | Workflow file. |
+| `deploy.pipelines.<name>.trigger` | push\|dispatch | none | `push` or `dispatch`. |
+| `deploy.pipelines.<name>.inputs` | map | none | String inputs passed on dispatch. |
+| `deploy.pipelines.<name>.wait` | boolean | none | Wait for the run to finish. |
+| `verify` | object | - | Deploy verification (#5562). |
+| `verify.workflow` | string | none | Verification workflow. |
+| `verify.results` | array | none | Result workflows to read. |
+| `verify.results[].workflow` | string | none | Workflow file. |
+| `verify.results[].kind` | smoke\|edge\|convergence | none | `smoke`, `edge` or `convergence`. |
+| `verify.flags` | array | none | Flags the verification can turn off. |
+| `verify.flags[].flag` | string | none | Flag name. |
+| `verify.flags[].off_command` | string | none | Command that turns it off. |
+| `verify.slis` | array | none | SLI checks; free-form entries. |
+| `verify.post_deploy_checks_file` | string | none | File of post-deploy checks. |
+| `verify.close_requires` | verified\|deployed | none | `verified` or `deployed`: what closes an issue. |
+| `rollback` | object | - | Rollback ladder (#5563). |
+| `rollback.triggers` | array | none | `smoke`, `health`, `livecheck`, `sli`, `crashloop` or `human`. |
+| `rollback.ladder` | array | none | Steps in order: `flag`, `unit`, `full`, `stop`. |
+| `rollback.refuse_across` | array | none | Changes a rollback must not cross (`destructive_migration`). |
+| `rollback.open_revert_pr` | boolean | none | Open a revert PR after a rollback. |
+| `rollback.flags` | array | none | Kill switches. |
+| `rollback.flags[].flag` | string | none | Flag name. |
+| `rollback.flags[].kill_command` | string | none | Command that kills it. |
+| `rollback.unit_workflow` | string | none | Workflow that rolls one unit back. |
+| `rollback.unit_action` | string | none | Action name passed to it. |
+| `rollback.full_workflow` | string | none | Workflow that rolls everything back. |
+| `rollback.health_command` | string | none | Command that reports health. |
+| `rollback.result_command` | string | none | Command that reports the rollback result. |
+| `events` | object | - | Event sinks. |
+| `events.webhook_url` | string | none | Webhook that receives release events. |
+| `quarantine` | object | - | Quarantine limits. |
+| `quarantine.days` | number | none | Days a quarantine lasts. |
+| `quarantine.max` | number | none | Maximum quarantined tests. |
+| `gates` | object | - | Deploy gate catalogue settings (#5583). |
+| `gates.demote_fb_rate` | number | 5 | False-block percent above which a gate is demoted. |
+| `gates.demote_window` | integer | 20 | Runs in the demotion window. |
+| `gates.safety` | array | built-in list | Gates never demoted. |
+| `gates.paths` | array | built-in globs | Paths a gate-only fix may touch (regate). |
+| `gates.workflow_steps` | array | none | Workflow steps that count as gate code. |
+| `controls` | object | - | Operator controls (#5555, #5556, #5564). |
+| `controls.intake` | any | none | Intake pause settings. |
+| `controls.conductor` | any | none | Conductor workflow settings. |
+| `controls.exempt` | any | none | Exemption settings. |
+
+#### Zero-config profile
+
+`forgedock release init` writes exactly this to `.forge/release.yaml` and never overwrites an existing file; `release init --conductor` also installs the conductor workflow.
+
+```yaml
+schema: 1
+branches: {default: main}
+plan: {approval: wait}
+lanes: {release: {pipeline: existing}}
+merge: {approval: confirm}
+```
+
+#### Deferred keys
+
+These keys are rejected by `release check-config` until their phase ships:
+
+- `plan.auto_if`
+- `retention_days`
+- `ci.forbid_per_issue_steps`
+- `couplings[].refine`
+- `ci.provider=command`
+- `risk.weights`
+
+#### CLI reference
+
+| Command | Purpose |
+|---------|---------|
+| `forgedock release` | Run the staging to default release as one resumable job (`--merge`, `--watch`, `--resume <id>`). |
+| `forgedock release p0` | Hotfix lane for an issue or branch (`--units`, `--preempt`, `--yes`). |
+| `forgedock release verify` | Verify a release sha, or re-run deploy verification of a release id. |
+| `forgedock release recover` | Recover a release that stopped mid-deploy. |
+| `forgedock release rollback` | Roll a release back (`--reason`, `--to flag\|unit\|full`, `--later`). |
+| `forgedock release plan` | Build the release plan for a lane. |
+| `forgedock release start` | Start a planned release (`--plan`, `--approve`, `--wave`). |
+| `forgedock release go` | Advance a started release (`--plan`, `--merge`, `--activate <key>`). |
+| `forgedock release status` | Read-only state of a release (`--watch`, `--json`). |
+| `forgedock release explain` | Rule trace for an id, issue or PR. |
+| `forgedock release check-config` | Validate the policy file (`--ref`, `--coverage`). |
+| `forgedock release init` | Write the zero-config profile. |
+| `forgedock release control` | Audited controls: `hold`, `resume`, `cancel`, `lane`, `exempt`, `freeze`, `unfreeze`; each also runs as `forgedock release <verb>` and needs `--reason`. `demote`, `promote`, `rollback` and `regate` are control verbs too. |
+| `forgedock release gates` | Gate telemetry (`check`, `demote`, `record`). |
+| `forgedock release report` | Model vs measured Actions minutes. |
+| `forgedock intake` | `pause`, `resume` or `status` of issue intake (`_active.intake`). |
+| `forgedock ci budget` | Actions-minute budget and CI placement (#5278). |
+| `controls log` | The `controls.jsonl` audit line every control verb appends; read it through `release status` and `release explain`. |
+| `ci flakes`, `ci nightly` | Records, not commands: the flake ledger (`_active.flakes`) and the nightly result, read through `release status`, `release explain` and `release report`. |
 
 ## `issue_watch` (OPTIONAL)
 
