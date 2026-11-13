@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { releaseFromCli, gateState } from "./release.mjs";
@@ -45,7 +45,7 @@ function fakeIo(world = {}) {
   };
   return io;
 }
-const managedDir = mkdtempSync(join(tmpdir(), "rs5554-")); writeFileSync(join(managedDir, "forge.yaml"), "release:\n  managed: true\n");
+const managedDir = tmpDir("rs5554-"); writeFileSync(join(managedDir, "forge.yaml"), "release:\n  managed: true\n");
 const local = { load: () => null, ids: () => [] };
 const base = (io, over = {}) => ({ io, repo: REPO, config: { managed: true }, local, gateState, ...over });
 
