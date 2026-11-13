@@ -14,9 +14,9 @@ Operators could not see where a release is, or why an issue is in or out, withou
 
 - `release status|explain` make no GitHub write. They read the ledger (`readLedger`, new `readActive`/`listLedgers`) only when `release.managed` is on, else the local cache, and read the gate with the existing `gateState`.
 - Output omits host names and wall clock (only timestamps recorded in the ledger), so a second host prints identical bytes. JSON: `forgedock.release.status/v1` and `forgedock.release.explain/v1`, each with `next_actions[]`.
-- `status --watch` polls with an injected sleep and ends on a terminal status; the bare `release --watch` stays accepted and unchanged.
-- `explain #N` traces only the rules in this repo today (skip labels, priority, `theme_map`, `Depends on` closure, recorded release set), each naming its config key. The wave planner and risk rules of the design do not exist yet; the later `release plan` issue adds them to the trace.
-- `explain <PR>` reports the gate marker, `forge/deploy-gate` and failing checks. Who demoted a check and until when needs the later `exempt` records and is not shown.
+- `status --watch [--interval s]` polls with an injected sleep, prints only on change and ends on a terminal status; the bare `release --watch` delegates to the same loop. Control verbs (`hold|resume|cancel|rollback|lane`) appear in `next_actions[]` with `--reason` placeholders and parse under `parseNextAction`; the CLI itself rejects them until #5556 lands.
+- `explain #N` emits `trace[]` of `{step, rule, config_key, result: pass|fail|n/a, would_change}`: classification (`FORGE:CLASSIFY`, else `classification: absent`), `plan.skip_labels`, `classify.min_confidence`, `risk.rules[i]`, `forces[i]` (a rule that fires is `fail`), priority, `theme_map`, `Depends on`, release set, the planner (`PLANNER_RULES` registry; `planner: not installed` until #5559 registers), and the lane (latest `lane` entry in `controls.jsonl`, else the plan). Records that #5556/#5557 will produce are read tolerantly and reported absent/`unknown`.
+- `explain <PR>` lists every required check with its outcome at the head plus the gate marker and `forge/deploy-gate`; a failing check with an exemption record in `controls.jsonl` is `n/a` and names actor, expiry (printed, not compared to a clock), reason and issue.
 
 ## Rejected
 

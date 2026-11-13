@@ -152,10 +152,13 @@ export async function heartbeat(ctx, lease) {
   return { ok: true };
 }
 
-/** Read-only `_active` ({lease, epoch, holds, intake, ...} of active.json; `{}` when the branch or a key is missing). */
+/** Read-only `_active` ({lease, epoch, holds, intake, ..., controls[]}: active.json plus the parsed lines of controls.jsonl; `{controls: []}` when the branch or a key is missing). */
 export async function readActive(ctx) {
-  const text = await readFile(ctx, ACTIVE, "active.json");
-  try { return JSON.parse(text ?? "{}"); } catch { return {}; }
+  let active = {};
+  try { active = JSON.parse((await readFile(ctx, ACTIVE, "active.json")) ?? "{}") ?? {}; } catch { active = {}; }
+  const controls = [];
+  for (const line of String((await readFile(ctx, ACTIVE, "controls.jsonl")) ?? "").split("\n")) { try { if (line.trim()) controls.push(JSON.parse(line)); } catch { /* skip a bad line */ } }
+  return { ...active, controls };
 }
 
 /** Release ids that have a ledger branch (never `_active`). */

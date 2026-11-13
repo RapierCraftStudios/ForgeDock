@@ -22,7 +22,7 @@ import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns } from "./ci-budget.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger } from "./release-ledger.mjs";
-import { statusFromCli } from "./release-status.mjs";
+import { statusFromCli, CONTROL_VERBS } from "./release-status.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -297,7 +297,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--json] | forgedock release explain <id | #issue | PR> [--json]";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release <hold|resume|cancel|rollback|lane> [<id>] --reason <text> [--repo owner/repo]";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -305,8 +305,13 @@ export async function releaseFromCli(argv, deps = {}) {
   const io = deps.io ?? realReleaseIo({ env, cwd });
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
   if (argv[0] === "status" || argv[0] === "explain") return statusCli(argv, { io, cwd, env, deps });
-  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo"));
+  if (CONTROL_VERBS.includes(argv[0])) throw new Error(`release ${argv[0]} is not available in this build (control verbs: #5556); ${RELEASE_USAGE}`);
+  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--interval"].includes(a) && !["--resume", "--repo", "--interval"].includes(argv[i - 1]));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
+  if (argv.includes("--watch")) { // the bare flag delegates to the status loop (#5554)
+    const pick = (f) => (flag(argv, f) ? [f, flag(argv, f)] : []);
+    return statusCli(["status", ...(flag(argv, "--resume") ? [flag(argv, "--resume")] : []), "--watch", ...pick("--repo"), ...pick("--interval")], { io, cwd, env, deps });
+  }
   const root = releaseRoot(env);
   const resume = flag(argv, "--resume");
   let id = resume ?? newReleaseId(io.now());
