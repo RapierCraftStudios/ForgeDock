@@ -663,7 +663,7 @@ finish with `terminal`/`terminalReason`. #5654: `orchestrate.mjs` also calls the
 `releaseLease` (best effort, awaited; skipped while another live batch owns the issue) when a
 lane ends `engine-error` or `deferred`/`run.interrupted`, and in `requeueLost` (a resumed lane
 with no result, e.g. after an upgrade), before the requeue, so the lane's own lease does not
-defer it as `lease.held` for the TTL. Genuinely foreign leases still defer.
+defer it as `lease.held` for the TTL. Genuinely foreign leases still defer. The lease also records the `batch` id, and `makeDispatchCheck` passes it as `selfBatch` to `otherLaneOwner`/`foreignLease`, so another run of the same batch never defers it; another batch's or a batch-less lease still does.
 
 ## Outcomes
 

@@ -7,21 +7,22 @@ import { parseState } from "../engine/state.mjs";
 import { MAX_LEASE_TTL_MS } from "../engine/projector.mjs";
 
 /** The live lease on an issue body held by someone other than `selfId` (null: none, expired, ours or implausibly far out). */
-export function foreignLease(body, { selfId = null, now = Date.now() } = {}) {
+export function foreignLease(body, { selfId = null, selfBatch = null, now = Date.now() } = {}) {
   const l = parseState(body)?.lease;
   if (!l || !Number.isFinite(l.until) || l.until <= now || l.until > now + MAX_LEASE_TTL_MS) return null;
+  if (selfBatch && l.batch === selfBatch) return null; // #5654: a run of this same batch (its stale lease), not another lane's
   return l.by && l.by !== selfId ? l : null;
 }
 
 /**
- * @param {{gh: Function, repo: string, issue: number, branch?: string, selfId?: string|null, ownPr?: number|null, now?: number, checkLease?: boolean, checkPr?: boolean}} a
+ * @param {{gh: Function, repo: string, issue: number, branch?: string, selfId?: string|null, selfBatch?: string|null, ownPr?: number|null, now?: number, checkLease?: boolean, checkPr?: boolean}} a
  * @returns {Promise<{kind: "lease"|"pr", detail: string}|null>} null when nothing else owns it or GitHub is unreadable (fail-open)
  */
-export async function otherLaneOwner({ gh, repo, issue, branch = `feat/issue-${issue}-lean`, selfId = null, ownPr = null, now = Date.now(), checkLease = true, checkPr = true }) {
+export async function otherLaneOwner({ gh, repo, issue, branch = `feat/issue-${issue}-lean`, selfId = null, selfBatch = null, ownPr = null, now = Date.now(), checkLease = true, checkPr = true }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
   if (checkLease) {
     const iss = await json(["issue", "view", String(issue), "-R", repo, "--json", "body"]);
-    const l = foreignLease(iss?.body ?? "", { selfId, now });
+    const l = foreignLease(iss?.body ?? "", { selfId, selfBatch, now });
     if (l) return { kind: "lease", detail: `issue ${issue} leased by ${l.by} until ${new Date(l.until).toISOString()}` };
   }
   if (!checkPr) return null;
