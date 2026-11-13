@@ -1488,3 +1488,9 @@ branches:
 #   needed_label: design:needed
 #   viewports: [390, 1440]     # the staging visual gate renders every route at each width
 #   require_visual_check: true # screenshots at every viewport and a render-critique verdict per route
+
+# Remote lane tools (#5650): tools the repo's remote (pool) lanes need beyond the generic lane image. The pool builds a
+# per-repo image FROM the base lane image applying one recipe per tool; a tool with no recipe is refused before any build.
+# Recipes live in bin/pool/lane-tools.mjs (RECIPES). Entries are `name` or `name@version` ([a-z0-9.+_-]); others are rejected.
+# execution:
+#   lane_tools: [promtool@2.54.1, postgresql-client, python@3.12, playwright]

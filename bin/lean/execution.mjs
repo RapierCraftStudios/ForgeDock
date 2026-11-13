@@ -58,6 +58,7 @@ import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
 import { dockerLabels, safeSegment } from "./ledger.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { validateLaneTools } from "../pool/lane-tools.mjs";
 import { resolveCredential, memoKeychain, defaultKeychain } from "./credentials.mjs";
 import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
@@ -135,12 +136,13 @@ export function parseExecution(sec = {}) {
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
   const wsN = Number(str(s.warm_sandboxes));
   const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
+  const lt = validateLaneTools(s.lane_tools); // #5650: invalid entries are dropped here and reported in laneToolsErrors; the remote provider refuses to start with them
   const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
   // #5094: rotator.mjs reads its per-account quota state; #5205: off/none/false disables auto-detection, anything else is unset (auto)
   const rot = str(s.account_rotator).toLowerCase(), accountRotator = rot === "tokenbaton" ? "tokenbaton" : ["off", "none", "false"].includes(rot) ? "off" : null;
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
