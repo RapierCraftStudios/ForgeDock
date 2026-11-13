@@ -249,6 +249,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
   const k = deferrals + 1;
   if (k > maxDeferrals) return { capped: true };
   if (posNum(r?.retryInSeconds)) return { delayMs: r.retryInSeconds * 1000 };
+  if (code === "run.interrupted") return { delayMs: 0 }; // #5654: its lease was released, so there is nothing to wait out
   // lease-held: "leased by X until <ISO>"
   const until = /\buntil (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(String(r?.detail ?? ""))?.[1];
   const at = until ? Date.parse(until) : NaN;

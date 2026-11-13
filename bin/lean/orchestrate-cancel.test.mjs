@@ -162,4 +162,15 @@ describe("--requeue of a lease-deferred pending issue (#5241)", () => {
       runOne: async () => (++calls === 1 ? { terminalReason: "engine-error", detail: "boom" } : { terminalReason: "merged", pr: 2 }) });
     assert.deepEqual(released, [2]);
   });
+
+  it("requeues an interrupted lane at once (no backoff) after releasing its lease", async () => {
+    const released = [], store = { load: () => null, save: () => {}, log: () => {} };
+    let calls = 0;
+    const t0 = Date.now();
+    await orchestrate({ issues: [3], parallel: 1, pollMs: 5, readBody: async () => "", store, releaseLease: async (n) => { released.push(n); },
+      runOne: async () => (++calls === 1 ? { terminalReason: "deferred", code: "run.interrupted", detail: "SIGTERM" } : { terminalReason: "merged", pr: 3 }) });
+    assert.deepEqual(released, [3]);
+    assert.equal(calls, 2);
+    assert.ok(Date.now() - t0 < 10000, "re-dispatched without the 120s deferral backoff");
+  });
 });
