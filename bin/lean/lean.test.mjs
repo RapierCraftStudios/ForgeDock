@@ -1275,6 +1275,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     const r = await run(w, { recover: { code: "ci.red", attempt: 1 } });
     assert.equal(r.terminalReason, "merged");
     assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label needs-human"));
+    assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label workflow:recovering"), "#5647: the recovery lane's end clears workflow:recovering");
     const dec = w.comments.find((c) => c.startsWith("<!-- FORGE:DECISION -->"));
     assert.match(dec, /recovery pass for `ci\.red`/); assert.match(dec, /\*\*Why\*\*/); assert.match(dec, /\*\*Alternative\*\*/);
     assert.ok(builders(w).some((b) => /Recovery pass \(ci\.red\): .*--log-failed/.test(b[4])));
