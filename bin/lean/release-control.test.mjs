@@ -178,3 +178,12 @@ describe("rollback verb (#5563)", () => {
     assert.deepEqual(w.active.rollbacks[RID], { reason: "smoke red", actor: "op", at: new Date(1_700_000_000_000).toISOString(), to: "unit" });
   });
 });
+
+describe("release control regate verb (#5584)", () => {
+  it("needs a release id and --reason, and is a known verb", async () => {
+    const w = world();
+    assert.match((await runControl("regate", ["--reason", "r"], base(w))).error, /release id required/);
+    assert.match((await runControl("regate", [RID, "--ref", "f"], base(w))).error, /--reason is required/);
+    assert.match((await runControl("regate", [RID, "--reason", "r"], base(w))).error, /no release/);
+  });
+});

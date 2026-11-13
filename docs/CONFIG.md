@@ -866,6 +866,16 @@ jobs:
 
 **Commands that use this section**: `forgedock release`
 
+### Gate-only fix lane: `release control regate` (#5584)
+
+`forgedock release control regate <release id> --ref <fix branch|sha> --reason "..." [--gate-fix-ref <hotfix branch>]` re-evaluates the gates of the same release sha (same image digests, no rebuild, no migration rerun) with the gate code of `--ref`, so a fix limited to gate artifacts does not need a new merge cycle. Nothing runs unless the verb is called. The fix still goes through CI and review once; it never skips the merge cycle for code that ships in images.
+
+- **Classifier**: the diff between the release's merged sha and `--ref` is gate-only only when every path matches `gates.paths` (default `scripts/deploy/**`, `scripts/lib/**`, `scripts/prod-smoke-test.sh`, `**/gate-fixtures/**`, `tests/gates/**`). A `.github/workflows/*.yml` file qualifies only when every changed hunk lies in a step named in `gates.workflow_steps` (default none). A migration path (`**/migrations/**`, `**/migrate/**`, `*.sql`), an image path (`Dockerfile*`, `docker-compose*.yml`) or any other app path sends the fix to the normal lane.
+- **Dispatch**: one `gh workflow run` of `verify.workflow` at `--ref` through the epoch fence, inputs `sha` (the release sha), `regate=true`, `gate_sha` and `forge_epoch`. The engine never sets `override_freeze` (I26); LIVE_CHECK (I28) still applies to the result.
+- **`gate_fix_ref`** (hotfix same-release gate fix): with `--gate-fix-ref`, the dispatch also carries `gate_fix_ref=<branch>`, which lets a hotfix-branch gate fix replace the default-branch preflight copy. It is recorded in the audit line and in `state.regates`.
+- **Refusals** (nothing is written or dispatched): no recorded live record/rollback target (`state.deploy.target`); `deploy.freeze_variable` set by the run (not set before the deploy) while migration files lie between the rollback target and the release sha; a fix that is not gate-only; a ref already re-evaluated.
+- **Audit**: every use appends a `controls.jsonl` line (`verb: regate`) with the actor, the fix sha, the release sha and `gate_sha` (sha1 over the changed gate paths and their blobs at `--ref`); the release state keeps `regates[]`, and gate telemetry recorded afterwards carries that `gate_sha`.
+
 ## `issue_watch` (OPTIONAL)
 
 Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name. The release keys need `mode: release` and at least a `threshold` or `immediate`.
