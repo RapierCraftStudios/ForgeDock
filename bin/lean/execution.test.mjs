@@ -975,6 +975,15 @@ describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-hum
     }
   });
 
+  it("#5656 a clone timeout on start keeps its clone deferral, not sandbox.transient", async () => {
+    const prov = fakeProvider();
+    prov.start = async () => { throw new Error("git clone timed out after 120s"); };
+    const r = await lanesFor(prov).runOne(7, null);
+    assert.equal(r.terminalReason, "deferred");
+    assert.notEqual(r.code, "sandbox.transient");
+    assert.match(r.detail, /could not clone/);
+  });
+
   it("a non-auth 4xx config error stays needs-human sandbox.start_failed; 429/503 stay sandbox.capacity", async () => {
     const r = await lanesFor(fakeProvider({ startThrows: 422 })).runOne(7, null);
     assert.deepEqual([r.terminalReason, r.code], ["needs-human", "sandbox.start_failed"]);
