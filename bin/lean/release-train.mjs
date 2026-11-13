@@ -59,7 +59,7 @@ const dispatchOrder = (roll) => [...roll.contract.order, ...roll.units.filter((u
  * Run a train wave. `ctx`: {io, repo, def, state, save, config: {deploy, ...}, policy, actor, host, purge?, date, n};
  * `wave`: [{issue, pr, record}]. @returns {Promise<{status: "live"|"verifying"|"demoted"|"rolled-back"|"refused"|"queued"|"blocked"|"stopped", reason?, branch?, ejected?, units?, rollback?}>}
  */
-export async function runTrain(ctx, wave) {
+export async function runReleaseTrain(ctx, wave) {
   const { io, state, policy } = ctx;
   const L = { claimDeploy, releaseDeploy, takeFence, recordTrain, deployStep, runRollback, ...(ctx.ledger ?? {}) }; // overridable for tests
   const d = ctx.config.deploy, pipe = d?.pipelines?.service;

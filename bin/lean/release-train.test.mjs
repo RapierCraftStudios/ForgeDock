@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { recomputeAtCut, runTrain, trainBranch } from "./release-train.mjs";
+import { recomputeAtCut, runReleaseTrain, trainBranch } from "./release-train.mjs";
 import { rollSet } from "./release-plan.mjs";
 import { laneTrailers } from "./release-fence.mjs";
 
@@ -67,21 +67,21 @@ const mkctx = (w, extra = {}, pol = policy) => {
 };
 const wave = [{ issue: 5, pr: 11, record: rec }];
 
-describe("runTrain", () => {
+describe("runReleaseTrain", () => {
   it("demotes at CUT before creating any branch", async () => {
     const w = world({ files: { 11: ["svc/api/migrations/1.sql"] } }); const { ctx } = mkctx(w);
-    const r = await runTrain(ctx, wave);
+    const r = await runReleaseTrain(ctx, wave);
     assert.equal(r.status, "demoted");
     assert.ok(!w.calls.git.some((a) => a[0] === "push"));
   });
   it("ejects a widened issue and demotes when none remain", async () => {
     const w = world({ files: { 11: ["svc/api/a.js", "svc/worker/w.js"] } }); const { ctx } = mkctx(w);
-    const r = await runTrain(ctx, wave);
+    const r = await runReleaseTrain(ctx, wave);
     assert.equal(r.status, "demoted"); assert.equal(r.ejected[0].issue, 5);
   });
   it("creates train/<date>-<n> from live, lands with the lane trailers and dispatches merge sha + units", async () => {
     const w = world(); const { ctx, state, seen } = mkctx(w);
-    const r = await runTrain(ctx, wave);
+    const r = await runReleaseTrain(ctx, wave);
     assert.equal(r.status, "live");
     assert.deepEqual(w.calls.git.find((a) => a[0] === "push"), ["push", "--quiet", "origin", `${"a".repeat(40)}:refs/heads/train/2026-11-13-1`]);
     const merge = w.calls.gh.find((a) => a[1] === "merge" && a.includes("--body"));
@@ -94,7 +94,7 @@ describe("runTrain", () => {
   it("a contract wave orders the producer first and runs regenerate before the push", async () => {
     const w = world({ files: { 11: ["contract/x.json"] }, dirty: true });
     const { ctx, state } = mkctx(w);
-    const r = await runTrain(ctx, [{ issue: 5, pr: 11, record: { units: ["api", "web"], migrations: "none", contract: true } }]);
+    const r = await runReleaseTrain(ctx, [{ issue: 5, pr: 11, record: { units: ["api", "web"], migrations: "none", contract: true } }]);
     assert.deepEqual(state.train.order, ["api", "web"]); assert.deepEqual(state.train.units, ["api", "web"]);
     assert.ok(w.calls.rehearse.includes("make gen"));
     const ci = w.calls.git.findIndex((a) => a[0] === "commit"), pi = w.calls.git.findIndex((a, i) => a[0] === "push" && i > ci);
@@ -103,7 +103,7 @@ describe("runTrain", () => {
   });
   it("a failing regenerate refuses", async () => {
     const w = world({ files: { 11: ["contract/x.json"] }, regenOk: false }); const { ctx } = mkctx(w);
-    const r = await runTrain(ctx, [{ issue: 5, pr: 11, record: { units: ["api", "web"], contract: true } }]);
+    const r = await runReleaseTrain(ctx, [{ issue: 5, pr: 11, record: { units: ["api", "web"], contract: true } }]);
     assert.equal(r.status, "refused");
   });
   it("on a deploy failure invokes rung 1 (flag) with the recorded digests", async () => {
@@ -111,19 +111,19 @@ describe("runTrain", () => {
     const { ctx, state } = mkctx(w, { deployResult: { blocked: true, reason: "smoke failed" } });
     state.deploy = { target: { sha: "a".repeat(40) }, runId: 7, merge: "b".repeat(40) };
     ctx.ledger.runRollback = async (c, a) => { calls.push({ digests: c.trainDigests, to: a.to }); return { rung: "flag", ok: true }; };
-    const r = await runTrain(ctx, wave);
+    const r = await runReleaseTrain(ctx, wave);
     assert.equal(r.status, "rolled-back");
     assert.deepEqual(calls, [{ digests: { api: "sha256:old-api" }, to: "flag" }]);
   });
   it("refuses without deploy.pipelines.service", async () => {
     const w = world(); const { ctx } = mkctx(w); ctx.config.deploy.pipelines = {};
-    assert.equal((await runTrain(ctx, wave)).status, "refused");
+    assert.equal((await runReleaseTrain(ctx, wave)).status, "refused");
   });
 });
 
 describe("web wave purge gate", () => {
   const webWave = [{ issue: 5, pr: 11, record: { units: ["web"], migrations: "none", contract: false } }];
-  const run = (purge) => { const w = world({ files: { 11: ["svc/web/a.js"] } }); const m = mkctx(w, { purge }); return runTrain(m.ctx, webWave).then((r) => ({ r, state: m.state })); };
+  const run = (purge) => { const w = world({ files: { 11: ["svc/web/a.js"] } }); const m = mkctx(w, { purge }); return runReleaseTrain(m.ctx, webWave).then((r) => ({ r, state: m.state })); };
   it("without a purge seam stays VERIFYING and never reaches live", async () => {
     const { r, state } = await run(undefined);
     assert.equal(r.status, "verifying"); assert.match(r.reason, /no purge seam/); assert.equal(state.train.state, "VERIFYING");
