@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import {
   validateCatalogue, parseCatalogue, gateRecord, telemetryLine, parseTelemetry, summarize, formatGatesReport, planDemotions, applyDemotions,
   parseGatesConfig, isSafetyGate, admission, gatesFromCli, effectiveGateMode, REQUIRED,
@@ -118,13 +118,13 @@ describe("report and cli", () => {
   });
   const mk = (git) => { const io = { out: [], calls: [], now: () => T0, print(l) { this.out.push(l); }, git, gh: async (a) => { io.calls.push(a); return ""; }, api: async (...a) => { io.calls.push(a); return {}; } }; return io; };
   it("with no catalogue every subcommand is a no-op with zero writes", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "gates-"));
+    const cwd = tmpDir("gates-");
     const io = mk(() => { throw new Error("absent"); });
     for (const argv of [[], ["check"], ["demote"], ["--json"]]) assert.equal(await gatesFromCli(argv, { io, cwd, history: runs("a", 100, 50), repo: "o/r" }), 0);
     assert.deepEqual(io.calls, []);
   });
   it("check compares the worktree catalogue with the base ref", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "gates-"));
+    const cwd = tmpDir("gates-");
     mkdirSync(join(cwd, ".forge"));
     const { id, ...noId } = GATE; void noId;
     const { owner: _o, ...noOwner } = GATE;
