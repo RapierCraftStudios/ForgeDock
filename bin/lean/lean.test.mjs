@@ -8686,6 +8686,14 @@ describe("FORGE:CLASSIFY wiring (#5557)", () => {
     assert.match(c, /"units": \[\s*"foo"\s*\]/); assert.doesNotMatch(c, /LLM-LIED/);
     assert.ok(w.edits.some((e) => e.includes("unit:foo")) && w.edits.some((e) => e.includes("type:bug")), "namespaced labels added");
   });
+  it("a live claim without verifiable evidence is downgraded and gets the lane:release label", async () => {
+    const w = world(); withPolicy(w); const rd = w.io.fs.read;
+    w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "bug", severity: "P2", exists_in: "live", flag: "none", confidence: 0.8 }) : rd(p));
+    await run(w);
+    const flat = w.edits.flat().map(String).join(" ");
+    assert.ok(flat.includes("lane:release"), "lane:release label issued");
+    assert.ok(flat.includes("where:unknown") && !flat.includes("where:live"), "downgraded to unknown");
+  });
   it("issues every label namespace incl. priority:, and an invalid record triggers the correction loop", async () => {
     const w = world(); withPolicy(w); const rd = w.io.fs.read;
     w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "bug", severity: "P2", exists_in: "unknown" }) : rd(p));

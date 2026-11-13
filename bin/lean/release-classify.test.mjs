@@ -124,5 +124,7 @@ describe("text-only and record building", () => {
     const r = buildClassifyRecord({ type: "bug", severity: "P2", exists_in: "unknown" }, policy, deriveFacts(policy, ["web/a.js"]));
     assert.deepEqual(labelsOf(r), ["type:bug", "priority:P2", "where:unknown", "unit:web", "mig:none", "risk:low"]);
     assert.match(renderClassify(r), /"units"/);
+    assert.ok(labelsOf({ ...r, lane_hint: "release" }).includes("lane:release"), "lane_hint adds a lane:* label");
+    assert.ok(!labelsOf({ ...r, lane_hint: "none" }).some((l) => l.startsWith("lane:")));
   });
 });
