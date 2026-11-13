@@ -254,8 +254,12 @@ export function statelessNeedsHuman(issues) {
 /** #5466: the batch's open issues that GitHub shows stateless (see `statelessNeedsHuman`). A read failure skips the issue. */
 export async function statelessOnGithub(state, gh, repo) {
   const run = new Set(Object.keys(state?.running ?? {}).map(Number));
+  // #5592: the label is only expected where the batch's own row ended parked: a requeued (pending) issue had its pipeline labels
+  // cleared on purpose, and a merged/invalid/decomposed row keeps an old NEEDS_HUMAN comment that no longer describes it.
+  const pend = new Set((state?.pending ?? []).map(Number));
+  const ended = (x) => state?.results?.[x]?.outcome !== undefined && !GOOD_END.has(state.results[x].outcome) && !pend.has(x);
   const rows = [];
-  for (const n of (state?.order ?? []).map(Number).filter((x) => !run.has(x))) {
+  for (const n of (state?.order ?? []).map(Number).filter((x) => !run.has(x) && ended(x))) {
     try {
       const v = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,state,labels,comments"]));
       rows.push({ number: n, state: v.state, labels: (v.labels ?? []).map((l) => l.name), comments: (v.comments ?? []).map((c) => c.body) });

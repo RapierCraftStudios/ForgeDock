@@ -54,6 +54,9 @@ domains:
       - path: decisions/5560-release-deploy.md
         authority: recommended
         token_cost: 600
+      - path: decisions/5568-release-flakes.md
+        authority: recommended
+        token_cost: 400
 
   devdocs:
     description: "Devdocs system, frontmatter schema, selective loading, index format"

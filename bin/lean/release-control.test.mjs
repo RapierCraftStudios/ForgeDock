@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { runControl, controlFromCli, buildDispatchArgs, holdCheck, CONTROL_SCHEMA } from "./release-control.mjs";
+import { runControl, controlFromCli, buildDispatchArgs, holdCheck, exemptionsSection, CONTROL_SCHEMA } from "./release-control.mjs";
 import { fenced } from "./release-fence.mjs";
 
 // A tiny in-memory GitHub: _active branch (active.json + controls.jsonl) and one release ledger.
@@ -10,7 +10,7 @@ function world({ active = { epoch: 1, lease: { holder: "A", epoch: 1, release: "
   const w = { active, controls: "", comments: [], vars: [], gh: [], files: {}, sha: 0 };
   w.io = {
     now: () => 1_700_000_000_000, print: (l) => (w.out ??= []).push(l),
-    gh: async (a) => { w.gh.push(a); if (a[0] === "repo") return JSON.stringify({ nameWithOwner: "o/r" }); if (a[0] === "variable") w.vars.push(a); return ""; },
+    gh: async (a) => { w.gh.push(a); if (a[0] === "repo") return JSON.stringify({ nameWithOwner: "o/r" }); if (a[0] === "variable") w.vars.push(a); if (a[0] === "issue" && a[1] === "view") return a[2] === "404" ? "" : JSON.stringify({ number: Number(a[2]), state: "OPEN", labels: [{ name: "flake" }] }); return ""; },
     api: async (method, path, body) => {
       if (method === "GET" && /git\/ref\/heads\/_active$/.test(path)) return { object: { sha: "h0" } };
       if (method === "GET" && /contents\/active\.json/.test(path)) return { content: Buffer.from(JSON.stringify(w.active)).toString("base64") };
@@ -56,6 +56,29 @@ describe("release control (#5556)", () => {
     assert.match((await runControl("exempt", ok, base(w, { policy: { trust: { actors: ["boss"] } } }))).error, /not trusted/);
     assert.equal((await runControl("exempt", ["lint", "--mode", "quarantine", "--issue", "3", "--until", "14d", "--reason", "r"], base(w))).ok, true);
     assert.equal((await runControl("exempt", ok, base(w, { policy: { trust: { actors: ["op"] } } }))).ok, true);
+  });
+
+  it("exempt without an existing issue is refused (#5568)", async () => {
+    const w = world();
+    const r = await runControl("exempt", ["lint", "--mode", "skip", "--issue", "404", "--until", "2h", "--reason", "x"], base(w));
+    assert.equal(r.ok, false); assert.match(r.error, /does not exist/);
+    assert.equal(w.controls, "");
+  });
+
+  it("quarantine is refused at the cap and without a flake-labelled issue, and a live one shows in the PR body (#5568)", async () => {
+    const at = new Date(1_700_000_000_000).toISOString(), until = new Date(1_700_000_000_000 + 3_600_000).toISOString();
+    const full = Object.fromEntries(Array.from({ length: 2 }, (_, i) => [`t${i}`, { mode: "quarantine", issue: "3", at, until }]));
+    const w = world({ active: { epoch: 1, lease: { holder: "A", epoch: 1, release: RID, issue: 9 }, exemptions: full } });
+    const a = ["--mode", "quarantine", "--issue", "3", "--until", "1d", "--reason", "x"];
+    assert.match((await runControl("exempt", ["new", ...a], base(w, { policy: { quarantine: { max: 2 } } }))).error, /cap 2/);
+    const gh = w.io.gh;
+    w.io.gh = async (x) => (x[0] === "issue" ? JSON.stringify({ number: 3, state: "OPEN", labels: [] }) : gh(x));
+    assert.match((await runControl("exempt", ["new", ...a], base(w))).error, /labelled flake/);
+    w.io.gh = gh;
+    const ok = await runControl("exempt", ["new", ...a], base(w));
+    assert.equal(ok.ok, true);
+    assert.match(exemptionsSection(w.active.exemptions, 1_700_000_000_000), /FORGE:EXEMPT[\s\S]*`new` \(quarantine\)/);
+    assert.equal(exemptionsSection({}, 0), "");
   });
 
   it("a mutation appends the audit line and posts a FORGE:CONTROL comment", async () => {

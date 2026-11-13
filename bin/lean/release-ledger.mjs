@@ -108,7 +108,7 @@ export async function updateActive(ctx, owned, fn) {
     if (out?.refuse) return { refused: out.refuse };
     const next = { ...cur };
     for (const [k, v] of Object.entries(out?.patch ?? {})) if (owned.includes(k)) next[k] = v;
-    const files = { "active.json": json(next) };
+    const files = { "active.json": json(next), ...(out?.files ?? {}) };
     if (out?.control) files["controls.jsonl"] = `${(head ? (await readFile(ctx, ACTIVE, "controls.jsonl")) ?? "" : "")}${JSON.stringify(redactDeep(out.control))}\n`;
     const r = await commitFiles(ctx, ACTIVE, files, `ledger: _active ${Object.keys(out?.patch ?? {}).join(",") || "control"}`, head);
     if (r.ok) return { ok: true, active: next, sha: r.sha };

@@ -8,6 +8,7 @@ import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
 import { makeIo, readSubagentModel } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
@@ -299,14 +300,24 @@ export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;
 /** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env. */
-export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }) {
-  return new Promise((done) => {
+/** #5598: best-effort removal of the containers a check started (labelled by the docker shim); never throws. */
+export async function reapContainers(label, { timeoutMs = 20000, env = process.env } = {}) {
+  try {
+    const ids = String((await pexec("docker", ["ps", "-aq", "--filter", `label=${label}`], { timeout: timeoutMs, env })).stdout ?? "").split(/\s+/).filter(Boolean);
+    if (ids.length) await pexec("docker", ["rm", "-f", ...ids], { timeout: timeoutMs, env });
+    return ids;
+  } catch { return []; }
+}
+
+export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, graceMs = 2000 }) {
+  const reapLabel = `forgedock.reap=${randomBytes(8).toString("hex")}`;
+  const inner = new Promise((done) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) }); }
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel } }); }
     catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
-    const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
-    const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
+    const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
+    const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
     child.stdout.on("data", add); child.stderr.on("data", add);
     child.on("error", (e) => { clearTimeout(timer); done({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
     child.on("close", (code) => {
@@ -315,6 +326,7 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }
       done(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
+  return inner.then(async (r) => { await reapContainers(reapLabel, { env: { ...process.env, ...(env ?? {}) } }); return r; });
 }
 
 /**
