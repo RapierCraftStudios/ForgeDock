@@ -64,5 +64,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "30d"
+  },
+  "schedd-status-under-load": {
+    "run": "s=$(date +%s%N); node bin/engine-cli.mjs schedd status >/dev/null; e=$(date +%s%N); test $(( (e-s)/1000000 )) -lt 3000",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "7d"
   }
 }
