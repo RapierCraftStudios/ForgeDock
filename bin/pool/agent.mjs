@@ -11,6 +11,7 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
+import { resolveLaneImage } from "./lane-tools.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -138,6 +139,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
     try {
+      // #5650: a repo's lane_tools select a derived image (built once per tool list); none keeps spec.image ?? image.
+      const laneImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
       if (withDocker) {
         // Private Docker daemon per sandbox (never the host socket). The lane joins its network namespace, so ports the
         // project's compose stack publishes are on the lane's localhost, and the API listens on loopback only. Both share
@@ -166,7 +169,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         "--env-file", envFile, ...laneNet, ...work,
         ...(spec.claim_dir ? ["-v", `${join(dir, "claim")}:/claim`] : []), // #4912: warm sandboxes receive their lane here
         "-v", `cs-cache-${cacheKey}:/cache`, "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
-        spec.image ?? image, ...spec.command.map(String),
+        laneImage, ...spec.command.map(String),
       ]);
       rec.state = "running";
     } catch (e) {

@@ -87,6 +87,14 @@ describe("release deploy stages (#5560)", () => {
     assert.match(d[0], /forge_epoch=3/); assert.ok(!/override_|acknowledge_/.test(d[0]));
     assert.ok(calls.some((r) => r.key.endsWith(`:deploy:3:deploy:${SHA}`)));
   });
+  it("a train wave dispatches the merge sha and the expected unit set (#5570)", async () => {
+    const { w, io } = world({ runs: [] }); const calls = [];
+    const orig = io.gh; io.gh = async (a) => { const r = await orig(a); if (a[0] === "workflow") w.runs = [{ databaseId: 11, status: "completed", conclusion: "success" }]; return r; };
+    const c = mk(io, { fence: fence(calls) }); c.config.trainDispatch = { units: ["api", "web"] };
+    await deployStep(c);
+    const d = w.gh.find((g) => g.startsWith("workflow run"));
+    assert.match(d, new RegExp(`merge_sha=${SHA}`)); assert.match(d, /units=api,web/);
+  });
   it("a stale epoch refuses the dispatch", async () => {
     const { io } = world({ runs: [] });
     const f = fence(); f.lctx = { io: { api: async () => active({ lease: { holder: "other", epoch: 4 }, epoch: 4 }) }, repo: "o/r" };

@@ -62,3 +62,11 @@ describe("pool unit hardening (#4673)", () => {
     assert.equal(lastExitReason(["nothing"]), null);
   });
 });
+
+describe("per-repo lane image (#5650)", () => {
+  it("agent resolves the image through lane-tools and keeps the base default", () => {
+    const src = read("bin/pool/agent.mjs");
+    assert.match(src, /resolveLaneImage\(\{ tools: spec\.lane_tools, baseImage: spec\.image \?\? image, docker \}\)/);
+    assert.match(src, /: \(spec\.image \?\? image\)/);
+  });
+});
