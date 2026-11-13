@@ -485,3 +485,44 @@ describe("release control routing (#5556)", () => {
     await assert.rejects(releaseFromCli(["control", "nope"], { io: { print() {}, gh: async () => "" }, cwd: tmp() }), /unknown control verb/);
   });
 });
+
+describe("managed merge (#5561)", () => {
+  const LEASE = { holder: "A", epoch: 3 };
+  const fence = (lctxCred = "driver") => ({ lctx: { repo: REPO, credential: lctxCred, io: { api: async (_m, path) => {
+    if (/active\.json/.test(path)) return { content: Buffer.from(JSON.stringify({ epoch: 3, lease: LEASE })).toString("base64") };
+    throw Object.assign(new Error("404 Not Found"), { status: 404 });
+  } } }, lease: { ...LEASE, release: "r1" }, now: () => "t", record: async () => {} });
+  const mk = (over = {}, method) => {
+    const merges = [];
+    const io = { print() {}, git: () => `schema: 1\nmerge: {method: ${method ?? "merge-commit"}}\n`, gh: async (a) => { merges.push(a); return ""; }, mergeGuard: async () => ({ ok: true }), ...over };
+    return { merges, ctx: { io, repo: REPO, state: { id: "r20240101-000000-1" }, opts: { merge: true }, config: { managed: true }, def: "main", staging: "staging", fence: fence() } };
+  };
+  it("merge carries --match-head-commit, Forge-Release and Forge-Epoch trailers", async () => {
+    const { ctx, merges } = mk();
+    const { managedPromotion } = await import("./release.mjs");
+    assert.deepEqual(await managedPromotion(ctx, { pr: 7, head: HEAD }), { merged: true, head: HEAD });
+    assert.deepEqual(merges[0], ["pr", "merge", "7", "--repo", REPO, "--merge", "--match-head-commit", HEAD, "--body", "Forge-Release: r20240101-000000-1\nForge-Epoch: 3"]);
+  });
+  it("merge.method picks the gh flag", async () => {
+    const { managedPromotion } = await import("./release.mjs");
+    for (const [m, flag] of [["squash", "--squash"], ["rebase", "--rebase"]]) {
+      const { ctx, merges } = mk({}, m);
+      await managedPromotion(ctx, { pr: 7, head: HEAD });
+      assert.ok(merges[0].includes(flag), m);
+    }
+  });
+  it("a refused guard (moved head, stale approval, no gate status, unreadable gate) merges nothing", async () => {
+    const { managedPromotion } = await import("./release.mjs");
+    const { ctx, merges } = mk({ mergeGuard: async () => ({ ok: false, why: "no forge/release-gate on x" }) });
+    const r = await managedPromotion(ctx, { pr: 7, head: HEAD });
+    assert.match(r.why, /merge guard: no forge\/release-gate/);
+    assert.equal(merges.length, 0);
+  });
+  it("I12: a lane-role context cannot merge", async () => {
+    const { managedPromotion } = await import("./release.mjs");
+    const { ctx, merges } = mk();
+    ctx.fence = fence("lane");
+    assert.match((await managedPromotion(ctx, { pr: 7, head: HEAD })).refused, /role lane may not merge/);
+    assert.equal(merges.length, 0);
+  });
+});

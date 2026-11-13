@@ -43,6 +43,7 @@ export const POLICY_SCHEMA = obj({
   risk: obj({ rules: list(obj({ when: obj({ migration: B, paths: list(), contract: B, rolled_units_gt: N, diff_lines_gt: N, requires: S }), risk: en("low", "medium", "high"), forces: S })) }),
   plan: obj({ approval: en("wait", "auto", "auto-if"), skip_labels: list(), require_design_gate: B, max_issues: N, stale_snapshot_s: N }),
   lanes: { t: "map", v: obj({ pipeline: S, ci_tier: S, approval: S, budget: S, base: en("live", "integration", "default"), units_max: N, max_risk: en("low", "medium", "high"), train_max_issues: N, train_max_units: N, soak_min: { t: "any" }, flag_policy: en("require", "warn", "off"), requires: list() }) },
+  credentials: obj({ gate_app: SN, lane_env_strip: list() }),
   merge: obj({ approval: en("confirm", "with-plan", "auto"), method: en("merge-commit", "squash", "rebase"), trailers: list() }),
   ci: obj({ provider: en("github-actions", "command"), required_checks: ANY, selection: ANY, rerun_budget_min: N, fix: ANY, flake: obj({ quarantine_after: N, window_days: N }), unskippable: list(), tiers: { t: "map", v: obj({ jobs: list() }) }, nightly: ANY, budget: ANY }),
   preflight: obj({ commands: list(), timeout_s: N, blocking: B }),

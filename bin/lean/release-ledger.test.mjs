@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { INIT_PROFILE } from "./release-config.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -155,6 +156,7 @@ async function commitHead(g) { // a foreign writer commits on top of the current
 describe("release fencing through the job (#5553)", () => {
   const HEAD = "a".repeat(40);
   const mkIo = (g, holder, calls) => ({ holder, print() {}, now: () => 1_700_000_000_000, sleep: async () => {}, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, api: g.api,
+    git: () => INIT_PROFILE, mergeGuard: async () => ({ ok: true }), // the merge guard has its own tests (release-gate.test.mjs, release.test.mjs)
     gh: async (a) => {
       const j = a.join(" ");
       if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: calls.some((c) => c[1] === "merge") ? "MERGED" : "OPEN", mergeCommit: calls.some((c) => c[1] === "merge") ? { oid: "m".repeat(40) } : null, headRefOid: HEAD, comments: [{ body: "FORGE:GATE_PASS" }] });
@@ -171,7 +173,7 @@ describe("release fencing through the job (#5553)", () => {
     const out = await go(mkIo(g, "hostA", calls), null, tmpDir("fa-"));
     assert.equal(out.status, "done");
     assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].slice(-2), ["--body", "Forge-Epoch: 1"]);
+    assert.deepEqual(calls[0].slice(-2), ["--body", `Forge-Release: ${ID}\nForge-Epoch: 1`]);
     const st = (await readLedger(ctxOf(g), ID)).state;
     assert.deepEqual(st.intents.map((i) => [i.action, i.epoch, i.done]), [["merge", 1, true]]);
   });
