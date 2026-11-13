@@ -3322,3 +3322,5 @@ Remote tool install and host fallback (#5652): a remote lane whose frozen valida
 `validate-catalog.mjs` `PY_RUNNER_RE`: a `uv run` option value never starts with `-`, so the option list cannot backtrack exponentially (CodeQL js/redos, release #5676).
 
 `pool/warm.mjs` `replenish` is single-flight. A sandbox counts as warm only after its launch returns, so concurrent passes (every lane launch, claim and reaper tick) each counted 0 and over-filled the pool. With slow 1.60.0 launches, legion held 11 never-ready warm sandboxes for n=1. A call during a pass joins it and schedules one more pass.
+
+`scripts/acceptance-red-green.sh` links a `.venv` next to every tracked Python manifest (pyproject.toml, poetry.lock, uv.lock, requirements*.txt) into the base checkout, not only the root `.venv`. Before this, a monorepo service test (`cd services/api && .venv/bin/python -m pytest`) ran `BASE=UNRUNNABLE`. `conformance.mjs` `reproFailures` classes `BASE=UNRUNNABLE HEAD=RAN` as `env.repro_unrunnable` (environment), never a builder resume.
