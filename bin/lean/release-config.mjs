@@ -15,6 +15,9 @@ import { readBranches } from "./lane.mjs";
 import { catalogueFindings } from "./release-gates.mjs";
 
 export const POLICY_PATH = ".forge/release.yaml";
+/** Migration locations and destructive statements the rollback ladder looks for in migration file text (I8, #5563); text only, nothing is executed. */
+export const MIGRATION_PATHS = ["**/migrations/**", "**/migrate/**", "*.sql"];
+export const DESTRUCTIVE_SQL = /\b(DROP\s+(TABLE|COLUMN|SCHEMA|INDEX|CONSTRAINT)|TRUNCATE|DELETE\s+FROM|ALTER\s+TABLE[^;]*\b(DROP|RENAME)\b|RENAME\s+(TO|COLUMN))\b/i;
 export const DEFERRED_KEYS = ["plan.auto_if", "retention_days", "ci.forbid_per_issue_steps", "couplings[].refine", "ci.provider=command", "risk.weights"];
 
 export const INIT_PROFILE = `schema: 1
@@ -49,7 +52,11 @@ export const POLICY_SCHEMA = obj({
   preflight: obj({ commands: list(), timeout_s: N, blocking: B }),
   deploy: obj({ live_release_command: S, freeze_variable: S, concurrency_group: S, start_timeout_s: N, stage_timeout_s: N, expected_digests_command: S, recovery: obj({ rerun_max: I, max_attempts: I, signatures: list() }), pipelines: { t: "map", v: PIPELINE } }),
   verify: obj({ workflow: S, results: list(obj({ workflow: S, kind: en("smoke", "edge", "convergence") })), flags: list(obj({ flag: S, off_command: S })), slis: list(ANY), post_deploy_checks_file: S, close_requires: en("verified", "deployed") }),
-  rollback: obj({ triggers: list(), ladder: list(), refuse_across: list(), open_revert_pr: B }),
+  rollback: obj({
+    triggers: list(en("smoke", "health", "livecheck", "sli", "crashloop", "human")), ladder: list(en("flag", "unit", "full", "stop")), refuse_across: list(en("destructive_migration")), open_revert_pr: B,
+    flags: list(obj({ flag: S, kill_command: S })), unit_workflow: S, unit_action: S, full_workflow: S, health_command: S, result_command: S,
+  }),
+  events: obj({ webhook_url: S }),
   quarantine: obj({ days: N, max: N }),
   gates: obj({ demote_fb_rate: N, demote_window: I, safety: list() }),
   controls: obj({ intake: ANY, conductor: ANY, exempt: ANY }),

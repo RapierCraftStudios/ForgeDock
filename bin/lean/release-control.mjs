@@ -15,11 +15,11 @@ import { UNSKIPPABLE_CLASSES, isUnskippable, parseFlakeConfig, canQuarantine } f
 
 export const CONTROL_SCHEMA = "forgedock.release.control/v1";
 export const CONTROL_MARKER = "FORGE:CONTROL";
-export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote"];
+export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote", "rollback"];
 export { UNSKIPPABLE_CLASSES as UNSKIPPABLE };
 export const EXEMPT_MAX_H = { skip: 24, quarantine: 14 * 24 };
 export const LANES = ["train", "release", "p0", "exclude"];
-const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes"];
+const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes", "rollbacks"];
 export const DEMOTE_MAX_H = 30 * 24;
 const BREAK_GLASS = /^(override_freeze|acknowledge_hotfix_revert|override_.*|acknowledge_.*)$/;
 
@@ -46,7 +46,7 @@ export async function holdCheck(lctx, id) {
 }
 
 const flagOf = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-const FLAGS = ["--repo", "--reason", "--mode", "--issue", "--until", "--force", "--fixture"];
+const FLAGS = ["--repo", "--reason", "--mode", "--issue", "--until", "--force", "--fixture", "--to"];
 const positionals = (argv) => argv.filter((a, i) => !a.startsWith("--") && !FLAGS.includes(argv[i - 1]));
 const ttlHours = (s) => { const m = /^(\d+)([hd])$/.exec(String(s ?? "")); return m ? Number(m[1]) * (m[2] === "d" ? 24 : 1) : null; };
 
@@ -115,6 +115,11 @@ export async function runControl(verb, argv, ctx) {
       }
       return { patch: { exemptions: { ...(a.exemptions ?? {}), [check]: entry } }, before: a.exemptions?.[check] ?? null, after: entry };
     };
+  } else if (verb === "rollback") { // #5563: the audited record of a rollback request; the ladder itself is release-rollback.mjs
+    const id = pos[0], to = flagOf(argv, "--to");
+    if (!id) return fail("rollback: release id required");
+    if (to && !["flag", "unit", "full"].includes(to)) return fail("rollback: --to must be flag, unit or full");
+    apply = (a) => { const entry = { reason, actor, at, to: to ?? null }; return { patch: { rollbacks: { ...(a.rollbacks ?? {}), [id]: entry } }, before: a.rollbacks?.[id] ?? null, after: entry }; };
   } else if (verb === "demote" || verb === "promote") { // #5583: false-block policy on a deploy gate, same audited path
     const gate = pos[0];
     if (!gate) return fail(`${verb}: gate id required`);

@@ -165,3 +165,16 @@ describe("demote / promote (#5583)", () => {
     assert.match((await runControl("promote", ["g", "--fixture", "f", "--reason", "r"], base(w))).error, /not demoted/);
   });
 });
+
+describe("rollback verb (#5563)", () => {
+  it("needs a reason and a release id, and records an audited line", async () => {
+    const w = world();
+    assert.match((await runControl("rollback", [RID], base(w))).error, /--reason is required/);
+    assert.match((await runControl("rollback", ["--reason", "x"], base(w))).error, /release id required/);
+    assert.match((await runControl("rollback", [RID, "--reason", "x", "--to", "stop"], base(w))).error, /--to must be/);
+    const r = await runControl("rollback", [RID, "--reason", "smoke red", "--to", "unit"], base(w));
+    assert.equal(r.ok, true);
+    assert.equal(r.entry.verb, "rollback");
+    assert.deepEqual(w.active.rollbacks[RID], { reason: "smoke red", actor: "op", at: new Date(1_700_000_000_000).toISOString(), to: "unit" });
+  });
+});

@@ -138,3 +138,13 @@ describe("gates catalogue and policy (#5583)", () => {
     assert.doesNotMatch(none.printed.join("\n"), /gates/);
   });
 });
+
+describe("rollback and events keys (#5563)", () => {
+  const rb = "rollback:\n  ladder: [flag, unit, full, stop]\n  triggers: [smoke, sli]\n  refuse_across: [destructive_migration]\n  open_revert_pr: true\n  flags: [{flag: f1, kill_command: ./kill}]\n  unit_workflow: svc.yml\n  full_workflow: rb.yml\n  result_command: ./res\nevents: {webhook_url: https://x.test/h}\n";
+  it("accepts the typed ladder keys", () => assert.deepEqual(check(`${OK}${rb}`), []));
+  it("rejects an unknown rung, trigger and key", () => {
+    assert.match(check(`${OK}rollback: {ladder: [nuke]}\n`).join("\n"), /ladder\[0\].*not one of/);
+    assert.match(check(`${OK}rollback: {triggers: [moon]}\n`).join("\n"), /triggers\[0\]/);
+    assert.match(check(`${OK}rollback: {sql: x}\n`).join("\n"), /rollback\.sql: unknown key/);
+  });
+});
