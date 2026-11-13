@@ -92,6 +92,12 @@ export function laneToolsDockerfile(baseImage, tools) {
   return [`FROM ${baseImage}`, "USER root", ...steps, ""].join("\n");
 }
 
+/** One in-flight build per tag (shared by every launch and the warm pool), and the last failure per tag. */
+const BUILDS = new Map();
+const FAILED = new Map();
+/** How long a failed build is reported instead of retried. */
+export const LANE_BUILD_RETRY_MS = 10 * 60000;
+
 /**
  * The image a launch runs: `baseImage` when no tools; else the per-repo tag, reused when present, built from the base
  * otherwise. `docker.hasImage` and `docker.build(dir, tag, args)` are injected. Throws typed lane_tools.unknown_recipe
@@ -102,6 +108,31 @@ export async function resolveLaneImage({ tools = [], baseImage, docker, buildTim
   checkRecipes(tools);
   const tag = laneToolsTag(baseImage, tools);
   if (await docker.hasImage?.(tag)) return tag;
+  if (!BUILDS.has(tag)) BUILDS.set(tag, buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }).finally(() => BUILDS.delete(tag)));
+  return BUILDS.get(tag); // concurrent callers share one build of a tag
+}
+
+/**
+ * Non-blocking form for a launch (the router waits ~120 s, a build can take many minutes): {image} when the tag exists,
+ * {building: true} after starting (or joining) a background build, {failed: message} for a build that failed in the last
+ * LANE_BUILD_RETRY_MS. Throws typed lane_tools.unknown_recipe.
+ */
+export async function laneImageNow({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, now = Date.now }) {
+  if (!tools.length) return { image: baseImage };
+  checkRecipes(tools);
+  const tag = laneToolsTag(baseImage, tools);
+  if (await docker.hasImage?.(tag)) return { image: tag };
+  const f = FAILED.get(tag);
+  if (f && now() - f.at < LANE_BUILD_RETRY_MS) return { failed: f.message };
+  if (!BUILDS.has(tag)) {
+    FAILED.delete(tag);
+    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }).catch((e) => { FAILED.set(tag, { at: now(), message: e.message }); }).finally(() => BUILDS.delete(tag));
+    BUILDS.set(tag, p);
+  }
+  return { building: true, tag };
+}
+
+async function buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }) {
   const dir = mkdtempSync(join(tmpdir(), "lane-tools-"));
   let timer;
   try {
