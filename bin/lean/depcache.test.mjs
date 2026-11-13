@@ -558,3 +558,34 @@ describe("depcache (#5590): incomplete installs are repaired, Python follows the
     assert.ok(!f.calls.some((c) => c.args[0] === "env"));
   });
 });
+
+describe("depcache (#5592 3c): poetry --no-root fallback", () => {
+  it("a poetry install that cannot install the root package is retried with --no-root", async () => {
+    const f = fakeExec();
+    const tried = [];
+    const exec = async (cmd, args, o) => {
+      if (cmd === "poetry" && args[0] === "install") {
+        tried.push(args.join(" "));
+        if (!args.includes("--no-root")) throw Object.assign(new Error("failed"), { stderr: "Error: The current project could not be installed: No file/folder found for package proj\nIf you do not want to install the current project use --no-root." });
+      }
+      return f.exec(cmd, args, o);
+    };
+    const base = scratch(), wt = join(base, "wt"); mkdirSync(wt, { recursive: true }); FIXTURES.poetry(wt);
+    const cache = makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 });
+    const [r] = await cache.prepare({ wt, repoKey: "repo-noroot" });
+    assert.equal(r.status, "miss-installed", JSON.stringify(r));
+    assert.deepEqual(tried, ["install --sync", "install --sync --no-root"]);
+  });
+  it("an unrelated poetry failure is not retried", async () => {
+    const tried = [];
+    const exec = async (cmd, args) => {
+      if (cmd === "poetry" && args[0] === "install") { tried.push(args.join(" ")); throw Object.assign(new Error("failed"), { stderr: "SolverProblemError: no matching version" }); }
+      if (args[0] === "--version") return "Python 3.12.3\n";
+      return "";
+    };
+    const base = scratch(), wt = join(base, "wt"); mkdirSync(wt, { recursive: true }); FIXTURES.poetry(wt);
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-noroot2" });
+    assert.equal(r.status, "failed");
+    assert.deepEqual(tried, ["install --sync"]);
+  });
+});
