@@ -37,6 +37,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
    promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
    flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
+   #5598: `runCheckCommand` gives each check `FORGE_REAP_LABEL=forgedock.reap=<token>`; `labelDockerArgs` (`heavy.mjs`) adds it as `--label` to
+   `docker run|create`, and after the check ends (timeout: SIGTERM, grace, SIGKILL) `reapContainers` removes the labelled containers
+   (best effort, no docker = no-op), so a timed-out promtool container is not leaked.
    #5148: `isPassThroughWrapper` also detects a wrapper that looks up a `$0`-derived name (`${0##*/}`, `basename "$0"`), so
    `writeHeavyShims` bakes the real binary past it and the preflight flags it; `guardChain` counts `FORGE_HEAVY_DEPTH` and
    stops at `SHIM_DEPTH_MAX` (32) with `env.shim_loop` (exit 126), whatever the wrapper shape.
