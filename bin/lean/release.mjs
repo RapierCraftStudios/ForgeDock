@@ -8,7 +8,7 @@
  * live in release-review.mjs / release-postmerge.mjs (stubs that block until their parts land). Promotion is opt-in: without
  * `--merge` or forge.yaml `release.auto_merge: true` the job stops at GATE_PASS and prints the merge command.
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,7 @@ import { fenced, epochTrailer } from "./release-fence.mjs";
 import { holdCheck, exemptionsSection, VERBS as CONTROL_VERBS } from "./release-control.mjs";
 import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
 import { readActive } from "./release-ledger.mjs";
+import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
 export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
@@ -428,7 +429,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -458,6 +459,7 @@ export async function releaseFromCli(argv, deps = {}) {
     return g.gatesFromCli(argv.slice(1), { io, cwd, defaultBranch, policy, repo, history: gateHistoryFromRoot(root) });
   }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
+  if (argv[0] === "status" || argv[0] === "explain") return statusCli(argv, { io, cwd, env, deps });
   if (argv[0] === "check-config" || argv[0] === "init") { // #5551: policy file, loaded lazily (release-config imports this module)
     const { checkConfigFromCli, initFromCli } = await import("./release-config.mjs");
     return (argv[0] === "init" ? initFromCli : checkConfigFromCli)(argv.slice(1), { io, cwd });
@@ -470,8 +472,12 @@ export async function releaseFromCli(argv, deps = {}) {
     return controlFromCli(cv, argv.slice(argv[0] === "control" ? 2 : 1), { io, policy, actor: deps.actor, host: deps.host });
   }
   if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
-  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane"));
+  const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane", "--interval"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane" || argv[i - 1] === "--interval"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
+  if (argv.includes("--watch")) { // the bare flag delegates to the status loop (#5554)
+    const pick = (f) => (flag(argv, f) ? [f, flag(argv, f)] : []);
+    return statusCli(["status", ...(flag(argv, "--resume") ? [flag(argv, "--resume")] : []), "--watch", ...pick("--repo"), ...pick("--interval")], { io, cwd, env, deps });
+  }
   const root = releaseRoot(env);
   const resume = flag(argv, "--resume");
   let id = resume ?? newReleaseId(io.now());
@@ -505,4 +511,13 @@ async function verifyFromCli(argv, { io, cwd }) {
   const r = await verifyRelease({ io, git: io.git, repo, staging: readBranches(cwd).staging || DEFAULT_STAGING_BRANCH, sha: full });
   io.print(r.ok ? `release verify ${full}: ok (snapshot + ${r.picks} cherry-pick(s), PR #${r.pr})` : `release verify ${full}: FAILED: ${r.why}`);
   return r.ok ? 0 : 1;
+}
+
+/** `release status|explain` (#5554): read-only; the local cache and the gate read are handed to release-status.mjs. */
+function statusCli(argv, { io, cwd, env, deps }) {
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* defaults */ }
+  const root = releaseRoot(env);
+  const local = { load: (id) => (ID_RE.test(String(id)) ? openRelease(root, id).load() : null), ids: () => { try { return readdirSync(root).filter((d) => ID_RE.test(d)); } catch { return []; } } };
+  const { policy, watch } = policyFromYaml(raw);
+  return statusFromCli(argv, { io, config: readReleaseConfig(raw), local, gateState, watch: deps.watch ?? watch, policy: deps.policy ?? policy, maxPolls: deps.maxPolls });
 }

@@ -81,6 +81,18 @@ export function parseDecisionComment(body, { issue = null } = {}) {
   } catch { return null; }
 }
 
+/** #5547: `<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy","why":"..."} -->` -> {requirement, disposition, why}; null for anything else (anchored records included). */
+export function parseRequirementDecision(body) {
+  const m = MARKER_RE.exec(String(body ?? "").split("\n", 1)[0]);
+  if (!m) return null;
+  try {
+    const raw = JSON.parse(m[1]);
+    const id = typeof raw?.requirement === "string" ? raw.requirement.trim() : "";
+    if (!/^R\d+$/.test(id) || raw.disposition !== "post-deploy") return null;
+    return { requirement: id, disposition: "post-deploy", why: one(raw.why) };
+  } catch { return null; }
+}
+
 /** One record per id, the latest wins (input in posting order); ids ordered by first appearance. */
 export function foldDecisions(records) {
   const by = new Map();

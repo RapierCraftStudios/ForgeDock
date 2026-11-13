@@ -308,7 +308,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 /**
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
-export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
+export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
@@ -1308,8 +1308,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       baseDone.add(n);
     }
   };
+  let blockedReadAt = -Infinity; // #5592 follow-up: the label list is one `gh issue list` per call; a waiting batch makes several passes a second
   const refreshBlocked = async () => {
     if (!getBlocked) return;
+    if (now() - blockedReadAt < blockedRefreshMs) return;
+    blockedReadAt = now();
     let got;
     try { got = await getBlocked(); } catch { return; }
     const next = new Set((Array.isArray(got) ? got : [...(got ?? [])]).filter((n) => Number.isSafeInteger(n) && n > 0));
