@@ -59,7 +59,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trusted body carries it for this lane is satisfied when that PR reads MERGED with
    that merge commit and the commit is an ancestor of `origin/<lane>` (`phases.mjs`
    `mergedToByState`), checked before the PR-list search.
-4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
+4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` as a section of the issue's one `FORGE:STATUS` comment (#5592, `statuscomment.mjs`: STARTED, CONTEXT, LANE_BRANCH, LITE, TRAJECTORY and the prose DECISION are sections edited in place across requeues, found by trusted author; INVESTIGATION, IMPLEMENTATION and PARKED are single edited comments; NEEDS_HUMAN, CONTRACT, REVIEW, FACTS, TRACKED, HOST_TASK, DEPENDENCY and owner asks stay separate), and `needs-human`, `needs-human:*`, `parked:*`, `remediation-queue` come off (`clearPipelineLabels`; also on a merged/invalid finish and in the batch dispatch check of a closed or merged issue; verify's reopen keeps its needs-human). The batch health `stateless` check reads only rows that ended parked (not pending/running/merged). The lane
    resumes an open PR / remote branch. Before an existing `lean-<N>` worktree is
    removed (#4162): processes whose cwd is inside it (an orphaned runner from a
    dead run, found via `/proc`) get SIGTERM, then SIGKILL after 5 s
