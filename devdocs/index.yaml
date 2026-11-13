@@ -63,6 +63,9 @@ domains:
       - path: decisions/5568-release-flakes.md
         authority: recommended
         token_cost: 400
+      - path: decisions/5564-release-conductor.md
+        authority: recommended
+        token_cost: 450
       - path: decisions/5584-release-regate.md
         authority: recommended
         token_cost: 400

@@ -241,10 +241,10 @@ export async function runRollback(ctx, { reason, to = "flag", trigger = null, la
 }
 
 /** The lease that fences the rollback's effects (own epoch, `forge_epoch` on every dispatch); unmanaged (no `io.api`): no fence. */
-async function takeFence(ctx, holder) {
+export async function takeFence(ctx, holder, ttlS = 300) {
   if (!ctx.io.api) return { fence: null };
   const lctx = { io: ctx.io, repo: ctx.repo, credential: "driver" };
-  const l = await acquireLease(lctx, { holder, release: ctx.state.id, issue: ctx.state.steps?.["release-pr"]?.result?.pr, ttlS: 300, now: ctx.io.now() });
+  const l = await acquireLease(lctx, { holder, release: ctx.state.id, issue: ctx.state.steps?.["release-pr"]?.result?.pr, ttlS, now: ctx.io.now() });
   if (!l.ok) return { refused: l.refused ?? "lease lost the race" };
   const record = async (rec) => { const a = (ctx.state.intents ??= []); const i = a.findIndex((x) => x.key === rec.key); if (i < 0) a.push(rec); else a[i] = rec; ctx.save(); };
   return { fence: { lctx, lease: l.lease, record, now: () => new Date(ctx.io.now()).toISOString() } };

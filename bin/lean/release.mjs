@@ -439,7 +439,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -464,6 +464,13 @@ export async function releaseFromCli(argv, deps = {}) {
     if (!ID_RE.test(String(argv[1] ?? ""))) throw new Error(`rollback needs a release id; ${RELEASE_USAGE}`);
     const def = readBranches(cwd).default || "main";
     return rollbackFromCli(argv.slice(1), { io, rel: openRelease(releaseRoot(env), argv[1]), policy: readPolicy({ io, defaultBranch: def, cwd }).policy, def, actor: deps.actor, host: deps.host });
+  }
+  if (argv[0] === "recover") { // #5564: the conductor's host-less recovery; loaded lazily like the other managed-release modules
+    const { recoverFromCli } = await import("./release-conductor.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    if (!ID_RE.test(String(argv[1] ?? ""))) throw new Error(`recover needs a release id; ${RELEASE_USAGE}`);
+    const def = readBranches(cwd).default || "main";
+    return recoverFromCli(argv.slice(1), { io, policy: readPolicy({ io, defaultBranch: def, cwd }).policy ?? {}, def, actor: deps.actor ?? env.GITHUB_ACTOR, host: deps.host });
   }
   if (argv[0] === "gates") { // #5583: catalogue, telemetry report, admission check; release-gates is loaded lazily
     const g = await import("./release-gates.mjs");
@@ -516,6 +523,9 @@ export async function releaseFromCli(argv, deps = {}) {
     const { readPolicy } = await import("./release-config.mjs");
     const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
     if (pol?.deploy) config.deploy = pol.deploy;
+    const { conductorGuard } = await import("./release-conductor.mjs"); // #5564: a configured conductor must exist on the default branch
+    const noConductor = conductorGuard({ io, policy: pol, def: readBranches(cwd).default || "main" });
+    if (noConductor) { io.print(`release: refused: ${noConductor}`); return 1; }
     config.policy = pol; config.fix = parseFixConfig(pol?.ci?.fix); // #5567: ci.fix.max_rounds / co_start / full_run_workflow
     config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
     if (pol?.verify) { // #5562: verification layers; risk class picks the soak minutes
