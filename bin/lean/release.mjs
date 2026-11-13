@@ -18,6 +18,7 @@ import { ghRunner } from "./issuewatch.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
+import { deployStep } from "./release-deploy.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
@@ -31,7 +32,7 @@ import { readActive } from "./release-ledger.mjs";
 import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
 
-export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
+export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge", "deploy"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -300,7 +301,7 @@ async function promotionStep(ctx) {
   return { merged: true, head, gate };
 }
 
-const OPTIONAL_STEPS = ["host-preflight", "mark-ready"];
+const OPTIONAL_STEPS = ["host-preflight", "mark-ready", "deploy"];
 
 const STEP_FNS = {
   preflight: preflightStep,
@@ -312,6 +313,7 @@ const STEP_FNS = {
   rehearsal: (ctx) => rehearsalStep(ctx),
   promotion: promotionStep,
   "post-merge": (ctx) => postMergeStep(ctx),
+  deploy: (ctx) => deployStep(ctx),
 };
 
 /** The step table with `over` replacing steps by name (tests stub the steps that need a real repo). */
@@ -485,6 +487,12 @@ export async function releaseFromCli(argv, deps = {}) {
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
   const config = readReleaseConfig(raw);
   if (config.managed) config.ciPolicy = readCiPolicy(cwd);
+  if (config.managed) { // #5560: deploy stages come from the default-branch policy only (I13)
+    const { readPolicy } = await import("./release-config.mjs");
+    const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
+    if (pol?.deploy) config.deploy = pol.deploy;
+    config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
+  }
   if (resume) {
     const st = openRelease(root, resume).load();
     if (!st && !config.managed) throw new Error(`no release ${resume} in ${root}`); // managed: the ledger may hold it (another host)
