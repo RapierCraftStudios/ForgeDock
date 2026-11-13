@@ -664,7 +664,11 @@ Stored in the issue body by `io.projector.writeState`:
 terminalReason, terminal, lease: {by, until, host, pid}}`. TTL 25 min, renewed
 every 2 min; a live foreign lease → `deferred` / `lease-held`; a dead holder
 (same host, pid gone) is taken over (`LEASE_TAKEOVER` event). Released on
-finish with `terminal`/`terminalReason`.
+finish with `terminal`/`terminalReason`. #5654: `orchestrate.mjs` also calls the injected
+`releaseLease` (best effort, awaited; skipped while another live batch owns the issue) when a
+lane ends `engine-error` or `deferred`/`run.interrupted`, and in `requeueLost` (a resumed lane
+with no result, e.g. after an upgrade), before the requeue, so the lane's own lease does not
+defer it as `lease.held` for the TTL. Genuinely foreign leases still defer. The lease also records the `batch` id, and `makeDispatchCheck` passes it as `selfBatch` to `otherLaneOwner`/`foreignLease`, so another run of the same batch never defers it; another batch's or a batch-less lease still does.
 
 ## Outcomes
 

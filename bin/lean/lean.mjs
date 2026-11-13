@@ -400,7 +400,7 @@ export async function runCore(o) {
   const myHost = o.hostName ?? osHostname();
   // #4920: unique per lane. A sandbox's pid is 1, so `core_<pid>` made every remote lane the same holder and the lease never refused one.
   const agentId = o.agentId ?? `core_${sanitizeLeaseHost(myHost)}_${o.pid ?? process.pid}_${randomBytes(3).toString("hex")}`;
-  const leaseObj = () => ({ by: agentId, until: now() + leaseTtlMs, host: myHost, pid: o.pid ?? process.pid });
+  const leaseObj = () => ({ by: agentId, until: now() + leaseTtlMs, host: myHost, pid: o.pid ?? process.pid, ...(o.batchId ? { batch: o.batchId } : {}) }); // #5654: the batch id lets its own requeue tell this lease from a foreign one
   /** Provably dead: same host and `kill(pid, 0)` throws ESRCH. A different host keeps the TTL behaviour. */
   const holderDead = (l) => {
     const parsed = parseLeaseHolder(l?.by);

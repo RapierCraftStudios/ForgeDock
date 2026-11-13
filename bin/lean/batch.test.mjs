@@ -834,6 +834,14 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
     assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
   });
+  it("#5654 makeDispatchCheck: a lease written by another run of the same batch does not defer; another batch's or a batch-less lease still does", async () => {
+    const body = (batch) => JSON.stringify({ body: `x\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 9, lease: { by: "core_h_1_aaaaaa", until: Date.now() + 600000, host: "h", pid: 1, ...(batch ? { batch } : {}) } })}\n-->` });
+    const mk = (b, batchId) => makeDispatchCheck({ repo: "o/r", batchId, gh: async (a) => (a[0] === "issue" && a[a.length - 1] === "body" ? b : a[0] === "issue" ? '{"state":"OPEN"}' : "[]") });
+    assert.equal(await mk(body("bt1"), "bt1")(9), null, "same batch, different run suffix: dispatched");
+    assert.equal((await mk(body("bt2"), "bt1")(9)).code, "lease.held", "another batch still defers");
+    assert.equal((await mk(body(null), "bt1")(9)).code, "lease.held", "a batch-less lease still defers");
+    assert.equal((await mk(body("bt1"), null)(9)).code, "lease.held", "no batch id: foreign");
+  });
   it("#4920 a deferred dispatch check launches no lane and no sandbox, and a restarted batch (new orchestrate) defers again", async () => {
     for (const round of [1, 2]) { // round 2: a fresh orchestrate call = a daemon restart; the answer is read from GitHub each time
       const { now, sleep } = fakeClock();

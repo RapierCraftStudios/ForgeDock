@@ -2186,7 +2186,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
       markRecovering: deps.markRecovering ?? makeMarkRecovering({ gh: (a) => leanIo.gh(a), repo }), // #5647
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
-      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
+      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, batchId: batch.id, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
@@ -2309,7 +2309,7 @@ export async function closedScope({ gh, repo, issue, labels }) {
  * Release review #4500: an OPEN issue reopened after that PR merged (a failed acceptance probe, #4399, or an operator
  * reopening it for rework) is new work, so the lane runs; an unreadable reopen history also runs the lane.
  */
-export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
+export function makeDispatchCheck({ gh, repo, owner: batchOwner = null, batchId = null }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
   /** Latest `reopened` event time (ms) on the issue, 0 when never reopened, null when unreadable. */
   const lastReopen = async (n) => {
@@ -2347,7 +2347,7 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
     // #5471: another live batch of the repo runs / holds the issue: no lane here (--force on the batch lifts it)
     const other = state === "OPEN" && batchOwner ? batchOwner(n) : null;
     if (other) return { outcome: "deferred", code: "batch.owned", detail: `owned by ${other}` };
-    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false, selfBatch: batchId }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
