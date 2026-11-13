@@ -27,6 +27,7 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = []
     runAgent: async (a) => { agentCalls.push(a); agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
     failedJobs: async () => jobs,
+    fileDeferred: async ({ items }) => { log.push(["deferred", items.map((i) => i.title)]); return []; },
     fileFixIssue: async () => { log.push(["fix-issue"]); return n++; },
     issueMerged: async () => false,
     addNotes: async (pr, notes) => log.push(["notes", notes]),
@@ -300,6 +301,29 @@ describe("fixStep one-round loop (#5567)", () => {
     assert.deepEqual(c.state.release.picks.at(-1), { sha: RV, orig: PK, kind: "revert" });
     assert.equal(r.held, true);
     assert.equal(s.log.filter((e) => e[0] === "lane").length, 1, "the revert is not a lane");
+  });
+});
+
+describe("fixStep deferred findings and guards (#5567)", () => {
+  const failed = { pr: 7, head: H1, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [], filed: [], ciFailing: 1, items: [{ title: "nit", severity: "LOW" }, { title: "far", severity: "HIGH", wave: false }, { title: "real", severity: "HIGH" }], guards: [{ name: "test-gate", why: "FAIL" }] };
+  it("non-blocking and out-of-wave findings are filed for the next plan, not into the fix brief; guard failures are in the brief", async () => {
+    const s = fakeSeam({ heads: [H2], jobs: [{ name: "unit", conclusion: "failure", log: "x" }] });
+    let brief = "";
+    s.fileFixIssue = async (a) => { brief = a.brief; return 100; };
+    await fixStep(ctx(s, { review: { result: failed } }));
+    assert.deepEqual(s.log.find((e) => e[0] === "deferred")[1].sort(), ["far", "nit"]);
+    assert.match(brief, /guard:test-gate/);
+    assert.match(brief, /real/);
+    assert.ok(!/far|nit\b/.test(brief.split("## Sibling")[0].replace(/ci:unit/g, "")), "deferred findings stay out of the brief");
+  });
+  it("the checks that will rerun are those whose input hash differs from the last run", async () => {
+    const s = fakeSeam({ heads: [H2], jobs: [{ name: "unit", conclusion: "failure", log: "x", inputHash: "h1" }, { name: "e2e", conclusion: "failure", log: "y", inputHash: "h2" }] });
+    let brief = "";
+    s.fileFixIssue = async (a) => { brief = a.brief; return 100; };
+    const c = ctx(s, { review: { result: failed } });
+    c.state.fixloop = { heads: {}, hashes: { unit: "h1", e2e: "old" } };
+    await fixStep(c);
+    assert.match(brief, /## Checks that will rerun\n- e2e\n\n?$/);
   });
 });
 

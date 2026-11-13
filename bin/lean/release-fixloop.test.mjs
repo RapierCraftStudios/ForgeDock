@@ -64,9 +64,17 @@ describe("release-fixloop (#5567)", () => {
     assert.equal(ask, "Owner: x");
     assert.deepEqual(r, { blocked: true, held: true, reason: "Owner: x" });
   });
+  it("unmanaged (no ctx.hold): a hold writes nothing and still stops the job", async () => {
+    assert.deepEqual(await holdForOwner({}, "Owner: y"), { blocked: true, held: true, reason: "Owner: y" });
+  });
   it("replay of a recorded findings fixture ends in one round or a recorded hold", () => {
     const rec = collectFindings(input());
     const d = secondPush({ rec, failedBefore: ["unit", "e2e"], rounds: 1 });
-    assert.ok(["hold", "rerun", "revert"].includes(d.action));
+    assert.equal(d.action, "hold", "same failures as before the fix, mixed with a real failure: neither revert nor rerun");
+    assert.match(d.ask, /^Owner: .*ci:unit.*max_rounds=1/);
+    const flakeOnly = collectFindings({ head: HEAD, jobs: [{ name: "e2e", conclusion: "failure", log: "ECONNRESET" }] });
+    assert.equal(secondPush({ rec: flakeOnly, failedBefore: ["e2e"], rounds: 1 }).action, "rerun");
+    const regress = collectFindings({ head: HEAD, jobs: [{ name: "unit", conclusion: "failure", log: "x" }, { name: "e2e", conclusion: "failure", log: "y" }] });
+    assert.equal(secondPush({ rec: regress, failedBefore: ["unit"], rounds: 1 }).action, "revert");
   });
 });
