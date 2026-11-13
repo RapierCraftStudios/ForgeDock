@@ -3280,3 +3280,9 @@ Remote tool install and host fallback (#5652): a remote lane whose frozen valida
 ## Entry 2026-11-13: review/conformance self-recovery (#5644)
 
 `lean.mjs`: the conformance gate loop resumes the builder up to `lean.review_max_resumes` rounds (default 3) instead of one. Each round gets only the failures still open, and the loop ends early when a round leaves the failure set (code and detail) unchanged. `builderFixable` limits rounds to regression, unimplemented, omission, deferral, scope and preserve findings. `outcome-codes.mjs`: `conformance.regression` and `conformance.scope_creep` are now `recoverable`, so a batch requeues them once with a `RECOVER_HOW` note that re-plans from the frozen contract; `builder.blocked` (credentials, owner decisions) stays human.
+
+## Entry 2026-11-13: copy-only page edits (#5648)
+
+`pagegate.mjs` `pageChange(file, {added, diff, generatedGlobs, threshold})` classifies a page as `new`, `rewrite`, `copy` or `generated`. `generated` is `docs/api/generated/**`, a `generated`/`__generated__` path segment, or an `@generated` header. `rewrite` is a modified page whose diff adds a JSX tag, `className`/`style` or an import/export line, or whose churn passes `pages.rewrite_threshold` (default 0.6). `copy` is any other modified page. Missing `added` or `diff` fails closed to `new`.
+
+`pageFailures` and `designFailures`/`visualGate` (`design-gate.mjs`) demand an approved design spec (`page_design_missing`, `design_spec_missing`) and the SEO/GEO checks only for `new`/`rewrite`. `copy` keeps the 390/1440 screenshot check; `generated` is dropped. `lean.mjs` passes `addedNow` (`git diff --diff-filter=A`) and the diff. `designGate` and `contractBriefProblems` take `baseFiles` (base-tree paths), so existing pages are not routed to /design or asked for `design_spec`/briefs at freeze. See `docs/design/visual-gate.md`.
