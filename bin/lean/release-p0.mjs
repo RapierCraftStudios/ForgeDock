@@ -163,7 +163,10 @@ export async function runP0(ctx, { issue = null, branch = null, units = null, pr
     }
     if (out.skipped) return { status: "refused", reason: "deploy.pipelines is empty; nothing to deploy" };
     p0.landingPr = await landingPr({ io, repo: ctx.repo, def: ctx.def, branch: br.branch, issue }); ctx.save();
-    return { status: "live", branch: br.branch, landingPr: p0.landingPr, wave: await waveDone({ ...ctx, deploy: d }) };
+    const wave = await waveDone({ ...ctx, deploy: d });
+    let sync; // #5566: once the landing PR is merged, sync the default branch back into the integration branch (managed only)
+    if (wave.done && ctx.config.managed) { const { syncStep } = await import("./release-mergeback.mjs"); sync = await syncStep(ctx, { lane: "p0" }); }
+    return { status: "live", branch: br.branch, landingPr: p0.landingPr, wave, ...(sync ? { sync } : {}) };
   } finally {
     if (lctx) await L.releaseDeploy(lctx, state.id).catch(() => null);
   }

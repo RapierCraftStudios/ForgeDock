@@ -80,6 +80,14 @@ const off2 = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").tri
  * (p0 never). Every read is best effort: unreadable facts proceed. @returns {{blocked?, reason?, ciMode?}}
  */
 export async function managedGate({ io, repo, config, lane, root }) {
+  if (lane === "release" && config.managed && io.api) { // #5566: a conflicted or unvalidated merge-back holds the release (never trains or p0)
+    try {
+      const { syncBlocksRelease } = await import("./release-mergeback.mjs");
+      const { readActive } = await import("./release-ledger.mjs");
+      const active = await readActive({ io, repo, credential: "driver" });
+      if (syncBlocksRelease(active, lane)) return { blocked: true, reason: `merge-back sync PR #${active.sync?.pr ?? "?"} is ${active.sync?.conflicted ? "conflicted" : "unvalidated or unmerged"}; merge it green before a release starts` };
+    } catch { /* best effort: an unreadable ledger proceeds */ }
+  }
   if (config.nightly) {
     try {
       const n = await readNightly({ gh: (a) => io.gh(a), repo, cfg: config.nightly, now: io.now() });
