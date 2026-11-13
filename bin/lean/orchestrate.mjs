@@ -626,6 +626,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!remote?.offlineFallback) return false;
     const after = Number.isInteger(remote.capacityFallbackAfter) && remote.capacityFallbackAfter > 0 ? remote.capacityFallbackAfter : CAPACITY_FALLBACK_AFTER;
     if ((capDefers.get(n) ?? 0) < after) return false;
+    // #5592: an overloaded host holds every local admission (host_overloaded), so falling back would park the lane indefinitely: keep retrying the pool
+    if (overload) { try { if (overload()?.overloaded) return false; } catch { /* unknown load: the headroom guard decides */ } }
     if (typeof remote.headroom !== "function") return true;
     try { return remote.headroom()?.ok !== false; } catch { return false; }
   };
@@ -1524,6 +1526,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (n === null) { budgetHeld = ready.length > 0; break; }
           const g = grant(n, wanted);
           if (g === "busy") continue; // #4481: not ready any more this pass (notBefore), so `ready` drops it
+          if (!g && (notBefore.get(n) ?? 0) > t) continue; // #5592: this issue waits on its own (host overload, pool slots): the issues behind it are still tried
           if (!g) break;
           pending.splice(pending.indexOf(n), 1);
           if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
@@ -1539,6 +1542,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (running.size >= K()) break;
           const g = grant(n, wanted);
           if (g === "busy") continue; // #4481
+          if (!g && (notBefore.get(n) ?? 0) > t) continue; // #5592: per-issue wait, not a full host queue
           if (!g) break;
           pending.splice(pending.indexOf(n), 1); start(n); started++;
         }
