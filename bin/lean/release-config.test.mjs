@@ -106,4 +106,27 @@ describe("CLI", () => {
     assert.deepEqual(check(`${OK}  flake: {quarantine_after: 3, window_days: 14}\nquarantine: {days: 14, max: 15}\n`.replace("ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake", "ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake")), []);
     assert.notDeepEqual(check(`${OK}quarantine: {max: x}\n`), []);
   });
+  it("accepts the verification layer keys and rejects a bad result kind (#5562)", () => {
+    assert.deepEqual(check(`${OK}verify:\n  workflow: verify.yml\n  close_requires: verified\n  results: [{workflow: smoke.yml, kind: smoke}]\n  flags: [{flag: F, off_command: x}]\n`), []);
+    assert.notDeepEqual(check(`${OK}verify:\n  results: [{workflow: s.yml, kind: nope}]\n`), []);
+  });
+});
+
+describe("gates catalogue and policy (#5583)", () => {
+  const GATE = `schema: 1\ngates:\n  - {id: g1, protects_against: "#1", where: deploy, determinism: high, pre_merge_artifact: f.json, version: v1, mode: block, owner: me, review_by: 2027-01-01}\n`;
+  const gio = (files) => ({ printed: [], print(l) { this.printed.push(l); }, git(a) { const t = files[a[1].split(":").slice(1).join(":")]; if (t === undefined) throw new Error("missing"); return t; } });
+  it("accepts the gates policy keys and rejects a wrong type", () => {
+    assert.deepEqual(check(OK + "gates: {demote_fb_rate: 5, demote_window: 20, safety: [a]}\n"), []);
+    assert.match(check(OK + "gates: {demote_window: 2.5}\n").join(), /demote_window/);
+  });
+  it("check-config reports catalogue errors, passes a valid one, ignores an absent one", () => {
+    const bad = gio({ ".forge/gates.yaml": GATE.replace("mode: block", "mode: nope"), [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: bad }), 1);
+    assert.match(bad.printed.join("\n"), /gates\.yaml: gates\[0\]\.mode/);
+    const good = gio({ ".forge/gates.yaml": GATE, [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: good }), 0);
+    const none = gio({ [POLICY_PATH]: OK });
+    assert.equal(checkConfigFromCli([], { io: none }), 0);
+    assert.doesNotMatch(none.printed.join("\n"), /gates/);
+  });
 });

@@ -141,3 +141,27 @@ describe("release control (#5556)", () => {
     assert.equal(await controlFromCli("hold", [RID, "--json"], { io: w.io }), 1);
   });
 });
+
+describe("demote / promote (#5583)", () => {
+  const dem = (g, extra = []) => [g, "--mode", "warn", "--issue", "7", "--until", "14d", "--reason", "fb", ...extra];
+  it("demote records an expiry and an audit line; promote needs a fixture", async () => {
+    const w = world();
+    const r = await runControl("demote", dem("smoke"), base(w));
+    assert.equal(r.ok, true);
+    assert.equal(r.entry.verb, "demote");
+    assert.equal(w.active.gateModes.smoke.until, new Date(1_700_000_000_000 + 14 * 86_400_000).toISOString());
+    assert.match(w.controls, /"verb":"demote"/);
+    const no = await runControl("promote", ["smoke", "--reason", "ok"], base(w));
+    assert.match(no.error, /--fixture/);
+    assert.ok(w.active.gateModes.smoke);
+    assert.equal((await runControl("promote", ["smoke", "--fixture", "tests/f.json", "--reason", "ok"], base(w))).ok, true);
+    assert.equal(w.active.gateModes.smoke, undefined);
+  });
+  it("refuses a safety-allowlisted or unskippable gate, a bad mode and a long expiry", async () => {
+    const w = world();
+    for (const g of ["backup-freshness", "migration", "secrets:x"]) assert.match((await runControl("demote", dem(g), base(w))).error, /safety allowlist/);
+    assert.match((await runControl("demote", ["g", "--mode", "skip", "--issue", "7", "--until", "1d", "--reason", "r"], base(w))).error, /--mode/);
+    assert.match((await runControl("demote", ["g", "--mode", "warn", "--issue", "7", "--until", "90d", "--reason", "r"], base(w))).error, /at most/);
+    assert.match((await runControl("promote", ["g", "--fixture", "f", "--reason", "r"], base(w))).error, /not demoted/);
+  });
+});

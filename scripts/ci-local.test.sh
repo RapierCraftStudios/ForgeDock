@@ -598,6 +598,19 @@ eq "SEC-3: the widened selection is the full set" 3 "$(printf '%s' "$R" | jq '.s
 R=$(_imp README.md)
 eq "SEC-3: a docs-only change still selects nothing (no widening)" '[]' "$(printf '%s' "$R" | jq -c '.sel')"
 
+# #5583 follow-up: a tree-scanning lint test (find/git ls-files, directly or via a script it runs) is selected for any change
+r=$(blank); mkdir -p "$r/scripts" "$r/bin"
+printf '#!/bin/bash\nfind "$1/bin" -name "*.test.mjs" | while read -r f; do grep -q tmpDir "$f" || echo "VIOLATION: $f"; done\n' > "$r/scripts/check-tmp.sh"
+printf '#!/bin/bash\nout=$(bash "$ROOT/scripts/check-tmp.sh" .)\n[ -z "$out" ]\n' > "$r/scripts/check-tmp.test.sh"
+printf '#!/bin/bash\n[ 1 -eq 1 ]\n' > "$r/scripts/plain.test.sh"
+commit_base "$r"
+_imp2() { node -e "
+import('$ROOT/scripts/ci-local/scoping.mjs').then(m=>{const c=process.argv.slice(1);const s=m.makeScopeCtx({repo:'$r',baseRef:'main',from:'main',changed:c});
+const t=['scripts/check-tmp.test.sh','scripts/plain.test.sh'];const r=m.impactedTests(s,t);console.log(JSON.stringify({sel:r.selected,widen:r.widen}))})" "$@"; }
+echo 'import x from "y";' > "$r/bin/new.test.mjs"
+R=$(_imp2 bin/new.test.mjs)
+eq "tree-scan: a new test file selects the lint that scans the tree (via the script it runs)" '["scripts/check-tmp.test.sh"]' "$(printf '%s' "$R" | jq -c '.sel')"
+
 # item 4 (REG-3): the built-in bash-3.2/GNU portability job runs only when CI targets macOS/Windows
 r=$(blank); mkdir -p "$r/.github/workflows" "$r/scripts"
 cat > "$r/.github/workflows/ci.yml" <<'YML'
