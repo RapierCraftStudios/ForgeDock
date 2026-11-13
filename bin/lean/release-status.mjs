@@ -8,7 +8,7 @@
  * `explain #N` traces the rules that exist today (classification record, skip labels, risk/forces, priority, theme_map, `Depends on`
  * closure, recorded release set, lane); the wave planner (#5559) registers into PLANNER_RULES, until then `planner: not installed`. Effects (`io`, `gateState`, local cache) are injected, so it is unit-testable.
  */
-import { readLedger, readActive } from "./release-ledger.mjs";
+import { readLedger, readActiveView as readActive } from "./release-ledger.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { priorityOf, classifyTheme, closure } from "./issuewatch-release.mjs";
 

@@ -108,7 +108,7 @@ export async function updateActive(ctx, owned, fn) {
     if (out?.refuse) return { refused: out.refuse };
     const next = { ...cur };
     for (const [k, v] of Object.entries(out?.patch ?? {})) if (owned.includes(k)) next[k] = v;
-    const files = { "active.json": json(next) };
+    const files = { "active.json": json(next), ...(out?.files ?? {}) };
     if (out?.control) files["controls.jsonl"] = `${(head ? (await readFile(ctx, ACTIVE, "controls.jsonl")) ?? "" : "")}${JSON.stringify(redactDeep(out.control))}\n`;
     const r = await commitFiles(ctx, ACTIVE, files, `ledger: _active ${Object.keys(out?.patch ?? {}).join(",") || "control"}`, head);
     if (r.ok) return { ok: true, active: next, sha: r.sha };
@@ -116,7 +116,14 @@ export async function updateActive(ctx, owned, fn) {
   return { lost: true, attempts: ACTIVE_RETRIES };
 }
 
-const leaseBody = (l) => `<!-- ${LEASE_MARKER} -->\nholder: ${l.holder}\nepoch: ${l.epoch}\nrelease: ${l.release}\n`;
+const leaseBody = (l) => `<!-- ${LEASE_MARKER} -->\nholder: ${l.holder}\nepoch: ${l.epoch}\nrelease: ${l.release}\n${l.expires ? `expires: ${new Date(l.expires).toISOString()}\n` : ""}`;
+
+/** Parsed `_active/active.json`; throws when it cannot be read (a fence must treat that as "no irreversible action", I5). */
+export async function readActive(ctx) {
+  const text = await readFile(ctx, ACTIVE, "active.json");
+  if (text == null) throw new Error("_active has no active.json");
+  return JSON.parse(text);
+}
 
 /**
  * Take the lease for release `release` as `holder`: refused while another holder's `FORGE:LEASE` comment (on `issue`) was
@@ -131,7 +138,7 @@ export async function acquireLease(ctx, { holder, release, issue, ttlS = 120, no
       if (c && now - Date.parse(c.updated_at) < (l.ttlS ?? ttlS) * 1000) return { refuse: `lease held by ${l.holder} (epoch ${l.epoch})` };
     }
     const epoch = (active.epoch ?? 0) + 1;
-    return { patch: { epoch, lease: { holder, release, issue, ttlS, epoch, commentId: l?.holder === holder ? l.commentId : undefined } }, control: { at: new Date(now).toISOString(), verb: "lease", holder, release, epoch } };
+    return { patch: { epoch, lease: { holder, release, issue, ttlS, epoch, expires: now + ttlS * 1000, commentId: l?.holder === holder ? l.commentId : undefined } }, control: { at: new Date(now).toISOString(), verb: "lease", holder, release, epoch } };
   });
   if (!r.ok) return r;
   let lease = r.active.lease;
@@ -153,7 +160,7 @@ export async function heartbeat(ctx, lease) {
 }
 
 /** Read-only `_active` ({lease, epoch, holds, intake, ..., controls[]}: active.json plus the parsed lines of controls.jsonl; `{controls: []}` when the branch or a key is missing). */
-export async function readActive(ctx) {
+export async function readActiveView(ctx) {
   let active = {};
   try { active = JSON.parse((await readFile(ctx, ACTIVE, "active.json")) ?? "{}") ?? {}; } catch { active = {}; }
   const controls = [];

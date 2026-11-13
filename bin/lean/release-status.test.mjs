@@ -197,6 +197,5 @@ describe("release status / explain (#5554)", () => {
     for (const argv of [["--watch", "--repo", REPO], ["status", "--watch", "--interval", "3", "--repo", REPO]]) { const [code, io] = await run(argv); assert.equal(code, 0); assert.equal(io.printed.length, 1); assert.match(io.printed[0], /status=done/); }
     await assert.rejects(run(["status", "--watch", "--interval", "0", "--repo", REPO]), /positive number/);
     await assert.rejects(releaseFromCli(["status", "--bogus"], { io: fakeIo() }), /unknown option --bogus/);
-    await assert.rejects(releaseFromCli(["hold", "--reason", "x"], { io: fakeIo() }), /not available in this build/);
   });
 });

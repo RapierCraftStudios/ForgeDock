@@ -9,6 +9,7 @@ import { parseDocsConfig } from "./lean/docsgate.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
 import { parseDesignConfig } from "./lean/design-gate.mjs";
 import { execFileSync } from "node:child_process";
+import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
@@ -1793,12 +1794,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
     { // #5442: page work waits for an approved design: a design:* issue is never dispatched (--force does not lift it)
       const held = new Map();
-      for (const n of issues) {
+      // #5592: bounded-concurrency label reads, not one serial gh call per issue (starved admission on a loaded host)
+      const hs = await mapLimit(issues, 6, async (n) => {
         let v = null;
         try { v = JSON.parse(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])); } catch { v = null; }
-        const h = designHold(v?.labels);
-        if (h) held.set(n, h);
-      }
+        return designHold(v?.labels);
+      });
+      issues.forEach((n, i) => { if (hs[i]) held.set(n, hs[i]); });
       for (const [n, h] of held) sink.line(`skipped: #${n} design_pending (${h}); run /design, design:approved lifts the hold`);
       if (held.size) {
         if (held.size === issues.length) throw new Error(`every issue is design_pending (${[...held.values()].join(", ")}); run /design first`);
@@ -2168,8 +2170,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       decide: deps.decide ?? (async (d) => {
         if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
-        const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
-        try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
+        const body = `## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
+        // #5592: runner decisions are a section of the issue's one FORGE:STATUS comment (last 5 kept), not a comment per requeue
+        try { const { postStatusSection } = await import("./lean/statuscomment.mjs"); const { capComment } = await import("./lean/render.mjs"); await postStatusSection({ gh: (a) => leanIo.gh(a), repo, issue: d.issue, markers: ["FORGE:DECISION"], text: body, cap: capComment }); } catch { /* best effort: the batch log keeps the row */ }
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
@@ -2316,6 +2319,8 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
       const reopened = await lastReopen(n);
       if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
     }
+    // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue (a verify reopen returned null above)
+    if (pr !== null || state === "CLOSED") { const { clearPipelineLabels } = await import("./lean/statuscomment.mjs"); await clearPipelineLabels({ gh, repo, issue: n, labels: iss?.labels }); }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") {
       // #5152: workflow:merged / a fully closed decomposition is delivered whatever the stateReason; a decomposition still
@@ -2359,7 +2364,10 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       if (!(await parkedRelabel({ gh, repo, issue, code: parked.code })).ok) return "failed"; // #5466: needs-human stays unless the replacement labels landed
       try {
         const { capComment } = await import("./lean/render.mjs");
-        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:PARKED code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""} -->\n## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}`)]);
+        const { postUpsert } = await import("./lean/statuscomment.mjs");
+        // #5592: one PARKED comment per issue, edited in place (the marker still leads the body)
+        await postUpsert({ gh, repo, issue, markers: ["FORGE:PARKED"], attrs: `code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""}`, cap: capComment,
+          body: `## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}` });
       } catch { /* best effort */ }
       return true;
     }

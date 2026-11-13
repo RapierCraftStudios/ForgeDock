@@ -779,6 +779,13 @@ release:
 
 `forgedock release verify <sha> [--repo owner/repo]` reads the `FORGE:RELEASE` record from the PR that contains `<sha>` and exits 0 only when `<sha>` is the snapshot plus recorded picks, each a clean cherry-pick of a `branches.staging` commit (same tree as `git cherry-pick`), so a repo workflow that trusted `head.ref == staging` can call it instead.
 
+### `.forge/release.yaml` (#5551)
+
+Nested release policy (`schema: 1`) lives in a committed `.forge/release.yaml`, not in the host-local forge.yaml. It is read from the default branch with `git show origin/<default>:.forge/release.yaml`, never from the PR head or the worktree, so a PR cannot weaken its own gates. The flat `release.*` keys above stay the fallback when the file is absent there. Sections: `branches`, `trust`, `state`, `units`, `couplings`, `contracts`, `forces`, `classify`, `risk`, `plan`, `lanes`, `merge`, `ci`, `preflight`, `deploy`, `verify`, `rollback`, `controls`.
+
+- `forgedock release check-config [--ref <git ref>]` parses it with the vendored, pinned YAML parser and fails (exit 1) on unknown keys, wrong types, duplicate keys, unreachable lanes (unknown pipeline, `base: integration` with no `branches.integration`, `ci_tier` not in `ci.tiers`) and keys deferred to a later phase (`plan.auto_if`, `retention_days`, `ci.forbid_per_issue_steps`, `couplings[].refine`, `ci.provider: command`, `risk.weights`).
+- `forgedock release init` writes the zero-config profile (`schema: 1`, `branches.default: main`, `plan.approval: wait`, `lanes.release.pipeline: existing`, `merge.approval: confirm`) to `.forge/release.yaml` and nothing else; it never overwrites.
+
 The forge.yaml reader handles two levels, so the rehearsal block is written as the flat keys `rehearsal_command`, `rehearsal_timeout` and `rehearsal_blocking`.
 
 | Key | Type | Required | Description |
@@ -797,6 +804,34 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `mode` | `snapshot` \| `freeze` | No | `freeze` (default) is the original behaviour: the release PR head is `branches.staging`, preflight refuses while a lane runs or a PR targets staging, and every batch is held at K=1 until the job ends. `snapshot` (#5276) cuts `release/<id>` from a staging SHA and opens `release/<id>` → `branches.default`; lanes keep merging to staging and no batch K is touched. A `FORGE:RELEASE` record (snapshot SHA, base/head range, bundle PRs, issues, cherry-picks) is kept in the job state and as a hidden marker in the PR body. Only one release branch may exist at a time. Promotion is unchanged (merge commit, `--match-head-commit`) but is stopped unless the head is the snapshot plus exactly the recorded cherry-picks. The branch is deleted after post-merge; fixes are already on staging, so nothing is back-merged. |
 | `branch_pattern` | string | No | Snapshot branch name; `{date}` is `YYYYMMDD`, `{n}` counts the day's release PRs. Default `release/{date}-{n}`. Everything under the pattern's prefix before `{` counts as a release in flight. |
 | `fix_mode` | `cherry-pick` \| `recut` | No | Snapshot mode only. `cherry-pick` (default): after a fix lane merges to staging, the merged commits of PRs labelled `release-blocker`, or closing a `release-blocker` issue or the blocking issue the job filed, are cherry-picked onto `release/<id>` (a clean pick only; a conflict blocks the job) and appended to `FORGE:RELEASE`. `recut`: the branch is moved to the current staging tip and the picks start over. |
+
+### Managed release: nightly and budget (#5569)
+
+Both blocks are read only when `release.managed` is on; otherwise no nightly, minutes or budget call is made. Before the first step `forgedock release [--lane release|train|p0]` (default `release`) reads the latest nightly run and applies the budget.
+
+```yaml
+nightly:
+  workflow: nightly.yml      # workflow file of the nightly run
+  branch: staging            # integration branch
+  block_release: true
+  t0_t2_hours: 24            # T0-T2 cadence; results older than twice this are stale and never block
+  t3_t4_hours: 168           # T3-T4 cadence (weekly)
+  t3_jobs: "hands e2e"       # comma list of job-name substrings that are T3 (a leading "T<n>" in a job name wins)
+  t4_jobs: "trivy"
+  unskippable: "migration"   # job-name substrings that block a release whatever their tier
+budget:
+  on_exceed: local-first     # local-first | hold | proceed
+  ignore: false              # true: budget never blocks this repo
+```
+
+| Key | Description |
+|-----|-------------|
+| `nightly.block_release` | Default `true`. A red T0-T2 job (an unclassified job counts as T2) or an `unskippable` job blocks `lane: release` with status blocked at step `gate`. T3/T4 reds never block; `train` and `p0` are never blocked. Any red files one open `nightly-red` issue (an existing one has its body edited). |
+| `budget.on_exceed` | Applied at the gate when the forecast (median of the lane's last 5 recorded releases) exceeds the month's remaining minutes (`ci.monthly_minutes` less the reserve, less month-to-date). `local-first` records `ciMode` in the release state, `hold` blocks, `proceed` continues. `p0` always proceeds. Unknown forecast or usage proceeds. |
+
+`forgedock release report` prints the model (`budget.model_release_minutes`, default 500, per release) against the measured minutes of the first 3 recorded releases and says whether they are within 25%; outside it, `budget.on_exceed` and the nightly cadence are the levers.
+
+The release state (and so the ledger) records `lane` and `minutes: {runs, total}`, where total is the sum of ceil(job minutes) of the Actions runs created since the release started, read from the jobs API.
 
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
 
@@ -851,6 +886,7 @@ issue_watch:
 | `trust_app_labels` | list | No | Needs `trust_app`: an App-authored issue must carry one of these labels. |
 | `skip_labels` | list | No | Issues carrying any of these labels are skipped. Default for `mode: batch`: `epic, needs-human, post-deploy, workflow:merged, awaiting-promotion, host-task`; `[]` for the other modes and to switch it off. |
 | `release_pause` | boolean | No | Pause the watch while a `forgedock release` job is in flight; it resumes by itself. Default true in `mode: batch`. |
+| `freeze.intake_auto_resume` / `release.tracker` | boolean / issue number | No | With `release.managed` (#5555): `freeze.intake_auto_resume: true` lets the issue watch clear a `forgedock intake pause --release <id>` once release `<id>` has ended in the ledger; `release.tracker` is the issue that gets the `forge:intake-paused` label. Default off. |
 | `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
 | `sweep_needs_human` | boolean | No | Also settle `needs-human` escalations that predate the watch (the backlog). Default false; `forgedock issue-watch run --dry-run` classifies them first and writes nothing. |
 | `max_launches` | integer | No | Total lane launches (claims plus requeues by the decision engine); at N the watch drains. Default: none. Decision-stage issues also count against `max_issues`. |
@@ -1596,6 +1632,7 @@ topology:
 | `validate.recipes` | map (regex → replacement) | No | Default unset. A top-level `validate:` block with a block-style `recipes:` map, e.g. `"poetry run pytest": "uv run --with-requirements r.txt pytest"`. Each key is a regex source; the first recipe that matches a frozen validate or `repro_test` command rewrites it at contract freeze (`applyValidateRecipes`), recorded as a decision. Use it for commands whose environment is not installed in lane sandboxes. |
 | `topology.route_reachability` | string (command) | No | Default unset (no check, no behaviour change). A repo-supplied command that takes the route paths a diff adds (Next.js `app/**/route.*`, `pages/api/**`; URL form, route groups removed) as arguments and exits non-zero when the production ingress does not deliver them to the service that implements them. Runs in the lean lane after validate and in `review-pr-staging`; a non-zero exit blocks (`conformance.unimplemented`, kind `route_unreachable`). Read by `readEnvConfig` (`bin/engine-cli.mjs`), run by `bin/lean/routecheck.mjs`. |
 | `pages.enabled` / `pages.routes` | bool / list | No | Page gate (#5428). Default on only when the repo tracks Next `app/**/page.*` files; `enabled: false` turns it off, and `routes` globs add non-Next page files. A diff touching a public page needs `page_gate` {design_spec, seo, geo} in the contract (checked by `validateContract`), and `page_missing`-class precheck rows (`page_design_missing`, `page_visual_missing`, `page_metadata_missing`, `page_canonical_missing`, `page_structured_data_missing`, `page_sitemap_missing`, `page_forbidden_pattern`, `page_link_broken`, `page_lint_failed`) fail as `conformance.unimplemented`. Read by `readEnvConfig`, checked by `bin/lean/pagegate.mjs`. |
+| `pages.exclude` / `pages.design_only` | lists | No | Globs (#5585). `exclude` drops internal, auth-gated or admin routes from the page gate entirely (no `page_gate` brief, no `page_*` rows). `design_only` keeps the `design` requirement (`page_gate.design_spec`, an approved spec, 390/1440 screenshots) but skips SEO/GEO. A page whose own file or an ancestor `layout.*` declares `robots: { index: false }` or `noindex` is excluded automatically (needs the file to exist in the worktree). Default empty. |
 | `pages.require` / `pages.icp_doc` | list / path | No | Default `[design, seo_intent, geo]`. `icp_doc` names the repo's ICP doc the SEO brief must cite. `design` also needs a 390 and 1440 screenshot in the result's `page_gate.screenshots`; `design` and `seo-geo` become review domains and `/review-pr-staging` Phase 1H blocks. |
 | `pages.sitemap` / `pages.metadata_patterns` / `pages.canonical_patterns` / `pages.structured_data_patterns` / `pages.forbid_patterns` / `pages.lint` | lists / command | No | Regex and glob overrides of the built-in Next defaults (sitemap files, `metadata`/`generateMetadata`, `canonical`, JSON-LD, `[[null]]`/raw-JSON/dead-end patterns on added page lines). A generated sitemap is justified in the result as `page_gate.sitemap_justification`. `lint` is a repo command given the page files; non-zero fails. |
 | `docs.required_for` | string or list | No | Default unset (#5419): the docs gate is off, so library/CLI repos are unchanged. Kinds of user-facing surface that need user docs: `api`, `mcp`, `dashboard`, `cli`, `sdk`. Built in: Next route handlers (`api`) and `app/**/page.*` under a `dashboard` path (`dashboard`); other kinds need `docs.surfaces`. Read by `readEnvConfig`, checked by `bin/lean/docsgate.mjs`. |
@@ -1658,7 +1695,7 @@ from the host by a major version (`setup-node` 18 vs host 26: version drift, lis
 DEGRADED, never FAIL, and its clock starts when the job starts executing, not while it waits for a machine slot.
 
 **Exact scoping** (runs only what the change can affect): job-level path filters from the CI definition (including
-`dorny/paths-filter` outputs) gate whole jobs; per-file linters (shellcheck, eslint, prettier, ruff, black, flake8, ...) run
+`dorny/paths-filter` outputs) gate whole jobs (generate such a filter step in git mode: `actions/checkout` with `fetch-depth: 0`, and `token: ''` with `base:` set on `dorny/paths-filter`, because the default PR files API times out on large diffs and every gated suite is then skipped, #5592); per-file linters (shellcheck, eslint, prettier, ruff, black, flake8, ...) run
 on the changed files only; tests use the ecosystem selector (`jest --findRelatedTests`, `vitest related`, `go` affected
 packages with reverse dependencies, `cargo test -p` affected crates, Maven `-pl ... -amd`, `nx affected`, `turbo --filter`) or a
 git-grep reference graph for file-list runners (pytest, mocha, `node --test`, bats, rspec, direct `*.test.*` invocations);
