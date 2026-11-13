@@ -43,15 +43,17 @@ describe("cross-batch ownership (#5471)", () => {
     assert.equal(ownerOf(root, "o/r", 6, "bB"), null);
     assert.deepEqual(b.readAdded(), [5, 6]);
   });
-  it("requeue refuses an issue another live batch runs, held counts as owned", async () => {
+  it("requeue refuses an issue another live batch runs or has pending; an idle hold is handed over (#5597)", async () => {
     const root = tmpDir("owned-requeue-");
-    seed(root, "bA", { order: [5, 7], pending: [7], running: { 5: {} }, held: [7] });
-    const b = seed(root, "bB", { order: [5, 7], results: { 5: { outcome: "needs-human" }, 7: { outcome: "needs-human" } } });
-    assert.equal(ownerOf(root, "o/r", 7, "bB"), "bA");
-    const res = await queued(quiet(() => orchestrateFromCli(["--requeue", "bB", "5", "7", "--reason", "r"], { batchRoot: root, io })));
-    assert.deepEqual(res.requeued, []);
-    assert.deepEqual(res.refused.map((x) => [x.issue, x.reason]), [[5, "owned by bA"], [7, "owned by bA"]]);
-    assert.deepEqual(b.readRequeued(), []);
+    seed(root, "bA", { order: [5, 7, 8], pending: [7, 8], running: { 5: {} }, held: [7] });
+    const b = seed(root, "bB", { order: [5, 7, 8], results: { 5: { outcome: "needs-human" }, 7: { outcome: "needs-human" }, 8: { outcome: "needs-human" } } });
+    assert.equal(ownerOf(root, "o/r", 7, "bB"), null);
+    assert.equal(dispatchOwner(root, "o/r", 7, "bB"), null, "a lower-id batch's idle hold does not defer dispatch");
+    assert.equal(ownerOf(root, "o/r", 8, "bB"), "bA");
+    const res = await queued(quiet(() => orchestrateFromCli(["--requeue", "bB", "5", "7", "8", "--reason", "r"], { batchRoot: root, io })));
+    assert.deepEqual(res.requeued, [7]);
+    assert.deepEqual(res.refused.map((x) => [x.issue, x.reason]), [[5, "owned by bA"], [8, "owned by bA"]]);
+    assert.deepEqual(b.readRequeued().map((e) => e.issue), [7]);
   });
   it("dispatch defers an issue another batch runs (or holds pending with a lower id) and admits it once the owner is done", async () => {
     const root = tmpDir("owned-dispatch-");

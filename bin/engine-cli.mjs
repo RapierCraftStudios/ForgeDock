@@ -1505,7 +1505,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
 /**
  * `--requeue <id> N... [--reason "..."]` (#4550): after an operator decision, a terminal issue of the batch (and the dependents
  * skipped behind it) goes back to pending. Closed issues and issues still labelled `needs-human` are refused before anything is
- * written. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
+ * written. Another live batch only holding an issue idle (#5597) does not own it: the issue is handed over. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
  * cleared so `--resume` runs it again). The runner applies the entries and posts the FORGE:DECISION.
  */
 async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, requireHost = false, force = null, print = (l) => console.log(l) }) {

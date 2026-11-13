@@ -519,6 +519,17 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.addIssues([2]).requeued, [2]);
   });
 
+  it("#5597 requeue in the holding batch releases a held pending issue; a plain pending one stays 'not terminal'", () => {
+    const b = openBatch(tmpDir("batch-held-requeue-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2], pending: [1, 2], running: {}, results: {}, notBefore: {} });
+    b.holdIssues([1]);
+    const r = b.requeue([1, 2]);
+    assert.deepEqual(r.requeued, [1]);
+    assert.deepEqual(r.refused.map((x) => [x.issue, x.reason]), [[2, "not terminal"]]);
+    assert.deepEqual(b.readHeld(), [], "the hold is released with the requeue");
+  });
+
   it("#4791 a transient lane-resolution failure is retried with backoff, never capped, and not terminal", async () => {
     const { now, sleep } = fakeClock();
     const updates = [];
