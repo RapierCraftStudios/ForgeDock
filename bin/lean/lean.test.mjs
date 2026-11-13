@@ -1225,7 +1225,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
     assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
-    assert.match(nhBody(w), /still invalid after one correction/);
+    assert.match(nhBody(w), /still invalid after \d+ correction\(s\)/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
     assert.equal((await run(w2)).terminalReason, "merged");
   });

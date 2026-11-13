@@ -1014,6 +1014,7 @@ lean:
   fix_model: claude-sonnet-5-5   # optional model of fresh fix-round sessions (default: the reviewer model)
   builder_routing: on            # on (default) | off: route the build to a mid-tier model by the frozen contract
   builder_mid_model: claude-sonnet-5-5   # optional mid-tier builder model (default claude-sonnet-5-5)
+  contract_max_corrections: 3   # #5623: builder correction rounds for a builder-correctable invalid contract before it ends contract.invalid (which a batch then requeues once with a fresh plan)
   light:
     mode: shadow     # off | shadow (default) | on: light-lane eligibility (#4448; lane wiring #4450)
     max_lines: 40    # upgrade to the full lane above this many non-test diff lines
