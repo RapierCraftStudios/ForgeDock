@@ -38,7 +38,7 @@ export function syncBlocksRelease(state, lane = state?.lane ?? "release") {
 }
 
 /** Old-side line ranges per file from a `-U0` unified diff: `{file: [[start, end], ...]}`. */
-export function parseHunks(diff) {
+export function diffRanges(diff) {
   const out = {};
   let file = null;
   for (const line of String(diff ?? "").split("\n")) {
@@ -110,7 +110,7 @@ export async function syncStep(ctx, { lane = "p0" } = {}) {
   try { io.git(["fetch", "--quiet", "origin", staging, def]); } catch { /* best effort */ }
   const p = probe(io, staging, def);
   let changed = [], laneHunks = {};
-  try { changed = String(io.git(["diff", "--name-only", `origin/${staging}...origin/${def}`])).split("\n").filter(Boolean); laneHunks = parseHunks(io.git(["diff", "-U0", `origin/${staging}...origin/${def}`])); } catch { /* unreadable: the target keeps the conflict files */ }
+  try { changed = String(io.git(["diff", "--name-only", `origin/${staging}...origin/${def}`])).split("\n").filter(Boolean); laneHunks = diffRanges(io.git(["diff", "-U0", `origin/${staging}...origin/${def}`])); } catch { /* unreadable: the target keeps the conflict files */ }
   const target = targetSet({ conflicts: p.files, changed });
   const pr = await openOrReuse({ io, repo, def, staging });
   const head = (() => { try { return String(io.git(["rev-parse", `origin/${def}`])).trim(); } catch { return null; } })();
@@ -119,7 +119,7 @@ export async function syncStep(ctx, { lane = "p0" } = {}) {
   const pre = await (ctx.preflight ?? runTargetedPreflight)(ctx, { head, pr, target });
   const prs = json(await io.gh(["pr", "list", "--repo", repo, "--base", staging, "--state", "open", "--json", "number,headRefName"])) ?? [];
   const others = [];
-  for (const o of prs.filter((x) => x.headRefName !== def && x.number !== pr)) others.push({ number: o.number, hunks: parseHunks(await io.gh(["pr", "diff", String(o.number), "--repo", repo])) });
+  for (const o of prs.filter((x) => x.headRefName !== def && x.number !== pr)) others.push({ number: o.number, hunks: diffRanges(await io.gh(["pr", "diff", String(o.number), "--repo", repo])) });
   const sync = { lane, pr, def, staging, conflicted: p.conflicted, target, review: { ok: !!review?.ok, verdict: review?.verdict ?? null }, preflight: { ok: !!pre?.ok, covered: pre?.covered ?? [], head }, duplicates: duplicateFixes(laneHunks, others), milestones: staleMilestones(io), merged: false };
   sync.validated = syncValidated(sync);
   await record(sync);

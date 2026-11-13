@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { syncStep, finishSync, syncBlocksRelease, syncValidated, parseHunks, duplicateFixes, staleMilestones, targetSet } from "./release-mergeback.mjs";
+import { syncStep, finishSync, syncBlocksRelease, syncValidated, diffRanges, duplicateFixes, staleMilestones, targetSet } from "./release-mergeback.mjs";
 import { runTargetedPreflight } from "./release-preflight.mjs";
 
 const LANE_DIFF = "diff --git a/src/a.js b/src/a.js\n--- a/src/a.js\n+++ b/src/a.js\n@@ -10,2 +10,3 @@\n x\n";
@@ -71,7 +71,7 @@ describe("merge-back (#5566)", () => {
     const { io } = fake();
     const r = await syncStep(base(io), { lane: "train" });
     assert.deepEqual(r.duplicates, [{ pr: 61, files: ["src/a.js"] }]);
-    assert.deepEqual(duplicateFixes(parseHunks(LANE_DIFF), [{ number: 9, hunks: parseHunks(APART) }]), []);
+    assert.deepEqual(duplicateFixes(diffRanges(LANE_DIFF), [{ number: 9, hunks: diffRanges(APART) }]), []);
   });
 
   it("lists open milestone branches as stale-vs-main with the hazard note", async () => {
