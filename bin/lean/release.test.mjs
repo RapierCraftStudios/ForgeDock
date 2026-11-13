@@ -58,6 +58,17 @@ describe("unmanaged release carries no epoch (#5553)", () => {
   });
 });
 
+describe("legacy managed promotion without a fence (#5561 regression)", () => {
+  it("a failing deploy-gate still reads the policy to rerun infra flakes (as before the managed split)", async () => {
+    const mod = await import("./release.mjs");
+    const io = fakeIo({ gate: "failure" });
+    const shown = [];
+    io.git = (a) => { if (a[0] === "show") shown.push(a[1]); throw new Error("no git"); };
+    await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: { managed: true }, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    assert.ok(shown.some((x) => x.startsWith("origin/main:")), "policy read for the flake rerun");
+  });
+});
+
 describe("release job (#5211)", () => {
   const promote = async (world, { opts = {}, config = {} } = {}) => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();
@@ -487,5 +498,74 @@ describe("release control routing (#5556)", () => {
   });
   it("an unknown control verb is an error", async () => {
     await assert.rejects(releaseFromCli(["control", "nope"], { io: { print() {}, gh: async () => "" }, cwd: tmp() }), /unknown control verb/);
+  });
+});
+
+describe("managed merge (#5561)", () => {
+  const LEASE = { holder: "A", epoch: 3 };
+  const fence = (lctxCred = "driver") => ({ lctx: { repo: REPO, credential: lctxCred, io: { api: async (_m, path) => {
+    if (/active\.json/.test(path)) return { content: Buffer.from(JSON.stringify({ epoch: 3, lease: LEASE })).toString("base64") };
+    throw Object.assign(new Error("404 Not Found"), { status: 404 });
+  } } }, lease: { ...LEASE, release: "r1" }, now: () => "t", record: async () => {} });
+  const mk = (over = {}, method) => {
+    const merges = [];
+    const io = { print() {}, git: () => `schema: 1\nmerge: {method: ${method ?? "merge-commit"}}\n`, gh: async (a) => { merges.push(a); return ""; }, mergeGuard: async () => ({ ok: true }), ...over };
+    return { merges, ctx: { io, repo: REPO, state: { id: "r20240101-000000-1" }, opts: { merge: true }, config: { managed: true }, def: "main", staging: "staging", fence: fence() } };
+  };
+  it("merge carries --match-head-commit, Forge-Release and Forge-Epoch trailers", async () => {
+    const { ctx, merges } = mk();
+    const { managedPromotion } = await import("./release.mjs");
+    assert.deepEqual(await managedPromotion(ctx, { pr: 7, head: HEAD }), { merged: true, head: HEAD });
+    assert.deepEqual(merges[0], ["pr", "merge", "7", "--repo", REPO, "--merge", "--match-head-commit", HEAD, "--body", "Forge-Release: r20240101-000000-1\nForge-Epoch: 3"]);
+  });
+  it("merge.method picks the gh flag", async () => {
+    const { managedPromotion } = await import("./release.mjs");
+    for (const [m, flag] of [["squash", "--squash"], ["rebase", "--rebase"]]) {
+      const { ctx, merges } = mk({}, m);
+      await managedPromotion(ctx, { pr: 7, head: HEAD });
+      assert.ok(merges[0].includes(flag), m);
+    }
+  });
+  it("a refused guard (moved head, stale approval, no gate status, unreadable gate) merges nothing", async () => {
+    const { managedPromotion } = await import("./release.mjs");
+    const { ctx, merges } = mk({ mergeGuard: async () => ({ ok: false, why: "no forge/release-gate on x" }) });
+    const r = await managedPromotion(ctx, { pr: 7, head: HEAD });
+    assert.match(r.why, /merge guard: no forge\/release-gate/);
+    assert.equal(merges.length, 0);
+  });
+  it("I12: a lane-role context cannot merge", async () => {
+    const { managedPromotion } = await import("./release.mjs");
+    const { ctx, merges } = mk();
+    ctx.fence = fence("lane");
+    assert.match((await managedPromotion(ctx, { pr: 7, head: HEAD })).refused, /role lane may not merge/);
+    assert.equal(merges.length, 0);
+  });
+});
+
+describe("release plan routing (#5559)", () => {
+  const POLICY_TEXT = "schema: 1\nbranches: {default: main}\nplan: {approval: wait}\nlanes: {release: {pipeline: existing}}\nmerge: {approval: confirm}\nunits:\n  api: {paths: [\"api/**\"]}\ntrust: {actors: [owner]}\ndeploy: {live_release_command: \"echo live\"}\n";
+  const issue = { number: 5, title: "t", body: "", labels: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z", comments: [{ author: { login: "b" }, body: "<!-- FORGE:CLASSIFY -->\n```json\n{\"type\":\"bug\",\"severity\":\"P2\",\"exists_in\":\"live\",\"confidence\":0.9,\"files\":[\"api/a.py\"]}\n```" }] };
+  const mkIo = (out, gh) => ({ print: (l) => out.push(l), gh: async (a) => { gh.push(a); return a[0] === "issue" ? JSON.stringify([issue]) : JSON.stringify({ nameWithOwner: "o/r" }); }, git: (a) => { if (a[0] === "show") return POLICY_TEXT; throw new Error("none"); }, rehearse: async () => ({ ok: true, output: "abc1234" }), now: () => 1 });
+  it("`release plan --json` is read-only and lists the plan; the bare release options still reject unknown flags", async () => {
+    const out = [], gh = [];
+    assert.equal(await releaseFromCli(["plan", "--json"], { io: mkIo(out, gh), cwd: tmp(), env: { ...process.env, FORGEDOCK_RELEASE_DIR: tmp() } }), 0);
+    const p = JSON.parse(out[0]);
+    assert.equal(p.schema, "forgedock.release.plan/v1"); assert.equal(p.issues[5].lane, "train"); assert.equal(p.live_sha, "abc1234");
+    assert.ok(gh.every((a) => a[0] === "issue" || a[0] === "repo"));
+    await assert.rejects(releaseFromCli(["--bogus"], { io: mkIo([], []), cwd: tmp() }), /unknown option/);
+  });
+});
+
+describe("release start|go routing (#5571)", () => {
+  const POLICY_TEXT = "schema: 1\nbranches: {default: main}\nlanes: {release: {pipeline: existing}}\nunits:\n  api: {paths: [\"api/**\"]}\ntrust: {actors: [owner]}\n";
+  const mkIo = (out, gh) => ({ print: (l) => out.push(l), gh: async (a) => { gh.push(a); return a[0] === "repo" ? JSON.stringify({ nameWithOwner: "o/r" }) : "[]"; }, git: (a) => (a[0] === "show" ? POLICY_TEXT : "abc1234\n"), now: () => 1_700_000_000_000 });
+  const opts = (out, gh) => ({ io: mkIo(out, gh), cwd: tmp(), env: { ...process.env, FORGEDOCK_RELEASE_DIR: tmp() } });
+  it("an unmanaged `start` and `go <id>` make no GitHub writes; `go` needs an id; a bad --wave is rejected", async () => {
+    const out = [], gh = [];
+    assert.equal(await releaseFromCli(["start"], opts(out, gh)), 0);
+    assert.equal(await releaseFromCli(["go", "r1"], opts(out, gh)), 0);
+    assert.ok(out.every((l) => /unmanaged/.test(l)) && gh.every((a) => a[0] === "repo"));
+    await assert.rejects(releaseFromCli(["go"], opts([], [])), /release id/);
+    await assert.rejects(releaseFromCli(["start", "--wave", "x"], opts([], [])), /--wave/);
   });
 });

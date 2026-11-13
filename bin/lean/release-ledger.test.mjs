@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { INIT_PROFILE } from "./release-config.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -155,6 +156,7 @@ async function commitHead(g) { // a foreign writer commits on top of the current
 describe("release fencing through the job (#5553)", () => {
   const HEAD = "a".repeat(40);
   const mkIo = (g, holder, calls) => ({ holder, print() {}, now: () => 1_700_000_000_000, sleep: async () => {}, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, api: g.api,
+    git: () => INIT_PROFILE, mergeGuard: async () => ({ ok: true }), // the merge guard has its own tests (release-gate.test.mjs, release.test.mjs)
     gh: async (a) => {
       const j = a.join(" ");
       if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: calls.some((c) => c[1] === "merge") ? "MERGED" : "OPEN", mergeCommit: calls.some((c) => c[1] === "merge") ? { oid: "m".repeat(40) } : null, headRefOid: HEAD, comments: [{ body: "FORGE:GATE_PASS" }] });
@@ -171,7 +173,7 @@ describe("release fencing through the job (#5553)", () => {
     const out = await go(mkIo(g, "hostA", calls), null, tmpDir("fa-"));
     assert.equal(out.status, "done");
     assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].slice(-2), ["--body", "Forge-Epoch: 1"]);
+    assert.deepEqual(calls[0].slice(-2), ["--body", `Forge-Release: ${ID}\nForge-Epoch: 1`]);
     const st = (await readLedger(ctxOf(g), ID)).state;
     assert.deepEqual(st.intents.map((i) => [i.action, i.epoch, i.done]), [["merge", 1, true]]);
   });
@@ -222,5 +224,35 @@ describe("release fencing through the job (#5553)", () => {
       const done = ran.filter((r) => !r.startsWith("die:") && !["host-preflight", "mark-ready", "rehearsal", "deploy"].includes(r)); // unconfigured steps leave no trace and may re-run
       assert.equal(new Set(done).size, done.length, `${dieAt}: no step ran twice (${done})`);
     }
+  });
+});
+
+describe("claimDeploy (#5565)", async () => {
+  const { claimDeploy, releaseDeploy } = await import("./release-ledger.mjs");
+  it("refuses an overlapping deploy, preempts only on request, releases", async () => {
+    const gh = fakeGh();
+    const io = { api: gh.api, now: () => gh.now, sleep: async () => {} };
+    const ctx = { io, repo: REPO, credential: "driver" };
+    assert.equal((await claimDeploy(ctx, { release: "r1" })).ok, true);
+    assert.equal((await claimDeploy(ctx, { release: "r1" })).ok, true);
+    assert.match((await claimDeploy(ctx, { release: "r2" })).queued, /DEPLOYING/);
+    const p = await claimDeploy(ctx, { release: "r2", preempt: true });
+    assert.equal(p.preempted, "r1");
+    await releaseDeploy(ctx, "r2");
+    assert.equal((await claimDeploy(ctx, { release: "r3" })).ok, true);
+  });
+});
+
+describe("recordSync (#5566)", async () => {
+  const { recordSync } = await import("./release-ledger.mjs");
+  it("keeps the sync in _active.sync and appends one audit line", async () => {
+    const g = fakeGh(), ctx = ctxOf(g);
+    const r = await recordSync(ctx, { pr: 7, conflicted: true, target: ["a.js"], milestones: [{ branch: "milestone/x" }], duplicates: [] }, 0);
+    assert.equal(r.ok, true);
+    assert.equal(r.active.sync.pr, 7);
+    const files = g.trees.get(g.commits.get(g.refs.get(ACTIVE)).tree);
+    const line = JSON.parse(files["controls.jsonl"].trim());
+    assert.equal(line.verb, "sync");
+    assert.equal(line.milestones, 1);
   });
 });

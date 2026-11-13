@@ -249,6 +249,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
   const k = deferrals + 1;
   if (k > maxDeferrals) return { capped: true };
   if (posNum(r?.retryInSeconds)) return { delayMs: r.retryInSeconds * 1000 };
+  if (code === "run.interrupted") return { delayMs: 0 }; // #5654: its lease was released, so there is nothing to wait out
   // lease-held: "leased by X until <ISO>"
   const until = /\buntil (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(String(r?.detail ?? ""))?.[1];
   const at = until ? Date.parse(until) : NaN;
@@ -311,7 +312,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null }) {
   const saved = store?.load?.() ?? null;
@@ -382,6 +383,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
   // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
+  const hostFallbackOn = () => remote?.hostFallback !== false; // #5652: unset keeps the host re-placement
   const placeOf = (n) => {
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
@@ -389,7 +391,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #5423: the lane now provisions the sandbox before ending tool_missing, so the first tool-missing recovery of a remote run retries remotely (not parked behind host load); a repeat goes to the host
     const rec = recovering.get(n);
     if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
-    if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
     { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
@@ -744,7 +747,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
-    if (cancelled && releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } } // #5241: the lane ended: its lease goes with it
+    // #5241: the lane ended: its lease goes with it. #5654: also an interrupted or engine-error end, which is requeued at once
+    if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
@@ -943,13 +947,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         row.detail = `Environment defect: the recovery attempt failed with the same \`${row.code}\` as the run before it, so no further rebuild is spent; run the command below on the host with the project's real dependencies.\n${String(row.detail ?? "")}`;
         decided({ issue: n, what: `no further recovery for ${row.code}: the same failure repeated`, why: firstLine(row.detail), alternative: "requeue another recovery lane that rebuilds against the same frozen command" });
       }
-      if (!repeatEnv && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+      // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
+      const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
+      if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      if (!repeatEnv && !noHostRecovery && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
         classUsed.set(`${n}:${cls}`, attempt);
         // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
         recoveries.set(n, (recoveries.get(n) ?? 0) + 1); recovering.set(n, { code, attempt, max, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
           detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.placement?.where ? { where: row.placement.where } : {}), ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
+        // #5647: the first lane labelled needs-human before the batch chose to recover; swap it for workflow:recovering while the recovery runs
+        if (typeof markRecovering === "function") { try { await markRecovering({ issue: n, code, attempt, max }); } catch { /* best effort: needs-human stays */ } }
         decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${max}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
         update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${max}: ${firstLine(row.detail)}` });
@@ -1039,7 +1048,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { ...(signal ? { signal } : {}), remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
@@ -1058,8 +1067,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5204: a requeue is never silent: one `deferred`/`run.interrupted` row names the cause (an upgrade or a plain restart)
   // and `onInterrupted` reconciles the issue's labels. It consumes no deferral, engine-error or recovery attempt.
   const interruptCause = saved?.engineVersion && version && saved.engineVersion !== version ? `upgrade v${saved.engineVersion}→v${version}` : "dispatcher restart";
-  const requeueLost = (n, why) => {
+  const requeueLost = async (n, why) => {
+    const rec = runRecs.get(n);
     runRecs.delete(n);
+    if (pending.includes(n) || results.has(n)) return;
+    // #5654: the lost lane's own lease would defer the requeue as lease.held for its whole TTL
+    if (releaseLease) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     if (pending.includes(n) || results.has(n)) return;
     pending.unshift(n); enqueued.set(n, now());
     update({ issue: n, outcome: "deferred", code: "run.interrupted", pr: null, cost_usd: 0, minutes: 0, detail: `interrupted: ${interruptCause}; ${why}; requeued` });
@@ -1072,7 +1085,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!adopt || !(rec?.pid || rec?.handle || rec?.remote)) return { n, rec, live: false, p: Promise.resolve(null) };
     let onLive;
     const isLive = new Promise((r) => { onLive = () => r(true); });
-    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
+    const p = Promise.resolve().then(() => adopt(n, rec, { onLive, ...(signal ? { signal } : {}) })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
     return { n, rec, p, first: Promise.race([p.then(() => false), isLive]) };
   });
   for (const a of adopting) a.live = a.first ? await a.first : false;
@@ -1080,17 +1093,17 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (live) {
       if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
       else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
-      track(n, p.then((r) => {
+      track(n, p.then(async (r) => {
         if (r) return settle(n, r, rec, checked.get(n) ?? null);
         if (halted) return; // #4454: kept for the next resume
-        running.delete(n); releaseSlot(n); endRemote(n); requeueLost(n, "the adopted lane ended without a result"); save(); // ended without a result after all
+        running.delete(n); releaseSlot(n); endRemote(n); await requeueLost(n, "the adopted lane ended without a result"); save(); // ended without a result after all
       }));
       continue;
     }
     const r = await p;
     if (!r) {
       const why = adoptErrors.get(n) ?? (!adopt || !(rec?.pid || rec?.handle || rec?.remote) ? "no adoptable pid or handle" : "the lane ended without a result");
-      requeueLost(n, why); continue;
+      await requeueLost(n, why); continue;
     }
     if (rec.remote) { remoteRun.add(n); noteRemote(n, rec.handle); }
     else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle

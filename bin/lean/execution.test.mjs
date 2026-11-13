@@ -7,7 +7,8 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -770,6 +771,21 @@ describe("hybrid placement (#4256)", () => {
   });
 });
 
+describe("#5652: host fallback policy", () => {
+  it("parseExecution reads execution.host_fallback only when explicit", () => {
+    assert.equal(parseExecution({ mode: "remote" }).hostFallback, undefined);
+    assert.equal(parseExecution({ mode: "remote", host_fallback: "true" }).hostFallback, true);
+    assert.equal(parseExecution({ mode: "remote", host_fallback: "false" }).hostFallback, false);
+  });
+  it("hostFallbackAllowed: role orchestrator is off, role unset is on, explicit opt-in overrides", () => {
+    assert.equal(hostFallbackAllowed({ hostRole: "orchestrator" }), false);
+    assert.equal(hostFallbackAllowed({}), true);
+    assert.equal(hostFallbackAllowed({ hostRole: "worker" }), true);
+    assert.equal(hostFallbackAllowed({ hostRole: "orchestrator", hostFallback: true }), true);
+    assert.equal(hostFallbackAllowed({ hostFallback: false }), false);
+  });
+});
+
 describe("#4547: fallback_local and agent liveness", () => {
   it("parseExecution: fallback_local is opt-in", () => {
     assert.equal(parseExecution({ mode: "remote", max_remote: "2" }).fallbackLocal, undefined);
@@ -943,6 +959,29 @@ describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-hum
     const prov = fakeProvider();
     prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 500"), { status: 500, transient: true, retryInSeconds: 12 }); };
     assert.equal((await lanesFor(prov).runOne(7, null)).retryInSeconds, 12);
+  });
+
+  it("#5656 start transport error (fetch failed, ECONNRESET, ETIMEDOUT): deferred sandbox.transient, never needs-human", async () => {
+    const errs = [
+      Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) }),
+      new TypeError("fetch failed"),
+      Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" }),
+    ];
+    for (const e of errs) {
+      const prov = fakeProvider();
+      prov.start = async () => { throw e; };
+      const r = await lanesFor(prov).runOne(7, null);
+      assert.deepEqual([r.terminalReason, r.code, r.retryInSeconds], ["deferred", "sandbox.transient", 60], e.message);
+    }
+  });
+
+  it("#5656 a clone timeout on start keeps its clone deferral, not sandbox.transient", async () => {
+    const prov = fakeProvider();
+    prov.start = async () => { throw new Error("git clone timed out after 120s"); };
+    const r = await lanesFor(prov).runOne(7, null);
+    assert.equal(r.terminalReason, "deferred");
+    assert.notEqual(r.code, "sandbox.transient");
+    assert.match(r.detail, /could not clone/);
   });
 
   it("a non-auth 4xx config error stays needs-human sandbox.start_failed; 429/503 stay sandbox.capacity", async () => {
@@ -1122,5 +1161,46 @@ describe("remote/pool credential resolver (#5131)", () => {
     await t.capacity();
     assert.equal(hit.seen[0].auth, "Bearer router-tok");
     assert.throws(() => remoteTransportFor({}, { env: {}, router: null }), (e) => e.code === "execution.provider.misconfigured");
+  });
+});
+
+describe("#5650: execution.lane_tools", () => {
+  it("parses name and name@version, sorted and deduped", () => {
+    assert.deepEqual(parseExecution({ lane_tools: ["promtool@2.54.1", "playwright", "playwright"] }).laneTools, ["playwright", "promtool@2.54.1"]);
+    assert.deepEqual(parseExecution({ lane_tools: "postgresql-client, python@3.12" }).laneTools, ["postgresql-client", "python@3.12"]);
+  });
+  it("invalid entries are dropped and reported by name; empty or absent leaves the shape unchanged", () => {
+    const e = parseExecution({ lane_tools: ["ok", "bad;rm", ""] });
+    assert.deepEqual(e.laneTools, ["ok"]);
+    assert.equal(e.laneToolsErrors.length, 2);
+    assert.ok(e.laneToolsErrors[0].includes("bad;rm"));
+    for (const sec of [{}, { lane_tools: [] }]) { const x = parseExecution(sec); assert.equal("laneTools" in x, false); assert.equal("laneToolsErrors" in x, false); }
+  });
+  it("the remote launch spec carries lane_tools only when set, and start refuses invalid entries", async () => {
+    const mk = (settings) => { const launched = []; const p = remoteProvider({ batch: { id: "b", logFile: () => "/dev/null" }, repo: "o/r", settings, transport: { launch: async (s) => launched.push(s), status: async () => ({ state: "running" }) }, credentials: () => "", gitIdentity: () => ({}) }); return { p, launched }; };
+    const a = mk({ laneTools: ["promtool@2.54.1"] }); await a.p.start({ issue: 1, args: ["--lane", "main"] });
+    assert.deepEqual(a.launched[0].lane_tools, ["promtool@2.54.1"]);
+    const b = mk({}); await b.p.start({ issue: 1, args: [] });
+    assert.equal("lane_tools" in b.launched[0], false);
+    const c = mk({ laneToolsErrors: ['invalid execution.lane_tools entry "x;y"'] });
+    await assert.rejects(c.p.start({ issue: 1 }), (err) => err.code === "lane_tools.invalid" && err.message.includes("x;y"));
+    assert.equal(c.launched.length, 0);
+  });
+});
+
+describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", () => {
+  it("#5669: a halt while the sandbox runs neither tears it down nor releases the ledger; adopt reattaches", async () => {
+    const prov = fakeProvider(); const root = tmpDir("exec-halt-"); const ledgerFor = ledgerIn(root);
+    const l = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 5 });
+    const ac = new AbortController();
+    const run = l.runOne(8, "main", { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    prov.results[8] = { terminalReason: "merged", pr: 8 }; prov.live.delete(8);
+    await run;
+    assert.deepEqual(prov.calls.filter((c) => c[0] === "teardown"), [], "no teardown after the halt");
+    assert.ok(ledgerFor(8).entries("sandbox").some((e) => e.value === "fake-8"), "ledger entry kept");
+    const r = await l.adopt(8, { handle: { provider: "fake", id: "fake-8", issue: 8 } }, {});
+    assert.equal(r.terminalReason, "merged");
   });
 });

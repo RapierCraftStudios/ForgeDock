@@ -1,0 +1,57 @@
+# ForgeDock release conductor (#5564): host-less recovery for a managed release whose driver went away.
+# Installed by `forgedock release init --conductor` (placeholders are filled with the exact forgedock version).
+# It never plans, builds, reviews, merges or patches: it calls `forgedock release recover <id>`, which takes a stale lease
+# and runs only the GitHub-only recovery actions. The token scopes are listed in forge-conductor.scopes.json.
+name: ForgeDock Conductor
+
+on:
+  workflow_run:
+    workflows: __DEPLOY_WORKFLOWS__
+    types: [completed]
+  deployment_status:
+  workflow_dispatch:
+  schedule:
+    - cron: '__WATCHDOG_CRON__'
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+concurrency:
+  group: forge-conductor
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # No-op path: nothing is checked out or installed unless `_active` names a release.
+      - name: Find the active release
+        id: active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/contents/active.json?ref=_active" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -r '.lease.release // empty' 2>/dev/null || true)
+          echo "release=${id}" >> "$GITHUB_OUTPUT"
+          [ -n "$id" ] || echo "no active release; nothing to do"
+
+      - name: Checkout default branch
+        if: steps.active.outputs.release != ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        if: steps.active.outputs.release != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Recover
+        if: steps.active.outputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.active.outputs.release }}
+        run: npx --yes forgedock@__FORGEDOCK_VERSION__ release recover "$RELEASE_ID" --repo "$GITHUB_REPOSITORY"

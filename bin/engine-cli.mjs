@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+const RECOVERING_LABEL = "workflow:recovering";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
@@ -35,7 +36,7 @@ import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
 import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
-import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
+import { parseExecution, detectNeeds, placementText, hostFallbackAllowed } from "./lean/execution.mjs";
 import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseCeilingBySize } from "./lean/ceiling.mjs";
@@ -479,6 +480,12 @@ export function readRelayCaps(env = process.env) {
  * `  day_budget_usd`, `  on_budget: stop|local`, `  cost_per_minute`) for `orchestrate`; undefined when the section is
  * absent or unreadable.
  */
+/** #5652: whether a remote lane's host-capability / tool-missing recovery may run on this host (execution.host_fallback, host.role). */
+export function readHostFallback(cwd = process.cwd()) {
+  let hostRole = null;
+  try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
+  return hostFallbackAllowed({ hostFallback: readExecution(cwd)?.hostFallback ?? null, hostRole });
+}
 export function readExecution(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution;
@@ -576,6 +583,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     const runners = tr && typeof tr === "object" && !Array.isArray(tr) ? Object.fromEntries(Object.entries(tr).filter(([k, v]) => k && typeof v === "string" && v.trim())) : {};
     const rm = readYamlMap(cwd, "validate", "recipes"); // #5020: y?.validate?.recipes, a block map {match regex: replacement} applied to frozen validate and repro commands
     const recipes = Object.entries(rm ?? {}).map(([match, replace]) => ({ match, replace }));
+    const catalog = String(typeof y?.validate?.catalog === "string" ? y.validate.catalog : "").split(",").map((x) => x.trim()).filter(Boolean); // #5653: CI files the derived command catalogue reads (default .github/workflows/ci.yml, scripts/ci-local.sh)
     const cf = readYamlMap(cwd, "verification", "coupled_files"); // #5079: {when glob: required glob[, glob]}
     const pp = readYamlMap(cwd, "topology", "prod_parity"); // #5284: {path glob: command | "note: how to verify"} production-only facts
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
@@ -587,7 +595,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(s(y?.validate?.regenerate) ? { validateRegenerate: s(y.validate.regenerate) } : {}), ...(catalog.length ? { validateCatalogSources: catalog } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -1062,7 +1070,7 @@ export async function runFromCli(argv, deps = {}) {
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), hostFallback: readHostFallback(), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes"))) && Number(readLeanSetting("review_max_resumes")) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes")) } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1876,7 +1884,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
-  const { formatLedgerSummary } = await import("./lean/phaseledger.mjs");
+  const { formatLedgerSummary, formatPhaseComparison, readBaselineRows } = await import("./lean/phaseledger.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
@@ -1915,7 +1923,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
       laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), hostFallback: readHostFallback(cwd), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes", cwd))) && Number(readLeanSetting("review_max_resumes", cwd)) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes", cwd)) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -1995,7 +2003,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
       };
       remote = liveExec.liveRemote({
-        capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
@@ -2176,8 +2184,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
+      markRecovering: deps.markRecovering ?? makeMarkRecovering({ gh: (a) => leanIo.gh(a), repo }), // #5647
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
-      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
+      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, batchId: batch.id, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
@@ -2228,6 +2237,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
   report.push(formatLedgerSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows
+  try { report.push(...formatPhaseComparison(rows, readBaselineRows({ excludeId: batch.id }))); } catch { report.push("phases vs prev7d: n/a"); } // #5649: read-only baseline, never fails the report
   const precheckLine = formatPrecheckSummary(rows); // #4331
   if (precheckLine) report.push(precheckLine);
   const firstPassLine = formatFirstPassSummary(rows); // #4362
@@ -2299,7 +2309,7 @@ export async function closedScope({ gh, repo, issue, labels }) {
  * Release review #4500: an OPEN issue reopened after that PR merged (a failed acceptance probe, #4399, or an operator
  * reopening it for rework) is new work, so the lane runs; an unreadable reopen history also runs the lane.
  */
-export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
+export function makeDispatchCheck({ gh, repo, owner: batchOwner = null, batchId = null }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
   /** Latest `reopened` event time (ms) on the issue, 0 when never reopened, null when unreadable. */
   const lastReopen = async (n) => {
@@ -2337,7 +2347,7 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null }) {
     // #5471: another live batch of the repo runs / holds the issue: no lane here (--force on the batch lifts it)
     const other = state === "OPEN" && batchOwner ? batchOwner(n) : null;
     if (other) return { outcome: "deferred", code: "batch.owned", detail: `owned by ${other}` };
-    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false }).catch(() => null) : null;
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n, checkPr: false, selfBatch: batchId }).catch(() => null) : null;
     if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
@@ -2381,13 +2391,41 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       if (predicate && await prem.evalPredicate(predicate, { repo, io: { gh, pkgVersion: prem.registryPkgVersion }, now: now() }) === true) return "skipped";
       const reg = await prem.registerAsk({ repo, io: { gh }, issue, ask: String(evidence ?? "") });
       const extra = [prem.premiseAnnotation(predicate), reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : ""].filter(Boolean).join("\n");
-      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`]); } catch { return "failed"; }
+      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`, "--remove-label", RECOVERING_LABEL]); } catch { return "failed"; } // #5647: needs-human and recovering never coexist
       try {
         const { capComment } = await import("./lean/render.mjs");
         await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN external=true -->\n## Needs human (external)\nOwner: ${external.owner || "unassigned (name an owner)"}\nUnblock condition: ${external.unblock || "unstated (name the condition that unblocks this issue)"}\n${extra ? `${extra}\n` : ""}${evidence}${!reg.existing && reg.entry ? `\n\n${reg.entry}` : ""}`)]);
       } catch { /* best effort */ }
       return true;
     }
+  };
+}
+
+
+/**
+ * #5647: a recovery lane is queued, so the issue shows `workflow:recovering` instead of `needs-human`. The label is added and read
+ * back before needs-human goes (a failure rolls the add back and keeps needs-human); then one FORGE:RECOVERING comment is upserted.
+ * Returns true | "failed".
+ */
+export function makeMarkRecovering({ gh, repo }) {
+  return async ({ issue, code, attempt, max }) => {
+    const n = String(issue);
+    try { await gh(["label", "create", RECOVERING_LABEL, "-R", repo, "--force", "--color", "C5DEF5", "--description", "Pipeline: automatic recovery in flight. Managed by ForgeDock."]); } catch { /* exists, or no rights: the add says */ }
+    try {
+      await gh(["issue", "edit", n, "-R", repo, "--add-label", RECOVERING_LABEL]);
+      const names = (JSON.parse(await gh(["issue", "view", n, "-R", repo, "--json", "labels"]))?.labels ?? []).map((l) => l?.name);
+      if (!names.includes(RECOVERING_LABEL)) throw new Error("label not applied");
+      await gh(["issue", "edit", n, "-R", repo, "--remove-label", "needs-human,needs-human:external"]);
+    } catch {
+      try { await gh(["issue", "edit", n, "-R", repo, "--remove-label", RECOVERING_LABEL]); } catch { /* needs-human is still on */ }
+      return "failed";
+    }
+    try {
+      const { capComment } = await import("./lean/render.mjs");
+      const { postUpsert } = await import("./lean/statuscomment.mjs");
+      await postUpsert({ gh, repo, issue, markers: ["FORGE:RECOVERING"], cap: capComment, body: `## Recovering (attempt ${attempt}/${max})\nrecovering (${code}), attempt ${attempt}/${max}: the watchdog is rebuilding this issue; \`needs-human\` appears only if recovery is exhausted.` });
+    } catch { /* best effort */ }
+    return true;
   };
 }
 
@@ -2461,6 +2499,8 @@ export async function scheddFromCli(argv, deps = {}) {
     for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
     if (st.orphaned?.length) console.log(`schedd: ${st.orphaned.length} orphaned batch(es) (not hosted, pending issues, idle over 7 days): ${st.orphaned.slice(0, 3).map((o) => o.id).join(" ")}${st.orphaned.length > 3 ? " …" : ""} (forgedock orchestrate --gc-orphans cancels them)`);
+    if (st.abandoned?.length) console.log(`schedd: abandoned ${st.abandoned.length} batch(es) not hosted and idle past the abandon age: ${st.abandoned.slice(0, 3).join(" ")}${st.abandoned.length > 3 ? " …" : ""} (forgedock orchestrate --resume <id> reopens one)`); // #5531
+    if (st.rehosted?.length) console.log(`schedd: re-hosted ${st.rehosted.length} batch(es) not hosted and idle past the abandon age: ${st.rehosted.slice(0, 3).join(" ")}${st.rehosted.length > 3 ? " …" : ""}`); // #5531
     for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }

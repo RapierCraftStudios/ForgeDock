@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync, utimesSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { join } from "node:path";
 import { phasesOf } from "./orchestrate.mjs";
 import { aggregate } from "../stats/aggregate.mjs";
-import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatLedgerSummary, WAIT_CAUSES, summarizeWaits } from "./phaseledger.mjs";
+import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatLedgerSummary, WAIT_CAUSES, summarizeWaits, comparePhases, formatPhaseComparison, readBaselineRows } from "./phaseledger.mjs";
 
 const clock = () => { let t = 1000; const f = () => t; f.tick = (ms) => { t += ms; }; return f; };
 
@@ -53,7 +56,7 @@ describe("phase ledger (#4908)", () => {
     assert.match(line, /largest: implement/);
     assert.equal(formatLedgerSummary([{ issue: 1 }]), "phases (wall time): n/a");
     assert.equal(formatLedgerSummary(null), "phases (wall time): n/a");
-    assert.equal(LANE_PHASES.length, 11);
+    assert.equal(LANE_PHASES.length, 13);
   });
 
   it("the batch row adds queue_wait to the lane ledger and stays null without one (#4908)", () => {
@@ -97,5 +100,70 @@ describe("phase ledger (#4908)", () => {
     assert.equal(summarizeWaits([{ plan: { ms: 5 } }]).n, 0);
     const q = summarizeWaits([1, 2, 3, 4].map((n) => ({ plan: { ms: 10 * n, wait: { heavy_queue: n * 1000 } } })));
     assert.deepEqual(q.phases.plan.pct.heavy_queue, { p50: 2500, p90: 4000 });
+  });
+});
+
+describe("phase comparison vs previous 7 days (#5649)", () => {
+  const row = (phases, minutes, outcome = "merged", issue = 1) => ({ issue, outcome, minutes, phases });
+  const M = 60000;
+
+  it("contract and fix are ledger phases that keep the lane sum, rows without them still summarise", async () => {
+    const now = clock(), t0 = now(), L = createLedger(now);
+    now.tick(1000); L.enter("plan"); now.tick(2000);
+    await L.during("contract", async () => { now.tick(3000); });
+    now.tick(4000); L.enter("review"); now.tick(5000);
+    await L.during("fix", async () => { now.tick(6000); });
+    now.tick(7000); L.enter("merge"); now.tick(1000);
+    const p = L.snapshot();
+    assert.deepEqual(Object.keys(p), ["sandbox_start", "plan", "contract", "review", "fix", "merge"]);
+    assert.equal(p.contract.ms, 3000); assert.equal(p.fix.ms, 6000);
+    assert.ok(withinWall(p, now() - t0));
+    assert.equal(unflattenPhases(flattenPhases(p)).fix.ms, 6000);
+    const s = summarizePhases([p, { plan: { ms: 10 } }]);
+    assert.equal(s.n, 2); assert.equal(s.phases.plan.n, 2); assert.equal(s.phases.fix.n, 1);
+  });
+
+  it("summarizePhases carries p75", () => {
+    const s = summarizePhases([1, 2, 3, 4].map((x) => ({ plan: { ms: x * 1000 } })));
+    assert.equal(s.phases.plan.p75, 3000);
+  });
+
+  it("comparePhases: no prior batches, rows without ledgers, one-sided phases", () => {
+    const cur = [row({ plan: { ms: 4 * M }, fix: { ms: M } }, 20), row(undefined, 30, "merged", 2)];
+    const none = comparePhases(cur, null);
+    assert.equal(none.baseline, false);
+    assert.equal(none.phases.plan.prev, null); assert.equal(none.phases.plan.delta, null);
+    assert.deepEqual([none.wall.cur.median, none.wall.cur.p75], [25 * M, 30 * M]);
+    const c = comparePhases(cur, [row({ plan: { ms: 2 * M }, merge: { ms: M } }, 10), row({}, 0, "failed")]);
+    assert.equal(c.baseline, true);
+    assert.equal(c.phases.plan.delta, 1);
+    assert.equal(c.phases.fix.prev, null); assert.equal(c.phases.merge.cur, null);
+    assert.equal(c.wall.prev.median, 10 * M);
+    assert.doesNotThrow(() => comparePhases(undefined, undefined));
+  });
+
+  it("formatPhaseComparison prints the line form, marks >25% growth and the lane wall", () => {
+    const out = formatPhaseComparison([row({ plan: { ms: 3 * M }, merge: { ms: M } }, 20)], [row({ plan: { ms: 2 * M }, merge: { ms: M } }, 10)]);
+    assert.equal(out[0], "plan median 3.0m (prev7d 2.0m) p75 3.0m (prev7d 2.0m) ! median +50%");
+    assert.equal(out[1], "merge median 1.0m (prev7d 1.0m) p75 1.0m (prev7d 1.0m)");
+    assert.equal(out[2], "lane wall (merged) median 20.0m (prev7d 10.0m) p75 20.0m (prev7d 10.0m) ! median +100%");
+    assert.match(formatPhaseComparison([row({ plan: { ms: M } }, 5)], null)[0], /^plan median 1\.0m \(prev7d n\/a\)/);
+    assert.deepEqual(formatPhaseComparison([], []), ["phases vs prev7d: n/a"]);
+  });
+
+  it("readBaselineRows reads recent batches except the current one, last row per issue; null when unreadable", () => {
+    const root = tmpDir("bl-"), now = Date.now();
+    const mk = (id, rows, ageDays) => {
+      mkdirSync(join(root, id)); const f = join(root, id, "log.jsonl");
+      writeFileSync(f, rows.map((r) => JSON.stringify(r)).join("\n") + "\nnot json\n");
+      const t = (now - ageDays * 86400000) / 1000; utimesSync(f, t, t);
+    };
+    mk("a", [{ issue: 1, minutes: 1 }, { issue: 1, minutes: 2 }, { issue: 2, minutes: 3 }], 1);
+    mk("old", [{ issue: 9, minutes: 9 }], 10);
+    mk("cur", [{ issue: 5, minutes: 5 }], 0);
+    mkdirSync(join(root, "nolog"));
+    const rows = readBaselineRows({ root, excludeId: "cur", now });
+    assert.deepEqual(rows.map((r) => r.minutes).sort(), [2, 3]);
+    assert.equal(readBaselineRows({ root: join(root, "missing"), now }), null);
   });
 });

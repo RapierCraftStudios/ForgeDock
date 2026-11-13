@@ -37,7 +37,7 @@ export function liveMatches(live, mergeSha, expected) {
   return units.length ? units.every(([u, d]) => live.images?.[u] === d) : sameSha(live.sha, mergeSha);
 }
 
-async function readTarget(io, cmd) {
+export async function readTarget(io, cmd) {
   if (!cmd) return null;
   const r = await io.rehearse(cmd, { timeout: 120_000 });
   return r?.ok ? parseLiveRelease(r.output) : null;
@@ -83,7 +83,7 @@ export async function runFor(ctx, { workflow, sha, inputs, key, startPolls, b })
     run = await poll(io, Math.max(startPolls, Math.ceil((ctx.config.deploy?.start_timeout_s ?? 60) * 1000 / b.pollMs)), b.pollMs, look);
     return run ? { run, dispatched: false } : { err: `a ${workflow} dispatch for ${sha.slice(0, 8)} was already recorded but no run appeared; check the Actions tab, then resume (never redispatched)` };
   }
-  const f = await fenced(ctx.fence, { action: "dispatch", key: idemKey(ctx, key) }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
+  const f = await fenced(ctx.fence, { action: "dispatch", key: idemKey(ctx, key) }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.deployRef ?? ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
   if (f.refused) return { err: `dispatch ${f.refused}` };
   run = await poll(io, startPolls, b.pollMs, look);
   return run ? { run, dispatched: true } : { err: `no ${workflow} run for ${sha.slice(0, 8)} after a dispatch on ${ctx.def}; check the Actions tab, then resume` };
@@ -176,7 +176,7 @@ export async function deployStep(ctx) {
   if (st.phase !== "LIVE_CHECKED" && st.phase !== "LIVE") {
     for (;;) {
       st.phase = "DEPLOYING"; ctx.save();
-      const r = await runFor(ctx, { workflow: pipe.workflow, sha, inputs: pipe.inputs ?? {}, key: `deploy:${sha}`, startPolls: pipe.trigger === "dispatch" ? 1 : Math.max(1, Math.ceil((d.start_timeout_s ?? 60) * 1000 / b.pollMs)), b });
+      const r = await runFor(ctx, { workflow: pipe.workflow, sha, inputs: { ...(pipe.inputs ?? {}), ...(ctx.config.trainDispatch ? { merge_sha: sha, units: ctx.config.trainDispatch.units.join(",") } : {}) }, key: `deploy:${sha}`, startPolls: pipe.trigger === "dispatch" ? 1 : Math.max(1, Math.ceil((d.start_timeout_s ?? 60) * 1000 / b.pollMs)), b });
       if (r.err) return blocked(r.err);
       st.runId = r.run.databaseId; ctx.save();
       const done = await finished(ctx, pipe.workflow, sha, Math.ceil(stageS(d) * 1000 / b.runPollMs), b);

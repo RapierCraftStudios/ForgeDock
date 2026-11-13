@@ -58,6 +58,7 @@ import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
 import { dockerLabels, safeSegment } from "./ledger.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { validateLaneTools } from "../pool/lane-tools.mjs";
 import { resolveCredential, memoKeychain, defaultKeychain } from "./credentials.mjs";
 import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
@@ -135,12 +136,14 @@ export function parseExecution(sec = {}) {
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
   const wsN = Number(str(s.warm_sandboxes));
   const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
+  const lt = validateLaneTools(s.lane_tools); // #5650: invalid entries are dropped here and reported in laneToolsErrors; the remote provider refuses to start with them
+  const hfRaw = str(s.host_fallback).toLowerCase(), hostFallback = hfRaw === "true" ? true : hfRaw === "false" ? false : null; // #5652: unset defers to host.role
   const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
   // #5094: rotator.mjs reads its per-account quota state; #5205: off/none/false disables auto-detection, anything else is unset (auto)
   const rot = str(s.account_rotator).toLowerCase(), accountRotator = rot === "tokenbaton" ? "tokenbaton" : ["off", "none", "false"].includes(rot) ? "off" : null;
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -232,6 +235,15 @@ export function detectNeeds(text, exec = null) {
   for (const name of exec?.hostCapabilities ?? []) if (new RegExp(`\\b${name.replace(/[_-]/g, "[ _-]")}\\b`, "i").test(t)) found.add(name);
   for (const { name, pattern } of exec?.hostCapabilityPatterns ?? []) { const re = safeRegExp(pattern); if (re?.test(t)) found.add(name); }
   return [...found].sort();
+}
+
+/**
+ * #5652: may a remote lane that lacks a tool or host capability be re-placed on the dispatching host? An explicit
+ * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else on (existing repos unchanged).
+ */
+export function hostFallbackAllowed({ hostFallback = null, hostRole = null } = {}) {
+  if (typeof hostFallback === "boolean") return hostFallback;
+  return String(hostRole ?? "").trim().toLowerCase() !== "orchestrator";
 }
 
 /** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */
@@ -602,6 +614,8 @@ export function usageLimitInTail(tail) {
   return { resetAt: RESETS_RE.exec(t)?.[1]?.trim() ?? null };
 }
 
+const HALTED = { terminalReason: "deferred", detail: "batch halted (schedd handover); sandbox kept for adopt" }; // #5669: dropped by orchestrate's settle
+
 /**
  * Lane seams for `orchestrate()` over a provider, the same contract as batch.mjs `detachedLanes`. `ledgerFor(issue)`
  * returns that sandbox's ledger (ledger.mjs `makeLedger`). #5095: with `holdId` every `rate_limited` result is held under it
@@ -649,8 +663,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
   const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
-  const wait = async (h, g = guard({ waited: 0, tries: 0 })) => {
+  // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
+  const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
     for (;;) {
+      if (sig?.aborted) return null;
       const r = await g(() => provider.fetchResult(h));
       if (r) return r;
       const st = await g(() => provider.status(h));
@@ -678,7 +694,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     // #5095: a 5xx from the pool router or agent is infrastructure: deferred with backoff (capped), never needs-human
-    : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true
+    : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true || (isTransportError(e) && !isCloneFailure(errText(e))) // #5656: fetch failed, ECONNRESET, ETIMEDOUT; a clone timeout keeps its own code
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_TRANSIENT, retryInSeconds: Number(e.retryInSeconds) > 0 ? Number(e.retryInSeconds) : TRANSIENT_RETRY_S,
       detail: `sandbox ${id} could not start (transient${Number.isInteger(e?.status) ? ` HTTP ${e.status}` : ""}): ${errText(e)}` }
     : isCloneFailure(errText(e)) ? cloneDeferred(id, errText(e))
@@ -713,7 +729,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (!Number.isFinite(h.startedAt)) h.startedAt = base.startedAt;
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
-        r = settleClone(await wait(h), base.id);
+        r = settleClone(await wait(h, undefined, ctx.signal), base.id);
+        if (ctx.signal?.aborted) return HALTED; // #5669: the sandbox stays for adopt, whatever `r` is
       } catch (e) {
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
@@ -741,7 +758,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       try {
         const ended = await g(() => provider.fetchResult(h));
         if (!ended && (await g(() => provider.status(h))) !== "running") r = null; // relaunched
-        else { if (!ended) ctx.onLive?.(); r = await wait(h, g); } // #4504: a live sandbox is awaited in the background
+        else { if (!ended) ctx.onLive?.(); r = await wait(h, g, ctx.signal); } // #4504: a live sandbox is awaited in the background
+        if (ctx.signal?.aborted) return null; // #5669: halted: left for the next adopt, no tear
       } catch (e) {
         if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };

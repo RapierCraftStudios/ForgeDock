@@ -138,7 +138,7 @@ async function grade({ run, src, head, base, corpus, issue, tmp, tag, apiShape }
 /** Run one arm on one corpus issue and grade it -> one row (see aggregate). `now` and `apiShape` are injectable. */
 export async function runArm({ arm, issue, corpus, cfg, run = benchDefaultRun, tmp, now = () => Date.now(), apiShape = detectApiShape }) {
   const tag = `${arm}-${issue.id}`, a = cfg.arms[arm];
-  const row = { arm, id: issue.id, cost_usd: null, wall_ms: null, model_ms: null, harness_wall_ms: null, claimed_fix: false, oracle_pass: false, suite_pass: null,
+  const row = { arm, id: issue.id, cost_usd: null, wall_ms: null, model_ms: null, start_ms: null, harness_wall_ms: null, claimed_fix: false, oracle_pass: false, suite_pass: null,
     api_shape: null, light: null, light_unobserved: false, light_eligibility: null, light_upgrade: null, terminal: null };
   const t0 = now();
   let src = null, head = null, base = corpus.base, claimed = false;
@@ -165,6 +165,7 @@ export async function runArm({ arm, issue, corpus, cfg, run = benchDefaultRun, t
     const res = readJson(rf);
     row.terminal = res?.terminalReason ?? `exit ${r.code}`;
     row.cost_usd = num(res?.cost_usd); row.wall_ms = num(res?.wall_ms); row.model_ms = num(res?.model_ms);
+    row.start_ms = num(res?.phases?.sandbox_start?.ms); // #5620: lane sandbox start wait (SANDBOX_STEP steps live under it); null when the result has no phases
     row.light = typeof res?.light === "boolean" ? res.light : null;
     row.light_unobserved = row.light === null; // #5541: no result file (or no `light` field), so the lane's depth is unknown, not false
     row.light_eligibility = res?.light_eligibility ?? null;

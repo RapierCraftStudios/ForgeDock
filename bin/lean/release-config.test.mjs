@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parsePolicy, validatePolicy, readPolicy, INIT_PROFILE, checkConfigFromCli, initFromCli, POLICY_PATH } from "./release-config.mjs";
+import { parsePolicy, validatePolicy, readPolicy, INIT_PROFILE, checkConfigFromCli, dockerfileCoverage, dockerfileSources, initFromCli, POLICY_PATH } from "./release-config.mjs";
 import { releaseFromCli } from "./release.mjs";
 
 const OK = `schema: 1
@@ -126,6 +126,9 @@ describe("gates catalogue and policy (#5583)", () => {
   it("accepts the gates policy keys and rejects a wrong type", () => {
     assert.deepEqual(check(OK + "gates: {demote_fb_rate: 5, demote_window: 20, safety: [a]}\n"), []);
     assert.match(check(OK + "gates: {demote_window: 2.5}\n").join(), /demote_window/);
+    assert.deepEqual(check(OK + "gates: {paths: [scripts/deploy/**], workflow_steps: [Smoke]}\n"), []); // #5584
+    assert.match(check(OK + "gates: {workflow_steps: Smoke}\n").join(), /workflow_steps/);
+    assert.match(check(OK + "gates: {bogus: 1}\n").join(), /bogus/);
   });
   it("check-config reports catalogue errors, passes a valid one, ignores an absent one", () => {
     const bad = gio({ ".forge/gates.yaml": GATE.replace("mode: block", "mode: nope"), [POLICY_PATH]: OK });
@@ -136,5 +139,44 @@ describe("gates catalogue and policy (#5583)", () => {
     const none = gio({ [POLICY_PATH]: OK });
     assert.equal(checkConfigFromCli([], { io: none }), 0);
     assert.doesNotMatch(none.printed.join("\n"), /gates/);
+  });
+});
+
+describe("rollback and events keys (#5563)", () => {
+  const rb = "rollback:\n  ladder: [flag, unit, full, stop]\n  triggers: [smoke, sli]\n  refuse_across: [destructive_migration]\n  open_revert_pr: true\n  flags: [{flag: f1, kill_command: ./kill}]\n  unit_workflow: svc.yml\n  full_workflow: rb.yml\n  result_command: ./res\nevents: {webhook_url: https://x.test/h}\n";
+  it("accepts the typed ladder keys", () => assert.deepEqual(check(`${OK}${rb}`), []));
+  it("rejects an unknown rung, trigger and key", () => {
+    assert.match(check(`${OK}rollback: {ladder: [nuke]}\n`).join("\n"), /ladder\[0\].*not one of/);
+    assert.match(check(`${OK}rollback: {triggers: [moon]}\n`).join("\n"), /triggers\[0\]/);
+    assert.match(check(`${OK}rollback: {sql: x}\n`).join("\n"), /rollback\.sql: unknown key/);
+  });
+});
+
+describe("check-config --coverage and contracts[].regenerate (#5570, Q9)", () => {
+  const POL = `${OK.replace("api: {paths", "api: {dockerfile: services/api/Dockerfile, paths")}`;
+  const mkio = (docker) => ({ printed: [], print(l) { this.printed.push(l); }, git(a) { const k = a[1].split(":").slice(1).join(":"); if (k === POLICY_PATH) return POL; if (k === "services/api/Dockerfile") return docker; throw new Error("missing"); } });
+  it("parses COPY/ADD sources, skipping --from copies and urls", () => {
+    assert.deepEqual(dockerfileSources("FROM x\nCOPY --from=build /out /app\nCOPY a/ b.txt /app/\nADD https://x/y /z\nCOPY . /all\n"), ["a/", "b.txt"]);
+  });
+  it("fails on a Dockerfile copying an unmapped path and passes once it is mapped", () => {
+    const bad = mkio("FROM x\nCOPY services/api /app\nCOPY libs/secret /app/libs\n");
+    assert.equal(checkConfigFromCli(["--coverage"], { io: bad }), 1);
+    assert.match(bad.printed.join("\n"), /copies libs\/secret/);
+    assert.deepEqual(dockerfileCoverage(parsePolicy(POL).policy, "COPY services/api /app\nCOPY shared /s\n"), []);
+    const good = mkio("FROM x\nCOPY services/api /app\nCOPY shared /s\n");
+    assert.equal(checkConfigFromCli(["--coverage"], { io: good }), 0);
+  });
+  it("without --coverage the Dockerfile is not read", () => assert.equal(checkConfigFromCli([], { io: mkio("COPY nowhere /x\n") }), 0));
+  it("accepts an optional contracts[].regenerate and rejects a wrong type", () => {
+    const c = (r) => validatePolicy(parsePolicy(`${OK}contracts:\n  - {producer: api, consumers: [web], paths: ["c/**"], regenerate: ${r}}\n`).policy);
+    assert.deepEqual(c('"make gen"'), []);
+    assert.match(c("[1]").join(), /regenerate/);
+  });
+});
+
+describe("features.flag_policy (#5571)", () => {
+  it("accepts require|warn|off and rejects anything else", () => {
+    for (const v of ["require", "warn", "off"]) assert.deepEqual(check(OK + `features: {flag_policy: ${v}}\n`), [], v);
+    assert.match(check(OK + "features: {flag_policy: maybe}\n").join(), /flag_policy/);
   });
 });

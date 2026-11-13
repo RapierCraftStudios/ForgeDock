@@ -280,6 +280,7 @@ export function depInstallFailures({ results = [], changedFiles = [] } = {}) {
     if (r?.status !== "failed") continue;
     const label = `${r.eco ?? "dependencies"}${r.dir && r.dir !== "." ? ` in ${r.dir}` : ""}: ${r.reason ?? "install failed"}`;
     const rx = SRC_BY_ECO(r.eco);
+    if (r.code === "env.tool_missing") { block.push({ code: "env.tool_missing", kind: "dep_install", tool: r.eco ?? "python", detail: `dependency install stopped (${label}) (environment, not the change)` }); continue; } // #5651
     const hit = r.eco ? changedFiles.find((f) => rx.test(f) && underDir(r.dir, f) && (r.dir && r.dir !== "." ? true : !dirs.some((d) => underDir(d, f)))) : null;
     if (hit) block.push({ code: "env.tool_missing", kind: "dep_install", tool: r.eco, detail: `dependency install failed (${label}) for a package the changed file ${hit} imports (environment, not the change)` });
     else logged.push(`Dependency install failed, unrelated to the changed files: ${label}`);
@@ -313,9 +314,11 @@ export function declaredEnv(contract) {
 
 /** #5590: pytest's built-in fixtures, never host executables. */
 const PYTEST_FIXTURES = new Set(["caplog", "capsys", "capfd", "capsysbinary", "capfdbinary", "monkeypatch", "tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory", "request", "recwarn", "pytestconfig", "mocker", "doctest_namespace", "cache", "testdir"]);
-/** #5590: `env` lists executables only; CamelCase (a class such as FakeRedis), snake_case and pytest-fixture names are libraries/fixtures that come from the lockfile. Pure. */
+/** A file name (`depcache.test.mjs`, `conftest.py`) in `env` is a test file, not a host tool; versioned executables (`python3.12`) still pass. */
+const SOURCE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|sh|bash|json|ya?ml|toml|md|txt|lock|cfg|ini)$/;
+/** #5590: `env` lists executables only; CamelCase (a class such as FakeRedis), snake_case, pytest-fixture and source-file names are libraries/fixtures/tests, not host tools. Pure. */
 export function isExecutableName(t) {
-  return !/[A-Z]/.test(t) && !t.includes("_") && !PYTEST_FIXTURES.has(t);
+  return !/[A-Z]/.test(t) && !t.includes("_") && !PYTEST_FIXTURES.has(t) && !SOURCE_FILE_RE.test(t);
 }
 
 /**

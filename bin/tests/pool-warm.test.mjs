@@ -179,3 +179,11 @@ test("#4936: a claim keeps the burst limit, so replenished warm sandboxes launch
   assert.ok(runs.length >= 1, "a warm sandbox was launched");
   for (const a of runs) assert.equal(a[a.indexOf("--cpus") + 1], "4", "launched with the burst lane_cpus, not the reservation");
 });
+
+test("warm configure keeps lane_tools in the stored spec only when set (#5650)", () => {
+  const { agent } = fixture();
+  const a = agent.warm.configure({ spec: spec("l-1", { lane_tools: ["playwright"] }), ...SIZE, n: 1 });
+  assert.deepEqual(agent.store.data.warm[a.key].spec.lane_tools, ["playwright"]);
+  const b = agent.warm.configure({ spec: spec("l-2", { repo: { slug: "o/other", url: "u", ref: "m" } }), ...SIZE, n: 1 });
+  assert.equal("lane_tools" in agent.store.data.warm[b.key].spec, false);
+});

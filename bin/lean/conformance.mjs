@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
+import { equivalentRuns, isDriftFailure } from "./validate-catalog.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
@@ -315,6 +316,8 @@ export const VERIFY_MODES = Object.freeze(["in_lane", "out_of_band"]);
  */
 export const OUT_OF_BAND_RE = /\blighthouse\b|\bweb[- ]vitals\b|\bfield[- ](?:perf\w*|profiles?|data|metrics?)\b|\bthrottled\b|\b(?:nightly|report[- ]only)\b[^.;\n]{0,40}?\b(?:suites?|jobs?|runs?|bench\w*|workflows?)\b/i;
 const PERF_METRIC_RE = /\b(?:LCP|INP|TTI|FCP|TTFB)\b/;
+/** #5653: criteria only time or production can show (a N-day metric, a corpus re-run, a published scorecard, after deploy). */
+const TIME_PROD_ONLY_RE = /\b\d+[- ]days?\b|\bscorecards?\b|\bcorpus re-?runs?\b|\bafter (?:the )?(?:deploy|release|promotion)\b/i;
 export const isOutOfBand = (r) => r?.verify === "out_of_band";
 const tagsOutOfBand = (r) => r?.disposition === "deliver" && r?.verify == null && (OUT_OF_BAND_RE.test(String(r?.quote ?? "")) || PERF_METRIC_RE.test(String(r?.quote ?? "")));
 /**
@@ -558,7 +561,7 @@ export function testPlanProblems(c, { required = false } = {}) {
 
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null, baseFiles = null } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -585,6 +588,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
     if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
     else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
+    if (r?.disposition === "deliver" && !isOutOfBand(r) && r?.verify !== "in_lane" && TIME_PROD_ONLY_RE.test(String(r?.quote ?? ""))) problems.push(`${id}: the quote needs time or production to observe (${String(r.quote).match(TIME_PROD_ONLY_RE)[0]}); classify it post-deploy (with a check id), defer with a bucket, or verify out_of_band with evidence, never narrow it into a deliver the lane can observe (#5653)`);
   }
   if (c.regression != null && !Array.isArray(c.regression)) problems.push("regression must be an array of {id, command, covers}");
   for (const g of Array.isArray(c.regression) ? c.regression : []) {
@@ -633,7 +637,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
   }
   problems.push(...testPlanProblems(c, { required: testPlan }));
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
-  if (pages) problems.push(...contractBriefProblems(c, pages, { readFile })); // #5428: page deliverables need page_gate briefs
+  if (pages) problems.push(...contractBriefProblems(c, pages, { readFile, baseFiles })); // #5428: page deliverables need page_gate briefs
   return { ok: problems.length === 0, problems };
 }
 
@@ -1100,7 +1104,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * tool), for the trajectory; always an array.
  */
 export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
-  const failures = [], superseded = [], ciCovered = [];
+  const failures = [], superseded = [], ciCovered = [], equivalent = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
@@ -1125,7 +1129,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
       const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
-      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
+      // #5653: the frozen command runs, and the substitute ran the same test ids with the same exit: recorded, not failed
+      if (verdict === "runs" && equivalentRuns(substitutedRuns[v.id], substitutedRuns[v.id].sub)) equivalent.push({ id: v.id, from: v.substituted.from, to: v.command });
+      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -1148,6 +1154,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       // #5447: CI may not run this test, so a missing tool on the rerun is never covered by a CI-verified head
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
+      else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });
     }
   }
@@ -1179,7 +1186,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   failures.push(...interfaceDecisionFailures(contract, result, changedFiles)); // #5338
   failures.push(...(seamFailures ?? [])); // #5338: a declared interface's provider and consumer no longer agree
-  return { ok: failures.length === 0, failures, superseded, ciCovered };
+  return { ok: failures.length === 0, failures, superseded, ciCovered, equivalent };
 }
 
 /**

@@ -9,7 +9,9 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
-import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
+import { makeLedger } from "./ledger.mjs";
+import { providerLanes } from "./execution.mjs";
+import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
@@ -322,6 +324,45 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
     assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1);
     assert.match(relabels[0].evidence, /the batch stopped \(interrupted by SIGINT\)/);
     assert.deepEqual(removed.sort(), ["SIGINT", "SIGTERM"]);
+  });
+
+  describe("makeMarkRecovering (#5647)", () => {
+    const hook = (failOn = null, labels = ["needs-human", "workflow:recovering"]) => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.join(" "));
+        if (failOn && a.join(" ").includes(failOn)) throw new Error("boom");
+        if (a[1] === "view" && a.includes("labels")) return JSON.stringify({ labels: labels.map((name) => ({ name })) });
+        if (a[1] === "view") return JSON.stringify({ comments: [] });
+        return "";
+      };
+      return { calls, run: () => makeMarkRecovering({ gh, repo: "o/r" })({ issue: 7, code: "ci.red", attempt: 1, max: 2 }) };
+    };
+    it("adds workflow:recovering, reads it back, then removes needs-human and posts the attempt comment", async () => {
+      const h = hook();
+      assert.equal(await h.run(), true);
+      const i = (x) => h.calls.findIndex((c) => c.includes(x));
+      assert.ok(i("label create workflow:recovering") < i("--add-label workflow:recovering"));
+      assert.ok(i("--add-label workflow:recovering") < i("--remove-label needs-human,needs-human:external"));
+      assert.ok(h.calls.some((c) => c.includes("attempt 1/2")));
+    });
+    it("a failed add keeps needs-human and rolls the label back", async () => {
+      const h = hook("--add-label");
+      assert.equal(await h.run(), "failed");
+      assert.ok(!h.calls.some((c) => c.includes("--remove-label needs-human")));
+    });
+    it("an add that did not read back keeps needs-human", async () => {
+      const h = hook(null, ["needs-human"]);
+      assert.equal(await h.run(), "failed");
+      assert.ok(!h.calls.some((c) => c.includes("--remove-label needs-human")));
+    });
+    it("the final needs-human relabel removes workflow:recovering after the skip checks", async () => {
+      const calls = [];
+      const gh = async (a) => { calls.push(a.join(" ")); return a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "" }) : ""; };
+      await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" });
+      assert.ok(calls.some((c) => c.includes("--add-label needs-human") && c.includes("--remove-label workflow:recovering")));
+      assert.ok(calls[0].includes("view"));
+    });
   });
 
   describe("makeRelabelNeedsHuman", () => {
@@ -794,6 +835,14 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.equal(await mk(OPEN, { open: '[{"number":4919}]' })(9), null, "own open lane PR: run (resume it)");
     assert.equal(await mk(OPEN, { body: new Error("down"), open: new Error("down") })(9), null, "unreadable: fail open");
     assert.equal((await mk('{"state":"CLOSED"}', { body: lease(Date.now() + 600000) })(9)).outcome, "invalid", "closed wins");
+  });
+  it("#5654 makeDispatchCheck: a lease written by another run of the same batch does not defer; another batch's or a batch-less lease still does", async () => {
+    const body = (batch) => JSON.stringify({ body: `x\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 9, lease: { by: "core_h_1_aaaaaa", until: Date.now() + 600000, host: "h", pid: 1, ...(batch ? { batch } : {}) } })}\n-->` });
+    const mk = (b, batchId) => makeDispatchCheck({ repo: "o/r", batchId, gh: async (a) => (a[0] === "issue" && a[a.length - 1] === "body" ? b : a[0] === "issue" ? '{"state":"OPEN"}' : "[]") });
+    assert.equal(await mk(body("bt1"), "bt1")(9), null, "same batch, different run suffix: dispatched");
+    assert.equal((await mk(body("bt2"), "bt1")(9)).code, "lease.held", "another batch still defers");
+    assert.equal((await mk(body(null), "bt1")(9)).code, "lease.held", "a batch-less lease still defers");
+    assert.equal((await mk(body("bt1"), null)(9)).code, "lease.held", "no batch id: foreign");
   });
   it("#4920 a deferred dispatch check launches no lane and no sandbox, and a restarted batch (new orchestrate) defers again", async () => {
     for (const round of [1, 2]) { // round 2: a fresh orchestrate call = a daemon restart; the answer is read from GitHub each time
@@ -1891,5 +1940,71 @@ describe("#5469: holds carry an owner and an expiry", () => {
     const res = await quiet(() => orchestrateFromCli(["--gc-orphans"], { batchRoot: root, io: { gh: async () => "" } }));
     assert.deepEqual(res.cancelled, ["old"]);
     assert.ok(old.readCancel()); assert.equal(fresh.readCancel(), null);
+  });
+});
+
+describe("batch scan cache (#5531)", () => {
+  it("#5531: pendingIssues re-reads after the state file changes; isTerminal sees report and cancel", () => {
+    const root = tmpDir("batch-cache-"), b = openBatch(root, "b20261031-000000-7001");
+    b.writePlan({ daemon: true });
+    b.store.save({ v: 1, order: [1], pending: [1] });
+    assert.deepEqual(b.pendingIssues(), [1]);
+    b.store.save({ v: 1, order: [1, 2], pending: [1, 2] });
+    assert.deepEqual(b.pendingIssues(), [1, 2]);
+    assert.equal(b.isTerminal(), false);
+    b.requestCancel({ reason: "x" });
+    assert.equal(b.isTerminal(), true);
+  });
+});
+
+describe("#5669: an upgrade handover adopts live lanes instead of requeueing them", () => {
+  const OLD = "1.59.1", NEW = "1.59.2";
+  const memStore = (init = null) => { const st = { saved: init, logged: [] }; return Object.assign(st, { load: () => st.saved, save: (x) => { st.saved = x; }, log: (r) => st.logged.push(r) }); };
+  const common = { parallel: 1, pollMs: 5, readBody: async () => "" };
+  it("#5669: handover adopts a live remote lane without an interrupted row", async () => {
+    const live = new Set([5]), results = {}, calls = [];
+    const provider = { name: "mem", idFor: (n) => `mem-${n}`,
+      start: async ({ issue }) => { calls.push("start"); return { provider: "mem", id: `mem-${issue}`, issue }; },
+      status: async (h) => (live.has(h.issue) ? "running" : "exited"), fetchResult: async (h) => results[h.issue] ?? null,
+      teardown: async (h) => { calls.push(["teardown", h.id]); delete results[h.issue]; live.delete(h.issue); return true; } }; // a torn-down sandbox is gone with its result
+    const root = tmpDir("handover-remote-");
+    const ledgerFor = (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n });
+    const lanes = providerLanes({ provider, laneArgs: () => [], ledgerFor, pollMs: 5, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
+    const store = memStore(), ac = new AbortController();
+    const old = orchestrate({ issues: [5], ...common, store, version: OLD, signal: ac.signal, runOne: lanes.runOne }).catch((e) => e);
+    await until(() => store.saved?.running?.[5]?.handle);
+    ac.abort();
+    assert.equal((await old).code, "batch.stopped");
+    results[5] = { terminalReason: "merged", pr: 105 }; live.delete(5); // the sandbox finishes while the old process is still running
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(calls.filter((c) => c[0] === "teardown"), [], "the halted lane leaves its sandbox for the new daemon");
+    const launched = [];
+    const rows = await orchestrate({ issues: [], ...common, store, version: NEW, adopt: lanes.adopt, runOne: async (n) => { launched.push(n); return { terminalReason: "merged", pr: 1 }; } });
+    assert.deepEqual(launched, [], "adopted, not relaunched");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[5, "merged", 105]], "the result is recorded once");
+    assert.deepEqual(store.logged.filter((r) => r.code === "run.interrupted"), []);
+  });
+  it("#5669: handover adopts a live local lane", async () => {
+    const rf = join(tmpDir("handover-local-"), "r.json");
+    let up = true;
+    const batch = { resultFile: () => rf, logFile: () => "log" };
+    const lanes = detachedLanes({ batch, alive: () => up, pollMs: 5 });
+    const store = memStore({ v: 1, order: [3], deps: { 3: [] }, lanes: {}, crossSeen: [], results: {}, running: { 3: { startedAt: 1, pid: 33 } }, pending: [], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null, engineVersion: OLD });
+    setTimeout(() => { writeFileSync(rf, JSON.stringify({ terminalReason: "merged", pr: 103 })); up = false; }, 50);
+    const launched = [];
+    const rows = await orchestrate({ issues: [], ...common, store, version: NEW, adopt: lanes.adopt, runOne: async (n) => { launched.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(launched, []);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[3, "merged", 103]]);
+    assert.deepEqual(store.logged.filter((r) => r.code === "run.interrupted"), []);
+  });
+  it("#5669: handover requeues a dead lane with the upgrade cause", async () => {
+    const batch = { resultFile: () => join(tmpDir("handover-dead-"), "none.json"), logFile: () => "log" };
+    const lanes = detachedLanes({ batch, alive: () => false, pollMs: 5 });
+    const store = memStore({ v: 1, order: [4], deps: { 4: [] }, lanes: {}, crossSeen: [], results: {}, running: { 4: { startedAt: 1, pid: 44 } }, pending: [], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null, engineVersion: OLD });
+    const rows = await orchestrate({ issues: [], ...common, store, version: NEW, adopt: lanes.adopt, runOne: async () => ({ terminalReason: "merged", pr: 9 }) });
+    const ir = store.logged.filter((r) => r.code === "run.interrupted");
+    assert.equal(ir.length, 1);
+    assert.match(ir[0].detail, /^interrupted: upgrade v1\.59\.1→v1\.59\.2; /);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[4, "merged"]]);
   });
 });

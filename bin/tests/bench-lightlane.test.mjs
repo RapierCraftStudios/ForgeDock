@@ -57,7 +57,7 @@ test("validateCorpus and validateRunConfig reject bad input", () => {
 test("runArm light: runs run-issue with the result file, reads true cost/wall/model and the light fields, grades the PR head", async () => {
   await withTmp(async (tmp) => {
     const c = corpus(), issue = c.issues[1];
-    const result = { terminalReason: "merged", pr: 77, cost_usd: 0.41, wall_ms: 200000, model_ms: 180000, light: true, light_eligibility: "eligible" };
+    const result = { terminalReason: "merged", pr: 77, cost_usd: 0.41, wall_ms: 200000, model_ms: 180000, light: true, light_eligibility: "eligible", phases: { sandbox_start: { ms: 4200, steps: { fetch: 100 } } } };
     const { run, calls } = fakeRun({ result });
     let ticks = 0;
     const shapes = [];
@@ -69,7 +69,7 @@ test("runArm light: runs run-issue with the result file, reads true cost/wall/mo
     const suiteAt = calls.findIndex((x) => x[0] === "sh" && x[2] === c.suite_command), oracleAt = calls.findIndex((x) => x[0] === "sh" && x[2] === issue.oracle.command);
     assert.ok(suiteAt >= 0 && oracleAt > suiteAt, "own suite runs before the oracle overlay");
     assert.equal(shapes[0].base, c.base);
-    assert.deepEqual(row, { arm: "light", id: issue.id, cost_usd: 0.41, wall_ms: 200000, model_ms: 180000, harness_wall_ms: 1000, claimed_fix: true, oracle_pass: true, suite_pass: true,
+    assert.deepEqual(row, { arm: "light", id: issue.id, cost_usd: 0.41, wall_ms: 200000, model_ms: 180000, start_ms: 4200, harness_wall_ms: 1000, claimed_fix: true, oracle_pass: true, suite_pass: true,
       api_shape: { status: "none", changes: [] }, light: true, light_unobserved: false, light_eligibility: "eligible", light_upgrade: null, terminal: "merged" });
   });
 });
@@ -115,7 +115,7 @@ test("runArm control: claude -p with the filled prompt; cost and time from its J
     assert.deepEqual(cl.slice(3), ["--output-format", "json", "--model", "claude-opus-5-5"]);
     assert.ok(calls.some((x) => x[0] === "git" && x.includes("commit")));
     assert.equal(row.cost_usd, 0.45); assert.equal(row.wall_ms, 300000); assert.equal(row.model_ms, 300000);
-    assert.equal(row.claimed_fix, true); assert.equal(row.oracle_pass, true); assert.equal(row.light, null);
+    assert.equal(row.claimed_fix, true); assert.equal(row.oracle_pass, true); assert.equal(row.light, null); assert.equal(row.start_ms, null);
   });
 });
 

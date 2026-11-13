@@ -129,11 +129,6 @@
       "count": 7
     }
   },
-  "bin/lean/schedd.mjs": {
-    "no-use-before-define": {
-      "count": 9
-    }
-  },
   "bin/lean/sequence.mjs": {
     "no-use-before-define": {
       "count": 3

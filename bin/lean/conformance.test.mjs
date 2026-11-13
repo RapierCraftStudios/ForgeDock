@@ -153,7 +153,7 @@ describe("#4574 amendment slips", () => {
 
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
-  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [] }));
+  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);
     for (const t of ["test/a.js", "src/a.test.ts", "tests/test_a.py", "a_test.go", "spec/a.spec.js"]) assert.ok(isTestPath(t), t);
@@ -195,6 +195,34 @@ describe("precheck (deterministic, no reviewer)", () => {
     }
     for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json", "[ -f a ] && npm test", "bash scripts/check.sh", "if [ -f x ]; then pytest; fi", "if true; then node --test a.test.mjs; fi", "for f in a b; do node --test $f; done"]) assert.ok(!noopCommand(cmd), cmd); // SEC-22: keywords around a real check
     for (const cmd of ["test 1", "[ 1 ]", "sleep 0", "node -e 0", "true\ntrue", "if true; then :; fi", "python -c pass", "exit 1"]) assert.ok(noopCommand(cmd), JSON.stringify(cmd)); // SEC-12
+  });
+  it("#5653 a substitute running the same passing test ids is satisfied and recorded; a failing check never is", () => {
+    const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [{ kind: "substitute-validate", validate: "V1", command: "uv run pytest -k leak", why: "no poetry" }]).contract;
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const pass = "t.py::a PASSED\nt.py::b PASSED\n";
+    const run = (frozen, s) => precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { ...frozen, sub: s } } });
+    const ok = run({ rc: 1, output: pass }, { rc: 0, output: pass }); // frozen exited non-zero from the runner (coverage plugin), every test passed
+    assert.deepEqual(ok.failures, []);
+    assert.deepEqual(ok.equivalent.map((e) => e.id), ["V1"]);
+    const failing = "t.py::a PASSED\nt.py::b FAILED\n";
+    for (const [f, s] of [[{ rc: 1, output: failing }, { rc: 1, output: failing }], [{ rc: 1, output: failing }, { rc: 0, output: pass }], [{ rc: 1, output: pass }, { rc: 1, output: pass }], [{ rc: 1, output: pass }, { rc: 0, output: "t.py::a PASSED\n" }], [{ rc: 1, output: "boom" }, { rc: 0, output: "boom" }]]) {
+      assert.deepEqual(run(f, s).failures.map((x) => x.kind), ["validate_failed"], "both failing, a failing test, a failing substitute, other ids or no ids still fails");
+    }
+  });
+  it("#5653 a validate failing on a stale generated artifact is a base-sync recovery, not unimplemented work", () => {
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 1 }] };
+    const c = { ...C, validate: [{ id: "V1", command: "node scripts/check-gen.mjs" }] };
+    const f = precheck({ contract: c, result: res, changedFiles: files, validateRuns: { V1: { rc: 1, output: "error: generated tools file is out of date" } } }).failures;
+    assert.deepEqual(f.map((x) => [x.kind, x.code]), [["validate_drift", "base.conflict"]]);
+    assert.deepEqual(precheck({ contract: c, result: res, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError" } } }).failures.map((x) => x.kind), ["validate_failed"]);
+  });
+  it("#5653 a deliver requirement that only time or production can show must be classified, not delivered", () => {
+    const q = "Issues carry criteria like 14-day metrics";
+    const mk = (r) => validateContract({ ...C, requirements: [{ id: "R1", quote: q, disposition: "deliver", ...r }] }, q).problems.filter((p) => /needs time or production/.test(p));
+    assert.equal(mk({}).length, 1);
+    assert.equal(mk({ verify: "in_lane" }).length, 0);
+    assert.equal(mk({ verify: "out_of_band", evidence: "nightly job" }).length, 0);
+    assert.equal(mk({ disposition: "defer", why: "w", bucket: "date:2026-12-01" }).length, 0);
   });
   it("#4979 SPEC-2 a substitute stands only when the frozen command cannot run", () => {
     const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "no pyproject at root" }]).contract;
@@ -833,7 +861,7 @@ describe("repro_test on bug lanes (#4271)", () => {
   });
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
-    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [] });
+    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] });
     for (const repro of [{ base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));

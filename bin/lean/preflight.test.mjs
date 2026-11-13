@@ -146,6 +146,11 @@ describe("#5447 unrunnable tests: install classification and the Tests summary",
     assert.deepEqual(depInstallFailures({ results, changedFiles: ["svc/a.py"] }).block, []);
     assert.equal(depInstallFailures({ results, changedFiles: ["top.py"] }).block.length, 1);
   });
+  it("#5651 a row coded env.tool_missing blocks without a changed-file match", () => {
+    const r = depInstallFailures({ results: [{ status: "failed", eco: "poetry", dir: ".", code: "env.tool_missing", reason: "no python satisfying the declared range" }], changedFiles: ["README.md"] });
+    assert.equal(r.block.length, 1);
+    assert.equal(r.block[0].code, "env.tool_missing");
+  });
   it("testRunSummary counts declared, ran, red->green and skipped(reason)", () => {
     const c = { validate: [{ id: "V1", command: "a" }, { id: "V2", command: "b" }], repro_test: { command: "c" } };
     const t = testRunSummary({ contract: c, failures: [{ kind: "validate_env", detail: "validate V2 (`b`) could not run" }], repro: { base: "FAILED", head: "RAN" } });
@@ -161,6 +166,8 @@ describe("#5447 declaredEnv", () => {
     assert.deepEqual(declaredEnv({}), []);
     // #5590: fixtures and libraries are not executables
     assert.deepEqual(declaredEnv({ test_plan: { env: ["pytest", "caplog", "FakeRedis", "tmp_path", "node", "psql"] } }), ["pytest", "node", "psql"]);
+    // a test file named in env is not a host tool (#5651 parked env.tool_missing on depcache.test.mjs)
+    assert.deepEqual(declaredEnv({ test_plan: [{ requirement: "R1", env: ["depcache.test.mjs", "conftest.py", "node", "python3.12"] }] }), ["node", "python3.12"]);
   });
 });
 
