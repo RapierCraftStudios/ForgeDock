@@ -1044,7 +1044,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { ...(signal ? { signal } : {}), remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
@@ -1077,7 +1077,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!adopt || !(rec?.pid || rec?.handle || rec?.remote)) return { n, rec, live: false, p: Promise.resolve(null) };
     let onLive;
     const isLive = new Promise((r) => { onLive = () => r(true); });
-    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
+    const p = Promise.resolve().then(() => adopt(n, rec, { onLive, ...(signal ? { signal } : {}) })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
     return { n, rec, p, first: Promise.race([p.then(() => false), isLive]) };
   });
   for (const a of adopting) a.live = a.first ? await a.first : false;

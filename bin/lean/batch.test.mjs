@@ -9,6 +9,8 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
+import { makeLedger } from "./ledger.mjs";
+import { providerLanes } from "./execution.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
@@ -1905,5 +1907,57 @@ describe("batch scan cache (#5531)", () => {
     assert.equal(b.isTerminal(), false);
     b.requestCancel({ reason: "x" });
     assert.equal(b.isTerminal(), true);
+  });
+});
+
+describe("#5669: an upgrade handover adopts live lanes instead of requeueing them", () => {
+  const OLD = "1.59.1", NEW = "1.59.2";
+  const memStore = (init = null) => { const st = { saved: init, logged: [] }; return Object.assign(st, { load: () => st.saved, save: (x) => { st.saved = x; }, log: (r) => st.logged.push(r) }); };
+  const common = { parallel: 1, pollMs: 5, readBody: async () => "" };
+  it("#5669: handover adopts a live remote lane without an interrupted row", async () => {
+    const live = new Set([5]), results = {}, calls = [];
+    const provider = { name: "mem", idFor: (n) => `mem-${n}`,
+      start: async ({ issue }) => { calls.push("start"); return { provider: "mem", id: `mem-${issue}`, issue }; },
+      status: async (h) => (live.has(h.issue) ? "running" : "exited"), fetchResult: async (h) => results[h.issue] ?? null,
+      teardown: async (h) => { calls.push(["teardown", h.id]); delete results[h.issue]; live.delete(h.issue); return true; } }; // a torn-down sandbox is gone with its result
+    const root = tmpDir("handover-remote-");
+    const ledgerFor = (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n });
+    const lanes = providerLanes({ provider, laneArgs: () => [], ledgerFor, pollMs: 5, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
+    const store = memStore(), ac = new AbortController();
+    const old = orchestrate({ issues: [5], ...common, store, version: OLD, signal: ac.signal, runOne: lanes.runOne }).catch((e) => e);
+    await until(() => store.saved?.running?.[5]?.handle);
+    ac.abort();
+    assert.equal((await old).code, "batch.stopped");
+    results[5] = { terminalReason: "merged", pr: 105 }; live.delete(5); // the sandbox finishes while the old process is still running
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(calls.filter((c) => c[0] === "teardown"), [], "the halted lane leaves its sandbox for the new daemon");
+    const launched = [];
+    const rows = await orchestrate({ issues: [], ...common, store, version: NEW, adopt: lanes.adopt, runOne: async (n) => { launched.push(n); return { terminalReason: "merged", pr: 1 }; } });
+    assert.deepEqual(launched, [], "adopted, not relaunched");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[5, "merged", 105]], "the result is recorded once");
+    assert.deepEqual(store.logged.filter((r) => r.code === "run.interrupted"), []);
+  });
+  it("#5669: handover adopts a live local lane", async () => {
+    const rf = join(tmpDir("handover-local-"), "r.json");
+    let up = true;
+    const batch = { resultFile: () => rf, logFile: () => "log" };
+    const lanes = detachedLanes({ batch, alive: () => up, pollMs: 5 });
+    const store = memStore({ v: 1, order: [3], deps: { 3: [] }, lanes: {}, crossSeen: [], results: {}, running: { 3: { startedAt: 1, pid: 33 } }, pending: [], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null, engineVersion: OLD });
+    setTimeout(() => { writeFileSync(rf, JSON.stringify({ terminalReason: "merged", pr: 103 })); up = false; }, 50);
+    const launched = [];
+    const rows = await orchestrate({ issues: [], ...common, store, version: NEW, adopt: lanes.adopt, runOne: async (n) => { launched.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(launched, []);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[3, "merged", 103]]);
+    assert.deepEqual(store.logged.filter((r) => r.code === "run.interrupted"), []);
+  });
+  it("#5669: handover requeues a dead lane with the upgrade cause", async () => {
+    const batch = { resultFile: () => join(tmpDir("handover-dead-"), "none.json"), logFile: () => "log" };
+    const lanes = detachedLanes({ batch, alive: () => false, pollMs: 5 });
+    const store = memStore({ v: 1, order: [4], deps: { 4: [] }, lanes: {}, crossSeen: [], results: {}, running: { 4: { startedAt: 1, pid: 44 } }, pending: [], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null, engineVersion: OLD });
+    const rows = await orchestrate({ issues: [], ...common, store, version: NEW, adopt: lanes.adopt, runOne: async () => ({ terminalReason: "merged", pr: 9 }) });
+    const ir = store.logged.filter((r) => r.code === "run.interrupted");
+    assert.equal(ir.length, 1);
+    assert.match(ir[0].detail, /^interrupted: upgrade v1\.59\.1→v1\.59\.2; /);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[4, "merged"]]);
   });
 });
