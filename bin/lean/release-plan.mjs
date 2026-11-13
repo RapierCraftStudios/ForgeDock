@@ -226,7 +226,7 @@ export function forecastPlan(plan, history, { remaining = null, cfg = parseBudge
   return { per_wave: per, forecast, remaining, ...applyOnExceed({ lane: "release", forecast, remaining, cfg }) };
 }
 
-export function renderPlan(plan, { approval, forecast, lane = "auto" } = {}) {
+export function renderReleasePlan(plan, { approval, forecast, lane = "auto" } = {}) {
   const out = [`release plan ${plan.plan_hash.slice(0, 12)}  policy ${String(plan.policy_sha ?? "none").slice(0, 7)}  live ${String(plan.live_sha ?? "unknown").slice(0, 7)}`];
   for (const w of plan.waves.filter((x) => lane === "auto" || x.lane === lane)) {
     out.push(`wave ${w.id} (${w.issues.length} issue(s); units ${w.units.join(",") || "none"})`);
@@ -260,7 +260,7 @@ export async function planFromCli(argv, { io, policy, policySha, managed = false
   const approval = approvalOf(plan, decisions, policy);
   const fc = forecastPlan(plan, history, { remaining: budget.remaining ?? null, cfg: budget.cfg });
   if (argv.includes("--json")) io.print(stableJson({ ...plan, approval, forecast: fc }));
-  else renderPlan(plan, { approval, forecast: fc, lane }).forEach((l) => io.print(l));
+  else renderReleasePlan(plan, { approval, forecast: fc, lane }).forEach((l) => io.print(l));
   if (managed && ledger && newId) await ledger({ id: newId, repo, plan, approval });
   return 0;
 }
