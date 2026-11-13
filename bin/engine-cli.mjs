@@ -576,6 +576,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     const runners = tr && typeof tr === "object" && !Array.isArray(tr) ? Object.fromEntries(Object.entries(tr).filter(([k, v]) => k && typeof v === "string" && v.trim())) : {};
     const rm = readYamlMap(cwd, "validate", "recipes"); // #5020: y?.validate?.recipes, a block map {match regex: replacement} applied to frozen validate and repro commands
     const recipes = Object.entries(rm ?? {}).map(([match, replace]) => ({ match, replace }));
+    const catalog = String(typeof y?.validate?.catalog === "string" ? y.validate.catalog : "").split(",").map((x) => x.trim()).filter(Boolean); // #5653: CI files the derived command catalogue reads (default .github/workflows/ci.yml, scripts/ci-local.sh)
     const cf = readYamlMap(cwd, "verification", "coupled_files"); // #5079: {when glob: required glob[, glob]}
     const pp = readYamlMap(cwd, "topology", "prod_parity"); // #5284: {path glob: command | "note: how to verify"} production-only facts
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
@@ -587,7 +588,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(s(y?.validate?.regenerate) ? { validateRegenerate: s(y.validate.regenerate) } : {}), ...(catalog.length ? { validateCatalogSources: catalog } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];

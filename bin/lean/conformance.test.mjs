@@ -153,7 +153,7 @@ describe("#4574 amendment slips", () => {
 
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
-  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [] }));
+  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);
     for (const t of ["test/a.js", "src/a.test.ts", "tests/test_a.py", "a_test.go", "spec/a.spec.js"]) assert.ok(isTestPath(t), t);
@@ -195,6 +195,18 @@ describe("precheck (deterministic, no reviewer)", () => {
     }
     for (const cmd of ["node --test a.test.mjs", "echo start && pytest tests/x.py", "test -f out.json", "[ -f a ] && npm test", "bash scripts/check.sh", "if [ -f x ]; then pytest; fi", "if true; then node --test a.test.mjs; fi", "for f in a b; do node --test $f; done"]) assert.ok(!noopCommand(cmd), cmd); // SEC-22: keywords around a real check
     for (const cmd of ["test 1", "[ 1 ]", "sleep 0", "node -e 0", "true\ntrue", "if true; then :; fi", "python -c pass", "exit 1"]) assert.ok(noopCommand(cmd), JSON.stringify(cmd)); // SEC-12
+  });
+  it("#5653 a substitute running the same test ids with the same result is satisfied and recorded", () => {
+    const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [{ kind: "substitute-validate", validate: "V1", command: "uv run pytest -k leak", why: "no poetry" }]).contract;
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const out = "t.py::a PASSED\nt.py::b PASSED\n";
+    const run = (frozen, s) => precheck({ contract: sub, result: res, changedFiles: files, substitutedRuns: { V1: { ...frozen, sub: s } } });
+    const ok = run({ rc: 1, output: out }, { rc: 1, output: out });
+    assert.deepEqual(ok.failures, []);
+    assert.deepEqual(ok.equivalent.map((e) => e.id), ["V1"]);
+    for (const [f, s] of [[{ rc: 1, output: out }, { rc: 0, output: out }], [{ rc: 1, output: out }, { rc: 1, output: "t.py::a PASSED\n" }], [{ rc: 1, output: "boom" }, { rc: 1, output: "boom" }]]) {
+      assert.deepEqual(run(f, s).failures.map((x) => x.kind), ["validate_failed"], "a different result, other ids or no ids still fails");
+    }
   });
   it("#4979 SPEC-2 a substitute stands only when the frozen command cannot run", () => {
     const sub = applyAmendments({ ...C, validate: [{ id: "V1", command: "poetry run pytest -k leak" }] }, [{ kind: "substitute-validate", validate: "V1", command: "node --test test/leak.test.js", why: "no pyproject at root" }]).contract;
@@ -833,7 +845,7 @@ describe("repro_test on bug lanes (#4271)", () => {
   });
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
-    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [] });
+    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] });
     for (const repro of [{ base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));

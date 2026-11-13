@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
+import { equivalentRuns } from "./validate-catalog.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
@@ -1100,7 +1101,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * tool), for the trajectory; always an array.
  */
 export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
-  const failures = [], superseded = [], ciCovered = [];
+  const failures = [], superseded = [], ciCovered = [], equivalent = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
@@ -1125,7 +1126,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
       const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
-      if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
+      // #5653: the frozen command runs, and the substitute ran the same test ids with the same exit: recorded, not failed
+      if (verdict === "runs" && equivalentRuns(substitutedRuns[v.id], substitutedRuns[v.id].sub)) equivalent.push({ id: v.id, from: v.substituted.from, to: v.command });
+      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -1179,7 +1182,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   failures.push(...interfaceDecisionFailures(contract, result, changedFiles)); // #5338
   failures.push(...(seamFailures ?? [])); // #5338: a declared interface's provider and consumer no longer agree
-  return { ok: failures.length === 0, failures, superseded, ciCovered };
+  return { ok: failures.length === 0, failures, superseded, ciCovered, equivalent };
 }
 
 /**
