@@ -176,8 +176,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### Recommendation
 ### Related Issues
 ### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
-
-Add ${LEAN_DIR}/classification.json {type,severity,exists_in:live|staging-only|unknown,cite:file:line,red_on_live,flag}
+${LEAN_DIR}/classification.json: {type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}
 
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 

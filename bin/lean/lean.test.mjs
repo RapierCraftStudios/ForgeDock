@@ -2166,8 +2166,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2600, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 2610: #5557 (classification line, +3 over 2600); 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
+    assert.ok(approxTokens(plan) <= 2610, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1875, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -8666,6 +8666,18 @@ describe("FORGE:CLASSIFY wiring (#5557)", () => {
     assert.ok(c, "FORGE:CLASSIFY posted");
     assert.match(c, /"units": \[\s*"foo"\s*\]/); assert.doesNotMatch(c, /LLM-LIED/);
     assert.ok(w.edits.some((e) => e.includes("unit:foo")) && w.edits.some((e) => e.includes("type:bug")), "namespaced labels added");
+  });
+  it("issues every label namespace incl. priority:, and an invalid record triggers the correction loop", async () => {
+    const w = world(); withPolicy(w); const rd = w.io.fs.read;
+    w.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "bug", severity: "P2", exists_in: "unknown" }) : rd(p));
+    await run(w);
+    const flat = w.edits.flat().map(String).join(" ");
+    for (const ns of ["type:", "priority:P2", "where:", "unit:foo", "mig:", "risk:"]) assert.ok(flat.includes(ns), ns);
+    const bad = world(); withPolicy(bad); const rb = bad.io.fs.read;
+    bad.io.fs.read = async (p) => (p.endsWith("/classification.json") ? JSON.stringify({ type: "nope", severity: "P2", exists_in: "unknown" }) : rb(p));
+    await run(bad);
+    const c = bad.comments.find((x) => x.includes("FORGE:CLASSIFY"));
+    assert.ok(c && /text-only/.test(c), "invalid record falls back to text-only after the correction");
   });
   it("is a no-op without .forge/release.yaml", async () => {
     const w = world();

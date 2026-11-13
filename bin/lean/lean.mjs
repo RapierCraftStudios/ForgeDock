@@ -383,7 +383,13 @@ export async function runCore(o) {
       const live = policy.branches?.release;
       let liveSha = null; if (live) liveSha = String(await git(["rev-parse", `origin/${live}`]).catch(() => "")).trim() || null;
       let rec = C.buildClassifyRecord(llm, policy, facts, { text: problems.length > 0 });
-      rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha });
+      const run = async (command, sha) => { // repro on a detached checkout of the live sha under the run TMPDIR (#5557)
+        const dir = `${runTmp ?? process.env.TMPDIR ?? "/tmp"}/classify-live-${issue}`;
+        await git(["worktree", "add", "--detach", dir, sha]);
+        try { const x = await io.runCommand({ command, cwd: dir, timeoutMs: 120000, env: laneEnv() }); const r = x?.r ?? x; return typeof r?.exit === "number" ? r.exit : 1; }
+        finally { await git(["worktree", "remove", "--force", dir]).catch(() => {}); }
+      };
+      rec = await C.verifyExistsIn(rec, { git: (a) => git(a), liveSha, run: io.runCommand ? run : undefined });
       if (rec.exists_in === "unknown" && rec.lane_hint === "none") rec.lane_hint = "release";
       await io.fs.write?.(`${wt}/${C.CLASSIFICATION_FILE}`, JSON.stringify(rec, null, 1));
       await post("FORGE:CLASSIFY", C.renderClassify(rec));
