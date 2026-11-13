@@ -165,12 +165,21 @@ export function checkConfigFromCli(argv, { io, cwd = process.cwd() }) {
   return findings.length ? 1 : 0;
 }
 
-/** `forgedock release init`: writes the zero-config profile (7.4) to `.forge/release.yaml` and nothing else; never overwrites. */
-export function initFromCli(_argv, { io, cwd = process.cwd() }) {
+/** `forgedock release init [--conductor]`: writes the zero-config profile (7.4) to `.forge/release.yaml` and nothing else; never overwrites. */
+export function initFromCli(argv, { io, cwd = process.cwd() }) {
   const file = join(cwd, POLICY_PATH);
+  if (argv?.includes("--conductor")) return initConductor(file, { io, cwd }); // #5564: async; the plain init stays synchronous
   if (existsSync(file)) { io.print(`release init: ${POLICY_PATH} exists; not overwriting`); return 1; }
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, INIT_PROFILE);
   io.print(`release init: wrote ${POLICY_PATH}`);
   return 0;
+}
+
+/** `release init --conductor`: the policy file (left alone when present) plus the version-pinned conductor workflow. */
+async function initConductor(file, { io, cwd }) {
+  const { installConductor } = await import("./release-conductor.mjs");
+  let pol = null; try { pol = parsePolicy(readFileSync(file, "utf8")).policy; } catch { /* no policy yet: defaults */ }
+  if (!existsSync(file)) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, INIT_PROFILE); io.print(`release init: wrote ${POLICY_PATH}`); }
+  return installConductor({ io, cwd, policy: pol });
 }
