@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
+import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -192,5 +192,34 @@ describe("project-local executables (#5592 3d/9)", () => {
   });
   it("local bins go after the lane PATH, never ahead, and are not duplicated", () => {
     assert.equal(withLocalBins("/a:/b", ["/c", "/a"]), "/a:/b:/c");
+  });
+});
+
+describe("#5683 sub-project manifest deps and venv python", () => {
+  const files = ["package.json", "web/package.json", "services/api/pyproject.toml", "shared/content/pyproject.toml", "tools/requirements-dev.txt"];
+  const texts = { "web/package.json": JSON.stringify({ devDependencies: { vitest: "^1", vite: "^5" } }), "services/api/pyproject.toml": 'dependencies = ["Fast_Api>=1", "httpx"]\n[dependency-groups]\ndev = ["pytest>=8"]', "tools/requirements-dev.txt": "# dev\nruff==0.4\nblack[jupyter]>=24\n" };
+  const read = (f) => texts[f] ?? "";
+  it("manifestDepOwner resolves vitest to web", () => {
+    assert.equal(manifestDepOwner("vitest", files, read), "web");
+    assert.equal(manifestDepOwner("vite", files, read), "web");
+    assert.equal(manifestDepOwner("pytest", files, read), "services/api");
+    assert.equal(manifestDepOwner("fast-api", files, read), "services/api");
+    assert.equal(manifestDepOwner("black", files, read), "tools");
+  });
+  it("manifestDepOwner null for host tools", () => {
+    for (const t of ["psql", "promtool", "ruf"]) assert.equal(manifestDepOwner(t, files, read), null);
+    assert.equal(manifestDepOwner("vitest", ["web/node_modules/x/package.json"], () => texts["web/package.json"]), null);
+  });
+  const exists = (p) => ["services/api/.venv/bin/python", "shared/content/.venv/bin/python"].includes(p);
+  it("venvPythonRewrite uses sub-project venv", () => {
+    assert.equal(venvPythonRewrite("pytest -q", ["pyproject.toml"], (p) => p === ".venv/bin/python"), ".venv/bin/python -m pytest -q");
+    assert.equal(venvPythonRewrite("python -m pytest tests/x.py", files, exists), "python -m pytest tests/x.py");
+    assert.equal(venvPythonRewrite("cd services/api && .venv/bin/python -m pytest t.py", files, exists), "cd services/api && .venv/bin/python -m pytest t.py");
+    assert.equal(venvPythonRewrite("cd services/api && python -m pytest t.py", files, () => false), "cd services/api && python -m pytest t.py");
+  });
+  it("venvPythonRewrite cd prefix and nearest manifest", () => {
+    assert.equal(venvPythonRewrite("cd services/api && python -m pytest tests/x.py -q", files, exists), "cd services/api && .venv/bin/python -m pytest tests/x.py -q");
+    assert.equal(venvPythonRewrite("python3 -m pytest shared/content/tests/t.py::a", files, exists), "shared/content/.venv/bin/python -m pytest shared/content/tests/t.py::a");
+    assert.equal(venvPythonRewrite("cd web && pytest", files, exists), "cd web && pytest");
   });
 });

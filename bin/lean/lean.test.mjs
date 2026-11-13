@@ -8894,3 +8894,29 @@ describe("#5592 (8) comment and label spam", () => {
     assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label parked:ci.red"));
   });
 });
+
+describe("#5683 monorepo sub-project dependencies are not host tools", () => {
+  const pkg = JSON.stringify({ devDependencies: { vitest: "^1", vite: "^5" } });
+  const withWeb = (w) => { const g = w.io.git; w.io.git = async (a, ...r) => (a[0] === "ls-files" && !a.includes(".forge-lean/") ? `${await g(a, ...r)}\nweb/package.json` : g(a, ...r)); w.files[`${WT}/web/package.json`] = pkg; return w; };
+  const planEnv = (env) => ({ ...CONTRACT, test_plan: [{ requirement: "R1", proof: "the runner resolves", level: "unit", level_reason: "cheapest level that observes it", repro: "no-repro", reason: "env-only", command: "node --test test/foo.test.js", env }] });
+  const hostMiss = (w) => { w.io.runCommand = async ({ command }) => (/command -v/.test(command) ? { rc: 1, output: "" } : { rc: 0, output: "" }); };
+  it("monorepo sub-project env name is not a host tool: prepared, never env.tool_missing; a real host tool still is", async () => {
+    const w = withWeb(world({ contract: planEnv(["vitest"]) })); let prepared = 0;
+    w.io.deps = { prepare: async () => { prepared++; return []; } }; hostMiss(w);
+    const ok = await run(w, { conformance: "enforce" });
+    assert.notEqual(ok.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.ok(prepared >= 1);
+    const h = withWeb(world({ contract: planEnv(["psql"]) })); h.io.deps = { prepare: async () => [] }; hostMiss(h);
+    assert.equal((await run(h, { conformance: "enforce" })).code, OUTCOME_CODES.ENV_TOOL_MISSING);
+  });
+  it("monorepo sub-project remote name skips recipe branch; a manifest-less tool still hits it", async () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const withTool = (tool) => ({ ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: `${tool} check x` }] });
+    const probing = (w, tool) => { w.io.probeCommand = async (a) => ({ rc: new RegExp(tool).test(JSON.stringify(a)) ? 127 : 0, output: "" }); };
+    const w = withWeb(world({ contract: withTool("vite") })); probing(w, "vite"); let prepared = 0; w.io.deps = { prepare: async () => { prepared++; return []; } };
+    const r = await run(w, { dir: tmpDir("lean-5683a-"), ...remote });
+    assert.notEqual(r.code, "env.tool_missing"); assert.ok(prepared >= 1);
+    assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
+    const h = withWeb(world({ contract: withTool("zzcheck") })); probing(h, "zzcheck");
+    assert.equal((await run(h, { dir: tmpDir("lean-5683b-"), ...remote })).code, "env.tool_missing");
+  });
+});
