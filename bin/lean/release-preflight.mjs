@@ -7,6 +7,7 @@
  * retries. With no command set every function here is a no-op. No model call. Effects go through `ctx.io`.
  */
 import { fileBlocker, tail } from "./release-rehearsal.mjs";
+import { fenced } from "./release-fence.mjs";
 
 export const PREFLIGHT_TIMEOUT_MS = 20 * 60_000;
 const json = (s) => JSON.parse(String(s || "null"));
@@ -55,4 +56,25 @@ export async function markReadyStep(ctx) {
   if (!r.ok && r.blocking) return stopOf(r);
   if (view?.isDraft) await io.gh(["pr", "ready", String(pr), "--repo", repo]);
   return { ...r, ready: true, wasDraft: !!view?.isDraft };
+}
+
+/**
+ * #5567: CI and the review panel start together on the same head. When `ci.fix` is configured (`co_start` or `full_run_workflow`),
+ * the draft release PR is marked ready before the review (the host preflight already passed on this head), and the repo's uncached
+ * full run is requested in that same pass through the configured workflow, fenced like any dispatch. Unconfigured: nothing happens.
+ * @returns {{skipped: true}|{ready: boolean, fullRun: boolean}|{refused: string}}
+ */
+export async function coStartCi(ctx, { pr }) {
+  const fix = ctx.config?.fix;
+  if (!fix?.coStart) return { skipped: true };
+  const { io, repo } = ctx;
+  const view = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid,headRefName,isDraft"]));
+  if (view?.isDraft) await io.gh(["pr", "ready", String(pr), "--repo", repo]);
+  let fullRun = false;
+  if (fix.fullRunWorkflow) {
+    const f = await fenced(ctx.fence, { action: "dispatch", key: `fullrun:${pr}:${view?.headRefOid}` }, (epoch) => io.gh(["workflow", "run", fix.fullRunWorkflow, "--repo", repo, "--ref", view?.headRefName, ...(epoch != null ? ["-f", `forge_epoch=${epoch}`] : [])]));
+    if (f.refused) return { refused: f.refused };
+    fullRun = true;
+  }
+  return { ready: true, wasDraft: !!view?.isDraft, fullRun };
 }

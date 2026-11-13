@@ -47,6 +47,14 @@ describe("validate", () => {
   });
 });
 
+describe("ci.fix (#5567)", () => {
+  it("accepts max_rounds, co_start and full_run_workflow; rejects unknown keys and a non-integer max_rounds", () => {
+    assert.deepEqual(check(OK.replace("ci:\n", "ci:\n  fix: {max_rounds: 1, co_start: true, full_run_workflow: full.yml}\n")), []);
+    assert.match(check(OK.replace("ci:\n", "ci:\n  fix: {bogus: 1}\n")).join(), /bogus: unknown key/);
+    assert.notDeepEqual(check(OK.replace("ci:\n", "ci:\n  fix: {max_rounds: x}\n")), []);
+  });
+});
+
 describe("I23 deferred keys are rejected", () => {
   const cases = {
     "plan.auto_if": "plan: {auto_if: x}\n", "retention_days": "retention_days: 30\n", "ci.forbid_per_issue_steps": "ci: {forbid_per_issue_steps: true}\n",
