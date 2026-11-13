@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { classifyFailure } from "./release-flakes.mjs";
 
-export const DEFAULT_MAX_ROUNDS = 1;
+export const ReleaseFixloopDEFAULT_MAX_ROUNDS = 1;
 const LOG_TAIL = 400;
 const uniq = (a) => [...new Set(a)];
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -19,7 +19,7 @@ const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 export function parseFixConfig(fix) {
   const n = Number(fix?.max_rounds ?? fix?.maxRounds); // accepts the policy form and an already parsed one
   const wf = [fix?.full_run_workflow, fix?.fullRunWorkflow].find((x) => typeof x === "string" && x.trim())?.trim() ?? null;
-  return { maxRounds: Number.isInteger(n) && n >= 1 ? n : DEFAULT_MAX_ROUNDS, coStart: fix?.co_start === true || fix?.coStart === true || Boolean(wf), fullRunWorkflow: wf };
+  return { maxRounds: Number.isInteger(n) && n >= 1 ? n : ReleaseFixloopDEFAULT_MAX_ROUNDS, coStart: fix?.co_start === true || fix?.coStart === true || Boolean(wf), fullRunWorkflow: wf };
 }
 
 /**
@@ -91,7 +91,7 @@ export const secondPushOf = (state, head) => state?.fixloop?.heads?.[head]?.seco
  * chosen only when a check fails now that was not failing before the fix (a set difference by check name).
  * @returns {{action: "revert"|"rerun"}|{action: "hold", ask: string}}
  */
-export function secondPush({ rec, failedBefore = null, lastPush = null, maxRounds = DEFAULT_MAX_ROUNDS, rounds }) {
+export function secondPush({ rec, failedBefore = null, lastPush = null, maxRounds = ReleaseFixloopDEFAULT_MAX_ROUNDS, rounds }) {
   const ask = (why) => ({ action: "hold", ask: `Owner: ${why} The one-round fix budget (ci.fix.max_rounds=${maxRounds}, ${rounds} used) is spent; decide the next step, then resume the release.` });
   if (lastPush) return ask(`a second push (${lastPush}) was already used on this head.`);
   if (onlyInfraFlakes(rec)) return { action: "rerun" };
