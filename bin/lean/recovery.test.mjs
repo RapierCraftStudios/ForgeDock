@@ -106,16 +106,16 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.ok(formatOutcomeLists(rows).some((l) => /^unrecovered: #1 \(budget\.exceeded: Implement turn budget spent/.test(l)));
   });
 
-  it("conformance gaps are recoverable: one recovery lane each, regression/guard_broken/scope_creep/e2e_unverified stay terminal, notes name the defer route", async () => {
-    const codes = ["conformance.unimplemented", "conformance.omission", "conformance.unjustified_deferral"];
+  it("conformance gaps are recoverable: one recovery lane each, guard_broken/e2e_unverified stay terminal, notes name the defer route", async () => {
+    const codes = ["conformance.unimplemented", "conformance.omission", "conformance.unjustified_deferral", "conformance.regression", "conformance.scope_creep"];
     for (const c of codes) {
       assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: c }), "recoverable", c);
       assert.ok(RECOVERABLE_CODES.includes(c) && RECOVER_HOW[c], c);
     }
-    for (const c of ["conformance.regression", "conformance.guard_broken", "conformance.scope_creep", "conformance.e2e_unverified"]) {
+    for (const c of ["conformance.guard_broken", "conformance.e2e_unverified"]) {
       assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: c }), "terminal", c);
     }
-    for (const c of codes.slice(1)) assert.match(RECOVER_HOW[c], /`defer`[\s\S]*why|why[\s\S]*follow-up/i);
+    for (const c of codes.slice(1, 3)) assert.match(RECOVER_HOW[c], /`defer`[\s\S]*why|why[\s\S]*follow-up/i);
     assert.match(RECOVER_HOW["conformance.omission"], /add-requirement/);
     const { rows, calls } = await batch({ 1: [NH("conformance.omission", "R2 not covered", { branch: "feat/issue-1-lean" }), NH("conformance.omission", "again")] });
     assert.deepEqual(calls.filter((c) => c.n === 1).map((c) => c.recover?.code ?? null), [null, "conformance.omission"]);
@@ -128,7 +128,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
       1: [NH("builder.blocked", "Builder is blocked (product-decision): pick a pricing model")],
       2: [],
       3: [NH("builder.blocked", "Builder is blocked (spend): needs a paid plan")],
-      4: [NH("conformance.regression", "R2 broke")],
+      4: [NH("conformance.guard_broken", "R2 broke")],
       5: [{ terminalReason: "merged" }] }, { 2: "**Depends on**: #1" });
     const r = byIssue(rows);
     assert.equal(calls.filter((c) => c.n === 1).length, 1); assert.equal(calls.filter((c) => c.n === 3).length, 1);
@@ -141,7 +141,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.match(esc, /#1 \(builder\.blocked\): Builder is blocked \(product-decision\)/);
     assert.match(esc, /#3 \(builder\.blocked\): Builder is blocked \(spend\)/);
     assert.doesNotMatch(esc, /#4/, "the needs-human list holds only human codes");
-    assert.ok(lines.some((l) => /^unrecovered: #4 \(conformance\.regression: R2 broke\)$/.test(l)));
+    assert.ok(lines.some((l) => /^unrecovered: #4 \(conformance\.guard_broken: R2 broke\)$/.test(l)));
   });
 
   it("base.conflict: a recovery base-sync with a clean result re-queues the issue; the report lists recovered issues separately", async () => {
@@ -165,6 +165,11 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     const { rows, calls } = await batch({ 1: [NH("contract.invalid", "contract invalid", { issueEdited: true }), { terminalReason: "merged" }], 2: [NH("contract.invalid"), { terminalReason: "merged" }] });
     assert.equal(byIssue(rows)[1].recovered, "contract.invalid");
     assert.equal(byIssue(rows)[2].recovered, "contract.invalid"); assert.equal(byIssue(rows)[2].outcome, "merged"); assert.equal(calls.filter((c) => c.n === 2).length, 2);
+  });
+
+  it("#5644: conformance.regression gets one recovery lane", async () => {
+    const { rows, calls } = await batch({ 1: [NH("conformance.regression"), { terminalReason: "merged" }] });
+    assert.equal(byIssue(rows)[1].recovered, "conformance.regression"); assert.equal(byIssue(rows)[1].outcome, "merged"); assert.equal(calls.filter((c) => c.n === 1).length, 2);
   });
 
   it("relabelNeedsHuman (SPEC-7/8): only a recovery that ends final engine-error/deferred relabels; invalid/merged never; a requeued deferred waits", async () => {
