@@ -106,4 +106,8 @@ describe("CLI", () => {
     assert.deepEqual(check(`${OK}  flake: {quarantine_after: 3, window_days: 14}\nquarantine: {days: 14, max: 15}\n`.replace("ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake", "ci:\n  tiers: {T3: {jobs: [e2e]}}\n  flake")), []);
     assert.notDeepEqual(check(`${OK}quarantine: {max: x}\n`), []);
   });
+  it("accepts the verification layer keys and rejects a bad result kind (#5562)", () => {
+    assert.deepEqual(check(`${OK}verify:\n  workflow: verify.yml\n  close_requires: verified\n  results: [{workflow: smoke.yml, kind: smoke}]\n  flags: [{flag: F, off_command: x}]\n`), []);
+    assert.notDeepEqual(check(`${OK}verify:\n  results: [{workflow: s.yml, kind: nope}]\n`), []);
+  });
 });

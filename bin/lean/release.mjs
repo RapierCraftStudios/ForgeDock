@@ -19,6 +19,7 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 import { deployStep } from "./release-deploy.mjs";
+import { riskClass } from "./release-verify.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
@@ -422,7 +423,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -432,6 +433,14 @@ export async function releaseFromCli(argv, deps = {}) {
     let y = {}; try { y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {}; } catch { /* defaults */ }
     for (const l of waveReport(historyFromRoot(releaseRoot(env)), parseBudgetConfig(y.budget)).lines) io.print(l);
     return 0;
+  }
+  if (argv[0] === "verify" && ID_RE.test(String(argv[1] ?? ""))) { // #5562: a release id re-runs the deploy verification; a sha keeps the snapshot-chain check
+    const { verifyReleaseById } = await import("./release-verify.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const def = readBranches(cwd).default || "main", rel = openRelease(releaseRoot(env), argv[1]), state = rel.load();
+    if (!state) throw new Error(`no release ${argv[1]} in ${releaseRoot(env)}`);
+    const r = await verifyReleaseById({ io, state, save: () => rel.save(state), def, policy: readPolicy({ io, defaultBranch: def, cwd }).policy, lane: flag(argv, "--lane") ?? state.lane });
+    return r.verified ? 0 : BLOCKED_EXIT;
   }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
   if (argv[0] === "status" || argv[0] === "explain") return statusCli(argv, { io, cwd, env, deps });
@@ -465,6 +474,11 @@ export async function releaseFromCli(argv, deps = {}) {
     const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
     if (pol?.deploy) config.deploy = pol.deploy;
     config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
+    if (pol?.verify) { // #5562: verification layers; risk class picks the soak minutes
+      config.verify = pol.verify;
+      config.verifyRisk = riskClass(flag(argv, "--lane"), config.deployPipeline);
+      config.verifySoak = pol.lanes?.[flag(argv, "--lane")]?.soak_min;
+    }
   }
   if (resume) {
     const st = openRelease(root, resume).load();
