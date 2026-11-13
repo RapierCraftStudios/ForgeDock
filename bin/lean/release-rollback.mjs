@@ -21,9 +21,9 @@ import { releaseIssues } from "./release-verify.mjs";
 import { DESTRUCTIVE_SQL, MIGRATION_PATHS } from "./release-config.mjs";
 
 export const RUNGS = ["flag", "unit", "full", "stop"];
-export const TRIGGERS = ["smoke", "health", "livecheck", "sli", "crashloop", "human"];
+export const ROLLBACK_TRIGGERS = ["smoke", "health", "livecheck", "sli", "crashloop", "human"];
 export const INCIDENT_MARKER = "FORGE:INCIDENT";
-export const BOUNDS = { pollMs: 10_000, startPolls: 6, donePolls: 180 };
+export const ROLLBACK_BOUNDS = { pollMs: 10_000, startPolls: 6, donePolls: 180 };
 const FLAG_OK = ["smoke", "health", "sli", "crashloop", "human"]; // a wrong deploy (livecheck) is not fixed by a flag
 const json = (s) => { try { return JSON.parse(String(s || "null")); } catch { return null; } };
 const short = (s) => String(s ?? "").slice(0, 8);
@@ -205,7 +205,7 @@ async function page(ctx, webhook, text) {
  * @returns {Promise<{ok: boolean, rung: string, why: string, history: object[], refused?: string, post: object}>}
  */
 export async function runRollback(ctx, { reason, to = "flag", trigger = null, later = [] }) {
-  const { io, state } = ctx, rb = ctx.policy?.rollback ?? {}, b = { ...BOUNDS, ...(ctx.config?.rollbackBounds ?? {}) };
+  const { io, state } = ctx, rb = ctx.policy?.rollback ?? {}, b = { ...ROLLBACK_BOUNDS, ...(ctx.config?.rollbackBounds ?? {}) };
   const run = (state.rollbackRun ??= { history: [], post: {} });
   const d = state.deploy;
   if (!d?.target?.sha || !d.merge) return { ok: false, rung: "none", why: "no recorded rollback target (I9); nothing to roll back", history: run.history, refused: "no recorded rollback target", post: run.post };
