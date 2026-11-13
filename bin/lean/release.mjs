@@ -21,7 +21,7 @@ import { postMergeStep } from "./release-postmerge.mjs";
 import { rehearsalStep, parseRehearsalConfig } from "./release-rehearsal.mjs";
 import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-budget.mjs";
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
-import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, releaseMinutes } from "./release-minutes.mjs";
+import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, gateHistoryFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, DEFAULT_PATTERN } from "./release-snapshot.mjs";
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
@@ -419,7 +419,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release verify <sha> [--repo owner/repo] | forgedock release check-config [--ref <git ref>] | forgedock release init | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -429,6 +429,24 @@ export async function releaseFromCli(argv, deps = {}) {
     let y = {}; try { y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {}; } catch { /* defaults */ }
     for (const l of waveReport(historyFromRoot(releaseRoot(env)), parseBudgetConfig(y.budget)).lines) io.print(l);
     return 0;
+  }
+  if (argv[0] === "gates") { // #5583: catalogue, telemetry report, admission check; release-gates is loaded lazily
+    const g = await import("./release-gates.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const defaultBranch = readBranches(cwd).default || "main", root = releaseRoot(env);
+    if (argv[1] === "record") { // merge a deploy-telemetry JSON-lines file into the release state; no catalogue, no write
+      const id = argv[2], file = flag(argv, "--file");
+      if (!id || !file || !existsSync(join(cwd, g.GATES_PATH))) { io.print(`release gates record: needs <release-id>, --file and ${g.GATES_PATH}`); return 1; }
+      const rel = openRelease(root, id), st = rel.load();
+      if (!st) { io.print(`release gates record: no release ${id}`); return 1; }
+      const recs = g.parseTelemetry(readFileSync(file, "utf8"));
+      rel.save({ ...st, gates: [...(st.gates ?? []), ...recs] });
+      io.print(`release gates record: ${recs.length} record(s) into ${id}`);
+      return 0;
+    }
+    const policy = readPolicy({ io, defaultBranch, cwd }).policy;
+    const repo = flag(argv, "--repo") ?? (argv[1] === "demote" ? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner : undefined);
+    return g.gatesFromCli(argv.slice(1), { io, cwd, defaultBranch, policy, repo, history: gateHistoryFromRoot(root) });
   }
   if (argv[0] === "verify") return verifyFromCli(argv.slice(1), { io, cwd });
   if (argv[0] === "check-config" || argv[0] === "init") { // #5551: policy file, loaded lazily (release-config imports this module)

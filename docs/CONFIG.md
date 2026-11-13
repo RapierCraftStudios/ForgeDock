@@ -833,6 +833,22 @@ budget:
 
 The release state (and so the ledger) records `lane` and `minutes: {runs, total}`, where total is the sum of ceil(job minutes) of the Actions runs created since the release started, read from the jobs API.
 
+
+### Deploy gate catalogue and false-block telemetry (#5583)
+
+Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-op with zero writes. `forgedock release check-config` validates the file when present. Fields per gate under `gates:` (`schema: 1`): `id`, `protects_against` (origin issue), `where`, `determinism`, `pre_merge_artifact` (fixture), `version`, `mode` (`block|skip|rollback|freeze|warn|red`), `owner`, `review_by` (`YYYY-MM-DD`); admission also needs `on_uncertainty: inconclusive`, `failure_triggers` and `proportionality`.
+
+`.forge/release.yaml` `gates:`: `demote_fb_rate` (percent, default 5), `demote_window` (runs, default 20), `safety` (never demoted; default `migration-immutability`, `identity-preflight`, `backup-freshness`, `health-auto-restore`, plus the unskippable classes).
+
+A `deploy-telemetry` job prints one JSON line per gate per run: `{"schema":"forgedock.release.gate/v1","gate":"<id>","outcome":"pass|fail|inconclusive|skip","class":"TP|FB|unknown","minutes":<n>,"evidence":"<text>"}`. A `TP`/`FB` class without `evidence` is stored as `unknown`. `forgedock release gates record <release-id> --file <jsonl>` stores the lines in the release state (`gates`).
+
+| Command | Description |
+|---------|-------------|
+| `release gates [--since 30d] [--json]` | Per gate: `runs`, `fails`, `fb`, `fb_share` (FB runs / runs, in percent), `minutes`. Text: a tab-separated header `gate runs fails fb fb_share minutes` and one row per gate. JSON: one line `{"schema":"forgedock.release.gates/v1","gates":[{gate,runs,fails,fb,minutes,fb_share}]}`. |
+| `release gates check [--base <ref>]` | Fails for a gate added or changed against the base ref (default `origin/<default>`) that lacks the fixture, version, `on_uncertainty: inconclusive`, failure trigger with proportionality, or owner and `review_by`. |
+| `release gates demote` | A gate whose FB rate over the last `demote_window` runs (a full window) exceeds `demote_fb_rate` is demoted to `warn` for 14 days via the audited `release demote` control, and an issue is filed. Safety gates are never demoted. |
+| `release promote <gate> --fixture <ref> --reason <text>` | Re-promotes a demoted gate; refused without a fixture reference. |
+
 The result (pass or fail, head SHA, blocker issue) is recorded in the release state (`steps.rehearsal`) and in a `FORGE:REHEARSAL` section of the release PR body next to the gate result.
 
 Repos that set `preflight_command` should skip their Actions CI while the release PR is a draft, so the paid run happens once, on the final head:

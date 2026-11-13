@@ -50,6 +50,16 @@ export function historyFromRoot(root) {
   return out;
 }
 
+/** Gate telemetry records (#5583) of the releases kept under `root`, oldest release first, each with `release` and `at`; [] when none. */
+export function gateHistoryFromRoot(root) {
+  if (!existsSync(root)) return [];
+  const out = [];
+  for (const id of readdirSync(root).sort()) {
+    try { const s = JSON.parse(readFileSync(join(root, id, "state.json"), "utf8")); for (const g of Array.isArray(s?.gates) ? s.gates : []) out.push({ ...g, release: id, at: s.startedAt }); } catch { /* skip */ }
+  }
+  return out;
+}
+
 /** Median of the last `n` records of `lane`; null with no history. */
 export function trailingMedian(records, lane = "release", n = 5) {
   const v = records.filter((r) => (r.lane ?? "release") === lane).slice(-n).map((r) => r.minutes).sort((a, b) => a - b);
