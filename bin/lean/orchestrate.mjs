@@ -328,6 +328,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const requeues = toMap(saved?.requeues);
   const deferrals = toMap(saved?.deferrals);
   const capDefers = toMap(saved?.capDeferrals); // #5112: issue -> `sandbox.capacity` deferrals (uncapped, so not in `deferrals`)
+  const capFresh = new Set(); // #5596: issues deferred for capacity in this process; counts restored by a resume alone never fall back
   const capFellBack = new Set(); // #5112: issues already reported as a capacity fallback (one decision each)
   const engineErrors = toMap(saved?.engineErrors);
   const transients = toMap(saved?.transientRetries); // #5161: issue -> transient engine-error retries taken
@@ -625,10 +626,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const capacityFallback = (n) => {
     if (!remote?.offlineFallback) return false;
     const after = Number.isInteger(remote.capacityFallbackAfter) && remote.capacityFallbackAfter > 0 ? remote.capacityFallbackAfter : CAPACITY_FALLBACK_AFTER;
-    if ((capDefers.get(n) ?? 0) < after) return false;
+    if ((capDefers.get(n) ?? 0) < after || !capFresh.has(n)) return false;
+    if (hostOverloaded()) return false; // #5596: the host would only hold it (host-overloaded): stay remote
     if (typeof remote.headroom !== "function") return true;
     try { return remote.headroom()?.ok !== false; } catch { return false; }
   };
+  // #5596: true while the host-overload hold (#5174) would refuse a local admission; a throwing probe is not overloaded.
+  const hostOverloaded = () => { try { return overload?.()?.overloaded === true; } catch { return false; } };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
   // true: start it; false: no capacity now; "busy" (#4481): another batch runs `n`, try the next issue.
   let overloadNoted = false; // #5174: one host-overloaded row per overload episode
@@ -641,6 +645,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { const u = holds.holdUntil(remote.identity()); poolHeld = Number.isFinite(u) && u > now() ? u : null; } catch { poolHeld = null; }
       if (poolHeld !== null) {
         if (!remote.fallbackLocal || heldUntil() !== null) { notBefore.set(n, poolHeld); return false; }
+        if (hostOverloaded()) { notBefore.set(n, poolHeld); return "busy"; } // #5596: no local fallback into the overload hold
         p = { where: "local", reason: `fallback to local: pool usage limit until ${new Date(poolHeld).toISOString()}` };
       }
     }
@@ -667,7 +672,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           }
         } else if (cap && cap.online > 0) { poolOfflineSince = null; poolStallNoted = false; }
         // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
-        if (remote.offlineFallback && cap && cap.online === 0) {
+        if (remote.offlineFallback && cap && cap.online === 0 && hostOverloaded()) {
+          notBefore.set(n, now() + Math.max(pollMs, 1)); return "busy"; // #5596: wait for the pool or the host, not a local hold
+        } else if (remote.offlineFallback && cap && cap.online === 0) {
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
         } else if (capacityFallback(n)) {
           p = { where: "local", reason: `fallback to local: pool at capacity after ${capDefers.get(n)} deferrals (${p.reason})` };
@@ -683,6 +690,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
         if (p.where === "remote" && remoteRun.size < remoteMax()) { remoteCapped.delete(n); capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
         if (p.where === "remote" && !remote.fallbackLocal) { remoteCapped.add(n); return false; }
+        if (p.where === "remote" && hostOverloaded()) { remoteCapped.add(n); notBefore.set(n, now() + Math.max(pollMs, 1)); return "busy"; } // #5596
         if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax()} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
         noteBudget(adm.reason);
@@ -697,7 +705,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (snap?.overloaded) {
         if (!overloadNoted) { overloadNoted = true; update({ issue: null, outcome: "host-overloaded", detail: formatOverload(snap) }); }
         notBefore.set(n, now() + Math.max(pollMs, 1));
-        return false;
+        return "busy"; // #5596: not false: a held local lane must not end the pass for the admissible lanes behind it
       }
       overloadNoted = false;
     }
@@ -823,6 +831,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n);
+        capFresh.add(n);
         capDefers.set(n, (capDefers.get(n) ?? 0) + 1); // #5112: counted for the fallback_local capacity fallback
         try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
       }

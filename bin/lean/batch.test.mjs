@@ -1269,6 +1269,43 @@ describe("#5112: late dependents of a decomposed issue, edge re-read on --requeu
   });
 });
 
+describe("#5596: no local fallback into the host-overload hold", () => {
+  const OVER = () => ({ overloaded: true, perCore: 9, threshold: 2 });
+  const mk = (extra = {}) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    return { c, sleep, base: { parallel: 2, now: () => c.t, sleep, pollMs: 1, readBody: async () => "", ...extra } };
+  };
+  it("a lane refused for capacity stays remote while the host is overloaded", async () => {
+    const { base } = mk();
+    const where = []; let tries = 0;
+    const rows = await orchestrate({ ...base, issues: [1], parallel: 1, overload: OVER,
+      remote: { max: 1, isRemote: () => true, capacity: () => ({ free: null, online: 1, at: 1 }), offlineFallback: true, capacityFallbackAfter: 2, headroom: () => ({ ok: true, detail: "" }) },
+      runOne: async (n, _l, ctx = {}) => { where.push(ctx.placement?.where ?? "remote"); tries++; return tries >= 5 ? { terminalReason: "merged", pr: 1 } : { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "HTTP 503 capacity" }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.ok(where.every((w) => w !== "local"), where.join());
+  });
+  it("a held local lane does not stop a remote lane behind it from being admitted", async () => {
+    const { base } = mk();
+    const ran = [];
+    const place = (n) => (n === 1 ? { where: "local", reason: "light" } : { where: "remote", reason: "heavy" });
+    let over = true; // the host cools down once the remote lane is done, so the held local lane can finish
+    const rows = await orchestrate({ ...base, issues: [1, 2], overload: () => ({ overloaded: over }), remote: { max: 2, place, isRemote: () => true },
+      runOne: async (n, _l, ctx = {}) => { ran.push(n); if (n === 2) over = false; return { terminalReason: "merged", pr: n, ...(ctx.remote ? { sandbox: { provider: "fake", id: `f${n}`, minutes: 0 } } : {}) }; } });
+    assert.equal(rows.find((r) => r.issue === 2)?.outcome, "merged");
+    assert.deepEqual(ran, [2, 1]);
+  });
+  it("capacity counts restored by a resume do not fall back to the host on the first pass", async () => {
+    const { base } = mk();
+    const where = []; let tries = 0;
+    const rows = await orchestrate({ ...base, issues: [1], parallel: 1, store: { load: () => ({ order: [1], pending: [1], capDeferrals: { 1: 9 } }), save() {} },
+      remote: { max: 1, isRemote: () => true, capacity: () => ({ free: null, online: 1, at: 1 }), offlineFallback: true, capacityFallbackAfter: 2, headroom: () => ({ ok: true, detail: "" }) },
+      runOne: async (n, _l, ctx = {}) => { where.push(ctx.placement?.where ?? "remote"); tries++; return tries >= 3 || ctx.placement?.where === "local" ? { terminalReason: "merged", pr: 1 } : { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "HTTP 503" }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.equal(where[0], "remote");
+  });
+});
+
 describe("#4788: a pool offline for longer than N minutes is reported once", () => {
   const run = async (onlineAt) => {
     const c = { t: 1_000_000 };
