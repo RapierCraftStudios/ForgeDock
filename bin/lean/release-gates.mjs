@@ -7,6 +7,8 @@
  * last `gates.demote_window` runs exceeds `gates.demote_fb_rate` percent is demoted to warn through `runControl("demote")`
  * with an expiry and an issue, unless it is on the safety allowlist. `release gates` reports runs/fails/FB share/minutes
  * (FB share = FB runs / runs, the same rate the demotion uses). No catalogue file: every entry point is a no-op, zero writes.
+ * CI evidence (#5711): a gate that re-runs work a required check already did names it in `evidence_check`; `evidenceSkips`
+ * says which of those gates an accepted attestation covers. A safety gate is never covered.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +26,7 @@ export const DEMOTE_MODES = ["warn", "inconclusive"];
 export const SAFETY_DEFAULT = ["migration-immutability", "identity-preflight", "backup-freshness", "health-auto-restore"];
 export const GATE_PATHS_DEFAULT = ["scripts/deploy/**", "scripts/lib/**", "scripts/prod-smoke-test.sh", "**/gate-fixtures/**", "tests/gates/**"];
 export const REQUIRED = ["id", "protects_against", "where", "determinism", "pre_merge_artifact", "version", "mode", "owner", "review_by"];
-const OPTIONAL = ["on_uncertainty", "failure_triggers", "proportionality"];
+const OPTIONAL = ["on_uncertainty", "failure_triggers", "proportionality", "evidence_check"];
 const DAY_MS = 86_400_000;
 
 /** @returns {string[]} findings for a parsed catalogue `{schema: 1, gates: [...]}`; empty when valid. */
@@ -80,6 +82,27 @@ export function parseGatesConfig(policy) {
 /** Safety-allowlisted gates are never demoted: the `gates.safety` entries and every unskippable class. */
 export const isSafetyGate = (gate, safety = SAFETY_DEFAULT) =>
   isUnskippable(String(gate)) || safety.some((s) => gate === s || String(gate).startsWith(`${s}:`) || String(gate).startsWith(`${s}/`));
+
+/**
+ * CI-evidence side (#5711, release-promote.mjs): for every catalogue gate with an `evidence_check`, whether the attestation
+ * `evidence` ({commit, checks: [{name, conclusion}]}) covers it. `ok` is the promote verdict (`canPromote`): without it nothing
+ * is skipped. A safety gate always runs, whatever the evidence says. The catalogue mode of a gate is not changed.
+ * @returns {{gate: string, check: string, skip: boolean, why: string, record?: object}[]} `record` is the telemetry record of a skipped gate.
+ */
+export function evidenceSkips(catalogue, evidence, { ok = false, safety = SAFETY_DEFAULT } = {}) {
+  const out = [];
+  for (const g of catalogue?.gates ?? []) {
+    const check = typeof g?.evidence_check === "string" ? g.evidence_check.trim() : "";
+    if (!g?.id || !check) continue;
+    const keep = (why) => out.push({ gate: String(g.id), check, skip: false, why });
+    if (isSafetyGate(String(g.id), safety)) { keep("safety gate: always runs"); continue; }
+    if (!ok) { keep("the evidence was not accepted"); continue; }
+    if (!(evidence?.checks ?? []).some((c) => c?.name === check && c.conclusion === "success")) { keep(`${check} is not in the attestation as success`); continue; }
+    const why = `${check} passed on ${String(evidence.commit).slice(0, 12)}`;
+    out.push({ gate: String(g.id), check, skip: true, why, record: gateRecord({ gate: g.id, outcome: "skip", evidence: `promote: ${why}` }) });
+  }
+  return out;
+}
 
 /** One telemetry record, or null for an unknown gate or outcome. A TP/FB class needs a non-empty `evidence`, else `unknown`. */
 export function gateRecord({ gate, outcome, class: cls, evidence, minutes = 0, gate_sha: gateSha }) {

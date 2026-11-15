@@ -1113,6 +1113,19 @@ branches:
 #   #   none     — No secrets backend; all vars are operator-set in .env.production
 #   # Default: none (all secret-chain checks are skipped with an explicit log message)
 #   secrets_backend: "sops"
+#
+#   # Build once, promote (#5711; docs/CONFIG.md `deploy.promote`). Default off. CI evidence bound to the commit, its tree
+#   # and the image digests lets the deploy side skip re-running what already passed; any mismatch runs the full pre-gate.
+#   # promote:
+#   #   enabled: false            # true turns it on, in shadow
+#   #   shadow: true              # record what would be skipped; the pre-gate still runs. false = act on the evidence
+#   #   required_checks: ["CI"]   # default: gate.required_checks
+#   #   cache_ref: "registry.example/acme/buildcache"   # registry layer cache for image builds
+#   #   services:
+#   #     web:
+#   #       image: "registry.example/acme/web"
+#   #       context: "web"
+#   #       cache_paths: ["/app/.next/cache"]
 
 # =============================================================================
 # AUTOPILOT (OPTIONAL)

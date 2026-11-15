@@ -21,6 +21,13 @@ export const CLOSED = {
   "verification.ci_local": ["mode", "exclude_jobs", "include_jobs", "extra_commands", "services", "budget_minutes", "max_parallel"],
   // #5710 test engine. The one-level parser flattens these under `ci`, so every name is unique within `ci`.
   "ci.tests": ["selection", "suites", "run_all", "ignore", "test_globs", "full_branches", "graduate_after", "graduate_min_failing", "shards", "shard_target_s", "quarantine", "quarantine_after", "quarantine_window_days", "recall_ledger"],
+  // #5712: the deploy stage engine (bin/lean/deploy-stages.mjs); the stage entries themselves are checked by validateEngine
+  "deploy.engine": ["enabled", "live_release_command", "stage_timeout_s", "colour", "services", "canary", "rollback", "stages"],
+  "deploy.engine.colour": ["active_command", "names"],
+  "deploy.engine.services": ["mode", "desired_command", "live_command"],
+  "deploy.engine.canary": ["health_command", "low", "medium", "high"],
+  "deploy.engine.rollback": ["budget_s", "shift_back_command", "abort_command"],
+  "deploy.promote": ["enabled", "shadow", "required_checks", "evidence_app", "cache_ref", "cache_mode", "builder", "rebuild_all", "services"], // #5711, read by bin/lean/release-promote.mjs
 };
 
 /** Typed keys: list | number | bool | scalar | {enum:[...]}. */
@@ -46,8 +53,19 @@ export const TYPES = {
   "ci.tests.quarantine_after": "number",
   "ci.tests.quarantine_window_days": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
+  "deploy.engine.enabled": "bool",
+  "deploy.engine.stage_timeout_s": "number",
+  "deploy.engine.stages": "list",
+  "deploy.engine.colour.names": "list",
+  "deploy.engine.services.mode": { enum: ["off", "shadow", "enforce"] },
+  "deploy.engine.rollback.budget_s": "number",
   "billing.enabled": "bool",
   "gate.required_checks": "list",
+  "deploy.promote.enabled": "bool",
+  "deploy.promote.shadow": "bool",
+  "deploy.promote.required_checks": "list",
+  "deploy.promote.rebuild_all": "list",
+  "deploy.promote.cache_mode": { enum: ["min", "max"] },
 };
 
 /** Keys the legacy `full` path never reads (the core path reads them: bin/engine-cli.mjs readEnvConfig, readConformanceMode). */
@@ -72,7 +90,7 @@ export function scanKeys(text) {
     if (/^\s*(#.*)?$/.test(line)) continue;
     const indent = line.match(/^ */)[0].length;
     if (skipAbove >= 0) { if (indent > skipAbove) continue; skipAbove = -1; }
-    if (/^\s*-(\s|$)/.test(line)) continue;
+    if (/^\s*-(\s|$)/.test(line)) { skipAbove = indent; continue; } // a list item; the keys of a map item (deeper lines) belong to the item, not to the parent
     const m = line.match(/^( *)([A-Za-z_][\w.-]*)\s*:(?:\s+(.*))?$/);
     if (!m) continue;
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
