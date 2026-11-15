@@ -30,7 +30,7 @@ import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mj
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { hasRecipe, installLaneTools } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -111,7 +111,7 @@ import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
-import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure } from "./validate-catalog.mjs";
+import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -1879,6 +1879,13 @@ export async function runCore(o) {
         await git(["add", "--", CHECKS_FILE]); await git(["commit", "--no-verify", "-m", "chore(forge): generated post-deploy checks for production-only e2e requirements (#5468)"]);
       } catch (e) { T.anomalies.push(`generated post-deploy checks not committed: ${String(e?.message ?? e).slice(0, 160)}`); }
     }
+    let freezeTracked = []; // #5683: tracked paths, for the sub-project venv rewrite at freeze
+    /** #5683: name -> the sub-project dir whose tracked manifest declares it (a project dependency, not a host tool), else null. */
+    async function depOwnerOf() {
+      const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean), texts = new Map();
+      for (const f of files) if (/(^|\/)(package\.json|pyproject\.toml|requirements[\w.-]*\.txt)$/.test(f) && !f.split("/").includes("node_modules")) texts.set(f, String(await io.fs.read(`${wt}/${f}`).catch(() => "")));
+      return { files, owner: (name) => manifestDepOwner(name, files, (f) => texts.get(f) ?? "") };
+    }
     function freezeRewrites(c) {
       const r = applyValidateRecipes(c, validateRecipes);
       const pd = (id, cmd) => { const to = rewriteProjectDirCommand(cmd); if (to !== cmd) T.decisions.push(`project-dir rewrite of ${id}: \`${cmd}\` -> \`${to}\``); return to; };
@@ -1888,6 +1895,9 @@ export async function runCore(o) {
         if (t && typeof t === "object" && typeof t.command === "string") r.contract = { ...r.contract, repro_test: { ...t, command: pd("repro_test", t.command) } };
       }
       for (const x of r.applied) T.decisions.push(`validate recipe rewrote ${x.id}: \`${x.from}\` -> \`${x.to}\``);
+      const vr = rewriteSubprojectVenv(r.contract, freezeTracked, (rel) => existsSync(join(wt, rel))); // #5683
+      r.contract = vr.contract;
+      for (const x of vr.applied) T.decisions.push(`sub-project venv rewrite of ${x.id}: \`${x.from}\` -> \`${x.to}\``);
       r.contract = foldRegression(r.contract); // #5448: the blast-radius regression set runs as validate G# entries
       const e = autoPostDeployE2e(r.contract); // #5468: production-only e2e/manual rows become post-deploy with a generated check
       for (const x of e.converted) { if (x.check) genChecks[x.check] = x.entry; T.decisions.push(`Production-only e2e/manual requirement ${x.id} frozen as post-deploy with ${x.check ? `generated check ${x.check}` : "no check (production observation window)"}`); }
@@ -2257,6 +2267,7 @@ export async function runCore(o) {
           return o.contract;
         };
         let contract = dropScope(await readContract());
+        freezeTracked = (await depOwnerOf()).files;
         contract = freezeRewrites(contract);
         await persistGenChecks();
         await refreshIssue("contract validation");
@@ -2343,8 +2354,11 @@ export async function runCore(o) {
         if (designRoute.blocked) return await needsHuman(`Design gate (forge.yaml design.gate: blocking): ${designRoute.reason}.\n\nRun /design on #${issue}; a FORGE:DESIGN_SPEC comment or the \`${designConfig.specLabel}\` label lifts the hold.`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue} (${designRoute.pages.slice(0, 3).join(", ")})` });
       }
       { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
-        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: laneEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        const deps5683 = await depOwnerOf(), projEnv = () => { const e = laneEnv(); const d = projectBinDirs(wt, deps5683.files); if (d.length) e.PATH = withLocalBins(e.PATH ?? process.env.PATH ?? "", d); return e; };
+        const projDeps = declaredEnv(frozen).filter((t) => deps5683.owner(t) !== null); // #5683: a sub-project's declared dependency is prepared and resolved through its bin dirs, never a host tool
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { if (deps5683.owner(t) !== null) continue; const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: projEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
+        if (projDeps.length && io.deps?.prepare) { try { await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); ev({ event: "TESTPLAN_ENV_PROJECT_DEPS", names: projDeps }); } catch { /* the install gate reports failures */ } }
         if (envMiss.length) {
           try {
             if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined });
@@ -2370,12 +2384,15 @@ export async function runCore(o) {
         const hn = contractHostNeeds(frozen, o.hostCaps && { ...o.hostCaps, hostCapabilities: (o.hostCaps.hostCapabilities ?? []).filter((c) => !relayed.has(c)) });
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
         // #5331: a tool the sandbox itself lacks (probed where the lane runs) ends the lane before the builder implements; the tool-missing recovery places it on the host (orchestrate placeOf)
-        let tm = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => []));
+        const remoteDeps = await depOwnerOf(); // #5683: a tool that is a tracked manifest dependency is prepared in the sandbox, never a lane_tools recipe or a host tool
+        const ownedDep = (t) => remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
+        let tm0 = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => [])), tm = notOwned(tm0);
+        if (tm0.tools.length && !tm.tools.length) { try { if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); ev({ event: "REMOTE_PROJECT_DEPS", tools: tm0.tools }); } catch { /* the install gate reports failures */ } }
         if (tm.tools.length) { // #5423: provision the sandbox once (nested lockfiles, pytest) and re-probe before giving the lane up
           try {
             if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined });
             if (tm.tools.includes("pytest") && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
-            tm = toolMisses(await preflightValidates(frozen).catch(() => []));
+            tm = notOwned(toolMisses(await preflightValidates(frozen).catch(() => [])));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           } catch { /* keep the original miss */ }
         }
@@ -2385,7 +2402,7 @@ export async function runCore(o) {
             const ins = await installLaneTools(withRecipe, { run: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: a.timeoutMs, env: laneEnv() }), root: process.getuid?.() === 0 });
             ev({ event: "REMOTE_TOOLS_INSTALLED", tools: withRecipe, ok: ins.ok });
             if (!ins.ok) return await needsHuman(`Installing ${ins.tool} in the remote sandbox failed (execution.lane_tools recipe); not re-placed on the host. Install stderr tail:\n${ins.stderrTail}`, OUTCOME_CODES.ENV_TOOL_MISSING);
-            tm = toolMisses(await preflightValidates(frozen).catch(() => []));
+            tm = notOwned(toolMisses(await preflightValidates(frozen).catch(() => [])));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           }
           if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES).`, OUTCOME_CODES.ENV_TOOL_MISSING);

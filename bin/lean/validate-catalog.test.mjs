@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deriveCatalog, mergeRecipes, rewriteMissed, extractTestIds, equivalentRuns, isDriftFailure } from "./validate-catalog.mjs";
+import { deriveCatalog, mergeRecipes, rewriteMissed, extractTestIds, equivalentRuns, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
 import { applyValidateRecipes } from "./conformance.mjs";
 
 const CI = "run: uv run --with-requirements r.txt pytest tests\nrun: npx vitest run";
@@ -38,5 +38,18 @@ describe("#5653 validate catalogue", () => {
   it("classifies a stale generated artifact, not a test failure", () => {
     assert.equal(isDriftFailure("error: generated tools file is out of date"), true);
     assert.equal(isDriftFailure("AssertionError: 1 != 2"), false);
+  });
+});
+
+describe("#5683 sub-project venv rewrite", () => {
+  const files = ["services/api/pyproject.toml"], exists = (p) => p === "services/api/.venv/bin/python";
+  it("rewrites the repro and validate commands, leaves others, and returns the input when nothing changes", () => {
+    const c = { repro_test: { path: "t", id: "i", command: "cd services/api && python -m pytest tests/a.py" }, validate: [{ id: "V1", command: "cd services/api && pytest" }, { id: "V2", command: "node --test x" }] };
+    const r = rewriteSubprojectVenv(c, files, exists);
+    assert.equal(r.contract.repro_test.command, "cd services/api && .venv/bin/python -m pytest tests/a.py");
+    assert.deepEqual(r.contract.validate.map((v) => v.command), ["cd services/api && .venv/bin/python -m pytest", "node --test x"]);
+    assert.deepEqual(r.applied.map((a) => a.id).sort(), ["V1", "repro_test"]);
+    const same = { validate: [{ id: "V1", command: "node --test x" }] };
+    assert.equal(rewriteSubprojectVenv(same, files, exists).contract, same);
   });
 });
