@@ -2828,6 +2828,56 @@ describe("merge_wait policy", () => {
       assert.ok(traj(w)[0].includes("carried forward across the CI fix round"));
     });
 
+    describe("#5692 CI events start the fix round before the check completes", () => {
+      /** `build` stays pending until the builder's fix lands; `evts` is what the router has for the head. */
+      const evWorld = (evts) => {
+        const w = world(); w.cancelled = []; w.polls = 0;
+        const sleep = w.io.sleep; w.io.sleep = async (ms) => (ms === WAIT ? sleep(ms) : new Promise((r) => setTimeout(r, 25))); // poll sleeps lose the race to a ready event
+        w.io.requiredChecks = async () => ["build"];
+        w.io.checkStates = async () => { w.polls++; return [{ name: "build", state: w.fixed ? "success" : "pending", url: RUN(77, 1) }]; };
+        w.io.failedLogs = async () => { w.fixed = true; return "log"; };
+        w.io.cancelRun = async (id) => { w.cancelled.push(id); };
+        let sent = false;
+        w.io.ciEventsWait = async () => (sent ? new Promise(() => {}) : (sent = true, { events: evts, next: evts.length }));
+        return w;
+      };
+      const STEP = { seq: 1, type: "step_failed", job: "build", step: "pnpm test", run_id: "77", lines: ["FAIL boom.test.ts"], ts: "2026-11-15T10:00:00Z" };
+      const SETUP = { ...STEP, step: "pnpm install", lines: ["ERR_PNPM_OUTDATED_LOCKFILE frozen-lockfile"] };
+      const V1 = { ...parseVerify({}), maxRounds: 1 };
+
+      it("a step_failed while the check is still pending starts the fix round with the event lines, and merges only once the check is green", async () => {
+        const w = evWorld([STEP]), p = fixPrompts(w), dir = tmpDir("core-");
+        const r = await run(w, { dir, verify: V1 });
+        assert.equal(r.terminalReason, "merged", r.reason);
+        assert.equal(p.length, 1); assert.match(p[0], /FAIL boom\.test\.ts/); assert.match(p[0], /step: pnpm test/);
+        assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.trigger), ["merge"]);
+        const aware = events(dir, "CI_AWARE"); assert.equal(aware.length, 1); assert.equal(aware[0].event_ts, "2026-11-15T10:00:00Z"); assert.equal(aware[0].source, "router");
+      });
+      it("merge gating unchanged: an event for a non-actionable class never merges while the required check is pending", async () => {
+        const w = evWorld([{ ...STEP, lines: ["ECONNRESET registry.npmjs.org"], class: "infra" }]), dir = tmpDir("core-");
+        let greenAt = null; w.io.checkStates = async () => { w.polls++; if (w.polls === 4) greenAt = w.merges.length; return [{ name: "build", state: w.polls >= 4 ? "success" : "pending", url: RUN(77, 1) }]; };
+        const r = await run(w, { dir, verify: V1 });
+        assert.equal(r.terminalReason, "merged", r.reason);
+        assert.equal(greenAt, 0, "nothing merged before the check turned green"); assert.equal(w.merges.length, 1);
+        assert.equal(events(dir, "CI_FIX_ROUND").length, 0);
+      });
+      it("a pending check at the wait budget never merges on events alone", async () => {
+        const w = evWorld([{ ...STEP, class: "infra" }]); w.io.checkStates = async () => [{ name: "build", state: "pending", url: RUN(77, 1) }];
+        const r = await run(w, { dir: tmpDir("core-"), verify: V1, ciMaxMinutes: 0 });
+        assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.merges.length, 0);
+      });
+      it("cancels the run only for a downstream class under fail_fast deterministic", async () => {
+        const on = evWorld([SETUP]); await run(on, { dir: tmpDir("core-"), verify: V1, ci: { fail_fast: "deterministic" } });
+        assert.deepEqual(on.cancelled, ["77"]);
+        const dir = tmpDir("core-"), on2 = evWorld([SETUP]); await run(on2, { dir, verify: V1, ci: "deterministic" });
+        assert.deepEqual(events(dir, "CI_FAIL_FAST").map((e) => [e.class, e.cancelled]), [["deterministic-setup", true]]);
+        const off = evWorld([SETUP]); await run(off, { dir: tmpDir("core-"), verify: V1 });
+        assert.deepEqual(off.cancelled, [], "policy off");
+        const code = evWorld([STEP]); await run(code, { dir: tmpDir("core-"), verify: V1, ci: { fail_fast: "deterministic" } });
+        assert.deepEqual(code.cancelled, [], "code class");
+      });
+    });
+
     it("a rerun that reports a new attempt still red goes to the fix round and reaches the builder", async () => {
       const w = redBuild("failure", RUN(77, 2)); const p = fixPrompts(w), n = waits(w), dir = tmpDir("core-");
       await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
