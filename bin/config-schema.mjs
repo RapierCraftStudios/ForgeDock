@@ -19,6 +19,8 @@ export const TOP_LEVEL = [
 /** Sections whose direct children are a closed set: another child is an unknown key. */
 export const CLOSED = {
   "verification.ci_local": ["mode", "exclude_jobs", "include_jobs", "extra_commands", "services", "budget_minutes", "max_parallel"],
+  // #5710 test engine. The one-level parser flattens these under `ci`, so every name is unique within `ci`.
+  "ci.tests": ["selection", "suites", "run_all", "ignore", "test_globs", "full_branches", "graduate_after", "graduate_min_failing", "shards", "shard_target_s", "quarantine", "quarantine_after", "quarantine_window_days", "recall_ledger"],
 };
 
 /** Typed keys: list | number | bool | scalar | {enum:[...]}. */
@@ -30,6 +32,19 @@ export const TYPES = {
   "verification.ci_local.extra_commands": "list",
   "verification.ci_local.budget_minutes": "number",
   "verification.ci_local.max_parallel": "number",
+  "ci.tests.selection": { enum: ["off", "shadow", "enforce"] },
+  "ci.tests.quarantine": { enum: ["off", "report", "non-blocking"] },
+  "ci.tests.suites": "list",
+  "ci.tests.run_all": "list",
+  "ci.tests.ignore": "list",
+  "ci.tests.test_globs": "list",
+  "ci.tests.full_branches": "list",
+  "ci.tests.graduate_after": "number",
+  "ci.tests.graduate_min_failing": "number",
+  "ci.tests.shards": "number",
+  "ci.tests.shard_target_s": "number",
+  "ci.tests.quarantine_after": "number",
+  "ci.tests.quarantine_window_days": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "billing.enabled": "bool",
   "gate.required_checks": "list",
