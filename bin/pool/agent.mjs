@@ -99,6 +99,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const used = () => Object.values(sb()).filter((s) => s.state !== "exited").reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   // #5535: disk figures for the router inventory; optional, omitted when unreadable. Sandbox dirs are walked at most every 60s.
   let diskCache = { at: 0, mb: {} };
+  let lastWorkSweep = -Infinity;
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
   function diskView() {
     const out = {};
@@ -273,7 +274,6 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     store.save();
   }
-  let lastWorkSweep = -Infinity;
 
   // GitHub credentials for a running sandbox: fetched from the router on demand (installation tokens expire hourly).
   const credCache = {};
