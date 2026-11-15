@@ -3,7 +3,13 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { classifyCiFailure } from "../lean/ci-classify.mjs";
+// The pool agent's self-update bundle carries only AGENT_BUNDLE_PATHS (router.mjs), never bin/lean, and the agent loads this
+// module through cli.mjs -> router.mjs. Classification is a router-side extra, so it is optional here: a missing module
+// leaves classify null (events pass through unclassified) instead of crashing the agent at import (1.61.0 outage).
+const { classifyCiFailure = null } = await import("../lean/ci-classify.mjs").catch((e) => {
+  if (e?.code === "ERR_MODULE_NOT_FOUND") return {};
+  throw e;
+});
 
 /** #5688: CI runner events pushed to the pool router and long-polled by agents (parent #5687). */
 export const CI_EVENT_TYPES = ["job_started", "step_started", "step_failed", "test_failed", "job_finished", "runner_unhealthy"];
