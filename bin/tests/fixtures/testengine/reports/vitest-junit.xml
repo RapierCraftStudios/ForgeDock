@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="3" failures="1" time="2.4">
+  <testsuite name="test/cart.test.js" tests="2" failures="1" time="2.0">
+    <testcase classname="test/cart.test.js" name="cart &gt; total" time="1.5">
+      <failure message="expected '$3.00' to be '$3.60'" type="AssertionError"/>
+    </testcase>
+    <testcase classname="test/cart.test.js" name="cart &gt; empty" time="0.5"/>
+  </testsuite>
+  <testsuite name="/work/repo/test/math.test.js" tests="1" failures="0" time="0.4">
+    <testcase classname="math" name="add" time="0.4"/>
+  </testsuite>
+</testsuites>

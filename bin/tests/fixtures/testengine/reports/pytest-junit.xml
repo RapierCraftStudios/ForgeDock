@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="0" failures="1" skipped="1" tests="5" time="3.500">
+<testcase classname="tests.unit.test_pricing" name="test_subtotal" time="0.250"/>
+<testcase classname="tests.unit.test_tax" name="test_with_tax" time="1.000"><failure message="assert 3.5 &lt; 1e-9">trace &gt; here</failure></testcase>
+<testcase classname="tests.unit.test_tax" name="test_rate" time="0.500"><skipped message="later"/></testcase>
+<testcase classname="tests.integration.test_checkout.TestCheckout" name="test_checkout" time="1.500"></testcase>
+<testcase classname="tests.gone.test_removed" name="test_x" time="0.250"><error message="boom"/></testcase>
+</testsuite></testsuites>

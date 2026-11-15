@@ -1,0 +1,1 @@
+{ "name": "sample-app", "private": true, "workspaces": ["packages/*", "web"] }
