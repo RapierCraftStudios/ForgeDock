@@ -3983,7 +3983,7 @@ const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate",
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
   "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
-  "ci-step", "ci-hook",
+  "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4427,6 +4427,17 @@ switch (command) {
     const { ciFromCli } = await import("./lean/ci-budget.mjs");
     try {
       exitCode = await ciFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "tests": {
+    // Test engine (#5710): `forgedock tests select|shard|recall` (affected-test selection, shard plan, shadow recall ledger).
+    const { testsFromCli } = await import("./lean/testengine.mjs");
+    try {
+      exitCode = await testsFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

@@ -100,25 +100,30 @@ async function poll(io, polls, ms, fn) {
   return null;
 }
 
-/** A fenced dispatch of `workflow` and the run it makes (newer than every run seen before). Never redispatched once an intent exists (I7). */
-async function dispatchRung(ctx, rung, workflow, inputs, b) {
-  const { io, repo } = ctx, st = ctx.state.rollbackRun, rec = (st.dispatch ??= {})[rung] ??= {};
+/**
+ * A fenced dispatch of `workflow` and the run it makes (newer than every run seen before). Never redispatched once an intent
+ * exists (I7). `rec` is the caller's persisted record of this dispatch; `tag` ends the intent key; `what` names it in messages.
+ */
+export async function dispatchOnce(ctx, rec, { workflow, inputs, tag, what }, b) {
+  const { io, repo } = ctx;
   const list = async () => json(await io.gh(["run", "list", "--repo", repo, "--workflow", workflow, "--json", "databaseId,status,conclusion", "--limit", "10"])) ?? [];
   if (rec.baseId == null) { rec.baseId = Math.max(0, ...(await list()).map((r) => r.databaseId)); ctx.save(); }
-  const had = rec.dispatched || (ctx.state.intents ?? []).some((i) => i.action === "dispatch" && String(i.key).endsWith(`:rollback:${rung}`));
+  const had = rec.dispatched || (ctx.state.intents ?? []).some((i) => i.action === "dispatch" && String(i.key).endsWith(`:${tag}`));
   if (!had) {
-    const key = `${ctx.fence?.lease?.release ?? ctx.state.id}:${ctx.fence?.lease?.epoch ?? 0}:rollback:${rung}`;
+    const key = `${ctx.fence?.lease?.release ?? ctx.state.id}:${ctx.fence?.lease?.epoch ?? 0}:${tag}`;
     const f = await fenced(ctx.fence, { action: "dispatch", key }, (epoch) => io.gh(buildDispatchArgs({ workflow, repo, ref: ctx.def, inputs: { ...inputs, ...(epoch != null ? { forge_epoch: epoch } : {}) } })));
     if (f.refused) return { err: `dispatch ${f.refused}` };
     rec.dispatched = true; ctx.save();
   }
   const newer = async () => (await list()).find((r) => r.databaseId > rec.baseId) ?? null;
   const run = await poll(io, b.startPolls, b.pollMs, newer);
-  if (!run) return { err: `no ${workflow} run appeared after the ${rung} rollback dispatch (never redispatched; check the Actions tab)` };
+  if (!run) return { err: `no ${workflow} run appeared after the ${what} (never redispatched; check the Actions tab)` };
   const done = await poll(io, b.donePolls, b.pollMs, async () => { const r = await newer(); return r?.status === "completed" ? r : null; });
   if (!done) return { err: `${workflow} run ${run.databaseId} did not finish` };
   return done.conclusion === "success" ? { run: done } : { err: `${workflow} run ${done.databaseId} concluded ${done.conclusion}` };
 }
+
+const dispatchRung = (ctx, rung, workflow, inputs, b) => dispatchOnce(ctx, ((ctx.state.rollbackRun.dispatch ??= {})[rung] ??= {}), { workflow, inputs, tag: `rollback:${rung}`, what: `${rung} rollback dispatch` }, b);
 
 async function healthy(io, rb) {
   if (!rb.health_command) return { ok: true, note: "health: unchecked (rollback.health_command unset)" };
@@ -226,6 +231,9 @@ export async function runRollback(ctx, { reason, to = "flag", trigger = null, la
   }
   const ok = rung !== "stop";
   const post = run.post;
+  if ((rung === "unit" || rung === "full") && d.stages && !post.stages_cleared) { // #5712: no stage checkpoint survives a code rollback
+    try { await (await import("./deploy-stages.mjs")).clearStages(ctx); post.stages_cleared = true; } catch (e) { d.stages = {}; io.print?.(`release rollback: the shared stage checkpoints were not cleared (${String(e?.message ?? e).split("\n")[0]}); the next deploy relies on stage checks`); }
+  }
   if (rung === "unit" || rung === "full") { if (rb.open_revert_pr !== false) post.revert ??= await revertPr(ctx, reason); }
   if (ok) post.reopened ??= await reopenIssues(ctx, reason);
   const inc = await (post.incident ? Promise.resolve(post.incident) : ensureIssue(ctx, `incident: rollback of release ${state.id}`, `Release ${state.id} (${short(d.merge)}) was rolled back via rung ${rung}.\n\nTrigger: ${trig}\nReason: ${reason}\nWhy this rung: ${why}\n${refused ? `Refused: ${refused}\n` : ""}${note ? `Result: ${note}\n` : ""}Ladder: ${run.history.map((h) => `${h.rung} -> ${h.result ?? h.why}`).join("; ") || "none"}`, `${INCIDENT_MARKER} ${state.id}`));

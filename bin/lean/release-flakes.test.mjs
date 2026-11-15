@@ -114,3 +114,18 @@ describe("release flakes (#5568)", () => {
     assert.deepEqual(none, { reran: [], skipped: [] }); // no ci.rerun_budget_min: no rerun
   });
 });
+
+describe("quarantineReport (#5710)", async () => {
+  const { quarantineReport, flakeEntry: fe } = await import("./release-flakes.mjs");
+  const now = Date.parse("2026-11-15T00:00:00Z");
+  const flips = (check, test, n) => Array.from({ length: n }, (_, i) => fe({ check, test, kind: "flip", sha: `s${i}`, runIds: [i], at: new Date(now - i * 3_600_000).toISOString() }));
+  it("reports repeated flakes as quarantined and still blocking by default", () => {
+    const q = quarantineReport([...flips("tests", "t/a.test.js", 3), ...flips("tests", "t/b.test.js", 2)], {}, now);
+    assert.deepEqual(q.map((x) => [x.target, x.count, x.blocking]), [["tests:t/a.test.js", 3, true]]);
+  });
+  it("non-blocking is opt-in and never reaches an unskippable class; off is empty", () => {
+    const all = [...flips("tests", "t/a.test.js", 3), ...flips("migration:up", null, 3), ...flips("tests", "suite/backup-restore/test_x.py", 3)];
+    assert.deepEqual(quarantineReport(all, { mode: "non-blocking" }, now).map((x) => x.blocking), [false, true, true]);
+    assert.deepEqual(quarantineReport(all, { mode: "off" }, now), []);
+  });
+});
