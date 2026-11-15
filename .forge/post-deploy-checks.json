@@ -130,5 +130,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "ci-runner-health-cli-runs": {
+    "run": "out=$(node bin/forgedock.mjs ci runner-health --json); rc=$?; test $rc -le 1 && echo \"$out\" | node -e 'JSON.parse(require(\"fs\").readFileSync(0,\"utf8\").trim().split(\"\\n\").pop())'",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }
