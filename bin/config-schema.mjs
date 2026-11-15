@@ -19,6 +19,12 @@ export const TOP_LEVEL = [
 /** Sections whose direct children are a closed set: another child is an unknown key. */
 export const CLOSED = {
   "verification.ci_local": ["mode", "exclude_jobs", "include_jobs", "extra_commands", "services", "budget_minutes", "max_parallel"],
+  // #5712: the deploy stage engine (bin/lean/deploy-stages.mjs); the stage entries themselves are checked by validateEngine
+  "deploy.engine": ["enabled", "live_release_command", "stage_timeout_s", "colour", "services", "canary", "rollback", "stages"],
+  "deploy.engine.colour": ["active_command", "names"],
+  "deploy.engine.services": ["mode", "desired_command", "live_command"],
+  "deploy.engine.canary": ["health_command", "low", "medium", "high"],
+  "deploy.engine.rollback": ["budget_s", "shift_back_command", "abort_command"],
 };
 
 /** Typed keys: list | number | bool | scalar | {enum:[...]}. */
@@ -31,6 +37,12 @@ export const TYPES = {
   "verification.ci_local.budget_minutes": "number",
   "verification.ci_local.max_parallel": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
+  "deploy.engine.enabled": "bool",
+  "deploy.engine.stage_timeout_s": "number",
+  "deploy.engine.stages": "list",
+  "deploy.engine.colour.names": "list",
+  "deploy.engine.services.mode": { enum: ["off", "shadow", "enforce"] },
+  "deploy.engine.rollback.budget_s": "number",
   "billing.enabled": "bool",
   "gate.required_checks": "list",
 };
@@ -57,7 +69,7 @@ export function scanKeys(text) {
     if (/^\s*(#.*)?$/.test(line)) continue;
     const indent = line.match(/^ */)[0].length;
     if (skipAbove >= 0) { if (indent > skipAbove) continue; skipAbove = -1; }
-    if (/^\s*-(\s|$)/.test(line)) continue;
+    if (/^\s*-(\s|$)/.test(line)) { skipAbove = indent; continue; } // a list item; the keys of a map item (deeper lines) belong to the item, not to the parent
     const m = line.match(/^( *)([A-Za-z_][\w.-]*)\s*:(?:\s+(.*))?$/);
     if (!m) continue;
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
