@@ -19,6 +19,8 @@ export const TOP_LEVEL = [
 /** Sections whose direct children are a closed set: another child is an unknown key. */
 export const CLOSED = {
   "verification.ci_local": ["mode", "exclude_jobs", "include_jobs", "extra_commands", "services", "budget_minutes", "max_parallel"],
+  "env.snapshots": ["enabled", "store", "keep", "max_age_days", "ready", "base_image", "image"],
+  "env.proxies": ["npm", "pypi", "apt", "git"],
 };
 
 /** Typed keys: list | number | bool | scalar | {enum:[...]}. */
@@ -30,6 +32,11 @@ export const TYPES = {
   "verification.ci_local.extra_commands": "list",
   "verification.ci_local.budget_minutes": "number",
   "verification.ci_local.max_parallel": "number",
+  "env.snapshots.enabled": "bool",
+  "env.snapshots.store": { enum: ["local", "oci"] },
+  "env.snapshots.keep": "number",
+  "env.snapshots.max_age_days": "number",
+  "env.snapshots.ready": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "billing.enabled": "bool",
   "gate.required_checks": "list",

@@ -109,6 +109,7 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock schedd [status | watchdog]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid, batches and last tick; watchdog restarts a stalled daemon"],
     ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes] [--sandboxes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale run ledgers, labelled containers/volumes, agent worktrees, abandoned branches, scratch files, orphaned processes and sandboxes; unowned resources and unpushed work are only reported"],
+    ["npx forgedock env key|build|status|gc [--store local|oci] [--out <dir>] [--apply] [--json]", "Environment library (forge.yaml env.snapshots, default off): dependency snapshots keyed by lockfiles + toolchain pins + lane_tools, built once outside jobs and reused by lane sandboxes, CI jobs and deploy images; build writes the recipe and manifest only (docs/ENV-LIBRARY.md)"],
   ]],
 ];
 
