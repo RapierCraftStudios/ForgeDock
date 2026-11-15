@@ -1,1 +1,0 @@
-{"type":"feature","severity":"P2","exists_in":"base","flag":null,"exists_in_evidence":{"cite":"bin/lean/release-flakes.mjs:39 classifyFailure is infra-only; bin/lean/ci-classify.mjs absent","repro":{"command":"test -f bin/lean/ci-classify.mjs","red_on_live":true,"green_after":true}}}
