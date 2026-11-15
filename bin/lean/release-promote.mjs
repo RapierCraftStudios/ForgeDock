@@ -262,15 +262,15 @@ export async function promoteDecision({ io, repo, cfg, sha, digests, catalogue =
   return decide(cfg, evidence, { ...target, digests, required: cfg.requiredChecks, configHash: configHash(cfg), ...(evidence ? { checks } : {}) }, { catalogue, safety });
 }
 
+/** Agreement of one record: a would-skip is right when the pre-gate passed and wrong when it failed; no claim otherwise. */
+export const agreeOf = (wouldSkip, observed) => (wouldSkip && (observed === "pass" || observed === "fail") ? observed === "pass" : null);
+
 /** Record a decision as the `forge/promote-decision` check run of the target commit (the audit trail in both modes). */
 export async function recordDecision({ io, repo }, d, { observed = null, minutes = null, now = Date.now() } = {}) {
   const doc = { schema: DECISION_SCHEMA, mode: d.mode, commit: d.commit, would_skip: !!d.would_skip, skipped: !!d.skip_pre_gate, reasons: d.reasons ?? [], evidence_commit: d.evidence_commit ?? null, observed, agree: agreeOf(d.would_skip, observed), minutes, at: new Date(now).toISOString() };
   await postDoc({ io, repo, sha: d.commit, name: DECISION_CHECK, title: `promote ${d.mode}`, summary: `${d.would_skip ? "would skip" : "would not skip"} the pre-gate${observed ? `; the pre-gate ${observed === "pass" ? "passed" : "failed"}` : ""}`, doc });
   return doc;
 }
-
-/** Agreement of one record: a would-skip is right when the pre-gate passed and wrong when it failed; no claim otherwise. */
-export const agreeOf = (wouldSkip, observed) => (wouldSkip && (observed === "pass" || observed === "fail") ? observed === "pass" : null);
 
 /**
  * Shadow agreement over decision records. `disagree` is the number that matters: promote would have skipped a pre-gate that failed.
