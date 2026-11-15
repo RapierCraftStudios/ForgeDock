@@ -26,7 +26,7 @@ const fail = (name, reason) => ({ name, status: "fail", reason: oneLine(reason) 
 const skip = (name, reason) => ({ name, status: "skip", reason });
 
 /** forge.yaml `ci` section -> {generated: [{cmd, paths}], tools, timeoutS}; junk keeps the defaults. */
-export function parsePreflightConfig(cwd) {
+export function parseCiPreflightConfig(cwd) {
   let sec = null;
   try { sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.ci; } catch { /* no forge.yaml: defaults */ }
   const s = sec && typeof sec === "object" ? sec : {};
@@ -89,9 +89,9 @@ export function workflowEnvKeys(text) {
 }
 
 /** Runs every check; @returns {ok, budgetMs, elapsedMs, checks}. `deps`: {run, which, now, env}. */
-export function runPreflight(cwd, deps = {}) {
+export function runCiPreflight(cwd, deps = {}) {
   const now = deps.now ?? Date.now, env = deps.env ?? process.env, run = deps.run ?? defaultRun, which = deps.which ?? ((c) => defaultWhich(c, env));
-  const cfg = parsePreflightConfig(cwd), budgetMs = cfg.timeoutS * 1000, start = now();
+  const cfg = parseCiPreflightConfig(cwd), budgetMs = cfg.timeoutS * 1000, start = now();
   const left = () => budgetMs - (now() - start);
   const exec = (cmd, args) => run(cmd, args, { cwd, timeoutMs: left() });
   const guard = (name, fn) => {
@@ -172,7 +172,7 @@ export async function ciPreflightFromCli(argv, deps = {}) {
   const out = deps.out ?? ((l) => console.log(l)), cwd = deps.cwd ?? process.cwd();
   const unknown = argv.find((a) => a !== "--json");
   if (unknown) throw new Error(`unknown argument ${unknown}; ${PREFLIGHT_USAGE}`);
-  const res = runPreflight(cwd, deps);
+  const res = runCiPreflight(cwd, deps);
   await emitEvents(res, deps);
   if (argv.includes("--json")) out(JSON.stringify(res));
   else {
