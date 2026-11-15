@@ -288,6 +288,31 @@ export function makeHostProbe() {
 }
 
 /**
+ * #5718: the read and cancel seams of CI runs, on any `gh(args)` runner (the lane io and `forgedock ci cancel-superseded` share them).
+ * `checkSuites(sha)`: [{id, status, conclusion, app}] (status queued | in_progress | completed), for verify.settle.
+ * `branchRuns(branch)`: the queued and running runs, [{id, headSha, status, event, actor, createdAt}], for verify.cancel_superseded.
+ * `viewerLogin()`: the login this process acts as; an installation token has no user, so a bot sets FORGE_BOT_LOGIN.
+ */
+export function ciRunSeams({ gh, repo }) {
+  const rows = (out) => String(out ?? "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+  return {
+    async checkSuites(sha) { return rows(await gh(["api", "--paginate", `repos/${repo}/commits/${sha}/check-suites`, "--jq", ".check_suites[] | {id, status, conclusion, app: .app.slug} | @json"])); },
+    async branchRuns(branch) {
+      const jq = ".workflow_runs[] | {id, headSha: .head_sha, status, event, actor: (.triggering_actor.login // .actor.login // null), createdAt: .created_at} | @json";
+      const out = [];
+      for (const status of ["queued", "in_progress"]) out.push(...rows(await gh(["api", "--paginate", `repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&status=${status}&per_page=100`, "--jq", jq])));
+      return out;
+    },
+    async cancelRun(id) { await gh(["api", "-X", "POST", `repos/${repo}/actions/runs/${id}/cancel`]); },
+    async viewerLogin() {
+      const env = String(process.env.FORGE_BOT_LOGIN ?? "").trim();
+      if (env) return env;
+      try { return String(await gh(["api", "user", "--jq", ".login"])).trim() || null; } catch { return null; }
+    },
+  };
+}
+
+/**
  * Required status checks for `lane` (#4158): the union of classic branch protection (contexts + checks) and the
  * repository rulesets that apply to the branch (`rules/branches/{lane}`, type required_status_checks). Each source
  * fails independently to [] (so one never hides the other); `unreadable` is set when a source failed for a reason other than a 404 (#5382).
@@ -458,6 +483,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         return { name: c.name, state, url: c.url ?? null, id: c.id ?? null, conclusion: c.status === "completed" ? String(c.conclusion ?? "").toLowerCase() || null : null }; // #4387 id orders attempts; #4403 raw conclusion (skipped = not run)
       });
     },
+    ...ciRunSeams({ gh: run("gh"), repo }), // #5718: checkSuites, branchRuns, cancelRun, viewerLogin
     /**
      * #4270 verify.check_run: one completed check run on `sha` (`gh api -X POST repos/<repo>/check-runs`, JSON on stdin).
      * Needs a token allowed to create check runs (GitHub App, checks:write). Resolves {id, html_url}; throws on failure.

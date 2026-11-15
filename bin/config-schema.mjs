@@ -33,6 +33,9 @@ export const TYPES = {
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "billing.enabled": "bool",
   "gate.required_checks": "list",
+  "verify.settle": { enum: ["fixed", "shadow", "condition"] }, // #5718
+  "verify.cancel_superseded": { enum: ["off", "own", "all", "true", "false"] },
+  "stats.ledger_ci_workflows": "list",
 };
 
 /** Keys the legacy `full` path never reads (the core path reads them: bin/engine-cli.mjs readEnvConfig, readConformanceMode). */

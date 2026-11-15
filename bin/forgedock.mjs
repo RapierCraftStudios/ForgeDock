@@ -4420,7 +4420,11 @@ switch (command) {
     // Actions-minutes budget and CI placement policy (#5278): `forgedock ci budget`.
     const { ciFromCli } = await import("./lean/ci-budget.mjs");
     try {
-      exitCode = await ciFromCli(restArgs);
+      if (restArgs[0] === "cancel-superseded") { // #5718: cancel the verification runs of a superseded head (off unless verify.cancel_superseded or --mode)
+        const [{ cancelSupersededFromCli }, { ciRunSeams }, { defaultGh, isValidRepo }, { resolveRepo }, { readVerify }] = await Promise.all([import("./lean/verify.mjs"), import("./lean/effects.mjs"), import("./stats/github-source.mjs"), import("./stats/index.mjs"), import("./engine-cli.mjs")]);
+        const repo = resolveRepo(null);
+        exitCode = await cancelSupersededFromCli(restArgs.slice(1), { gh: defaultGh, repo: isValidRepo(repo) ? repo : null, config: readVerify() ?? {}, seams: ({ repo: r }) => ciRunSeams({ gh: defaultGh, repo: r }) });
+      } else exitCode = await ciFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
