@@ -83,7 +83,7 @@ import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { ciSignal, cancelDecision, eventLog } from "./ci-watch.mjs";
 import { classifyCiFailure } from "./ci-classify.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky, cancelSuperseded } from "./verify.mjs";
 import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, NO_TRIGGER } from "./e2e.mjs";
 import { transferToEpic } from "./acceptance.mjs";
 import { laneBackendId } from "./limits.mjs";
@@ -2828,7 +2828,12 @@ export async function runCore(o) {
         files = await changedFiles();
         if (ciGateNames === undefined) ciGateNames = vcfg.workflow ? null : await ciGate({ io, lane, mergeWait, verify: vcfg });
         const verifyArgs = { io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns, gate: ciGateNames,
-          push: () => gitPush(["push", "-u", "origin", branch]),
+          push: !vcfg.cancelSuperseded || vcfg.cancelSuperseded === "off" ? () => gitPush(["push", "-u", "origin", branch]) : async () => { // #5718: runs of the head this push replaces are cancelled
+            const pushedAt = now(); await gitPush(["push", "-u", "origin", branch]);
+            const c = await cancelSuperseded({ io, branch, head, mode: vcfg.cancelSuperseded, pushedAt });
+            if (c.cancelled.length || c.failed.length) ev({ event: "CI_SUPERSEDED_CANCEL", head, cancelled: c.cancelled, failed: c.failed });
+          },
+          onSettle: (rec) => ev({ event: "CI_SETTLE", head, ...rec }), // #5718: verify.settle shadow/condition record
           onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } };
         let v = await runCiVerify(verifyArgs);
         if (v.runId != null) ciSeenRuns.push(v.runId);

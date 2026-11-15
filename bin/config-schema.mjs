@@ -68,6 +68,9 @@ export const TYPES = {
   "deploy.engine.rollback.budget_s": "number",
   "billing.enabled": "bool",
   "gate.required_checks": "list",
+  "verify.settle": { enum: ["fixed", "shadow", "condition"] }, // #5718
+  "verify.cancel_superseded": { enum: ["off", "own", "all", "true", "false"] },
+  "stats.ledger_ci_workflows": "list",
   "deploy.promote.enabled": "bool",
   "deploy.promote.shadow": "bool",
   "deploy.promote.required_checks": "list",

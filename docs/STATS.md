@@ -260,6 +260,49 @@ telemetry comment in the window get their full comment list re-read (6 in parall
 low). A run with no `--since` and no cache still walks the whole history once. Telemetry comments are edited in place, which
 the comment window catches; if a cached item still looks stale, run with `--refresh`.
 
+## Release ledger (`--release-ledger`, forge#5718)
+
+```bash
+npx forgedock stats --release-ledger [--repo <owner/repo>] [--since <date|21d>] [--json]
+npx forgedock stats --release-ledger --baseline save      # freeze today's numbers
+npx forgedock stats --release-ledger --baseline compare   # before/after, measured the same way
+```
+
+One table of what a release costs today against the targets, read from the GitHub Actions runs, jobs and steps API plus
+release state. Nothing is estimated: a metric without a sample prints `n/a`. The window defaults to the last 21 days.
+
+| Row | How it is measured |
+|-----|--------------------|
+| Mechanical failure surfaced | Failed CI runs whose first failed step is a checkout, toolchain, dependency or lint step: run start to run end (when the failure is visible today), p50 |
+| Job setup (self-hosted, hosted) | Per job, seconds in checkout, toolchain and dependency-install steps (classified by step name, any ecosystem); the p50 of each class, summed |
+| CI wall time per round | A round is every CI run of one head sha of a release PR: first run created to last run finished (first attempt), p50; cancelled rounds are left out |
+| Pushes per release PR | Distinct head shas with CI runs per release PR, p50 (and max) |
+| Deploy pre-gate | Live deploys: run start to the start of the deploy job, p50 |
+| Image build | Per job, minutes in image-build steps, p50 |
+| Deploy job (rollout) | Live deploys: the deploy job's minutes, p50; the report lists its ten longest steps |
+| Release PR opened -> live | PR creation to the end of the first deploy that reached live for its merge commit: median and p90; `clean` = live on the first deploy attempt |
+| Queue time | Job created to job started, p90 |
+| CI minutes in failed / cancelled jobs | Share of job time by job conclusion |
+| CI rounds that fail | Share of judged rounds with a failed run |
+| Deploy attempts that reached live | Deploy runs in which a job ran, and the share whose deploy job succeeded |
+
+The report also prints the critical-path jobs (the job that ends last in a round, with its p50 and failure rate).
+
+What counts as a release PR, CI run and deploy is generic and can be pinned in forge.yaml (`stats.ledger_*`, see
+[CONFIG.md](CONFIG.md#stats-optional)): a release PR is a PR into the default branch (from `branches.staging` when set); its
+CI runs are the pull-request runs that name it (push runs of the head branch when the repo has none); the deploy workflow is
+the push/dispatch workflow on the default branch whose name says deploy, publish or release with the most runs.
+`--deploy-workflow <name|file>` and `--release-head <branch|any>` override per call. With `release.managed: true` the
+managed ledger's deploy attempt counts are merged in.
+
+Cost: one runs query per branch and event (the runs API takes seconds per page), then one jobs call per run, 4 at a time.
+Jobs of completed runs are cached in `~/.forge/stats-cache/<owner>_<repo>/actions-jobs.json`, so a weekly re-read only
+fetches new runs (`--no-cache` skips it). Every read is paginated and retried on transient GitHub errors.
+
+`--baseline save` writes the metrics to `release-ledger-baseline.json` next to that cache (`--baseline-file <path>` for a
+file you commit). `--baseline compare` prints each metric before and after with a verdict `improved|regressed|flat|n/a`
+(flat is within 5%, or 2 points for a share) and exits 2 when there is no baseline.
+
 ## Per-release regression rule (`--by version`, forge#4628)
 
 ```bash

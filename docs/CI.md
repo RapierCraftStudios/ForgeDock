@@ -204,6 +204,37 @@ Uncomment the `Set Commit Status` step in the workflow template to add a pass/fa
 
 ---
 
+## Superseded runs
+
+A push to a PR branch makes the runs of the previous head useless, but GitHub lets them finish. On ForgeDock's own
+release PRs, 39% of CI job minutes over 7 days (2026-11-08 to 2026-11-15) went to jobs that were then cancelled. Two ways to stop paying for it:
+
+**In the workflow (preferred, no API calls).** Add a `concurrency` block to every workflow that only verifies a head:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+
+The group is per workflow and per PR, so a new push cancels only the older run of the same workflow on the same PR.
+`cancel-in-progress` is limited to pull-request events: a push or dispatch run on a protected branch may be a deploy, and
+a deploy must never be cancelled half way. Do not add the block to a deploy workflow; give that one a group with
+`cancel-in-progress: false` so deploys queue instead.
+
+**From ForgeDock (when the workflow cannot be edited).** `verify.cancel_superseded: own` in forge.yaml makes a lane cancel
+the pull-request runs of its own branch for an older head right after it pushes (default `off`; see
+[CONFIG.md](CONFIG.md#verify-optional)). For any branch or PR, by hand or from a hook:
+
+```bash
+npx forgedock ci cancel-superseded --pr 123 --dry-run   # list what would be cancelled
+npx forgedock ci cancel-superseded --pr 123 --mode own  # cancel the runs this actor triggered
+```
+
+It cancels only queued or running `pull_request` / `pull_request_target` runs whose head sha is not the branch's current
+head. The checks of the current head are untouched, so no gate gets weaker. Measure the effect with
+`forgedock stats --release-ledger` (row "CI minutes in cancelled jobs").
+
 ## Troubleshooting
 
 **Review job fails immediately with `ANTHROPIC_API_KEY not set`**

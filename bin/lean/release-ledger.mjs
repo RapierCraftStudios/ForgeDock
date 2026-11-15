@@ -220,3 +220,24 @@ export async function recordTrain(ctx, rec, now = Date.now()) {
   const at = new Date(now).toISOString();
   return updateActive(ctx, ["train"], (active) => ({ patch: { train: { ...(active.train ?? {}), [rec.release ?? "-"]: { ...rec, lane: "train", rollout_invalidated: true, at } } }, control: { at, verb: "train", lane: "train", release: rec.release ?? null, state: rec.state ?? null, units: rec.units?.length ?? 0, rollout_invalidated: true } }));
 }
+
+/**
+ * #5718: release state for `forgedock stats --release-ledger`. One record per managed release started at or after `sinceMs`:
+ * `{id, pr, startedAt, status, live, deployAttempts}` (read-only; a release without a readable state is skipped). The id
+ * carries the start time (`rYYYYMMDD-HHMMSS-n`), so older releases cost no read.
+ */
+export async function releaseRecords(ctx, { sinceMs = 0 } = {}) {
+  const out = [];
+  for (const id of await listLedgers(ctx)) {
+    const m = /^r(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(id);
+    if (m && Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) < sinceMs) continue;
+    let s = null;
+    try { s = (await readLedger(ctx, id))?.state ?? null; } catch { s = null; }
+    if (!s) continue;
+    const pr = s.steps?.["release-pr"]?.result?.pr ?? s.pr ?? null;
+    const phase = String(s.deploy?.phase ?? "");
+    out.push({ id, pr: pr == null ? null : Number(pr), startedAt: s.startedAt ?? null, status: s.status ?? null,
+      live: ["live", "done"].includes(String(s.status ?? "").toLowerCase()) || phase.startsWith("LIVE"), deployAttempts: Number(s.deploy?.attempts) || 0 });
+  }
+  return out;
+}

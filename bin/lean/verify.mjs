@@ -29,6 +29,30 @@ export const VERIFY_CHECK_NAME = "forgedock/verify";
 /** Checks API output.text limit is 65535 characters; stay well under it. */
 export const VERIFY_TEXT_CAP = 60000;
 const OK = ["success", "neutral", "skipped"];
+/** #5718 `verify.cancel_superseded`: off (default) | own (runs this actor triggered) | all (every run of the branch). */
+export const CANCEL_SUPERSEDED_MODES = Object.freeze(["off", "own", "all"]);
+export const parseCancelSuperseded = (v) => { const s = String(v ?? "").trim().toLowerCase(); return s === "true" ? "own" : CANCEL_SUPERSEDED_MODES.includes(s) ? s : "off"; };
+/**
+ * #5718 `verify.settle`: how long gate checks that have not reported are waited on. `fixed` (default): the whole grace
+ * period, as before. `condition`: until the head's check suites say nothing more can report (settleKnown), at most the
+ * grace period. `shadow`: waits as `fixed` and records when `condition` would have decided and whether the gating set
+ * was the same.
+ */
+export const SETTLE_MODES = Object.freeze(["fixed", "shadow", "condition"]);
+/** The condition never holds before this long after the push: GitHub creates check suites asynchronously. */
+export const SETTLE_MIN_MS = 20000;
+/**
+ * #5718: true when the required set of a head is known: its check suites were read on two consecutive polls with the
+ * same ids, at least one exists, every suite is completed, and `minMs` has passed. A suite that is queued or in progress
+ * may still register checks, so the set is not known. `prev` is the id list of the previous poll (null on the first).
+ * @returns {{known: boolean, ids: string[]}}
+ */
+export function settleKnown({ suites, prev, elapsedMs, minMs = SETTLE_MIN_MS }) {
+  const list = Array.isArray(suites) ? suites : [];
+  const ids = list.map((x) => String(x?.id)).sort();
+  const stable = Array.isArray(prev) && prev.length === ids.length && prev.every((id, i) => id === ids[i]);
+  return { known: ids.length > 0 && stable && elapsedMs >= minMs && list.every((x) => String(x?.status).toLowerCase() === "completed"), ids };
+}
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
@@ -56,6 +80,7 @@ export function parseVerify(sec = {}) {
   const rawChecks = Array.isArray(s.checks) ? s.checks : str(s.checks).split(",");
   const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
   const checks = names.length ? [...new Set(names)] : null;
+  const settle = SETTLE_MODES.includes(str(s.settle).toLowerCase()) ? str(s.settle).toLowerCase() : "fixed"; // #5718: both keys are absent from the result at their defaults
   const postMerge = str(s.post_merge) || null;
   // a flow list (`[a, "b c"]`) arrives as one scalar from the one-level reader: strip the brackets and quotes
   const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).trim().replace(/^\[(.*)\]$/s, "$1").split(",");
@@ -75,7 +100,7 @@ export function parseVerify(sec = {}) {
   const baselines = parseBaselines(s.baselines); // #5448: suites validate runs when matching paths change
   const precheckBlock = str(s.precheck_block).toLowerCase() === "true"; // #5079: a still-failing declared check stops the lane (ci.red)
   const guardBlock = str(s.guard_block).toLowerCase() !== "false"; // #5239: verify.invariants (the pre-merge guard set) block the merge unless false
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, enumeratingMechanical, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), ...(baselines.length ? { baselines } : {}), ...(Object.keys(sandboxes).length ? { sandboxes } : {}), e2e: parseE2e(s) };
+  return { ...(settle !== "fixed" ? { settle } : {}), ...(parseCancelSuperseded(s.cancel_superseded) !== "off" ? { cancelSuperseded: parseCancelSuperseded(s.cancel_superseded) } : {}), mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, enumeratingMechanical, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), ...(baselines.length ? { baselines } : {}), ...(Object.keys(sandboxes).length ? { sandboxes } : {}), e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
@@ -170,8 +195,11 @@ const sameSha = (a, b) => Boolean(a && b) && (String(a).startsWith(b) || String(
  * (rerunTarget) makes the re-verify after a rerun wait for newer attempts than the ones judged red.
  */
 export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMaxMinutes = 360, now = () => Date.now(), sleep, random = Math.random,
-  push = async () => {}, exclude = [], onPoll = async () => {}, graceMs = DEFAULT_GRACE_MS, gate = null, rerunOf = null }) {
+  push = async () => {}, exclude = [], onPoll = async () => {}, graceMs = DEFAULT_GRACE_MS, gate = null, rerunOf = null, onSettle = () => {} }) {
   const v = verify ?? parseVerify({});
+  // #5718: `fixed` never reads check suites; the two other modes need the seam, else they are `fixed` too.
+  const settleMode = SETTLE_MODES.includes(v.settle) && v.settle !== "fixed" && io?.checkSuites ? v.settle : "fixed";
+  const st = { prev: null, knownAt: null, knownNames: null, reported: false };
   const files = verifiableFiles(changedFiles);
   if (skipsCi(files, v.skipPaths)) return { result: "skipped", failures: [], runUrl: null, detail: `all ${files.length} changed file(s) match skip_paths` };
   await push();
@@ -211,7 +239,20 @@ export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMa
       const gating = gateSet ? latest.filter((c) => gateSet.has(c.name)) : [];
       const relevant = gating.length ? gating : latest;
       const missing = gateSet ? [...gateSet].filter((n) => !latest.some((c) => c.name === n)) : [];
-      const waitMissing = missing.length && now() - startedAt < graceMs;
+      let waitMissing = missing.length && now() - startedAt < graceMs;
+      if (settleMode !== "fixed" && missing.length && st.knownAt === null && waitMissing) {
+        let suites = null;
+        try { suites = await io.checkSuites(head); } catch { suites = null; } // unreadable: not known, keep waiting
+        const k = settleKnown({ suites, prev: st.prev, elapsedMs: now() - startedAt });
+        st.prev = suites ? k.ids : null;
+        if (k.known) { st.knownAt = now() - startedAt; st.knownNames = (gating.length ? gating : latest).map((c) => c.name).sort(); }
+      }
+      if (settleMode === "condition" && st.knownAt !== null) waitMissing = false;
+      if (settleMode !== "fixed" && missing.length && !waitMissing && !st.reported) {
+        st.reported = true;
+        const names = relevant.map((c) => c.name).sort();
+        try { onSettle({ mode: settleMode, missing, waited_ms: now() - startedAt, known_at_ms: st.knownAt, grace_ms: graceMs, agreed: st.knownNames === null ? null : JSON.stringify(st.knownNames) === JSON.stringify(names) }); } catch { /* a record, never a verdict */ }
+      }
       if (relevant.length && !waitMissing && relevant.every((c) => c.state !== "pending")) {
         const failed = relevant.filter((c) => c.state === "failure");
         const ignored = gating.length ? latest.filter((c) => !gateSet.has(c.name) && c.state === "failure").map((c) => c.name) : [];
@@ -225,6 +266,37 @@ export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMa
     await onPoll();
     await sleep(ciPollDelayMs(i, random));
   }
+}
+
+/** Events whose runs only verify a head; a push or dispatch run may deploy, so it is never cancelled here. */
+export const SUPERSEDED_EVENTS = Object.freeze(["pull_request", "pull_request_target"]);
+/**
+ * #5718: the runs of `branch` a push of `head` superseded (pure): queued or running, of a verification event, for another
+ * head sha, created before `pushedAt` when it is given, and under `own` triggered by `actor`. `runs`: [{id, headSha, status, event, actor, createdAt}].
+ */
+export function supersededRuns({ runs, head, mode = "own", actor = null, events = SUPERSEDED_EVENTS, pushedAt = null }) {
+  if (mode !== "own" && mode !== "all") return [];
+  if (!head || (mode === "own" && !actor)) return [];
+  const live = ["queued", "in_progress", "waiting", "pending", "requested"];
+  return (runs ?? []).filter((r) => r?.id != null && r.headSha && !sameSha(r.headSha, head) && live.includes(String(r.status).toLowerCase()) && events.includes(r.event)
+    && (mode === "all" || String(r.actor ?? "").toLowerCase() === String(actor).toLowerCase()) && (pushedAt == null || !(Date.parse(r.createdAt) > pushedAt)));
+}
+/**
+ * #5718: cancel the superseded runs of `branch` after `head` was pushed. Seams: `io.branchRuns(branch)`, `io.cancelRun(id)`,
+ * `io.viewerLogin()` (only for `own`). Never throws and never touches a run of `head`: {cancelled: id[], failed: id[], skipped?: why}.
+ */
+export async function cancelSuperseded({ io, branch, head, mode = "off", pushedAt = null, dryRun = false }) {
+  if (mode !== "own" && mode !== "all") return { cancelled: [], failed: [], skipped: "off" };
+  if (!io?.branchRuns || !io?.cancelRun) return { cancelled: [], failed: [], skipped: "no seam" };
+  let runs = [], actor = null;
+  try { actor = mode === "own" ? await io.viewerLogin?.() : null; runs = (await io.branchRuns(branch)) ?? []; } catch { return { cancelled: [], failed: [], skipped: "runs unreadable" }; }
+  if (mode === "own" && !actor) return { cancelled: [], failed: [], skipped: "actor unknown" };
+  const out = { cancelled: [], failed: [] };
+  for (const r of supersededRuns({ runs, head, mode, actor, pushedAt })) {
+    if (dryRun) { out.cancelled.push(r.id); continue; }
+    try { await io.cancelRun(r.id); out.cancelled.push(r.id); } catch { out.failed.push(r.id); } // already finished (409) or no permission: the run just completes
+  }
+  return out;
 }
 
 const VALIDATE_KINDS = ["validate_missing", "validate_failed"], REQUIREMENT_KINDS = ["requirement_unimplemented", "untracked_deferral"];
@@ -264,4 +336,27 @@ export function verifyReport({ head = null, commands = null, structure = null, u
   let json = JSON.stringify({ head, conclusion, gates }, null, 2);
   if (json.length > VERIFY_TEXT_CAP) json = JSON.stringify({ head, conclusion, truncated: true, gates: gates.map((g) => ({ id: g.id, ok: g.ok, ran: g.ran, evidence: JSON.stringify(g.evidence).slice(0, Math.floor(VERIFY_TEXT_CAP / (gates.length + 1))) })) }, null, 2);
   return { conclusion, gates, title, summary, text: "```json\n" + json + "\n```" };
+}
+
+/**
+ * #5718 `forgedock ci cancel-superseded (--pr N | --branch B) [--repo o/r] [--mode own|all] [--dry-run]`: cancel the
+ * verification runs an older head of a branch still has in flight. The mode comes from forge.yaml
+ * `verify.cancel_superseded` unless `--mode` is given; off does nothing. `deps`: {seams({repo}), gh(args), config, print}.
+ */
+export async function cancelSupersededFromCli(argv, deps) {
+  const print = deps.print ?? ((s) => process.stdout.write(`${s}\n`));
+  const opt = (name) => { const i = argv.indexOf(name); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : null; };
+  const pr = opt("--pr"), dryRun = argv.includes("--dry-run");
+  let branch = opt("--branch"), head = null;
+  const mode = opt("--mode") ? parseCancelSuperseded(opt("--mode")) : deps.config?.cancelSuperseded ?? "off";
+  const repo = opt("--repo") ?? deps.repo ?? null;
+  if (!repo || (!pr && !branch) || (pr && !/^\d+$/.test(pr))) { print("usage: forgedock ci cancel-superseded (--pr N | --branch B) [--repo owner/repo] [--mode own|all] [--dry-run]"); return 2; }
+  if (mode === "off") { print("cancel-superseded: off (set verify.cancel_superseded: own|all in forge.yaml, or pass --mode)"); return 0; }
+  try {
+    if (pr) { const v = JSON.parse(await deps.gh(["pr", "view", pr, "-R", repo, "--json", "headRefName,headRefOid"])); branch = v.headRefName; head = v.headRefOid; }
+    else head = String(await deps.gh(["api", `repos/${repo}/branches/${encodeURIComponent(branch)}`, "--jq", ".commit.sha"])).trim();
+  } catch (e) { print(`cancel-superseded: cannot read the head of ${pr ? `#${pr}` : branch}: ${String(e?.stderr ?? e?.message ?? e).split("\n")[0].slice(0, 200)}`); return 1; }
+  const r = await cancelSuperseded({ io: deps.seams({ repo }), branch, head, mode, dryRun });
+  print(`cancel-superseded: ${branch} at ${String(head).slice(0, 12)} (${mode}${dryRun ? ", dry run" : ""}): ${r.skipped ? `skipped (${r.skipped})` : `${r.cancelled.length} run(s) ${dryRun ? "would be cancelled" : "cancelled"}${r.cancelled.length ? `: ${r.cancelled.join(", ")}` : ""}${r.failed.length ? `; ${r.failed.length} could not be cancelled` : ""}`}`);
+  return r.skipped && r.skipped !== "off" ? 1 : 0;
 }
