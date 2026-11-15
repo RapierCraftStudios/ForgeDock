@@ -1,0 +1,36 @@
+TAP version 13
+# Subtest: grp
+    # Subtest: one
+    ok 1 - one
+      ---
+      duration_ms: 1.5
+      type: 'test'
+      ...
+    # Subtest: two <bad>
+    not ok 2 - two <bad>
+      ---
+      duration_ms: 2.5
+      type: 'test'
+      location: '/work/repo/test/math.test.js:3:48'
+      failureType: 'testCodeFailure'
+      error: '1 == 2'
+      ...
+    1..2
+not ok 1 - grp
+  ---
+  duration_ms: 4.4
+  type: 'suite'
+  location: '/work/repo/test/math.test.js:3:1'
+  failureType: 'subtestsFailed'
+  ...
+# Subtest: top
+ok 2 - top
+  ---
+  duration_ms: 0.25
+  type: 'test'
+  ...
+# Subtest: later
+ok 3 - later # SKIP not yet
+1..3
+# tests 4
+# fail 1
