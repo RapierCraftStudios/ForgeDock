@@ -54,6 +54,15 @@ export const withEnv = (cmd, env) => `export ${Object.entries(env).map(([k, v]) 
 const parseJson = (s) => { try { const o = JSON.parse(String(s ?? "").trim()); return o && typeof o === "object" && !Array.isArray(o) ? o : null; } catch { return null; } };
 
 export const engineOn = (e) => !!e && e.enabled === true;
+/** True when the `deploy:` section of the text has an `engine:` child (a line scan: used only when the YAML does not parse). */
+function hasEngineBlock(text) {
+  let inDeploy = false;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/^\S/.test(line)) inDeploy = line.startsWith("deploy:");
+    else if (inDeploy && line.trimStart().startsWith("engine:")) return true;
+  }
+  return false;
+}
 
 /**
  * forge.yaml `deploy.engine`, or null when it is off. No git call unless the working copy turns it on; then the default
@@ -62,7 +71,7 @@ export const engineOn = (e) => !!e && e.enabled === true;
 export function readEngine({ raw, io, def }) {
   const text = String(raw ?? "");
   if (!/^deploy:/m.test(text)) return null;
-  const pick = (t) => { try { return load(String(t), { schema: JSON_SCHEMA })?.deploy?.engine ?? null; } catch (e) { return /^deploy:[^\n]*\n(?:(?:[ \t]+[^\n]*|[ \t]*)\n)*?[ \t]+engine:/m.test(String(t)) ? { enabled: true, error: `forge.yaml is not valid YAML (${String(e?.message ?? e).split("\n")[0]})` } : null; } };
+  const pick = (t) => { try { return load(String(t), { schema: JSON_SCHEMA })?.deploy?.engine ?? null; } catch (e) { return hasEngineBlock(t) ? { enabled: true, error: `forge.yaml is not valid YAML (${String(e?.message ?? e).split("\n")[0]})` } : null; } };
   let e = pick(text);
   if (!engineOn(e)) return null;
   if (io?.git && def) { let t = null; try { t = io.git(["show", `origin/${def}:forge.yaml`]); } catch { t = null; } if (t != null) e = pick(t); }
