@@ -1542,6 +1542,19 @@ env:
   toolchain: "pnpm@10.4.1"              # optional: overrides the detected package manager; "off" disables detection
   setup: "bash scripts/reconcile-dev-db.sh"   # optional: run once per fresh lane worktree, before the builder
   sparse_max_kb: 1024                   # optional: tracked files this size or larger stay out of lane worktrees; 0 = full checkout
+  snapshots:                            # optional: environment library (#5714), off unless enabled
+    enabled: false
+    store: local                        # local | oci
+    keep: 3
+    max_age_days: 14
+    ready: 2
+    base_image: ghcr.io/acme/ci-base:1  # oci store: the image installs run in
+    image: ghcr.io/acme/shop-env        # oci store: repository snapshots are pushed to (tag = key)
+  proxies:                              # optional: caching proxies lanes use (pool/services); each key independent
+    npm: http://proxy-host:4873
+    pypi: http://proxy-host:3141/index
+    apt: http://proxy-host:3142
+    git: git://proxy-host:9418
 ```
 
 | Field | Type | Required | Description |
@@ -1550,7 +1563,16 @@ env:
 | `setup` | string | No | Shell command (`bash -c`) run once in each fresh lane worktree before the builder starts, with the lane's PATH and `TMPDIR`. Use it for environment drift the repo's migrations don't cover, for example a dev-database reconcile script. Timeout 15 min. A non-zero exit ends the lane `needs-human` with code `env.setup_failed`: an environment error, not a build failure. The builder never runs. |
 | `sparse_max_kb` | integer | No | Default `1024`. Lane worktrees are sparse checkouts: tracked files of this many KB or more (generated JSON, screenshots, PDFs, media) are not written to disk, which cuts per-lane disk in repos that track large assets (#4221). Lockfiles, manifests (`package.json`, `pyproject.toml`, `requirements*.txt`, ...), toolchain pins, `tsconfig*.json`, `forge.yaml`, `.gitattributes` and `.gitignore` are always checked out. A repo with no such file gets a plain checkout. The builder prompt names the absent files; `git sparse-checkout add /<path>` brings one back. `0` disables it. Git sets `extensions.worktreeConfig=true` in the repo's shared config; the sparse setting itself is per lane worktree, so the main checkout is unchanged. If the sparse setup fails, the lane uses a full checkout. |
 
-**Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`)
+| `snapshots.enabled` | boolean | No | Default `false`. Environment library (#5714, [ENV-LIBRARY.md](ENV-LIBRARY.md)): dependency trees are installed once per environment key (lockfiles + manifests + toolchain pin files + `execution.lane_tools` + image) outside any job and reused. With a pool provider, each launch asks the pool agent to keep the repo's snapshot built and staged in the cache volume; a lane whose lockfiles match claims a staged copy by directory rename (`Dependencies (...): hit (env snapshot (rename))`), and any other lane installs as before. Absent or `false`: no launch field, no lane env, no helper container. |
+| `snapshots.store` | `local` \| `oci` | No | Default `local` (directory store: the pool cache volume, or `FORGE_ENV_ROOT`, default `~/.forge/env`). `oci`: `forgedock env build` writes a `Dockerfile.env` for `<image>:<key>`, used as a CI job container and a deploy base layer. |
+| `snapshots.keep` | integer | No | Default `3`. Snapshots kept per repo, newest by last use. |
+| `snapshots.max_age_days` | integer | No | Default `14`. Snapshots unused this long are removed; a repo's newest always stays. |
+| `snapshots.ready` | integer | No | Default `2`. Staged hardlink copies the pool keeps ready per snapshot; one is consumed per claiming lane. `0`: lanes hardlink from the snapshot instead. |
+| `snapshots.base_image` | string | `oci` only | The image the frozen installs run in (your CI base image with the toolchain installed). Part of the key. |
+| `snapshots.image` | string | `oci` only | Image repository without a tag; snapshots are `<image>:<key>`. |
+| `proxies.npm` / `pypi` / `apt` / `git` | URL | No | `http(s)://` or `git://` URLs of the opt-in caching services in `pool/services/docker-compose.yml`. Pool lanes get the matching package-manager variables (`npm_config_registry`, `PIP_INDEX_URL`, `UV_DEFAULT_INDEX`, `FORGE_APT_PROXY`, ...; full table in [ENV-LIBRARY.md](ENV-LIBRARY.md)). Absent keys change nothing. A value that is not such a URL is ignored. |
+
+**Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`); `forgedock env key|build|status|gc|stage` and pool launches read `snapshots` and `proxies` (`bin/env/env.mjs` `readEnvSnapshots`)
 
 ---
 
