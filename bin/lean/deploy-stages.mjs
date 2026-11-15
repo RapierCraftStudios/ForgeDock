@@ -5,7 +5,7 @@
  * in release-deploy.mjs is untouched). The repo declares ordered stages; each is a host command (`run`) or a dispatched
  * workflow, so ssh/compose/k8s stay in the repo. Every stage has a checkpoint `{key, parts, status, outputs, sha}`: the key
  * hashes the stage definition, the git blobs matching its `inputs` globs, the service slice, the outputs of the stages it
- * needs and the live baseline. A stage is skipped only when its checkpoint is `done`, the key is unchanged and its optional
+ * needs (or, for a stage without outputs, that stage's key) and the live baseline. A stage is skipped only when its checkpoint is `done`, the key is unchanged and its optional
  * read-only `check` still passes; everything else re-runs, so a resume starts at the first failed or incomplete stage and a
  * fix commit re-runs only the stages whose inputs it touched.
  * A failure before traffic moves leaves the old colour serving: no shift, no hold, no rollback trigger. A failure at or after
@@ -22,7 +22,7 @@ import { dispatchOnce } from "./release-rollback.mjs";
 import { verifyStep, verifyConfigured } from "./release-verify.mjs";
 import { deriveFacts, riskOf } from "./release-classify.mjs";
 import { unitGlobToRegExp } from "./release-unitmap.mjs";
-import { readActive, updateActive } from "./release-ledger.mjs";
+import { readActive, updateActive, heartbeat } from "./release-ledger.mjs";
 
 /** Stage kinds and the idempotency contract a stage of that kind must keep (the engine may run any stage twice). */
 export const KINDS = {
@@ -41,7 +41,7 @@ export const CANARY = { low: { steps: [100], wait_s: 0 }, medium: { steps: [10, 
 export const STAGES_KEY = "deploy_stages";
 export const ENGINE_KEYS = ["enabled", "live_release_command", "stage_timeout_s", "colour", "services", "canary", "rollback", "stages"];
 const STAGE_KEYS = ["id", "kind", "run", "workflow", "inputs", "needs", "services", "check", "outputs_command", "timeout_s"];
-const PART_NAMES = { def: "stage definition", paths: "files matching inputs", services: "service digests or config", needs: "outputs of an earlier stage", base: "live baseline or colour" };
+const PART_NAMES = { def: "stage definition", paths: "files matching inputs", services: "service digests or config", needs: "an earlier stage it needs changed", base: "live baseline or colour" };
 
 const blocked = (reason, extra = {}) => ({ blocked: true, reason, ...extra });
 const tail = (s, n = 300) => String(s ?? "").trim().slice(-n);
@@ -176,6 +176,14 @@ export function stageParts({ stage, tree, services, needs, base }) {
   return { def: hash({ kind: stage.kind, run: stage.run ?? null, workflow: stage.workflow ?? null, check: stage.check ?? null, outputs_command: stage.outputs_command ?? null }), paths: tree, services: services == null ? "-" : hash(services), needs: hash(needs), base: hash(base) };
 }
 export const partsKey = (parts) => hash(parts);
+/** What a later stage hashes for a stage it needs: its outputs, or, when it declares none, its key (so a changed input is never invisible downstream). */
+const token = (outputs, key) => (Object.keys(outputs ?? {}).length ? outputs : { ran: key ?? null });
+/** Keep the lease heartbeat fresh during a long deploy (the conductor takes over a stale lease, #5564). @returns {Promise<string|null>} why to stop */
+async function beat(ctx) {
+  const f = ctx.fence;
+  if (!f?.lctx || !f.lease) return null;
+  try { return (await heartbeat(f.lctx, f.lease)).fenced ? "fenced: another host took over the release lease" : null; } catch { return null; }
+}
 
 /** Run or skip a stage from its checkpoint. @returns {{run: boolean, why: string}} */
 export function decide(cp, parts) {
@@ -276,7 +284,7 @@ export async function planStages(ctx, sha, d = ctx.config.deploy ?? {}) {
     if (stage.services && x.sv.mode === "enforce" && !x.sv.active.length) dec = { run: false, why: "no changed services" };
     else if (!dec.run) dec.why += `${stage.check ? "; its check is probed at run time" : ""}${rerun.length ? `; re-runs if the outputs of ${rerun.join(", ")} change` : ""}`;
     if (dec.run) rerun.push(stage.id);
-    x.outputs[stage.id] = cp?.outputs ?? {}; // a stage that will run has no outputs yet: assume they stay as they were
+    x.outputs[stage.id] = token(cp?.outputs, dec.run ? partsKey(parts) : cp?.key); // a stage that will run has no outputs yet: assume declared outputs stay as they were
     stages.push({ stage: stage.id, kind: stage.kind, run: dec.run, why: dec.why, contract: KINDS[stage.kind] });
   });
   return { sha, target: target?.sha ?? null, colour: x.colour, risk: x.risk, canary: canaryPlan(eng, x.risk.risk), services: { mode: x.sv.mode, changed: x.sv.changed, unchanged: x.sv.unchanged }, stages };
@@ -319,8 +327,11 @@ async function runShift(ctx, x, stage, key, attempt) {
       if (!r.ok) return r;
       sh.since = now(); ctx.save();
     }
-    const wait = pct < 100 ? sh.since + plan.wait_s * 1000 - now() : 0;
-    if (wait > 0) await io.sleep(wait);
+    for (let wait = pct < 100 ? sh.since + plan.wait_s * 1000 - now() : 0; wait > 0; wait -= 60_000) { // sliced, so the lease stays fresh through a long wait
+      await io.sleep(Math.min(wait, 60_000));
+      const lost = await beat(ctx);
+      if (lost) return { refused: lost };
+    }
     if (x.eng.canary.health_command) {
       const h = await io.rehearse(withEnv(x.eng.canary.health_command, { ...env, FORGE_STAGE: stage.id }), { timeout: 120_000 });
       if (!h?.ok) return { fail: `canary health failed at ${pct}%: ${tail(h?.output) || "health command failed"}` };
@@ -391,7 +402,14 @@ export async function runStages(ctx, sha, d) {
   const eng = normalise(ctx.config.deployEngine);
   if (await freezeValue(io, repo, d.freeze_variable)) return blocked(`${d.freeze_variable} is set; the engine never deploys while a freeze is set (I26)`);
   const eg = (st.engine ??= { started_at: new Date(now()).toISOString() });
-  if (st.merge !== sha) { delete state.verify; st.merge = sha; } // a fix commit is verified from scratch
+  if (st.merge !== sha) { // a fix commit (--sha): verified from scratch, against its own expected digests
+    if (d.expected_digests_command) {
+      const r = await io.rehearse(withEnv(d.expected_digests_command, { FORGE_SHA: sha }), { timeout: 120_000 });
+      st.expected = r?.ok ? parseJson(r.output) : null;
+      if (!st.expected) return blocked("deploy.expected_digests_command returned no digests for the new sha; nothing was deployed");
+    }
+    delete state.verify; st.merge = sha;
+  }
   st.phase = "DEPLOYING"; ctx.save();
   const x = await prepare(ctx, eng, sha, st.target);
   if (x.blocked) return x;
@@ -409,8 +427,10 @@ export async function runStages(ctx, sha, d) {
       if (!c?.ok) { drift = stage.id; dec = { run: true, why: "its check failed: the recorded effect no longer holds" }; }
     }
     if (dec.run && stage.services && x.sv.mode === "enforce" && !x.sv.active.length) dec = { run: false, why: "no changed services" };
-    if (!dec.run) { x.outputs[stage.id] = cp?.outputs ?? {}; log.push({ stage: stage.id, run: false, why: dec.why }); io.print?.(`deploy ${stage.id}: skipped (${dec.why})`); continue; }
+    if (!dec.run) { x.outputs[stage.id] = token(cp?.outputs, cp?.key); log.push({ stage: stage.id, run: false, why: dec.why }); io.print?.(`deploy ${stage.id}: skipped (${dec.why})`); continue; }
     const attempt = (cp && cp.status !== "done" && cp.key === key ? cp.attempt ?? 1 : 0) + 1, t0 = now();
+    const lost = await beat(ctx);
+    if (lost) return blocked(`stage ${stage.id}: ${lost}`);
     st.stage = stage.id; st.attempt = attempt; ctx.save();
     io.print?.(`deploy ${stage.id}: running (${dec.why})`);
     let r;
@@ -429,7 +449,7 @@ export async function runStages(ctx, sha, d) {
     let outputs = {};
     if (stage.outputs_command) outputs = (await rehearseJson(io, stage.outputs_command, { ...x.env, FORGE_STAGE: stage.id })) ?? {};
     else if (stage.run && stage.kind !== "shift") outputs = parseJson(String(r.output ?? "").trim().split("\n").at(-1)) ?? {};
-    x.outputs[stage.id] = outputs;
+    x.outputs[stage.id] = token(outputs, key);
     if (r.verify) verify = r.verify;
     await x.store.put(stage.id, { ...rec, status: "done", outputs });
     log.push({ stage: stage.id, run: true, why: dec.why, ms: rec.ms });

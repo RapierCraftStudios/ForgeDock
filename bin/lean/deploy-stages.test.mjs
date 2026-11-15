@@ -45,6 +45,7 @@ function world(o = {}) {
       if (w.fail[cmd] > 0) { w.fail[cmd] -= 1; return { ok: false, output: `${cmd} boom` }; }
       if (cmd === "live") return w.live ? { ok: true, output: w.live } : { ok: false, output: "" };
       if (cmd === "active") return { ok: true, output: w.active };
+      if (cmd === "expected") return { ok: true, output: "{}" };
       if (cmd === "desired") return { ok: true, output: JSON.stringify(w.desired) };
       if (cmd === "livesvc") return { ok: true, output: JSON.stringify(w.liveSvc) };
       if (cmd === "build") return { ok: true, output: `built\n${JSON.stringify({ digests: w.digests })}` };
@@ -197,7 +198,7 @@ describe("deploy engine: input-change invalidation (#5712)", () => {
     const { w, io } = world({ fail: { "smoke-new": 1 } }); const e = ENGINE(); const c = mk(io, e); await deployStep(c);
     e.stages[1].run = "expand"; e.stages[1].check = "expand-check"; // definition changed (a check was added)
     w.fail["smoke-new"] = 1; let mark = w.ran.length; await deployStep(c);
-    assert.deepEqual(cmds(w, mark), ["expand", "smoke-new"]);
+    assert.deepEqual(cmds(w, mark), ["expand", "deploy-new", "smoke-new"], "expand declares no outputs, so its changed key reaches the stages that need it");
     w.fail["expand-check"] = 1; w.fail["smoke-new"] = 1; mark = w.ran.length; await deployStep(c);
     assert.deepEqual(cmds(w, mark), ["expand", "deploy-new", "smoke-new"], "a failed check means the environment drifted: that stage and all after it");
     const p = stageParts({ stage: e.stages[0], tree: "t", services: null, needs: {}, base: { target: OLD } });
@@ -355,7 +356,7 @@ describe("deploy engine: canary by risk class (#5712)", () => {
     const high = world({ numstat: "3\t1\tinfra/migrations/001.sql" }); const e = ENGINE(); e.canary = { health_command: "health" };
     const c = mk(high.io, e); await deployStep(c);
     assert.deepEqual(high.w.ran.filter((r) => r.cmd === "shift").map((r) => r.env.FORGE_TRAFFIC_PCT), ["10", "50", "100"]);
-    assert.deepEqual(high.w.slept, [300_000, 300_000]);
+    assert.equal(high.w.slept.reduce((a, b) => a + b, 0), 600_000); assert.ok(high.w.slept.every((ms) => ms <= 60_000), "waits are sliced for the lease heartbeat");
     assert.equal(high.w.ran.filter((r) => r.cmd === "health").length, 3); assert.equal(high.w.ran.find((r) => r.cmd === "shift").env.FORGE_RISK, "high");
     assert.equal(c.state.deploy.engine.risk.risk, "high");
   });
@@ -374,7 +375,8 @@ describe("deploy engine: canary by risk class (#5712)", () => {
     const mark = w.ran.length, out = await deployStep(c);
     assert.equal(out.live, true);
     assert.deepEqual(w.ran.slice(mark).filter((r) => r.cmd === "shift").map((r) => r.env.FORGE_TRAFFIC_PCT), ["50", "100"]);
-    assert.equal(w.slept[0] > 199_000 && w.slept[0] <= 200_000, true); assert.equal(w.slept[1], 300_000);
+    const total = w.slept.reduce((a, b) => a + b, 0);
+    assert.ok(total > 499_000 && total <= 500_000, `200 s left of the first wait plus 300 s, got ${total}`);
   });
 });
 
@@ -464,6 +466,7 @@ describe("deploy engine: durable checkpoints and workflow stages (#5712)", () =>
       if (m === "POST" && /git\/trees$/.test(path)) { l.active = JSON.parse(body.tree.find((f) => f.path === "active.json").content); return { sha: "t1" }; }
       if (m === "POST" && /git\/commits$/.test(path)) { l.commits += 1; return { sha: "h0" }; }
       if (m === "PATCH" && /git\/refs/.test(path)) return {};
+      if (m === "PATCH" && /issues\/comments\//.test(path)) { l.beats = (l.beats ?? 0) + 1; return {}; }
       throw new Error(`unrouted ${m} ${path}`);
     };
     const lctx = { io, repo: "o/r", credential: "driver" };
@@ -493,6 +496,19 @@ describe("deploy engine: durable checkpoints and workflow stages (#5712)", () =>
     const out = await deployStep(mk(io, ENGINE(), { state: { id: ID2, steps: { "post-merge": { result: { merge: SHA2 } } } }, ctx: { fence: fence(ID2) } }));
     assert.equal(out.live, true); assert.deepEqual(cmds(w, mark), ORDER);
     assert.equal(w.ran.slice(mark).find((r) => r.cmd === "deploy-new").env.FORGE_COLOUR, "blue");
+  });
+  it("the lease heartbeat is kept fresh per stage; a lease taken over by another host stops the run before the next stage", async () => {
+    const { w, io } = world(); const { l, fence } = ledger(io); const c = mk(io, ENGINE(), { ctx: { fence: fence(ID) } }); const orig = io.rehearse;
+    io.rehearse = async (cmd, o) => { const r = await orig(cmd, o); if (/; expand$/.test(cmd)) l.active.lease = { holder: "conductor-gh", epoch: 2, release: ID }; return r; };
+    const out = await deployStep(c);
+    assert.match(out.reason, /stage deploy-new: fenced: another host took over/); assert.deepEqual(cmds(w), ["build", "expand"]); assert.equal(l.beats, 2);
+    assert.equal(out.preTraffic, undefined);
+  });
+  it("--sha refreshes the expected digests for the new commit", async () => {
+    const { w, io } = world({ fail: { "smoke-new": 1 } }); const c = mk(io, ENGINE(), { config: { deploy: { expected_digests_command: "expected" } } });
+    await deployStep(c); w.trees[SHA2] = TREE; c.config.deploySha = SHA2; w.fail.expected = 1;
+    assert.match((await deployStep(c)).reason, /expected_digests_command returned no digests for the new sha/);
+    assert.equal(w.ran.at(-1).env.FORGE_SHA, SHA2);
   });
   it("an unreadable checkpoint store blocks (I5) before any stage", async () => {
     const { w, io } = world(); const { fence } = ledger(io); io.api = async () => { throw new Error("HTTP 502"); };

@@ -15,7 +15,8 @@ Decisions:
 - Data model. A stage is `{id, kind, run | workflow, inputs, needs, services, check, outputs_command, timeout_s}`. A checkpoint
   is `{key, parts, status, outputs, sha, release, at, ms, attempt}`. `parts` are five hashes: the stage definition, the git
   blobs at the deploy sha matching `inputs` (default `**` = the tree id), the service slice (stages with `services: true`),
-  the outputs of the stages it needs (default: all earlier stages), and the baseline (rollback target sha + new colour).
+  the outputs of the stages it needs (default: all earlier stages; a needed stage that declares no outputs contributes its
+  own key, so its changed inputs are never invisible downstream), and the baseline (rollback target sha + new colour).
   The key is the hash of the parts. Outputs are the last stdout line when it is a JSON object, or `outputs_command`.
 - Skip rule: checkpoint `done`, same key, and the optional read-only `check` passes. A failed `check` means the environment
   drifted: that stage and every later one run. Everything else is independent, so a smoke-fix commit re-runs smoke only, and a
@@ -66,6 +67,10 @@ Idempotency contracts (also `KINDS` in the module, printed by `--plan --json`):
 | retire | Stops the old colour; a no-op when already stopped. No instant shift-back after it. |
 | contract | Destructive migrations, only after retire; the migration tool skips what is applied. |
 | run | Declared by the repo: safe to run twice. |
+
+Lease: the engine heartbeats the release lease before each stage and every 60 s of a canary wait, and stops when another
+host holds it. A single command stage longer than the conductor TTL (900 s) cannot heartbeat (the command hook is
+synchronous): with `controls.conductor.enabled`, use a workflow stage for it or keep stages under the TTL (follow-up).
 
 Failure modes: unreadable checkpoints block (I5); an invalid block blocks (never falls back to the workflow pipeline); a
 crash mid-stage leaves no checkpoint, so the stage runs again (its contract) and a workflow stage observes its run; a stale

@@ -1211,7 +1211,7 @@ deploy:
 | `kind` | `build`, `migrate`, `deploy`, `smoke`, `shift`, `verify`, `retire`, `contract` or `run` (default). Each kind has an idempotency contract (the engine may run a stage twice): see `devdocs/decisions/5712-deploy-stage-engine.md`. |
 | `run` / `workflow` | Exactly one (a `verify` stage may have neither). A workflow receives the inputs `stage`, `sha`, `release`, `colour`, `old_colour`, `services`, `traffic_pct`, `forge_epoch`. |
 | `inputs` | Path globs. A change to a matching file at the deploy sha re-runs the stage. Default `**` (any commit). |
-| `needs` | Earlier stages whose outputs this stage depends on. Default: all earlier stages. |
+| `needs` | Earlier stages this stage depends on. Default: all earlier stages. It re-runs when a needed stage's outputs change, or, for a needed stage without outputs, when that stage's inputs change. |
 | `services` | `true`: the stage works per service; its key includes the service digests, and in `enforce` mode it is skipped when no service changed. |
 | `check` | Read-only probe that the stage's effect still holds. A done stage is skipped only when it passes; a failure re-runs this stage and all later ones. |
 | `outputs_command` | Prints a JSON object recorded as the stage's outputs. Without it, a `run` stage's last stdout line is used when it is a JSON object. |
