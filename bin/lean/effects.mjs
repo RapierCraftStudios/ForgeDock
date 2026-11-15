@@ -474,6 +474,30 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     async rerunFailedJobs(runId) {
       await run("gh")(["run", "rerun", String(runId), "--failed", "-R", repo]);
     },
+    /** #5692: Actions runs of a head sha, newest first: [{id, status, conclusion}]. */
+    async runsForSha(sha) {
+      const j = JSON.parse(await run("gh")(["api", `repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}`]) || "{}");
+      return (j.workflow_runs ?? []).map((r) => ({ id: r.id, status: r.status, conclusion: r.conclusion ?? null }));
+    },
+    /** #5692: jobs of one run with their steps: [{id, name, status, conclusion, steps:[{name, status, conclusion, completed_at}]}]. */
+    async jobsOf(runId) {
+      const j = JSON.parse(await run("gh")(["api", `repos/${repo}/actions/runs/${encodeURIComponent(String(runId))}/jobs?per_page=100`]) || "{}");
+      return (j.jobs ?? []).map((x) => ({ id: x.id, name: x.name, status: x.status, conclusion: x.conclusion ?? null,
+        steps: (x.steps ?? []).map((s) => ({ name: s.name, status: s.status, conclusion: s.conclusion ?? null, completed_at: s.completed_at ?? null })) }));
+    },
+    /** #5692: `gh run cancel <id>`; throws when it cannot. */
+    async cancelRun(runId) { await run("gh")(["run", "cancel", String(runId), "-R", repo]); },
+    /** #5692: router long-poll GET /ci/events (FORGEDOCK_CI_EVENTS_URL + FORGEDOCK_CI_TOKEN); null when unconfigured or unreachable. */
+    async ciEventsWait({ repo: r = repo, sha, pr, since = 0, waitS = 0 }) {
+      const base = process.env.FORGEDOCK_CI_EVENTS_URL || process.env.FORGE_CI_EVENTS_URL;
+      if (!base) return null;
+      try {
+        const u = new URL(base);
+        u.search = new URLSearchParams({ repo: r, ...(sha ? { sha } : { pr: String(pr) }), since: String(since), wait: String(waitS) }).toString();
+        const res = await fetch(u, { headers: process.env.FORGEDOCK_CI_TOKEN ? { authorization: `Bearer ${process.env.FORGEDOCK_CI_TOKEN}` } : {}, signal: AbortSignal.timeout((waitS + 10) * 1000) });
+        return res.ok ? await res.json() : null;
+      } catch { return null; }
+    },
     /** Check runs on a commit (push-triggered CI): [{name, state: success|failure|pending, url, id, conclusion}], same mapping as checkStates; `id` orders attempts (#4387). */
     async commitChecks(sha) {
       const out = String(await run("gh")(["api", "--paginate", `repos/${repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {id, name, status, conclusion, url: .html_url} | @json"]));

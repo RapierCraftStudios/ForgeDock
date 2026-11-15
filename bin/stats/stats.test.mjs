@@ -13,6 +13,7 @@ import { cacheDir } from "./cache.mjs";
 import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } from "./github-source.mjs";
 import { buildReport, makeProgressPrinter, parseArgs, parseSince, readAlertConfig, runStats, sinceToTimestamp } from "./index.mjs";
 import { lanesOfLog, readLanes, readLocalLaneRuns, readLocalRuns, summariseLog } from "./local-source.mjs";
+import { ciAwarenessReport, lanesOf, readCiLogs, renderCiAwareness } from "./ci-awareness.mjs";
 import { renderAlerts, renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 
@@ -1079,5 +1080,40 @@ describe("merged vs verified (#5339)", () => {
     assert.equal(g.flow.mergedPct, 0.75);
     assert.equal(g.flow.verifiedPct, 0.5);
     assert.deepEqual(g.flow.milestones, [{ milestone: "M1", merged: 2, verified: 1 }, { milestone: "M2", merged: 1, verified: 1 }]);
+  });
+});
+
+describe("stats --ci-awareness (#5692)", () => {
+  const T = (sec) => new Date(Date.UTC(2026, 10, 15, 10, 0, sec)).toISOString();
+  const lane = (version, aware, rounds) => [
+    { event: "RUN_START", version, ts: T(0) },
+    ...aware.map((s, i) => ({ event: "CI_AWARE", event_ts: T(100 + i), aware_ts: T(100 + i + s), ts: T(100 + i + s) })),
+    ...rounds.map(([pr, at]) => ({ event: "CI_FIX_ROUND", pr, ts: T(at) })),
+    { event: "RUN_TERMINAL", ts: T(1000) },
+  ];
+  it("per version: median/p90 awareness, rounds per PR and wall per round", () => {
+    const r = ciAwarenessReport([lane("1.59.0", [], [[7, 100]]), lane("1.60.0", [10, 20, 30, 40, 50], [[8, 100], [8, 400]])]);
+    const old = r.versions.find((v) => v.version === "1.59.0"), cur = r.versions.find((v) => v.version === "1.60.0");
+    assert.equal(old.event_driven, false); assert.equal(old.awareness_s.n, 0); assert.equal(old.rounds_per_pr.median, 1);
+    assert.equal(cur.event_driven, true); assert.deepEqual([cur.awareness_s.median, cur.awareness_s.p90, cur.awareness_s.n], [30, 50, 5]);
+    assert.equal(cur.rounds_per_pr.median, 2); assert.deepEqual(cur.round_wall_s.n, 2); assert.equal(cur.round_wall_s.median, 300);
+    assert.equal(r.total.lanes, 2);
+  });
+  it("lanesOf splits RUN_START slices; render and the CLI read local logs", () => {
+    assert.equal(lanesOf([...lane("a", [], []), ...lane("b", [], [])]).length, 2);
+    const dir = tmpDir("ci-aware-"); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "o__r__7.jsonl"), `${lane("1.60.0", [12], [[7, 100]]).map((e) => JSON.stringify(e)).join("\n")}\n{broken\n`);
+    writeFileSync(join(dir, "x__y__8.jsonl"), `${lane("1.60.0", [99], []).map((e) => JSON.stringify(e)).join("\n")}\n`);
+    assert.equal(readCiLogs(dir, "o/r").length, 1);
+    const text = renderCiAwareness(ciAwarenessReport(readCiLogs(dir)));
+    assert.match(text, /awareness latency: median 12s, p90 99s \(n=2\)/); assert.match(text, /event-driven/);
+    assert.equal(parseArgs(["--ci-awareness"]).ciAwareness, true);
+  });
+  it("--since <date> keeps only the lanes started on/after it", () => {
+    const logs = [lane("1.59.0", [], [[7, 100]]), lane("1.60.0", [10], [[8, 100]])];
+    assert.equal(ciAwarenessReport(logs, { sinceMs: Date.parse(T(0)) }).total.lanes, 2);
+    assert.equal(ciAwarenessReport(logs, { sinceMs: Date.parse(T(1)) }).total.lanes, 0);
+    assert.equal(ciAwarenessReport([[{ event: "RUN_START", version: "x" }]], { sinceMs: 1 }).total.lanes, 0); // no start time
+    assert.equal(ciAwarenessReport(logs).total.lanes, 2);
   });
 });
