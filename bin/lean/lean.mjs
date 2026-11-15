@@ -81,7 +81,9 @@ import { unjustified } from "./enumerating.mjs";
 import { applyEnumerating, renameDuplicates, verifyApplied } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
+import { ciSignal, cancelDecision, eventLog } from "./ci-watch.mjs";
+import { classifyCiFailure } from "./ci-classify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky, cancelSuperseded } from "./verify.mjs";
 import { e2eSpecs, e2eWanted, uiInteractiveChanged, ownFailures, runE2eGate, fakedPaths, NO_TRIGGER } from "./e2e.mjs";
 import { transferToEpic } from "./acceptance.mjs";
 import { laneBackendId } from "./limits.mjs";
@@ -260,6 +262,7 @@ const defaultCredExec = (args) => {
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {string} [o.fixModel]     model of fresh fix-round sessions (#4363, forge.yaml lean.fix_model); default the reviewer model
  * @param {object} [o.builderRouting] forge.yaml lean.builder_routing/builder_mid_model (#4394): {mode: on (default)|off, midModel}
+ * @param {object|string} [o.ci] forge.yaml ci block or bare `fail_fast` policy (#5692): `deterministic` cancels the run on a downstream-class CI event; default off
  * @param {string} [o.followupsDefaultMilestone] forge.yaml followups.default_milestone (#4664): milestone of deferred follow-ups whose parent's milestone has shipped and has no next one
  * @param {string} [o.followupsRollupLabel] forge.yaml followups.rollup_issue_label (#5078): a repo's own open issue with this label is the post-deploy rollup when no marked one is open
  * @param {string} [o.sequenceRegenerate] forge.yaml lean.sequence.regenerate (#4386): snapshot generator for a schema-changing renumbered migration
@@ -2825,7 +2828,12 @@ export async function runCore(o) {
         files = await changedFiles();
         if (ciGateNames === undefined) ciGateNames = vcfg.workflow ? null : await ciGate({ io, lane, mergeWait, verify: vcfg });
         const verifyArgs = { io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns, gate: ciGateNames,
-          push: () => gitPush(["push", "-u", "origin", branch]),
+          push: !vcfg.cancelSuperseded || vcfg.cancelSuperseded === "off" ? () => gitPush(["push", "-u", "origin", branch]) : async () => { // #5718: runs of the head this push replaces are cancelled
+            const pushedAt = now(); await gitPush(["push", "-u", "origin", branch]);
+            const c = await cancelSuperseded({ io, branch, head, mode: vcfg.cancelSuperseded, pushedAt });
+            if (c.cancelled.length || c.failed.length) ev({ event: "CI_SUPERSEDED_CANCEL", head, cancelled: c.cancelled, failed: c.failed });
+          },
+          onSettle: (rec) => ev({ event: "CI_SETTLE", head, ...rec }), // #5718: verify.settle shadow/condition record
           onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } };
         let v = await runCiVerify(verifyArgs);
         if (v.runId != null) ciSeenRuns.push(v.runId);
@@ -3679,15 +3687,15 @@ export async function runCore(o) {
      * logs, shared with ciVerify's verify.max_rounds budget; the fixed head is re-reviewed and pushed, then the wait restarts.
      * Returns null to wait again, or a terminal result (rounds exhausted, no session, no new commit, review failure).
      */
-    async function mergeFixRound(checks) {
+    async function mergeFixRound(checks, ctx = null) { // ctx: a CI event (#5692) that started the round before its check completed
       // #4586: the failed runs are rerun once per head before a round is counted; the red check is waited out until the rerun reports (bounded).
       const rkey = `merge:${localHead}`, rerun = ciReruns.get(rkey);
-      if (!rerun && !isSplit) {
+      if (!rerun && !isSplit && !ctx) { // a still-running run cannot be rerun (#5692)
         const rr = await rerunFailedOnce({ io, v: { failedChecks: checks, failures: checks.map((c) => ({ job: c.name })) } });
         ciReruns.set(rkey, { rr, urls: new Map(checks.map((c) => [c.name, c.url ?? null])), waits: 0 });
         ev({ event: "CI_FLAKE_RERUN", trigger: "merge", head: localHead, runs: rr.runs, jobs: rr.jobs, result: rr.ok ? "rerun-started" : "rerun-failed", detail: rr.detail });
         if (rr.ok) { await sleep(20000); return null; }
-      } else if (rerun?.rr.ok && rerun.waits < 20 && checks.every((c) => (c.url ?? null) === rerun.urls.get(c.name))) {
+      } else if (!ctx && rerun?.rr.ok && rerun.waits < 20 && checks.every((c) => (c.url ?? null) === rerun.urls.get(c.name))) {
         rerun.waits++; await sleep(20000); return null; // still the attempt that was rerun
       }
       const flakyNames = checks.filter((c) => vcfg.flaky?.includes(c.name)).map((c) => c.name);
@@ -3699,6 +3707,7 @@ export async function runCore(o) {
         return await needsHuman(`Required check(s) failed on PR #${pr}: ${jobs.join(", ")}${ciRounds ? ` (after ${ciRounds} CI fix round(s))` : ""}`, OUTCOME_CODES.CI_RED);
       }
       const failures = await collectFailedLogs(io, checks);
+      if (ctx && failures.length) failures[0] = { ...failures[0], log: [eventLog(ctx), failures[0].log].filter(Boolean).join("\n") };
       ciRounds++;
       T.decisions.push(`Required check(s) failed on PR #${pr} (${jobs.join(", ")}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
       ev({ event: "CI_FIX_ROUND", trigger: "merge", round: ciRounds, jobs, pr });
@@ -3815,6 +3824,21 @@ export async function runCore(o) {
       } else {
         let startedAt = now();
         let pollIndex = 0, gateHead = null, conflicted = false, notStartedLogged = false;
+        // #5692: step-granular CI awareness. An event only starts a fix round early; the merge gate below is still the check states.
+        const watching = policy !== "all" && !isSplit && Boolean(io.ciEventsWait || io.runsForSha);
+        let sig = null, sigHead = null;
+        const never = new Promise(() => {});
+        const onCiEvent = async (e) => {
+          const cls = e.class ?? classifyCiFailure({ step: e.step, lines: e.lines, test: e.test }).class;
+          if (cls === "infra" || cls === "flaky-suspect") return null; // left to the check poll and its rerun
+          const d = cancelDecision({ ...e, class: cls }, o.ci ?? o.failFast);
+          ev({ event: "CI_AWARE", pr, head: localHead, source: e.source ?? "router", job: e.job ?? null, step: e.step ?? null, class: cls, event_ts: e.ts ?? null, aware_ts: new Date(now()).toISOString() });
+          if (d.action === "cancel" && e.run_id && io.cancelRun) {
+            let ok = true; try { await io.cancelRun(e.run_id); } catch { ok = false; }
+            ev({ event: "CI_FAIL_FAST", pr, run: e.run_id, class: cls, cancelled: ok, reason: d.reason });
+          }
+          return await mergeFixRound([{ name: e.job ?? e.step ?? "ci", url: e.run_id ? `https://github.com/${repo}/actions/runs/${e.run_id}` : null }], e);
+        };
         for (;;) {
           await renew();
           let states = [];
@@ -3856,8 +3880,16 @@ export async function runCore(o) {
             return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
           }
           onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
-          await sleep(ciPollDelayMs(pollIndex++, random));
+          if (!watching) { await sleep(ciPollDelayMs(pollIndex++, random)); continue; }
+          if (sigHead !== localHead) { sig?.stop(); sig = ciSignal({ repo, sha: localHead, pr, io, sleep, now }); sigHead = localHead; }
+          const evt = await Promise.race([sig.next().then((v) => v ?? never), sleep(ciPollDelayMs(pollIndex++, random)).then(() => null)]);
+          if (evt) {
+            const r = await onCiEvent(evt);
+            if (r) { sig.stop(); return r; }
+            startedAt = now(); pollIndex = 0; // a fix round (or none): the head gets the full wait budget
+          }
         }
+        sig?.stop();
         if (conflicted) {
           const r = await baseSync("PR became conflicting while waiting for CI"); if (r) return r;
           continue; // wait again on the synced head with a fresh budget

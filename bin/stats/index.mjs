@@ -17,11 +17,12 @@ import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { buildCard, renderCardMarkdown, renderCardPng, renderCardSvg } from "./card.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, compareEfficiency, formatEfficiencyLines, formatCompareLines, parseWindows } from "./efficiency.mjs";
-import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics } from "./release.mjs";
+import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics, runReleaseLedger, parseLedgerConfig, ledgerSince } from "./release.mjs";
 import { experimentReport, renderExperiment } from "./experiment.mjs";
 import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
+import { ciAwarenessReport, readCiLogs, renderCiAwareness } from "./ci-awareness.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
 import { firstReviewReport, renderFirstReview } from "./first-review.mjs";
 import { firstMergeReport, gatherFirstRunIssues, medianMinutes, renderFirstMerge } from "./firstmerge.mjs";
@@ -40,6 +41,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --ci-awareness [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --first-review [--repo <owner/repo>] [--since <date>] [--min-n 20] [--json]
        forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
@@ -49,6 +51,8 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
        forgedock stats --card [--week|--month] [--include-repo-names] [--public-repo] [--out <dir>] [--repo <owner/repo>]
        forgedock stats --depth [--since <version|date>] [--min-n N] [--offline] [--repo <owner/repo>] [--json]
+       forgedock stats --release-ledger [--repo <owner/repo>] [--since <date|21d>] [--baseline save|compare] [--baseline-file <path>]
+                      [--deploy-workflow <name|file>] [--release-head <branch|any>] [--no-cache] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
 delta against the previous version and a low-n flag for samples under 10. Missing data prints n/a.
@@ -96,6 +100,8 @@ Explorer A/B (forge#4418; local run logs only, every run of each log, no GitHub 
                         lean.explore mode (on, off), plus the same issues run in both modes; --json for JSON
 
 Pool (forge#4549; local batch reports, no gh):
+  --ci-awareness        median/p90 CI awareness latency, CI rounds per PR and wall per round, per engine version, from local run logs (#5692);
+                        --since <date> keeps only the lanes started on/after that date
   --pool                remote lane minutes, lanes and share per pool agent over --window (default 7d,30d)
 
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
@@ -165,7 +171,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { card: false, week: false, month: false, includeRepoNames: false, publicRepo: false, out: null, depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { card: false, week: false, month: false, includeRepoNames: false, publicRepo: false, out: null, depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, ciAwareness: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -200,6 +206,12 @@ export function parseArgs(argv) {
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--depth") o.depth = true;
     else if (name === "--pool") o.pool = true;
+    else if (name === "--release-ledger") o.releaseLedger = true;
+    else if (name === "--baseline") { const v = take(); if (v !== "save" && v !== "compare") throw new Error("--baseline must be save or compare"); o.baseline = v; }
+    else if (name === "--baseline-file") o.baselineFile = take();
+    else if (name === "--deploy-workflow") o.deployWorkflow = take();
+    else if (name === "--release-head") o.releaseHead = take();
+    else if (name === "--ci-awareness") o.ciAwareness = true;
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
     else if (name === "--window") o.windows = parseWindows(take());
     else if (name === "--compare") { // #4491
@@ -230,7 +242,7 @@ export function parseArgs(argv) {
   }
   if ((o.week || o.month || o.includeRepoNames || o.publicRepo || o.out) && !o.card) throw new Error("--week, --month, --include-repo-names, --public-repo and --out need --card");
   if (o.week && o.month) throw new Error("--week and --month are mutually exclusive");
-  if (o.card && (o.depth || o.pool || o.efficiency || o.compounding || o.selfFiled || o.conformanceOutcomes || o.contextAb || o.exploreAb || o.tiers || o.laneProfile || o.edge || o.milestone || o.experiment || o.by)) throw new Error("--card cannot be combined with another query mode");
+  if (o.card && (o.depth || o.pool || o.ciAwareness || o.efficiency || o.compounding || o.selfFiled || o.conformanceOutcomes || o.contextAb || o.exploreAb || o.tiers || o.laneProfile || o.edge || o.milestone || o.experiment || o.by)) throw new Error("--card cannot be combined with another query mode");
   if (o.card && (o.week || o.month) && o.since) throw new Error("--week/--month and --since are mutually exclusive");
   if (o.batch && !o.efficiency) throw new Error("--batch and --window need --efficiency");
   if (o.windows && !o.efficiency && !o.pool && !o.compounding) throw new Error("--batch and --window need --efficiency");
@@ -241,6 +253,7 @@ export function parseArgs(argv) {
   if ((o.replay || o.enforceDomains || o.riskPaths) && !o.conformanceOutcomes) throw new Error("--replay, --enforce-domains and --risk-paths need --conformance-outcomes");
   if ((o.enforceDomains || o.riskPaths) && !o.replay) throw new Error("--enforce-domains and --risk-paths need --replay");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
+  if ((o.baseline || o.baselineFile || o.deployWorkflow || o.releaseHead) && !o.releaseLedger) throw new Error("--baseline, --baseline-file, --deploy-workflow and --release-head need --release-ledger");
   return o;
 }
 
@@ -350,6 +363,21 @@ export function readAlertConfig(cwd = process.cwd()) {
   return out;
 }
 
+/** forge.yaml `stats.ledger_*` (+ `branches.staging` as the default release head) for `--release-ledger`. */
+export function readLedgerConfig(cwd = process.cwd()) {
+  try { const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")); return parseLedgerConfig(y?.stats, y?.branches); } catch { return parseLedgerConfig(null, null); }
+}
+
+/** Release state of a managed repo (`release.managed: true`) from its GitHub ledger; [] otherwise or when it cannot be read. */
+async function managedReleaseRecords(gh, repo, sinceMs, cwd = process.cwd()) {
+  try {
+    if (String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.release?.managed ?? "").trim().toLowerCase() !== "true") return [];
+    const { releaseRecords } = await import("../lean/release-ledger.mjs");
+    const api = async (_method, path) => { try { return JSON.parse(await gh(["api", path])); } catch (e) { if (/HTTP 404/.test(String(e?.stderr ?? e?.message ?? ""))) e.status = 404; throw e; } };
+    return await releaseRecords({ io: { api }, repo }, { sinceMs });
+  } catch { return []; }
+}
+
 /** forge.yaml `branding.show_attribution` (default true): the card footer link. */
 export function readAttribution(cwd = process.cwd()) {
   try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.branding?.show_attribution ?? "true") !== "false"; } catch { return true; }
@@ -388,6 +416,11 @@ export async function buildReport(opts, deps = {}) {
   if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
   else if (deps.releaseTimes) releaseTimes = deps.releaseTimes;
   else releaseTimes = gitTagTimes();
+  if (opts.ciAwareness) { // #5692: local run logs only
+    const p = parseSince(opts.since);
+    if (p.sinceVersion) throw new Error("--ci-awareness: --since must be a date (YYYY-MM-DD)");
+    return { repo, query: { ci_awareness: ciAwarenessReport(readCiLogs(deps.runsDir ?? runsDir(env), repo), { sinceMs: p.sinceMs ?? null }) } };
+  }
   if (opts.pool) { // forge#4549: local batch reports only
     const pool = poolUtilisation({ batchRoot: deps.batchRoot ?? batchRoot(env), repo, windows: opts.windows ?? parseWindows("7d,30d"), now: deps.now?.() ?? Date.now() });
     return { repo, query: { pool } };
@@ -502,6 +535,13 @@ export async function runStats(argv, deps = {}) {
     process.stderr.write(`forgedock stats: could not resolve a valid owner/repo (pass --repo owner/repo)\n`);
     return 2;
   }
+  if (opts.releaseLedger) { // #5718: its own read path (Actions runs/jobs/steps), no telemetry crawl
+    try {
+      const gh = deps.gh ?? defaultGh;
+      const ledger = deps.ledger ?? await managedReleaseRecords(gh, opts.repo, ledgerSince(opts.since, deps.now?.() ?? Date.now()));
+      return await runReleaseLedger(opts, { gh, config: deps.ledgerConfig ?? readLedgerConfig(), ...deps, ledger });
+    } catch (err) { process.stderr.write(`forgedock stats: ${err.message}\n`); return 1; }
+  }
   if (opts.card && (opts.week || opts.month)) opts.since = new Date((deps.now?.() ?? Date.now()) - (opts.week ? 7 : 30) * 86400000).toISOString().slice(0, 10);
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
@@ -535,6 +575,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.origin && !opts.json) { process.stdout.write(`${renderOrigin(report.query.origin)}\n`); return 0; }
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
+    if (report.query?.ci_awareness && !opts.json) { process.stdout.write(`${renderCiAwareness(report.query.ci_awareness)}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;

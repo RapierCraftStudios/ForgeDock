@@ -620,6 +620,42 @@ ci:
 
 `forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]]` prints the plan, included minutes, month-to-date usage across the account (billing usage API: needs a token that can read the org or user billing), the projection, the active mode, alerts (projected overage, a new burn source such as a repo flipped private) and the parity hit rate (local green -> remote red, per suite). `--digest` adds the per-repo and per-workflow month digest; `--propose` lists the runnable local jobs derived from the repo's workflow files (same tool pins). `--set-mode`, `--budget`, `--reserve`, `--plan` write the `ci` block (see `/forgedock-ci-setup`). Runner minutes are weighted by OS (Linux 1, Windows 2, macOS 10). Caches live in `~/.forge/ci-budget/` (`FORGEDOCK_CI_BUDGET_DIR`).
 
+### `ci.tests` test engine (forge#5710)
+
+Affected-test selection, shard planning and flaky quarantine for `forgedock tests select|shard|recall` (see [test-engine.md](test-engine.md)). Off by default. Block style; the parser flattens these keys under `ci`, so their names are unique within `ci`.
+
+```yaml
+ci:
+  tests:
+    selection: shadow        # off (default) | shadow | enforce (refused until the recall ledger graduated)
+    suites:                  # "<path glob> ... => <test-file glob | @suite | *> ..."
+      - "migrations/** => tests/integration/**"
+    # run_all: ["infra/**"]          # extra globs that select everything (lockfiles, manifests and CI files always do)
+    # ignore: ["**/*.md"]            # changed files that select nothing
+    # test_globs: ["tests/**/*.py"]  # replaces the *.test.* / *.spec.* / __tests__ / test_*.py / *_test.py convention
+    # full_branches: [main, "release/**"]  # head or PR-base branches that always run the full suite
+    graduate_after: 50       # consecutive full runs with 100% failure recall before enforce may skip
+    graduate_min_failing: 1  # of those, subset selections that contained a real failure
+    shards: 4                # default shard count of `tests shard`
+    # shard_target_s: 240    # or derive the count from a per-shard time target
+    quarantine: report       # off | report (default) | non-blocking (opt-in; never for an unskippable class)
+    quarantine_after: 3      # same-commit fail -> pass flips ...
+    quarantine_window_days: 14   # ... inside this window
+    # recall_ledger: /var/lib/forge/recall.jsonl  # default ~/.forge/tests/<owner>__<repo>/recall.jsonl
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `selection` | string | `off` | `off`: nothing is computed. `shadow`: the selection is recorded and the full suite runs. `enforce`: only the selection runs, once the ledger graduated; before that it behaves as `shadow` and says so. |
+| `suites` | list | none | Declared path -> suite map, the fallback for what the import graph cannot see. |
+| `run_all`, `ignore`, `test_globs`, `full_branches` | list | see above | Selection inputs. Changing `suites`, `run_all`, `ignore` or `test_globs` restarts graduation. |
+| `graduate_after`, `graduate_min_failing` | number | 50, 1 | Graduation criterion. |
+| `shards`, `shard_target_s` | number | none | Shard count, or a time target to derive it from. |
+| `quarantine`, `quarantine_after`, `quarantine_window_days` | string, number, number | `report`, 3, 14 | Flaky-test report. Quarantined tests always run. |
+| `recall_ledger` | string | per-repo file under `~/.forge/tests/` | Where the recall ledger lives. |
+
+Scheduled runs and `full_branches` always run the full suite, whatever the mode. **Commands that use this section**: `forgedock tests select`, `forgedock tests shard`, `forgedock tests recall`.
+
 ## `execution` (OPTIONAL)
 
 Owner opt-in for the paid API agent backend (#4257). The API backend is **never the default**: under `--backend auto` (the default) ForgeDock uses the `claude` CLI, and when no CLI is available it fails with `CLI_BACKEND_UNAVAILABLE` instead of billing `ANTHROPIC_API_KEY`.
@@ -838,7 +874,7 @@ The release state (and so the ledger) records `lane` and `minutes: {runs, total}
 
 ### Deploy gate catalogue and false-block telemetry (#5583)
 
-Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-op with zero writes. `forgedock release check-config` validates the file when present. Fields per gate under `gates:` (`schema: 1`): `id`, `protects_against` (origin issue), `where`, `determinism`, `pre_merge_artifact` (fixture), `version`, `mode` (`block|skip|rollback|freeze|warn|red`), `owner`, `review_by` (`YYYY-MM-DD`); admission also needs `on_uncertainty: inconclusive`, `failure_triggers` and `proportionality`.
+Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-op with zero writes. `forgedock release check-config` validates the file when present. Fields per gate under `gates:` (`schema: 1`): `id`, `protects_against` (origin issue), `where`, `determinism`, `pre_merge_artifact` (fixture), `version`, `mode` (`block|skip|rollback|freeze|warn|red`), `owner`, `review_by` (`YYYY-MM-DD`); admission also needs `on_uncertainty: inconclusive`, `failure_triggers` and `proportionality`. Optional `evidence_check: <required check name>` marks a gate that re-runs work a required check already did; see [`deploy.promote`](#deploypromote-optional) for when that evidence lets the gate be skipped (a safety gate never is).
 
 `.forge/release.yaml` `gates:`: `demote_fb_rate` (percent, default 5), `demote_window` (runs, default 20), `safety` (never demoted; default `migration-immutability`, `identity-preflight`, `backup-freshness`, `health-auto-restore`, plus the unskippable classes).
 
@@ -1071,6 +1107,7 @@ These keys are rejected by `release check-config` until their phase ships:
 | `forgedock release p0` | Hotfix lane for an issue or branch (`--units`, `--preempt`, `--yes`). |
 | `forgedock release verify` | Verify a release sha, or re-run deploy verification of a release id. |
 | `forgedock release recover` | Recover a release that stopped mid-deploy. |
+| `forgedock release deploy` | Deploy stage engine (`deploy.engine`): `--plan [<id>] [--sha]` lists the stages that would run and why; `--resume <id> [--sha]` continues from the first failed or incomplete stage. |
 | `forgedock release rollback` | Roll a release back (`--reason`, `--to flag\|unit\|full`, `--later`). |
 | `forgedock release plan` | Build the release plan for a lane. |
 | `forgedock release start` | Start a planned release (`--plan`, `--approve`, `--wave`). |
@@ -1081,11 +1118,95 @@ These keys are rejected by `release check-config` until their phase ships:
 | `forgedock release init` | Write the zero-config profile. |
 | `forgedock release control` | Audited controls: `hold`, `resume`, `cancel`, `lane`, `exempt`, `freeze`, `unfreeze`; each also runs as `forgedock release <verb>` and needs `--reason`. `demote`, `promote`, `rollback` and `regate` are control verbs too. |
 | `forgedock release gates` | Gate telemetry (`check`, `demote`, `record`). |
+| `forgedock release promote` | With `--check`, `--gate`, `--attest`, `--observed`, `--report` or `--images`: build once, promote (`deploy.promote` in forge.yaml, #5711). With a gate id and `--fixture`: the control verb. |
 | `forgedock release report` | Model vs measured Actions minutes. |
 | `forgedock intake` | `pause`, `resume` or `status` of issue intake (`_active.intake`). |
 | `forgedock ci budget` | Actions-minute budget and CI placement (#5278). |
 | `controls log` | The `controls.jsonl` audit line every control verb appends; read it through `release status` and `release explain`. |
 | `ci flakes`, `ci nightly` | Records, not commands: the flake ledger (`_active.flakes`) and the nightly result, read through `release status`, `release explain` and `release report`. |
+
+## `deploy.promote` (OPTIONAL)
+
+Build once, promote (#5711). The release commit's CI result is recorded as evidence bound to the commit, its tree and the image digests; the deploy side checks that evidence instead of re-running tests, builds and rehearsals that already passed on the same tree. **Default off.** Once enabled it starts in shadow: it records what it would have skipped while the full pre-gate still runs.
+
+```yaml
+deploy:
+  promote:
+    enabled: true                 # default false: nothing is read or written
+    shadow: true                  # default true: record only. false = act on the evidence
+    required_checks: [unit, build]            # default: gate.required_checks, then .forge/release.yaml ci.required_checks
+    evidence_app: github-actions  # the only app whose evidence check run is trusted (default github-actions)
+    cache_ref: registry.example/acme/buildcache   # registry layer cache, one tag per service
+    cache_mode: max               # min | max (default max)
+    builder: ""                   # buildx builder name (a persistent builder keeps cache mounts)
+    rebuild_all: ["docker/base/**"]           # a change here rebuilds every image
+    services:
+      web:
+        image: registry.example/acme/web
+        context: web              # default "."
+        dockerfile: web/Dockerfile            # default <context>/Dockerfile
+        paths: ["packages/ui/**"] # build inputs outside the context
+        cache_paths: ["/app/.next/cache"]     # build cache mounts the Dockerfile declares
+      api:
+        image: registry.example/acme/api
+        context: services/api
+        paths: ["libs/shared/**", "uv.lock"]
+        cache_paths: ["/root/.cache/uv"]
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `deploy.promote.enabled` | boolean | `false` | Master switch. Anything but `true` is off. |
+| `deploy.promote.shadow` | boolean | `true` | `true`: the decision is recorded and the pre-gate still runs. `false`: accepted evidence skips the pre-gate. |
+| `deploy.promote.required_checks` | list | `gate.required_checks`, then the policy's `ci.required_checks` | Check runs that must be `success` on the attested commit. With none, nothing is attested or skipped. |
+| `deploy.promote.evidence_app` | string | `github-actions` | App slug whose `forge/promote-evidence` and `forge/promote-decision` check runs are read. |
+| `deploy.promote.cache_ref` | string | none | Registry repository for the layer cache; each service uses the tag `<cache_ref>:<service>`. Without it no cache flags are emitted. |
+| `deploy.promote.cache_mode` | `min`\|`max` | `max` | `mode=` of `--cache-to`. |
+| `deploy.promote.builder` | string | none | `--builder` for every build. |
+| `deploy.promote.rebuild_all` | list of globs | none | A changed path matching one rebuilds every image. |
+| `deploy.promote.services.<name>.image` | string | required | Image repository; the build is tagged `<image>:<sha>`. |
+| `deploy.promote.services.<name>.context` | string | `.` | Build context. Every path under it is a build input. |
+| `deploy.promote.services.<name>.dockerfile` | string | `<context>/Dockerfile` | Dockerfile path; also a build input. |
+| `deploy.promote.services.<name>.paths` | list of globs | none | Build inputs outside the context. A service with context `.` and no `paths` is rebuilt on every change. |
+| `deploy.promote.services.<name>.cache_paths` | list | none | Targets of `RUN --mount=type=cache` mounts (a framework build cache, a package-manager cache). |
+| `deploy.promote.services.<name>.cache_ref` | string | `<cache_ref>:<name>` | Layer-cache reference of this service. |
+
+Without `services`, the `units` of `.forge/release.yaml` that name an `image` are used (`paths`, `dockerfile`).
+
+**Evidence.** `forgedock release promote --attest --sha <sha> --digests <file|json>` reads the check runs of the commit and, only when every required check concluded `success` on exactly that commit, writes the attestation `{commit, tree, images, checks: [{name, conclusion, id, run_id}], config_hash}` as the output of a `forge/promote-evidence` check run on the commit. The token must belong to an app with `checks: write` (the workflow `GITHUB_TOKEN` does). A failed, missing, skipped or unfinished required check, a malformed digest, or a configured service without a digest: exit 1, nothing written.
+
+**Decision.** `forgedock release promote --gate --sha <sha> --digests <file|json>` is the deploy-side call. Evidence is looked up on the commit, its parents (a merge commit of the attested head) and the heads of pull requests merged as it (squash). The pre-gate is skipped only when all of these hold; anything else runs the full pre-gate:
+
+- the evidence check run was posted by `evidence_app` and names the commit it is on;
+- the tree to deploy equals the attested tree;
+- every currently required check is in the attestation as `success`, and still is `success` on the attested commit when read again now;
+- every digest to deploy equals the attested digest of that service (`--digests`, else the policy's `deploy.expected_digests_command`);
+- the config hash (required checks and service build inputs) equals the attested one;
+- the block has no finding (an unknown key, a missing image, no required checks).
+
+It prints the decision (`--json`: `{"schema":"forgedock.release.promote/v1","mode","would_skip","skip_pre_gate","reasons","skips","gates"}`), appends `skip_pre_gate=` and `would_skip=` to `$GITHUB_OUTPUT`, and records the decision as a `forge/promote-decision` check run on the commit. In enforce mode a decision that cannot be recorded does not skip. `--check` prints the same explanation and writes nothing.
+
+When `.forge/gates.yaml` exists, each gate with an `evidence_check` is listed as skipped or kept. A gate on the safety allowlist (`gates.safety` and the unskippable classes) is always kept.
+
+**Shadow.** With `shadow: true`, `skip_pre_gate` is always `false`. After the pre-gate, `forgedock release promote --observed pass|fail --sha <sha> [--minutes N]` records its outcome next to the decision. `forgedock release promote --report [--last 30]` counts, over the last commits of the default branch: decisions, would-skips, observed outcomes, agreements, **disagreements** (promote would have skipped a pre-gate that failed) and the pre-gate minutes it would have saved; it exits 1 on any disagreement. Exit criterion for the owner's decision to set `shadow: false`: at least 10 observed would-skip decisions and 0 disagreements.
+
+**Image plan.** `forgedock release promote --images --base <ref> [--sha <sha>] [--json]` plans without running docker. A service is reused (previous digest, no build) only when the changed paths are known, a well-formed previous digest exists (`--previous`, else the attestation of the base commit), no `rebuild_all` path changed and no changed path matches its context, `paths` or Dockerfile. Each service to build gets `docker buildx build` arguments with `--cache-from type=registry,ref=…` and `--cache-to type=registry,ref=…,mode=…`, `--metadata-file .forge/build/<service>.json` (its `containerimage.digest` is the digest to attest) and `--push`. The plan lists each `cache_paths` mount with the id the Dockerfile gives it and warns when the Dockerfile declares no such mount. BuildKit keeps cache mounts in the builder and does not export them with `--cache-to`: use a persistent builder (`builder`) or restore them in the workflow.
+
+```yaml
+# CI on the release commit, after tests and image builds:
+- run: forgedock release promote --attest --sha "$GITHUB_SHA" --digests digests.json
+# Deploy workflow:
+- id: promote
+  run: forgedock release promote --gate --sha "$GITHUB_SHA" --digests digests.json
+- if: steps.promote.outputs.skip_pre_gate != 'true'
+  run: ./scripts/pre-gate.sh        # today's full pre-gate, unchanged
+- if: always() && steps.promote.outputs.skip_pre_gate != 'true'
+  run: forgedock release promote --observed "${{ job.status == 'success' && 'pass' || 'fail' }}" --sha "$GITHUB_SHA"
+```
+
+**Commands that use this section**: `forgedock release promote`
+
+---
 
 ## `issue_watch` (OPTIONAL)
 
@@ -1168,6 +1289,73 @@ rollouts:
 A diff that adds a key to one of these files with a default of `false`, `0`, `off` or `null` (#4769) must be covered by an activation row in the contract: a `defer` requirement with bucket `owner:promote:<flag>` (a trailing `*` matches a prefix) or a `deliver` row whose why names the flag. Without one conformance fails with `activation_missing`, and an acceptance criterion naming `shadow`, `cohort` or `treated` fails with `mode_unreachable`. Without `rollouts` nothing changes.
 
 A post-deploy check whose output has a line `BLOCKED: <flag> = off ...` is not a failure: it posts one `FORGE:ROLLOUT_ASK` owner ask per flag on the rollup and parks `awaiting-measurement`; the ask is posted again only when the output (the evidence) changes. `dormancyReport` (`bin/lean/activation.mjs`) lists introduced flags still `off` after `dormant_days`, with days dormant and the parent issue, through an injected read-only `flagState(flag)` hook; a `keep-off` decision for a flag (or `PREFIX*`) silences it.
+
+## `deploy` (OPTIONAL)
+
+`deploy.engine` (#5712) turns the deploy of a release into a resumable stage machine (`bin/lean/deploy-stages.mjs`). Default off: without `enabled: true` the deploy step is unchanged. Your repo keeps its own tooling (ssh, compose, k8s): a stage is a host command (`run`) or a dispatched workflow (`workflow`).
+
+```yaml
+deploy:
+  engine:
+    enabled: true
+    live_release_command: "ops/live-release"      # prints the live sha, or JSON {sha, images}; used when .forge/release.yaml has no deploy.live_release_command
+    stage_timeout_s: 1800                         # default per stage (3600); a stage may set timeout_s
+    colour:
+      active_command: "ops/active-colour"         # prints the colour serving traffic
+      names: [blue, green]                        # default
+    services:
+      mode: shadow                                # off | shadow | enforce (shadow when desired_command is set)
+      desired_command: "ops/digests --sha $FORGE_SHA"   # JSON {service: {digest, config}}
+      live_command: "ops/digests --live"                # same shape, what is running
+    canary:
+      health_command: "ops/health"                # run after each step
+      medium: {steps: [10, 100], wait_s: 120}     # defaults: low [100]; medium [10, 100] 120 s; high [10, 50, 100] 300 s
+    rollback:
+      budget_s: 60                                # timeout of the two commands below
+      shift_back_command: "ops/shift 0"           # traffic back to the old colour
+      abort_command: "ops/down $FORGE_COLOUR"     # optional: stop the idle colour after a pre-traffic failure
+    stages:
+      - {id: build, kind: build, run: "ops/build", inputs: ["services/**"], services: true}
+      - {id: expand, kind: migrate, run: "ops/migrate expand", inputs: ["db/expand/**"]}
+      - {id: deploy-new, kind: deploy, run: "ops/up $FORGE_COLOUR", inputs: ["ops/**"], services: true, check: "ops/is-up $FORGE_COLOUR"}
+      - {id: smoke-new, kind: smoke, run: "tests/smoke/run $FORGE_COLOUR", inputs: ["tests/smoke/**"]}
+      - {id: shift, kind: shift, run: "ops/shift $FORGE_TRAFFIC_PCT", inputs: ["ops/router/**"]}
+      - {id: verify, kind: verify}
+      - {id: retire-old, kind: retire, run: "ops/down $FORGE_OLD_COLOUR", inputs: ["ops/**"]}
+      - {id: contract, kind: contract, run: "ops/migrate contract", inputs: ["db/contract/**"]}
+```
+
+| Stage key | Meaning |
+|-----------|---------|
+| `id` | Unique name. |
+| `kind` | `build`, `migrate`, `deploy`, `smoke`, `shift`, `verify`, `retire`, `contract` or `run` (default). Each kind has an idempotency contract (the engine may run a stage twice): see `devdocs/decisions/5712-deploy-stage-engine.md`. |
+| `run` / `workflow` | Exactly one (a `verify` stage may have neither). A workflow receives the inputs `stage`, `sha`, `release`, `colour`, `old_colour`, `services`, `traffic_pct`, `forge_epoch`. |
+| `inputs` | Path globs. A change to a matching file at the deploy sha re-runs the stage. Default `**` (any commit). |
+| `needs` | Earlier stages this stage depends on. Default: all earlier stages. It re-runs when a needed stage's outputs change, or, for a needed stage without outputs, when that stage's inputs change. |
+| `services` | `true`: the stage works per service; its key includes the service digests, and in `enforce` mode it is skipped when no service changed. |
+| `check` | Read-only probe that the stage's effect still holds. A done stage is skipped only when it passes; a failure re-runs this stage and all later ones. |
+| `outputs_command` | Prints a JSON object recorded as the stage's outputs. Without it, a `run` stage's last stdout line is used when it is a JSON object. |
+| `timeout_s` | Stage timeout. |
+
+Commands get `FORGE_SHA`, `FORGE_TARGET_SHA` (what was live before), `FORGE_RELEASE`, `FORGE_STAGE`, `FORGE_COLOUR` (new), `FORGE_OLD_COLOUR`, `FORGE_RISK`, `FORGE_SERVICES` (comma list to act on; empty means the engine has no service list), `FORGE_SERVICES_SKIPPED` and, for `shift`, `FORGE_TRAFFIC_PCT`.
+
+Rules the engine enforces:
+
+- **Resume.** Each stage has a checkpoint (inputs hash, outputs, status) in the release state and, for a managed release, on the ledger. A stage is skipped when its checkpoint is done and its inputs are unchanged; so a resume starts at the first failed or incomplete stage, and a fix commit re-runs only the stages whose `inputs` it touches (or whose needed outputs changed).
+- **Smoke before traffic.** A `smoke` stage must come before the first `shift`. A failure before the shift moves no traffic: the old colour keeps serving, and there is no hold, freeze or rollback trigger.
+- **Rollback.** A failure from the shift up to `retire` runs `rollback.shift_back_command` within `rollback.budget_s`. If that fails, the rollback ladder is triggered as before. After `retire` the engine holds for a roll-forward.
+- **Changed services only.** A service is unchanged only when its image digest and config hash both match what is running. `shadow` deploys everything and records what would have been skipped and whether that agreed; `enforce` skips.
+- **Canary by risk class.** The risk class comes from the release risk rules (`risk.rules` of `.forge/release.yaml`, else the defaults) over the files changed since the live sha.
+- **Verification.** A `verify` stage is required. It checks the live record against the deployed sha, runs its own command if it has one, then the `verify` layers of `.forge/release.yaml`.
+
+```bash
+forgedock release deploy --plan <release id>            # which stages would run, and why
+forgedock release deploy --plan --sha <sha> --json      # plan for a commit, as JSON
+forgedock release deploy --resume <release id>          # continue from the first failed or incomplete stage
+forgedock release deploy --resume <release id> --sha <sha>   # same, deploying a later default-branch commit that contains the release merge (a fix)
+```
+
+To turn it off, set `enabled: false` or remove the block. A release already started by the engine must be finished (or rolled back) with the engine on.
 
 ## `post_deploy` (OPTIONAL)
 
@@ -1309,6 +1497,25 @@ stats:
 | `alerts.toolchain_warning_pct` | number | No | Alert when one `TOOLCHAIN_WARNING` text is repeated on more than this percentage of lanes. Default 50. |
 | `alerts.outcome_share_factor` | number | No | Alert when an outcome code other than `completed` has at least this factor of its share in the previous window. The code must be on at least 2 lanes, and the previous window must have at least `min_lanes` lanes. A code new in this window counts. Default 2. |
 
+Release ledger keys (#5718, `forgedock stats --release-ledger`, all optional; see [STATS.md](STATS.md)):
+
+```yaml
+stats:
+  ledger_release_base: main            # default: the repo's default branch
+  ledger_release_head: staging         # default: branches.staging, else any head
+  ledger_ci_workflows: [CI, images.yml]  # names or file names; default: every workflow
+  ledger_deploy_workflow: deploy.yml   # name or file; default: detected
+  ledger_deploy_job: "^deploy"         # regex on the job name; default: detected
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `ledger_release_base` | string | No | Branch a release PR targets. Default: the repository's default branch. |
+| `ledger_release_head` | string | No | Head branch of a release PR. Default: `branches.staging` when set, else every PR into the base counts. |
+| `ledger_ci_workflows` | list | No | Workflows (name or file name) counted as release-PR CI. Default: all. |
+| `ledger_deploy_workflow` | string | No | The deploy workflow (name or file). Default: the push/dispatch workflow on the base whose name says deploy, publish or release with the most runs; the report names what it picked. |
+| `ledger_deploy_job` | string | No | Regex for the job that rolls out. Default: the longest job whose name says deploy, else the longest job. |
+
 Each alert line names the event, the rate, the sample size (`count/sample` lanes) and one example reason. When no alert fires, nothing is printed. The flat form `stats.alerts_<key>` also works and wins. `forgedock stats --no-local` skips the alerts.
 
 ### Phase ledger (#4908)
@@ -1337,6 +1544,8 @@ verify:
   flaky: "memory-erasure,e2e-pdf"  # optional; known-flaky CI job names: reported, never block or feed the builder
   post_merge: pnpm -r typecheck # optional; run on the merged tree at base-sync before the push (default: the lane's scoped typecheck)
   duplicate_exports: false      # optional; turn off the same-app duplicate-export check (default true)
+  settle: condition             # optional; fixed (default) | shadow | condition: wait for unreported gate checks
+  cancel_superseded: own        # optional; off (default) | own | all: cancel runs of the head a push replaced
 
 lean:
   enumerating:
@@ -1371,6 +1580,8 @@ lean:
 | `guard_command` | map | No | Guard gate (#4693) test-file command per extension (#4792), e.g. `".py": "scripts/pytest {path}"` for a repo whose tests need a managed environment. Consulted before the contract's validate commands and the hard-coded `node --test` / `python -m pytest -q` fallbacks. `{path}` is replaced by the repo-relative path of the guard's base copy (`<name>__guardbase.<ext>`); a template without `{path}` gets it appended. Runs from the worktree root. Keys may be written with or without the leading dot. Absent: unchanged. |
 | `sandboxes` | map | No | Test sandboxes (#5450): throwaway services a lane's validate commands need. One entry per name, written on one line: `postgres: { image: postgres:16, init: "make migrate DB_URL=$SANDBOX_URL", ttl: 30m }`, `redis: { image: redis:7 }`, `api: { compose: docker-compose.test.yml, service: api, needs: [postgres, redis] }`, `http-replay: { fixtures: tests/fixtures/http/, for: integration }`. Optional `port` and `ready` (a command run in the container until it exits 0) override the postgres/redis defaults. A frozen contract validate entry declares `env: ["postgres"]`; only then is a sandbox created, once per lane, with unique container names (`forge-sbx-<lane>-<name>`), ephemeral loopback ports and `forgedock.*` labels, registered in the lane ledger so teardown and `forgedock gc` reclaim it. Validate commands get `SANDBOX_<NAME>_URL` (a `fixtures` entry: `SANDBOX_<NAME>_DIR`, an absolute path); `init` runs on the host with `SANDBOX_URL`. A name with no entry, or a host without Docker, ends the lane `needs-human` (never a skip; no-Docker uses `env.tool_missing` so the lane is placed where Docker runs). A `fixtures` entry also exports `SANDBOX_<NAME>_MODE` (`replay`, or `record` with `record: true` or `FORGE_SANDBOX_RECORD=1`); an `http*` entry also exports `SANDBOX_HTTP_REPLAY_DIR`/`_MODE`. Each lane's image sandboxes join their own network `forge-sbx-<lane>-net`. `forgedock init --minimal` writes a commented proposal detected from compose files, migrations and test markers. Images are checked or pulled once per batch process (lanes share the cache). Each sandbox adds a `FORGE:SANDBOX {name, kind, ms, cost_usd}` line to the lane decisions. Operators: `forgedock sandbox up <name>... | down | ls`. Absent: no sandbox is ever created. |
 | `check_run` | boolean | No | Default `false` (no Checks API call, behaviour unchanged). `true`: after each push of a reviewed head (PR open, base-sync, merge-time fix round) the engine posts one completed `forgedock/verify` check run on that head (forge#4270), `success` iff every deterministic gate the lane already ran passed: declared check commands, undeclared package edges, docs freshness, contract scope, validate ids, requirement status, hotspot growth, amendments. The output carries each gate's id, pass/fail and evidence as JSON; the run log records a `VERIFY` event. Report only: ForgeDock never makes it required and never waits on it (it is ignored by its own CI waits); requiring it is the repository's branch-protection choice. Creating check runs needs a token that may (a GitHub App with `checks: write`); a Checks API failure is logged as an anomaly and never fails the lane. |
+| `settle` | string | No | How long CI verification waits for a gating check name that has not reported (forge#5718). `fixed` (default): the whole 5-minute grace period, unchanged. `condition`: until the head's check suites show nothing more can report (every suite completed, the same suites on two consecutive polls, at least 20 s after the push), never longer than the grace period; an unreadable suite list keeps the fixed wait. `shadow`: waits as `fixed` and logs a `CI_SETTLE` run-log event with when the condition held (`known_at_ms`) and whether the gating set was the same (`agreed`). Turn `condition` on after shadow agrees on your repo: a workflow that registers after every suite completed (a chained `workflow_run`) is the one case the condition cannot see. The set of gating checks and their verdicts is the same in every mode. |
+| `cancel_superseded` | string | No | Default `off`. `own`: after the lane pushes a new head, cancel the queued and running `pull_request` / `pull_request_target` runs of its branch for an older head that this actor triggered (forge#5718). `all`: whoever triggered them. Push and dispatch runs are never cancelled (they may deploy), and a run of the current head never is. Logged as `CI_SUPERSEDED_CANCEL`. A GitHub App token has no user: set `FORGE_BOT_LOGIN` for `own`. The same check by hand: `forgedock ci cancel-superseded (--pr N \| --branch B) [--mode own\|all] [--dry-run]`. Prefer the workflow `concurrency` block ([CI.md](CI.md#superseded-runs)) where you can edit the workflow. |
 | `post_merge` | string | No | Command run in the lane worktree on the merged tree after each base-sync merge, before the push (forge#4406). Default: the typecheck rows of the lane's change-scoped checks (`bin/lean/checks.mjs`), in `local` and `hybrid` mode only; `ci` mode runs no host typecheck unless `post_merge` is set. A failure resumes the builder with the output, up to `max_rounds` rounds, and the fixed head is re-reviewed; still failing is a trajectory anomaly and CI stays the gate. |
 | `duplicate_exports` | boolean | No | Default `true`: at hand-off and after each base-sync merge, names the lane newly exports that another non-test module of the same app or package (nearest `package.json`/`pyproject.toml`/`setup.py`/`go.mod`/`Cargo.toml`) already declares go back to the builder once ("rename or reuse", both paths); one left over is an anomaly (forge#4406). Re-exports, default exports and names 3+ other modules declare (framework conventions) are ignored. `false` turns the check off. |
 | `e2e` | string | No | e2e merge gate (forge#4403). `auto` (default): run e2e when the diff touches `e2e_paths` or a contract requirement quote has `[type:e2e]`. `always`: on every lane except docs-only ones. `never`: today's behaviour. Without `e2e_label` or `e2e_workflow` no e2e can run, so every mode keeps today's behaviour (a lane that changed specs records a decision saying so). |
@@ -1542,6 +1753,19 @@ env:
   toolchain: "pnpm@10.4.1"              # optional: overrides the detected package manager; "off" disables detection
   setup: "bash scripts/reconcile-dev-db.sh"   # optional: run once per fresh lane worktree, before the builder
   sparse_max_kb: 1024                   # optional: tracked files this size or larger stay out of lane worktrees; 0 = full checkout
+  snapshots:                            # optional: environment library (#5714), off unless enabled
+    enabled: false
+    store: local                        # local | oci
+    keep: 3
+    max_age_days: 14
+    ready: 2
+    base_image: ghcr.io/acme/ci-base:1  # oci store: the image installs run in
+    image: ghcr.io/acme/shop-env        # oci store: repository snapshots are pushed to (tag = key)
+  proxies:                              # optional: caching proxies lanes use (pool/services); each key independent
+    npm: http://proxy-host:4873
+    pypi: http://proxy-host:3141/index
+    apt: http://proxy-host:3142
+    git: git://proxy-host:9418
 ```
 
 | Field | Type | Required | Description |
@@ -1550,7 +1774,16 @@ env:
 | `setup` | string | No | Shell command (`bash -c`) run once in each fresh lane worktree before the builder starts, with the lane's PATH and `TMPDIR`. Use it for environment drift the repo's migrations don't cover, for example a dev-database reconcile script. Timeout 15 min. A non-zero exit ends the lane `needs-human` with code `env.setup_failed`: an environment error, not a build failure. The builder never runs. |
 | `sparse_max_kb` | integer | No | Default `1024`. Lane worktrees are sparse checkouts: tracked files of this many KB or more (generated JSON, screenshots, PDFs, media) are not written to disk, which cuts per-lane disk in repos that track large assets (#4221). Lockfiles, manifests (`package.json`, `pyproject.toml`, `requirements*.txt`, ...), toolchain pins, `tsconfig*.json`, `forge.yaml`, `.gitattributes` and `.gitignore` are always checked out. A repo with no such file gets a plain checkout. The builder prompt names the absent files; `git sparse-checkout add /<path>` brings one back. `0` disables it. Git sets `extensions.worktreeConfig=true` in the repo's shared config; the sparse setting itself is per lane worktree, so the main checkout is unchanged. If the sparse setup fails, the lane uses a full checkout. |
 
-**Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`)
+| `snapshots.enabled` | boolean | No | Default `false`. Environment library (#5714, [ENV-LIBRARY.md](ENV-LIBRARY.md)): dependency trees are installed once per environment key (lockfiles + manifests + toolchain pin files + `execution.lane_tools` + image) outside any job and reused. With a pool provider, each launch asks the pool agent to keep the repo's snapshot built and staged in the cache volume; a lane whose lockfiles match claims a staged copy by directory rename (`Dependencies (...): hit (env snapshot (rename))`), and any other lane installs as before. Absent or `false`: no launch field, no lane env, no helper container. |
+| `snapshots.store` | `local` \| `oci` | No | Default `local` (directory store: the pool cache volume, or `FORGE_ENV_ROOT`, default `~/.forge/env`). `oci`: `forgedock env build` writes a `Dockerfile.env` for `<image>:<key>`, used as a CI job container and a deploy base layer. |
+| `snapshots.keep` | integer | No | Default `3`. Snapshots kept per repo, newest by last use. |
+| `snapshots.max_age_days` | integer | No | Default `14`. Snapshots unused this long are removed; a repo's newest always stays. |
+| `snapshots.ready` | integer | No | Default `2`. Staged hardlink copies the pool keeps ready per snapshot; one is consumed per claiming lane. `0`: lanes hardlink from the snapshot instead. |
+| `snapshots.base_image` | string | `oci` only | The image the frozen installs run in (your CI base image with the toolchain installed). Part of the key. |
+| `snapshots.image` | string | `oci` only | Image repository without a tag; snapshots are `<image>:<key>`. |
+| `proxies.npm` / `pypi` / `apt` / `git` | URL | No | `http(s)://` or `git://` URLs of the opt-in caching services in `pool/services/docker-compose.yml`. Pool lanes get the matching package-manager variables (`npm_config_registry`, `PIP_INDEX_URL`, `UV_DEFAULT_INDEX`, `FORGE_APT_PROXY`, ...; full table in [ENV-LIBRARY.md](ENV-LIBRARY.md)). Absent keys change nothing. A value that is not such a URL is ignored. |
+
+**Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`); `forgedock env key|build|status|gc|stage` and pool launches read `snapshots` and `proxies` (`bin/env/env.mjs` `readEnvSnapshots`)
 
 ---
 

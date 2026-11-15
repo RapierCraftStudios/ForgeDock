@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Opt-in caching proxies for lanes and CI runners: npm, PyPI, apt, and a read-only git mirror.
+# Nothing uses them until a repo sets forge.yaml `env.proxies` (docs/ENV-LIBRARY.md). Start on one host that the pool
+# hosts and runners can reach:
+#   FORGE_PROXY_BIND=<private address> docker compose -f pool/services/docker-compose.yml up -d
+# The default bind is loopback. These services have no authentication: bind them to a private interface only
+# (VPN or internal network), never a public one. Private packages and private repos are not served: the npm and
+# PyPI proxies cache public registries, and the git mirror fetches only the public URLs listed in GIT_MIRROR_REPOS.
+name: forge-proxies
+services:
+  npm:
+    image: verdaccio/verdaccio:6
+    restart: unless-stopped
+    ports: ["${FORGE_PROXY_BIND:-127.0.0.1}:4873:4873"]
+    volumes: ["npm-cache:/verdaccio/storage"]
+  pypi:
+    image: epicwink/proxpi:latest
+    restart: unless-stopped
+    environment:
+      PROXPI_INDEX_URL: https://pypi.org/simple/
+      PROXPI_CACHE_SIZE: "${FORGE_PYPI_CACHE_BYTES:-21474836480}"
+      PROXPI_CACHE_DIR: /cache
+    ports: ["${FORGE_PROXY_BIND:-127.0.0.1}:3141:5000"]
+    volumes: ["pypi-cache:/cache"]
+  apt:
+    image: sameersbn/apt-cacher-ng:latest
+    restart: unless-stopped
+    ports: ["${FORGE_PROXY_BIND:-127.0.0.1}:3142:3142"]
+    volumes: ["apt-cache:/var/cache/apt-cacher-ng"]
+  git-mirror:
+    # Bare mirrors of GIT_MIRROR_REPOS (space-separated https URLs), refreshed every GIT_MIRROR_INTERVAL seconds and
+    # served read-only over git:// at git://<host>:9418/<owner>/<name>.git
+    image: alpine:3.20
+    restart: unless-stopped
+    environment:
+      GIT_MIRROR_REPOS: "${GIT_MIRROR_REPOS:-}"
+      GIT_MIRROR_INTERVAL: "${GIT_MIRROR_INTERVAL:-60}"
+    entrypoint: ["/bin/sh", "/mirror.sh"]
+    configs:
+      - source: mirror_sh
+        target: /mirror.sh
+    ports: ["${FORGE_PROXY_BIND:-127.0.0.1}:9418:9418"]
+    volumes: ["git-mirror:/srv/git"]
+configs:
+  mirror_sh:
+    file: ./git-mirror.sh
+volumes:
+  npm-cache:
+  pypi-cache:
+  apt-cache:
+  git-mirror:

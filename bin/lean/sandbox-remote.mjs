@@ -17,9 +17,12 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { mergeRemoteLog } from "../engine/runlog.mjs";
 import { safeSegment } from "./ledger.mjs";
 import { scopedEnv } from "./execution.mjs";
+import { laneEnvFor, readEnvSnapshots } from "../env/env.mjs";
 import { resolveCredential } from "./credentials.mjs";
 import { relayCommandNames, runRelayed, servicePending } from "./relay.mjs";
 
@@ -222,14 +225,16 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const resultFile = `/result/${issue}.json`;
       const relayEnv = relays.length ? { CS_RELAY_COMMANDS: relayCommandNames(relay).join(","), CS_RELAY_CAPS: relays.join(","), ...(await prefetchEnv(issue)) } : {};
       const warm = Number.isInteger(settings.warmSandboxes) && settings.warmSandboxes > 0 ? settings.warmSandboxes : 0;
+      const envSnap = settings.forgeYaml ? readEnvSnapshots(settings.forgeYaml) : null; // env.snapshots: off unless enabled
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         ...(settings.laneTools?.length ? { lane_tools: settings.laneTools } : {}), // #5650: per-repo lane image
+        ...(envSnap?.enabled ? { env_snapshots: { enabled: true, ready: envSnap.ready, keep: envSnap.keep, max_age_days: envSnap.maxAgeDays } } : {}), // the agent builds and stages snapshots outside the lane
         ...(warm ? { warm } : {}), // #4912: the pool agent keeps this many warm sandboxes for the repo
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
         // The host's git identity: without it the lane image falls back to a placeholder author that fails DCO.
-        env: { ...gitIdentityEnv(gitIdentity(), laneEnv ?? {}), ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}), ...relayEnv }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
+        env: { ...gitIdentityEnv(gitIdentity(), laneEnv ?? {}), ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}), ...relayEnv, ...laneEnvFor(envSnap, settings.laneTools ?? []) }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
         command: ["forgedock", "run-issue", String(issue), ...args, "--result-file", resultFile], result_file: resultFile,
       };
       const startedAt = now();
@@ -250,7 +255,10 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     async fetchResult(h) {
       const r = await transport.result(h.id);
       if (r) { await pullLogs(h); await minutesOf(h); }
-      return r ?? null;
+      if (!r) return null;
+      const { runLog, ...rest } = r; // #5697: the lane's run log goes to the host run log, not into the result
+      if (runLog) mergeRemoteLog(env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
+      return rest;
     },
     async capacity() {
       // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down

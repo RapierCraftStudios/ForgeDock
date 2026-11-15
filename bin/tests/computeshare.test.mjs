@@ -22,6 +22,9 @@ function fakeDocker() {
     async kill(name, signal) { const c = containers.get(name); if (!c?.running) return false; this.kills.push([name, signal]); c.running = false; c.exitCode = 143; c.finishedAt = new Date().toISOString(); return true; },
     async listLabelled() { return [...containers.keys()]; },
     async wipe() {},
+    workDirs: new Set(),
+    async removeWorkDir(_vol, _image, dir) { this.workDirs.delete(dir); },
+    async pruneWorkDirs(_vol, _image, keep) { for (const d of [...this.workDirs]) if (!keep.includes(d)) this.workDirs.delete(d); },
     volumes: new Set(),
     async listVolumes(prefix) { return [...this.volumes].filter((v) => v.startsWith(prefix)); },
     async removeVolume(v) { this.volumes.delete(v); },
@@ -208,15 +211,40 @@ test("docker sandbox: private daemon sidecar, lane in its netns, shared /work, s
   const [dind, lane] = docker.runs;
   assert.ok(dind.includes("--privileged") && dind.includes("--host=tcp://127.0.0.1:2375") && dind.includes("--tls=false"));
   assert.ok(!dind.join(" ").includes("0.0.0.0"));
-  assert.ok(dind.includes("cs-work-d1:/work") && lane.includes("cs-work-d1:/work"));
+  assert.ok(dind.includes("cs-cache-o-r:/cache") && lane.includes("cs-cache-o-r:/cache"));
+  assert.ok(![...dind, ...lane].some((a) => String(a).includes("cs-work-")));
   assert.deepEqual(lane.slice(lane.indexOf("--network"), lane.indexOf("--network") + 2), ["--network", "container:cs-d1-dind"]);
   assert.equal(lane[lane.indexOf("--cpus") + 1], "2");
   assert.equal(dind[dind.indexOf("--cpus") + 1], "1");
   assert.ok(!lane.join(" ").includes("/var/run/docker.sock") && !dind.join(" ").includes("/var/run/docker.sock"));
-  docker.volumes.add("cs-work-d1");
   await agent.destroy("d1", "test");
   assert.equal(docker.containers.size, 0);
   assert.equal(docker.volumes.size, 0);
+});
+
+test("#5696 lane worktree and depcache share one mount: work dir lives under the /cache volume", async () => {
+  const { agent, docker } = agentFixture();
+  await agent.launch({ spec: spec("w1"), cpus: 1, mem_gb: 1 });
+  const lane = docker.runs[0];
+  const mounts = lane.filter((a, i) => lane[i - 1] === "-v" && /:\/(cache|work)$/.test(a));
+  assert.deepEqual(mounts, ["cs-cache-o-r:/cache"]); // no separate /work mount, so hardlinks from /cache/forge-depcache never cross devices
+});
+
+test("#5696 teardown and the orphan sweep remove work dirs: no /cache/work growth over 20 launches", async () => {
+  const { agent, docker } = agentFixture();
+  for (let i = 0; i < 20; i++) {
+    await agent.launch({ spec: spec(`g${i}`, i % 2 ? { docker: true } : {}), cpus: 1, mem_gb: 1 });
+    const rec = agent.store.data.sandboxes[`g${i}`];
+    assert.equal(rec.workDir, `/cache/work/g${i}`);
+    docker.workDirs.add(rec.workDir); // what the entrypoint creates
+    await agent.destroy(`g${i}`, "test");
+  }
+  assert.equal(docker.workDirs.size, 0);
+  await agent.launch({ spec: spec("live"), cpus: 1, mem_gb: 1 });
+  docker.workDirs.add("/cache/work/live").add("/cache/work/stray");
+  docker.volumes.add("cs-cache-o-r");
+  await agent.reap();
+  assert.deepEqual([...docker.workDirs], ["/cache/work/live"]);
 });
 
 test("router reserves lane + daemon capacity for docker-enabled repos", async () => {
@@ -724,4 +752,46 @@ test("agent capacity reports disk_free_gb and per-sandbox sandbox_disk_mb; route
   assert.equal(j.sandboxes.p1.disk_used_mb, 42);
   assert.equal("disk_used_mb" in j.sandboxes.p2, false);
   assert.equal(j.agents.find((x) => x.name === "a").disk_free_gb, 9.5);
+});
+
+// #5688: CI runner events over the router (ci token POSTs, fd token GETs).
+test("router /ci/events: ci token posts, only the fd token reads, long-poll answers in the same cycle", async () => {
+  const router = createRouter({ state_dir: tmpDir("cs-ci-"), enroll_token: "e", forgedock_token: "fd", ci_tokens: ["ci-1", "ci-2"] }, { fetchFn: async () => new Response("{}"), log: quiet });
+  const call = (method, url, auth, body) => new Promise((resolve) => {
+    let status = 0;
+    const req = { method, url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, socket: {}, async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)); } };
+    router.handle(req, { writeHead(st) { status = st; }, end(b) { resolve({ status, body: b ? JSON.parse(b) : null }); } });
+  });
+  const ev = (extra = {}) => ({ type: "step_failed", repo: "o/r", sha: "abc", run_id: 1, job: "unit", ts: "2026-11-15T00:00:00Z", ...extra });
+  const q = "/ci/events?repo=o%2Fr&sha=abc";
+
+  assert.equal((await call("POST", "/ci/events", "nope", ev())).status, 401);
+  assert.equal((await call("POST", "/ci/events", null, ev())).status, 401);
+  assert.equal((await call("GET", q, "ci-1")).status, 401, "a ci token cannot read");
+  assert.equal((await call("GET", "/status", "ci-1")).status, 401, "a ci token cannot reach other routes");
+  assert.equal((await call("POST", "/sandboxes/claim", "ci-1", {})).status, 401);
+
+  const waiting = call("GET", `${q}&wait=5`, "fd");
+  const t0 = performance.now();
+  const posted = await call("POST", "/ci/events", "ci-2", ev({ lines: ["boom"] }));
+  assert.equal(posted.status, 202);
+  const got = await waiting;
+  assert.ok(performance.now() - t0 < 1000);
+  assert.equal(got.status, 200);
+  assert.deepEqual([got.body.events.length, got.body.events[0].lines, got.body.next], [1, ["boom"], 1]);
+  assert.ok(Number.isFinite(got.body.events[0].received_at));
+
+  assert.equal((await call("POST", "/ci/events", "fd", [ev(), ev({ pr: 9 })])).status, 202, "the fd token may post too");
+  assert.deepEqual((await call("GET", `${q}&since=1`, "fd")).body.events.map((e) => e.seq), [2, 3]);
+  assert.equal((await call("GET", "/ci/events?repo=o%2Fr&pr=9", "fd")).body.events.length, 1);
+
+  const missing = ev(); delete missing.sha;
+  const r400 = await call("POST", "/ci/events", "ci-1", missing);
+  assert.equal(r400.status, 400);
+  assert.match(r400.body.error, /sha/);
+  assert.equal((await call("POST", "/ci/events", "ci-1", ev({ lines: Array(41).fill("x") }))).status, 413);
+  assert.equal((await call("POST", "/ci/events", "ci-1", Array(201).fill(ev()))).status, 413);
+  assert.equal((await call("GET", "/ci/events?repo=o%2Fr", "fd")).status, 400);
+  assert.equal((await call("GET", `${q}&wait=61`, "fd")).status, 400);
+  assert.equal((await call("GET", "/health")).status, 200);
 });

@@ -130,5 +130,17 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "pool-deps-install-p50": {
+    "run": "gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '.[]|select(.body|contains(\"FORGE:TELEMETRY\"))|.body' | grep -o 'phase_deps_install_ms\"\\{0,1\\}[:= ]*[0-9]*' | grep -o '[0-9]*$' | sort -n | awk '{a[NR]=$1} END{exit !(NR>=10 && a[int((NR+1)/2)]<=300000)}'",
+    "pass": "exit 0",
+    "timeout": 180,
+    "for": "7d"
+  },
+  "ci-runner-health-cli-runs": {
+    "run": "out=$(node bin/forgedock.mjs ci runner-health --json); rc=$?; test $rc -le 1 && echo \"$out\" | node -e 'JSON.parse(require(\"fs\").readFileSync(0,\"utf8\").trim().split(\"\\n\").pop())'",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

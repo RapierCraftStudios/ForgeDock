@@ -13,7 +13,7 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
-import { resolveLaneImage, laneImageNow } from "./lane-tools.mjs";
+import { resolveLaneImage, laneImageNow, laneToolsTag } from "./lane-tools.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -52,7 +52,29 @@ export function liveHeadroom(cfg = {}) {
 }
 export const dindName = (name) => `${name}-dind`;
 export const workVolume = (name) => `cs-work-${name.replace(/^cs-/, "")}`;
+/** #5696: the lane worktree is a plain dir on the cache volume (one mount), so depcache hardlinks never hit EXDEV. */
+export const workDirOf = (name) => `/cache/work/${name.replace(/^cs-/, "")}`;
+const WORK_SWEEP_MS = 10 * 60000;
 export const safeName = (id) => `cs-${String(id).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 100)}`;
+/** Minimum gap between two environment-snapshot ensure runs for one cache volume. */
+export const ENV_ENSURE_GAP_MS = 5 * 60000;
+/**
+ * `docker run` args for the environment-snapshot helper (env.snapshots): a short-lived container of the lane image that
+ * reads the repo's bare mirror in the cache volume, builds the snapshot for the ref's lockfiles when it is missing,
+ * stages `ready` hardlink copies and collects old snapshots. It writes only under /cache/env, on the same volume as the
+ * lane worktrees (/cache/work), so a lane claims a staged copy with a rename. Pure.
+ */
+export function envEnsureArgs({ volume, image, slug, ref = null, laneTools = [], snapshots = {}, net = [], cpus = 2, mem_gb = 4 }) {
+  const int = (v, d) => (Number.isInteger(v) && v >= 0 ? v : d);
+  return [
+    "--rm", "--name", `cs-envbuild-${volume.replace(/^cs-cache-/, "")}`.slice(0, 120), "--label", "computeshare.env=1",
+    "--cpus", String(cpus), "--memory", `${Math.round(mem_gb * 1024)}m`, ...net, "-v", `${volume}:/cache`,
+    "-e", "FORGE_ENV_ROOT=/cache/env", "-e", `FORGE_ENV_IMAGE=${image}`, "-e", "FORGE_DEPCACHE_ROOT=/cache/forge-depcache", "-e", "npm_config_store_dir=/cache/pnpm-store",
+    "--entrypoint", "forgedock", image, "env", "ensure", "--mirror", `/cache/git/${String(slug).replace(/\//g, "_")}.git`, ...(ref ? ["--ref", String(ref)] : []),
+    "--repo", String(slug), "--ready", String(int(snapshots.ready, 2)), "--keep", String(int(snapshots.keep, 3)), "--max-age-days", String(int(snapshots.max_age_days, 14)),
+    ...(laneTools.length ? ["--lane-tools", [...laneTools].sort().join(",")] : []),
+  ];
+}
 const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
 
 /**
@@ -96,6 +118,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const used = () => Object.values(sb()).filter((s) => s.state !== "exited").reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   // #5535: disk figures for the router inventory; optional, omitted when unreadable. Sandbox dirs are walked at most every 60s.
   let diskCache = { at: 0, mb: {} };
+  let lastWorkSweep = -Infinity;
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
   function diskView() {
     const out = {};
@@ -111,6 +134,20 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function capacity() {
     const u = used();
     return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active: Object.values(sb()).filter((s) => s.state !== "exited").length, ...diskView(), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+  }
+
+  /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
+  const envImageOf = (spec) => (spec.lane_tools?.length ? laneToolsTag(spec.image ?? image, spec.lane_tools) : (spec.image ?? image));
+  const envEnsured = new Map(); // cache volume -> last ensure start
+  /**
+   * env.snapshots: start the snapshot helper for the repo, at most once per ENV_ENSURE_GAP_MS and one at a time per cache
+   * volume (the fixed container name refuses a second). Never awaited by a launch and never fails one.
+   */
+  function ensureEnv({ volume, spec, net }) {
+    if (now() - (envEnsured.get(volume) ?? -Infinity) < ENV_ENSURE_GAP_MS) return null;
+    envEnsured.set(volume, now());
+    const args = envEnsureArgs({ volume, image: envImageOf(spec), slug: spec.repo.slug, ref: spec.repo.ref ?? null, laneTools: spec.lane_tools ?? [], snapshots: spec.env_snapshots, net, cpus: cfg.env_build_cpus ?? 2, mem_gb: cfg.env_build_mem_gb ?? 4 });
+    return Promise.resolve().then(() => docker.run(args)).then(() => log.info?.(`env snapshot helper started for ${spec.repo.slug}`), (e) => log.warn?.(`env snapshot helper: ${String(e.stderr || e.message).slice(0, 200)}`));
   }
 
   async function launch({ spec, cpus, mem_gb, limit = null }) {
@@ -137,15 +174,19 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
-    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "" };
+    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
+      ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
     const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker };
     sb()[spec.id] = rec;
     store.save();
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+    rec.cacheVolume = `cs-cache-${cacheKey}`;
+    rec.workDir = workDirOf(name);
     // Public resolvers: host resolvers like Tailscale MagicDNS are not reachable from the container network.
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
+    const cacheMount = ["-v", `${rec.cacheVolume}:/cache`];
     try {
       // #5650: a repo's lane_tools select a derived image (built once per tool list); none keeps spec.image ?? image.
       const laneImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
@@ -157,7 +198,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         if (limit) { dCpus = limit.dind_cpus; dMem = limit.dind_mem_gb; laneCpus = limit.lane_cpus; laneMem = limit.lane_mem_gb; }
         else { dCpus = Math.min(cfg.dind_cpus ?? 1, cpus - 1); dMem = Math.min(cfg.dind_mem_gb ?? 2, mem_gb - 1); laneCpus = cpus - dCpus; laneMem = mem_gb - dMem; }
         ({ cpus: dCpus, mem: dMem } = clampToVm(dCpus, dMem));
-        work = ["-v", `${workVolume(name)}:/work`];
+        work = cacheMount; // the daemon sees the checkout at the same /cache/work path as the lane
         await docker.run([
           "--name", dindName(name), "--label", LABEL, "--label", `computeshare.id=${spec.id}`, "--label", "computeshare.role=dind",
           "--privileged", "--cpus", String(dCpus), "--memory", mb(dMem), "--memory-swap", mb(dMem + swapFor(limit?.dind_swap_gb)),
@@ -176,10 +217,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         "--cpus", String(laneCpus), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
         "--env-file", envFile, ...laneNet, ...work,
         ...(spec.claim_dir ? ["-v", `${join(dir, "claim")}:/claim`] : []), // #4912: warm sandboxes receive their lane here
-        "-v", `cs-cache-${cacheKey}:/cache`, "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
+        ...(withDocker ? [] : cacheMount), "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
         laneImage, ...spec.command.map(String),
       ]);
       rec.state = "running";
+      if (spec.env_snapshots?.enabled && spec.repo?.slug) ensureEnv({ volume: rec.cacheVolume, spec, net: netArgs });
     } catch (e) {
       rec.state = "exited";
       rec.finishedAt = now();
@@ -228,7 +270,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (!r) return false;
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
-    if (r.docker) { await docker.remove(dindName(r.name)); await docker.removeVolume(workVolume(r.name)); }
+    if (r.docker) await docker.remove(dindName(r.name));
+    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { log.warn?.(`work dir ${r.workDir}: ${String(e.stderr || e.message).slice(0, 200)}`); } }
+    else if (r.docker) await docker.removeVolume(workVolume(r.name)); // sandbox launched before #5696
     try { await docker.wipe(r.dir, image); } catch (e) { log.warn?.(`wipe ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
     rmSync(r.dir, { recursive: true, force: true });
     delete sb()[r.id];
@@ -254,8 +298,15 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       const r = await resize(pendingResize);
       log.info?.(`pending resize applied: HTTP ${r.status} ${JSON.stringify(r.body)}`);
     }
-    const knownVols = new Set(Object.values(sb()).map((r) => workVolume(r.name)));
+    const knownVols = new Set(Object.values(sb()).filter((r) => !r.workDir).map((r) => workVolume(r.name)));
     for (const v of await docker.listVolumes("cs-work-")) if (!knownVols.has(v)) { await docker.removeVolume(v); log.info?.(`removed orphan volume ${v}`); }
+    if (t - lastWorkSweep >= WORK_SWEEP_MS) {
+      lastWorkSweep = t;
+      const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
+      for (const v of await docker.listVolumes("cs-cache-")) {
+        try { await docker.pruneWorkDirs(v, image, keep); } catch (e) { log.warn?.(`work sweep ${v}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    }
     store.save();
   }
 

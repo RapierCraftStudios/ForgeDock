@@ -100,3 +100,101 @@ export function waveReport(records, cfg = parseBudgetConfig(null)) {
   const verdict = waves.length < 3 ? `${waves.length}/3 waves measured` : m.within ? "within 25% of the model" : "OUTSIDE 25% of the model: tune budget.on_exceed and the nightly cadence";
   return { ...m, waves: waves.length, lines: [...m.lines, `total: model ${m.model} min, measured ${m.measured} min (${verdict})`] };
 }
+
+// ---- Actions timing primitives (#5718, Forge CI W8): pure readers of runs/jobs/steps payloads, shared by `forgedock stats --release-ledger`. ----
+
+const spanMs = (a, b) => { const d = Date.parse(b) - Date.parse(a); return Number.isFinite(d) && d > 0 ? d : 0; };
+const FAILED = ["failure", "timed_out", "startup_failure"];
+const lc = (v) => String(v ?? "").toLowerCase();
+/** A job that ran (skipped jobs carry no time and no queue). */
+export const jobRan = (j) => lc(j?.conclusion) !== "skipped" && spanMs(j?.started_at, j?.completed_at) > 0;
+export const jobSeconds = (j) => spanMs(j?.started_at, j?.completed_at) / 1000;
+/** Seconds a job waited for a runner (created -> started); null when the job never ran or the API gave no `created_at`. */
+export const queueSeconds = (j) => (jobRan(j) && j.created_at ? spanMs(j.created_at, j.started_at) / 1000 : null);
+/** Self-hosted by its labels, else by a runner group that is not GitHub's own. */
+export function isSelfHosted(j) {
+  if ((j?.labels ?? []).some((l) => lc(l) === "self-hosted")) return true;
+  const g = lc(j?.runner_group_name);
+  return Boolean(g) && !/github actions|larger runners/.test(g);
+}
+
+/**
+ * Step classes, by step name only (the jobs API has no `uses`), ecosystem-neutral. Order matters: dependency installs are
+ * tested before toolchains so "Install Python dependencies" is `deps`. `Post ...` steps and the runner's own
+ * "Set up job" / "Complete job" are never setup.
+ */
+export const STEP_CLASSES = Object.freeze([
+  ["checkout", /(^|[\s/])checkout(@|\s|$)|\bgit clone\b|\bfetch (the )?(repo|repository|sources?)\b/i],
+  ["deps", /\bnpm (ci|install|i)\b|\bpnpm (install|i)\b|\byarn( install)?\s*(--|$)|\bpip3? install\b|\bpoetry install\b|\buv (sync|pip install)\b|\bpipenv (install|sync)\b|\bbundle install\b|\bcomposer install\b|\bgo mod download\b|\bcargo fetch\b|\bdotnet restore\b|\binstall (\w+ )?(dependencies|deps|packages|requirements|modules)\b|\brestore (\w+ )?(dependencies|deps|cache)\b|actions\/cache|^cache\b|\bdependency cache\b/i],
+  ["image-build", /docker\/build-push-action|\bdocker (buildx )?build\b|\bbuildx bake\b|\bbuild (and push )?(the )?(\S+ )?(docker )?images?\b|\bimage build\b/i],
+  ["toolchain", /setup-[a-z0-9-]+(@|\s|$)|\baction-setup\b|^(run )?set ?up (?!job\b)\S+|\binstall (node|python|rust|go|java|ruby|php|deno|bun|toolchain)\b|\brustup\b|\bnvm (install|use)\b|\bpyenv\b|\basdf install\b|\btoolchain\b/i],
+  ["lint", /\b(lint\w*|eslint|ruff|flake8|prettier|format(ting)?( check)?|typecheck|type-check|tsc|mypy|lockfile|generated|drift|shellcheck)\b/i],
+]);
+export const SETUP_CLASSES = Object.freeze(["checkout", "toolchain", "deps"]);
+/** Failures of these classes are mechanical: no test ran, the fix is deterministic. */
+export const MECHANICAL_CLASSES = Object.freeze(["checkout", "toolchain", "deps", "lint"]);
+export function classifyStep(name) {
+  const n = String(name ?? "").trim();
+  if (!n || /^post\b/i.test(n) || /^(set up|complete) job$/i.test(n)) return null;
+  for (const [cls, re] of STEP_CLASSES) if (re.test(n)) return cls;
+  return null;
+}
+/** Seconds one job spent per setup class: {checkout, toolchain, deps, total}. */
+export function jobSetup(j) {
+  const out = { checkout: 0, toolchain: 0, deps: 0, total: 0 };
+  for (const s of j?.steps ?? []) {
+    const cls = classifyStep(s?.name);
+    if (!SETUP_CLASSES.includes(cls)) continue;
+    const sec = spanMs(s.started_at, s.completed_at) / 1000;
+    out[cls] += sec; out.total += sec;
+  }
+  return out;
+}
+/** Job seconds by outcome: {seconds, failed, cancelled, failedShare, cancelledShare}; shares are null with no time. */
+export function minuteShares(jobs) {
+  let seconds = 0, failed = 0, cancelled = 0;
+  for (const j of jobs ?? []) {
+    const s = jobSeconds(j), c = lc(j?.conclusion);
+    seconds += s;
+    if (FAILED.includes(c)) failed += s; else if (c === "cancelled") cancelled += s;
+  }
+  return { seconds, failed, cancelled, failedShare: seconds ? failed / seconds : null, cancelledShare: seconds ? cancelled / seconds : null };
+}
+/** The job that ends last: it sets the wall time of its run. Null when no job ran. */
+export function criticalJob(jobs) {
+  let best = null;
+  for (const j of jobs ?? []) if (jobRan(j) && (!best || Date.parse(j.completed_at) > Date.parse(best.completed_at))) best = j;
+  return best;
+}
+/** The earliest failed step over `jobs`: {job, step, cls, at} (`cls` from classifyStep), or null. */
+export function firstFailedStep(jobs) {
+  let best = null;
+  for (const j of jobs ?? []) for (const s of j?.steps ?? []) {
+    if (!FAILED.includes(lc(s?.conclusion)) || !s.completed_at) continue;
+    if (!best || Date.parse(s.completed_at) < Date.parse(best.at)) best = { job: j.name, step: s.name, cls: classifyStep(s.name), at: s.completed_at };
+  }
+  return best;
+}
+export const isFailedConclusion = (c) => FAILED.includes(lc(c));
+
+const lines = (out) => String(out ?? "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+const RUN_JQ = ".workflow_runs[] | {id, name, path, event, status, conclusion, head_sha, head_branch, run_attempt, created_at, run_started_at, updated_at, prs: [.pull_requests[]?.number], actor: (.triggering_actor.login // .actor.login // null)} | @json";
+const JOB_JQ = ".jobs[] | {id, name, run_attempt, status, conclusion, created_at, started_at, completed_at, labels, runner_group_name, steps: [.steps[]? | {name, status, conclusion, started_at, completed_at}]} | @json";
+/** The runs list API returns at most this many results per query; a fuller window is split in two. */
+export const RUNS_QUERY_CAP = 1000;
+const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+/**
+ * Workflow runs created in [sinceMs, untilMs], optionally one branch and one event, paginated (`gh api --paginate`, so the
+ * caller's retry helper covers each page). A window that hits the API's 1000-result cap is halved and fetched again, so
+ * nothing is silently dropped. The runs API is slow (seconds per page): callers scope by branch and event.
+ */
+export async function listRuns({ gh, repo, sinceMs, untilMs = Date.now(), branch = null, event = null, cap = RUNS_QUERY_CAP }) {
+  const q = `repos/${repo}/actions/runs?per_page=100&created=${iso(sinceMs)}..${iso(untilMs)}${branch ? `&branch=${encodeURIComponent(branch)}` : ""}${event ? `&event=${encodeURIComponent(event)}` : ""}`;
+  const runs = lines(await gh(["api", "--paginate", q, "--jq", RUN_JQ]));
+  if (runs.length < cap || untilMs - sinceMs < 2000) return runs;
+  const mid = Math.floor((sinceMs + untilMs) / 2000) * 1000;
+  const [a, b] = [await listRuns({ gh, repo, sinceMs, untilMs: mid, branch, event, cap }), await listRuns({ gh, repo, sinceMs: mid + 1000, untilMs, branch, event, cap })];
+  return [...b, ...a];
+}
+/** Jobs (with steps) of one run, every attempt, paginated. */
+export const listRunJobs = async ({ gh, repo, runId }) => lines(await gh(["api", "--paginate", `repos/${repo}/actions/runs/${runId}/jobs?per_page=100&filter=all`, "--jq", JOB_JQ]));

@@ -3982,14 +3982,15 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
 let exitCode = 0;
 // #5301: an App login puts a scoped installation token in this process's env (GH_TOKEN) for child gh calls; no login, no change.
-if (command !== "auth") await applyAuthEnv();
+if (command !== "auth" && command !== "ci-step" && command !== "ci-hook") await applyAuthEnv();
 // #5381: installation tokens live 1h; long-running commands re-resolve before expiry so later gh calls and lanes inherit a fresh one.
 if (AUTH_REFRESH_COMMANDS.has(command)) startAuthRefresh();
 switch (command) {
@@ -4219,6 +4220,12 @@ switch (command) {
     exitCode = await runGc(restArgs);
     break;
   }
+  case "env": {
+    // Environment library: per-repo dependency snapshots keyed by lockfiles + toolchain + lane_tools (bin/env)
+    const { envFromCli } = await import("./env/cli.mjs");
+    exitCode = await envFromCli(restArgs);
+    break;
+  }
   case "sandbox": {
     // #5450: operator control of the lane test sandboxes (verify.sandboxes): up <name>... | down | ls
     const { sandboxFromCli } = await import("./lean/testsandbox.mjs");
@@ -4419,11 +4426,33 @@ switch (command) {
     // Actions-minutes budget and CI placement policy (#5278): `forgedock ci budget`.
     const { ciFromCli } = await import("./lean/ci-budget.mjs");
     try {
-      exitCode = await ciFromCli(restArgs);
+      if (restArgs[0] === "cancel-superseded") { // #5718: cancel the verification runs of a superseded head (off unless verify.cancel_superseded or --mode)
+        const [{ cancelSupersededFromCli }, { ciRunSeams }, { defaultGh, isValidRepo }, { resolveRepo }, { readVerify }] = await Promise.all([import("./lean/verify.mjs"), import("./lean/effects.mjs"), import("./stats/github-source.mjs"), import("./stats/index.mjs"), import("./engine-cli.mjs")]);
+        const repo = resolveRepo(null);
+        exitCode = await cancelSupersededFromCli(restArgs.slice(1), { gh: defaultGh, repo: isValidRepo(repo) ? repo : null, config: readVerify() ?? {}, seams: ({ repo: r }) => ciRunSeams({ gh: defaultGh, repo: r }) });
+      } else exitCode = await ciFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
     }
+    break;
+  }
+  case "tests": {
+    // Test engine (#5710): `forgedock tests select|shard|recall` (affected-test selection, shard plan, shadow recall ledger).
+    const { testsFromCli } = await import("./lean/testengine.mjs");
+    try {
+      exitCode = await testsFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "ci-step":
+  case "ci-hook": {
+    // Runner-side CI event emitter (#5689): `forgedock ci-step --name <step> -- <cmd...>`, `forgedock ci-hook job-started|job-completed`.
+    const { ciStepFromCli, ciHookFromCli } = await import("./lean/ci-emit.mjs");
+    exitCode = await (command === "ci-step" ? ciStepFromCli : ciHookFromCli)(restArgs);
     break;
   }
   case "interfaces": {

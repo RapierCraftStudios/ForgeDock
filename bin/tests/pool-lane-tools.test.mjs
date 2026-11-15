@@ -16,7 +16,7 @@ function fakeDocker({ have = [], failBuild = false, hang = false } = {}) {
     async hasImage(ref) { return images.has(ref); },
     async build(dir, tag) { this.builds.push({ dir, tag, dockerfile: readFileSync(`${dir}/Dockerfile`, "utf8") }); if (hang) return new Promise(() => {}); if (failBuild) throw Object.assign(new Error("boom"), { stderr: "apt failed" }); images.add(tag); return tag; },
     async run(args) { this.runs.push(args); containers.set(args[args.indexOf("--name") + 1], { running: true, exitCode: 0, startedAt: "", finishedAt: "" }); return "cid"; },
-    async inspect(n) { return containers.get(n) ?? null; }, async remove() {}, async listLabelled() { return []; }, async wipe() {}, async listVolumes() { return []; }, async removeVolume() {} };
+    async inspect(n) { return containers.get(n) ?? null; }, async remove() {}, async listLabelled() { return []; }, async wipe() {}, async removeWorkDir() {}, async pruneWorkDirs() {}, async listVolumes() { return []; }, async removeVolume() {} };
 }
 const spec = (id, extra = {}) => ({ id, issue: 7, repo: { slug: "o/r", url: "u", ref: "main" }, env: {}, command: ["true"], ...extra });
 const agentWith = (docker) => createAgent({ name: "a", listen: { host: "127.0.0.1", port: 7712 }, router_url: "http://r:1", state_dir: tmpDir("lt-"), allow_cpus: 8, allow_mem_gb: 16, token: "t" }, { docker, log: quiet, live: () => ({ ok: true }) });
@@ -36,6 +36,11 @@ describe("lane_tools validation", () => {
 });
 
 describe("recipes and tag", () => {
+  it("xvfb recipe apt-installs xvfb and xauth and takes no version", () => {
+    assert.match(laneToolsDockerfile("b:1", ["xvfb"]), /apt-get install -y --no-install-recommends xvfb xauth/);
+    assert.throws(() => checkRecipes(["xvfb@1"]), /takes no version/);
+    assert.doesNotThrow(() => checkRecipes(["xvfb", "python@3.12", "promtool@2.53.3", "postgresql-client"]));
+  });
   it("unknown tool fails fast naming the tool and known recipes; nothing is built", async () => {
     const docker = fakeDocker();
     await assert.rejects(resolveLaneImage({ tools: ["nosuch"], baseImage: "b:1", docker }), (e) => e.code === "lane_tools.unknown_recipe" && e.message.includes("nosuch") && Object.keys(RECIPES).every((n) => e.message.includes(n)));
@@ -49,7 +54,7 @@ describe("recipes and tag", () => {
     assert.notEqual(laneToolsTag("b:2", ["a", "b"]), t);
   });
   it("no tool names appear outside the registry module", () => {
-    for (const f of ["agent.mjs", "warm.mjs", "router.mjs"]) { const src = readFileSync(new URL(`../pool/${f}`, import.meta.url), "utf8"); for (const n of Object.keys(RECIPES)) assert.ok(!src.includes(`"${n}"`), `${f} mentions ${n}`); }
+    for (const f of ["agent.mjs", "warm.mjs", "router.mjs", "ci-events.mjs"]) { const src = readFileSync(new URL(`../pool/${f}`, import.meta.url), "utf8"); for (const n of Object.keys(RECIPES)) assert.ok(!src.includes(`"${n}"`), `${f} mentions ${n}`); }
   });
 });
 

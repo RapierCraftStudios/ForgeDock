@@ -1,0 +1,935 @@
+{
+ "repo": {
+  "full_name": "acme/widgets",
+  "default_branch": "main"
+ },
+ "pulls": [
+  {
+   "number": 12,
+   "title": "Release 12",
+   "state": "closed",
+   "created_at": "2026-03-02T11:00:00Z",
+   "merged_at": "2026-03-02T11:05:00Z",
+   "closed_at": "2026-03-02T11:05:00Z",
+   "merge_commit_sha": "m12",
+   "head": {
+    "ref": "chore/sync",
+    "sha": "m12-head"
+   },
+   "base": {
+    "ref": "main"
+   },
+   "user": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "number": 11,
+   "title": "Release 11",
+   "state": "closed",
+   "created_at": "2026-03-02T09:00:00Z",
+   "merged_at": "2026-03-02T09:30:00Z",
+   "closed_at": "2026-03-02T09:30:00Z",
+   "merge_commit_sha": "m11",
+   "head": {
+    "ref": "staging",
+    "sha": "m11-head"
+   },
+   "base": {
+    "ref": "main"
+   },
+   "user": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "number": 10,
+   "title": "Release 10",
+   "state": "closed",
+   "created_at": "2026-03-01T10:00:00Z",
+   "merged_at": "2026-03-01T12:00:00Z",
+   "closed_at": "2026-03-01T12:00:00Z",
+   "merge_commit_sha": "m10",
+   "head": {
+    "ref": "staging",
+    "sha": "m10-head"
+   },
+   "base": {
+    "ref": "main"
+   },
+   "user": {
+    "login": "dev-one"
+   }
+  }
+ ],
+ "runs": [
+  {
+   "id": 100,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "event": "pull_request",
+   "status": "completed",
+   "conclusion": "failure",
+   "head_sha": "a1",
+   "head_branch": "staging",
+   "run_attempt": 1,
+   "created_at": "2026-03-01T10:00:00Z",
+   "run_started_at": "2026-03-01T10:00:00Z",
+   "updated_at": "2026-03-01T10:20:00Z",
+   "workflow_id": 1,
+   "pull_requests": [
+    {
+     "number": 10,
+     "head": {
+      "ref": "staging"
+     },
+     "base": {
+      "ref": "main"
+     }
+    }
+   ],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 103,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "event": "pull_request",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "head_sha": "a15",
+   "head_branch": "staging",
+   "run_attempt": 1,
+   "created_at": "2026-03-01T10:24:00Z",
+   "run_started_at": "2026-03-01T10:24:00Z",
+   "updated_at": "2026-03-01T10:29:00Z",
+   "workflow_id": 1,
+   "pull_requests": [
+    {
+     "number": 10,
+     "head": {
+      "ref": "staging"
+     },
+     "base": {
+      "ref": "main"
+     }
+    }
+   ],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 101,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "event": "pull_request",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "a2",
+   "head_branch": "staging",
+   "run_attempt": 1,
+   "created_at": "2026-03-01T10:30:00Z",
+   "run_started_at": "2026-03-01T10:30:00Z",
+   "updated_at": "2026-03-01T10:40:00Z",
+   "workflow_id": 1,
+   "pull_requests": [
+    {
+     "number": 10,
+     "head": {
+      "ref": "staging"
+     },
+     "base": {
+      "ref": "main"
+     }
+    }
+   ],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 102,
+   "name": "Images",
+   "path": ".github/workflows/images.yml",
+   "event": "pull_request",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "a2",
+   "head_branch": "staging",
+   "run_attempt": 1,
+   "created_at": "2026-03-01T10:30:00Z",
+   "run_started_at": "2026-03-01T10:30:00Z",
+   "updated_at": "2026-03-01T10:36:00Z",
+   "workflow_id": 1,
+   "pull_requests": [
+    {
+     "number": 10,
+     "head": {
+      "ref": "staging"
+     },
+     "base": {
+      "ref": "main"
+     }
+    }
+   ],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 110,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "event": "pull_request",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "b1",
+   "head_branch": "staging",
+   "run_attempt": 1,
+   "created_at": "2026-03-02T09:00:00Z",
+   "run_started_at": "2026-03-02T09:00:00Z",
+   "updated_at": "2026-03-02T09:10:00Z",
+   "workflow_id": 1,
+   "pull_requests": [
+    {
+     "number": 11,
+     "head": {
+      "ref": "staging"
+     },
+     "base": {
+      "ref": "main"
+     }
+    }
+   ],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 120,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "b1",
+   "head_branch": "staging",
+   "run_attempt": 1,
+   "created_at": "2026-03-02T08:59:00Z",
+   "run_started_at": "2026-03-02T08:59:00Z",
+   "updated_at": "2026-03-02T09:05:00Z",
+   "workflow_id": 1,
+   "pull_requests": [],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 200,
+   "name": "Deploy",
+   "path": ".github/workflows/deploy.yml",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "failure",
+   "head_sha": "m10",
+   "head_branch": "main",
+   "run_attempt": 1,
+   "created_at": "2026-03-01T12:00:00Z",
+   "run_started_at": "2026-03-01T12:00:00Z",
+   "updated_at": "2026-03-01T12:50:00Z",
+   "workflow_id": 1,
+   "pull_requests": [],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 201,
+   "name": "Deploy",
+   "path": ".github/workflows/deploy.yml",
+   "event": "workflow_dispatch",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "m10",
+   "head_branch": "main",
+   "run_attempt": 1,
+   "created_at": "2026-03-01T13:00:00Z",
+   "run_started_at": "2026-03-01T13:00:00Z",
+   "updated_at": "2026-03-01T13:45:00Z",
+   "workflow_id": 1,
+   "pull_requests": [],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 210,
+   "name": "Deploy",
+   "path": ".github/workflows/deploy.yml",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "m11",
+   "head_branch": "main",
+   "run_attempt": 1,
+   "created_at": "2026-03-02T09:30:00Z",
+   "run_started_at": "2026-03-02T09:30:00Z",
+   "updated_at": "2026-03-02T10:00:00Z",
+   "workflow_id": 1,
+   "pull_requests": [],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 211,
+   "name": "Deploy",
+   "path": ".github/workflows/deploy.yml",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "m12",
+   "head_branch": "main",
+   "run_attempt": 1,
+   "created_at": "2026-03-02T11:05:00Z",
+   "run_started_at": "2026-03-02T11:05:00Z",
+   "updated_at": "2026-03-02T11:05:10Z",
+   "workflow_id": 1,
+   "pull_requests": [],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  },
+  {
+   "id": 300,
+   "name": "Deploy docs",
+   "path": ".github/workflows/docs.yml",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "m11",
+   "head_branch": "main",
+   "run_attempt": 1,
+   "created_at": "2026-03-02T09:30:00Z",
+   "run_started_at": "2026-03-02T09:30:00Z",
+   "updated_at": "2026-03-02T09:32:00Z",
+   "workflow_id": 1,
+   "pull_requests": [],
+   "actor": {
+    "login": "dev-one"
+   },
+   "triggering_actor": {
+    "login": "dev-one"
+   }
+  }
+ ],
+ "jobs": {
+  "100": [
+   {
+    "id": 9001,
+    "run_id": 100,
+    "name": "lint",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-03-01T10:00:00Z",
+    "started_at": "2026-03-01T10:00:10Z",
+    "completed_at": "2026-03-01T10:02:10Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Set up job",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:00:10Z",
+      "completed_at": "2026-03-01T10:00:12Z"
+     },
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:00:12Z",
+      "completed_at": "2026-03-01T10:00:17Z"
+     },
+     {
+      "name": "Run actions/setup-node@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:00:17Z",
+      "completed_at": "2026-03-01T10:00:37Z"
+     },
+     {
+      "name": "Install dependencies",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:00:37Z",
+      "completed_at": "2026-03-01T10:01:07Z"
+     },
+     {
+      "name": "Run lint",
+      "status": "completed",
+      "conclusion": "failure",
+      "number": 1,
+      "started_at": "2026-03-01T10:01:07Z",
+      "completed_at": "2026-03-01T10:02:10Z"
+     },
+     {
+      "name": "Post Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:02:10Z",
+      "completed_at": "2026-03-01T10:02:10Z"
+     }
+    ]
+   },
+   {
+    "id": 9002,
+    "run_id": 100,
+    "name": "test",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T10:00:00Z",
+    "started_at": "2026-03-01T10:01:00Z",
+    "completed_at": "2026-03-01T10:20:00Z",
+    "labels": [
+     "self-hosted",
+     "linux"
+    ],
+    "runner_group_name": "Default",
+    "runner_name": "runner-a",
+    "steps": [
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:01:00Z",
+      "completed_at": "2026-03-01T10:02:40Z"
+     },
+     {
+      "name": "Set up Python",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:02:40Z",
+      "completed_at": "2026-03-01T10:03:40Z"
+     },
+     {
+      "name": "poetry install",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:03:40Z",
+      "completed_at": "2026-03-01T10:07:00Z"
+     },
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:07:00Z",
+      "completed_at": "2026-03-01T10:20:00Z"
+     }
+    ]
+   }
+  ],
+  "101": [
+   {
+    "id": 9004,
+    "run_id": 101,
+    "name": "lint",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T10:30:00Z",
+    "started_at": "2026-03-01T10:30:05Z",
+    "completed_at": "2026-03-01T10:32:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:30:05Z",
+      "completed_at": "2026-03-01T10:30:10Z"
+     },
+     {
+      "name": "Run lint",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:30:10Z",
+      "completed_at": "2026-03-01T10:32:00Z"
+     }
+    ]
+   },
+   {
+    "id": 9005,
+    "run_id": 101,
+    "name": "test",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T10:30:00Z",
+    "started_at": "2026-03-01T10:30:30Z",
+    "completed_at": "2026-03-01T10:40:00Z",
+    "labels": [
+     "self-hosted",
+     "linux"
+    ],
+    "runner_group_name": "Default",
+    "runner_name": "runner-a",
+    "steps": [
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:30:30Z",
+      "completed_at": "2026-03-01T10:32:30Z"
+     },
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:32:30Z",
+      "completed_at": "2026-03-01T10:40:00Z"
+     }
+    ]
+   },
+   {
+    "id": 9006,
+    "run_id": 101,
+    "name": "docs",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "skipped",
+    "created_at": "2026-03-01T10:30:00Z",
+    "started_at": "2026-03-01T10:30:00Z",
+    "completed_at": "2026-03-01T10:30:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": []
+   }
+  ],
+  "102": [
+   {
+    "id": 9007,
+    "run_id": 102,
+    "name": "build",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T10:30:00Z",
+    "started_at": "2026-03-01T10:30:04Z",
+    "completed_at": "2026-03-01T10:36:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:30:04Z",
+      "completed_at": "2026-03-01T10:30:10Z"
+     },
+     {
+      "name": "Set up Docker Buildx",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:30:10Z",
+      "completed_at": "2026-03-01T10:30:20Z"
+     },
+     {
+      "name": "Build and push image",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:30:20Z",
+      "completed_at": "2026-03-01T10:34:20Z"
+     }
+    ]
+   }
+  ],
+  "103": [
+   {
+    "id": 9003,
+    "run_id": 103,
+    "name": "test",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "cancelled",
+    "created_at": "2026-03-01T10:24:00Z",
+    "started_at": "2026-03-01T10:24:00Z",
+    "completed_at": "2026-03-01T10:29:00Z",
+    "labels": [
+     "self-hosted",
+     "linux"
+    ],
+    "runner_group_name": "Default",
+    "runner_name": "runner-a",
+    "steps": [
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T10:24:00Z",
+      "completed_at": "2026-03-01T10:25:40Z"
+     },
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "number": 1,
+      "started_at": "2026-03-01T10:25:40Z",
+      "completed_at": "2026-03-01T10:29:00Z"
+     }
+    ]
+   }
+  ],
+  "110": [
+   {
+    "id": 9008,
+    "run_id": 110,
+    "name": "test",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-02T09:00:00Z",
+    "started_at": "2026-03-02T09:00:20Z",
+    "completed_at": "2026-03-02T09:10:00Z",
+    "labels": [
+     "self-hosted",
+     "linux"
+    ],
+    "runner_group_name": "Default",
+    "runner_name": "runner-a",
+    "steps": [
+     {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:00:20Z",
+      "completed_at": "2026-03-02T09:01:20Z"
+     },
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:01:20Z",
+      "completed_at": "2026-03-02T09:10:00Z"
+     }
+    ]
+   }
+  ],
+  "200": [
+   {
+    "id": 9009,
+    "run_id": 200,
+    "name": "pre-gate",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T12:00:00Z",
+    "started_at": "2026-03-01T12:00:05Z",
+    "completed_at": "2026-03-01T12:20:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T12:00:05Z",
+      "completed_at": "2026-03-01T12:20:00Z"
+     }
+    ]
+   },
+   {
+    "id": 9010,
+    "run_id": 200,
+    "name": "deploy",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-03-01T12:20:00Z",
+    "started_at": "2026-03-01T12:20:10Z",
+    "completed_at": "2026-03-01T12:50:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Roll out",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T12:20:10Z",
+      "completed_at": "2026-03-01T12:45:00Z"
+     },
+     {
+      "name": "Smoke",
+      "status": "completed",
+      "conclusion": "failure",
+      "number": 1,
+      "started_at": "2026-03-01T12:45:00Z",
+      "completed_at": "2026-03-01T12:50:00Z"
+     }
+    ]
+   }
+  ],
+  "201": [
+   {
+    "id": 9011,
+    "run_id": 201,
+    "name": "pre-gate",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T13:00:00Z",
+    "started_at": "2026-03-01T13:00:05Z",
+    "completed_at": "2026-03-01T13:20:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T13:00:05Z",
+      "completed_at": "2026-03-01T13:20:00Z"
+     }
+    ]
+   },
+   {
+    "id": 9012,
+    "run_id": 201,
+    "name": "deploy",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-01T13:20:00Z",
+    "started_at": "2026-03-01T13:20:00Z",
+    "completed_at": "2026-03-01T13:45:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Roll out",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T13:20:00Z",
+      "completed_at": "2026-03-01T13:35:00Z"
+     },
+     {
+      "name": "Smoke",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T13:35:00Z",
+      "completed_at": "2026-03-01T13:40:00Z"
+     },
+     {
+      "name": "Tail services",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-01T13:40:00Z",
+      "completed_at": "2026-03-01T13:45:00Z"
+     }
+    ]
+   }
+  ],
+  "210": [
+   {
+    "id": 9013,
+    "run_id": 210,
+    "name": "pre-gate",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-02T09:30:00Z",
+    "started_at": "2026-03-02T09:30:05Z",
+    "completed_at": "2026-03-02T09:40:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Run tests",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:30:05Z",
+      "completed_at": "2026-03-02T09:40:00Z"
+     }
+    ]
+   },
+   {
+    "id": 9014,
+    "run_id": 210,
+    "name": "deploy",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-02T09:40:00Z",
+    "started_at": "2026-03-02T09:40:00Z",
+    "completed_at": "2026-03-02T10:00:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Roll out",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:40:00Z",
+      "completed_at": "2026-03-02T09:51:00Z"
+     },
+     {
+      "name": "Smoke",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:51:00Z",
+      "completed_at": "2026-03-02T09:56:00Z"
+     },
+     {
+      "name": "Tail services",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:56:00Z",
+      "completed_at": "2026-03-02T10:00:00Z"
+     }
+    ]
+   }
+  ],
+  "211": [
+   {
+    "id": 9015,
+    "run_id": 211,
+    "name": "deploy",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "skipped",
+    "created_at": "2026-03-02T11:05:00Z",
+    "started_at": "2026-03-02T11:05:05Z",
+    "completed_at": "2026-03-02T11:05:05Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": []
+   }
+  ],
+  "300": [
+   {
+    "id": 9016,
+    "run_id": 300,
+    "name": "deploy docs",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-03-02T09:30:00Z",
+    "started_at": "2026-03-02T09:30:05Z",
+    "completed_at": "2026-03-02T09:32:00Z",
+    "labels": [
+     "ubuntu-latest"
+    ],
+    "runner_group_name": "GitHub Actions",
+    "runner_name": "GitHub Actions 7",
+    "steps": [
+     {
+      "name": "Publish site",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-03-02T09:30:05Z",
+      "completed_at": "2026-03-02T09:32:00Z"
+     }
+    ]
+   }
+  ]
+ }
+}
