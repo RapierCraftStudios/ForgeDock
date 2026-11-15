@@ -306,12 +306,14 @@ export function writeCiBlock(raw, set) {
 }
 
 // ---- CLI -------------------------------------------------------------------------------------------------------------
-export const CI_USAGE = "usage: forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]] [--set-mode MODE] [--budget MINUTES] [--reserve PCT] [--plan PLAN]";
+export const CI_USAGE = "usage: forgedock ci preflight [--json] | forgedock ci runner-health [--recover] [--json] [--repo owner/repo] [--print-units] | forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]] [--set-mode MODE] [--budget MINUTES] [--reserve PCT] [--plan PLAN]";
 const flagVal = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
 
 /** `forgedock ci budget ...`; @returns the exit code. `deps`: {gh, cwd, now, out, dir}. */
 export async function ciFromCli(argv, deps = {}) {
   const out = deps.out ?? ((l) => console.log(l)), cwd = deps.cwd ?? process.cwd(), gh = deps.gh ?? defaultGh, now = deps.now ?? Date.now(), dir = deps.dir ?? cacheDir();
+  if (argv[0] === "preflight") return (await import("./ci-preflight.mjs")).ciPreflightFromCli(argv.slice(1), { out, cwd, ...deps.preflight });
+  if (argv[0] === "runner-health") return (await import("./ci-runner-health.mjs")).ciRunnerHealthFromCli(argv.slice(1), { out, cwd, ...deps.runnerHealth });
   if (argv[0] !== "budget") throw new Error(CI_USAGE);
   const rest = argv.slice(1);
   const valued = ["--repo", "--set-mode", "--budget", "--reserve", "--plan", "--base"];

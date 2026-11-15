@@ -254,3 +254,55 @@ export function deriveState(allEvents, { path = "full" } = {}) {
   }
   return s;
 }
+
+/** #5697: the most run-log text a lane exports in its result (bytes); a longer log is cut from the middle. */
+export const RUNLOG_EXPORT_MAX = 20 * 1024 * 1024;
+
+/** Keep the head and the tail of `text` (whole lines, half of `max` each) with a LOG_TRUNCATED marker event between them. */
+export function capLog(text, max = RUNLOG_EXPORT_MAX) {
+  if (Buffer.byteLength(text) <= max) return text;
+  const lines = text.split("\n").filter((l) => l.trim());
+  const half = Math.floor(max / 2);
+  let head = 0, hb = 0, tail = lines.length, tb = 0;
+  while (head < tail && hb + Buffer.byteLength(lines[head]) + 1 <= half) hb += Buffer.byteLength(lines[head++]) + 1;
+  while (tail > head && tb + Buffer.byteLength(lines[tail - 1]) + 1 <= half) tb += Buffer.byteLength(lines[--tail]) + 1;
+  const marker = JSON.stringify({ event: "LOG_TRUNCATED", dropped_lines: tail - head, dropped_bytes: Buffer.byteLength(text) - hb - tb, ts: new Date().toISOString() });
+  return [...lines.slice(0, head), marker, ...lines.slice(tail)].join("\n") + "\n";
+}
+
+/** #5697: `result` plus the lane's own run log (capped) as `runLog`, so the host can keep it after the sandbox is gone. Never throws. */
+export function attachRunLog(result, { dir, issue, repo = null, max = RUNLOG_EXPORT_MAX }) {
+  try {
+    const path = runLogPath(dir, issue, repo);
+    if (!existsSync(path)) return result;
+    return { ...result, runLog: capLog(readFileSync(path, "utf-8"), max) };
+  } catch { return result; }
+}
+
+/**
+ * #5697: append the events of an exported run log (jsonl text) to the host run log, once. Each event is keyed by its
+ * lane-side seq + ts + event (`remote_seq` after a merge), so collecting the same log again adds nothing; merged events
+ * get the next host seq. Returns the number appended; never throws.
+ */
+export function mergeRemoteLog(dir, issue, runLog, { repo = null } = {}) {
+  try {
+    const incoming = [];
+    for (const l of String(runLog ?? "").split("\n")) { if (!l.trim()) continue; try { incoming.push(JSON.parse(l)); } catch { /* a cut line */ } }
+    if (!incoming.length) return 0;
+    mkdirSync(dir, { recursive: true });
+    const path = runLogPath(dir, issue, repo);
+    const existing = parseLog(path);
+    const key = (e, seq) => `${seq}|${e.ts ?? ""}|${e.event ?? ""}`;
+    const seen = new Set(existing.map((e) => key(e, e.remote_seq ?? e.seq)));
+    let seq = existing.length;
+    const lines = [];
+    for (const e of incoming) {
+      const k = key(e, e.seq ?? ""); if (seen.has(k)) continue;
+      seen.add(k);
+      const { seq: remote, ...rest } = e;
+      lines.push(JSON.stringify({ seq: ++seq, ...rest, ...(remote !== undefined ? { remote_seq: remote } : {}) }));
+    }
+    if (lines.length) appendFileSync(path, lines.join("\n") + "\n");
+    return lines.length;
+  } catch { return 0; }
+}
