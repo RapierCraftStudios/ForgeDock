@@ -305,7 +305,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   function sendBundle(res) {
-    const tar = spawn("tar", ["-czf", "-", "-C", cfg.repo_root, "package.json", "bin/pool", "pool"]);
+    const tar = spawn("tar", ["-czf", "-", "-C", cfg.repo_root, ...AGENT_BUNDLE_PATHS]);
     res.writeHead(200, { "content-type": "application/gzip" });
     tar.stdout.pipe(res);
     tar.on("error", () => res.destroy());
@@ -490,6 +490,12 @@ export function pickClaudeLogin({ logins, usage, ceilingPct = 95, now, limited =
   return { status: 429, retryAfter: Math.max(1, Math.ceil((resetMs - now) / 1000)),
     body: { error: "usage limit", code: "rate_limited", reason: `usage limit hit; resets at ${at}`, reset_at: at } };
 }
+
+/**
+ * What the router ships to pool agents (self-update and bootstrap). Every module the agent can load statically from
+ * bin/pool/agent.mjs must live under these paths; bin/tests/pool-agent-bundle.test.mjs enforces it.
+ */
+export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "pool"]);
 
 export function startRouter(cfg, deps) {
   const router = createRouter(cfg, deps);
