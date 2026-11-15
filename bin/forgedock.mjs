@@ -3982,7 +3982,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
@@ -4218,6 +4218,12 @@ switch (command) {
     // Reaper (#4180): dry-run report by default; --apply reclaims only ForgeDock-owned resources (ledger, label, lane naming, own tmp).
     const { runGc } = await import("./gc.mjs");
     exitCode = await runGc(restArgs);
+    break;
+  }
+  case "env": {
+    // Environment library: per-repo dependency snapshots keyed by lockfiles + toolchain + lane_tools (bin/env)
+    const { envFromCli } = await import("./env/cli.mjs");
+    exitCode = await envFromCli(restArgs);
     break;
   }
   case "sandbox": {

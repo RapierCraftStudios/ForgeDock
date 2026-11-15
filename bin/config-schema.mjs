@@ -19,6 +19,8 @@ export const TOP_LEVEL = [
 /** Sections whose direct children are a closed set: another child is an unknown key. */
 export const CLOSED = {
   "verification.ci_local": ["mode", "exclude_jobs", "include_jobs", "extra_commands", "services", "budget_minutes", "max_parallel"],
+  "env.snapshots": ["enabled", "store", "keep", "max_age_days", "ready", "base_image", "image"],
+  "env.proxies": ["npm", "pypi", "apt", "git"],
   // #5710 test engine. The one-level parser flattens these under `ci`, so every name is unique within `ci`.
   "ci.tests": ["selection", "suites", "run_all", "ignore", "test_globs", "full_branches", "graduate_after", "graduate_min_failing", "shards", "shard_target_s", "quarantine", "quarantine_after", "quarantine_window_days", "recall_ledger"],
   // #5712: the deploy stage engine (bin/lean/deploy-stages.mjs); the stage entries themselves are checked by validateEngine
@@ -39,6 +41,11 @@ export const TYPES = {
   "verification.ci_local.extra_commands": "list",
   "verification.ci_local.budget_minutes": "number",
   "verification.ci_local.max_parallel": "number",
+  "env.snapshots.enabled": "bool",
+  "env.snapshots.store": { enum: ["local", "oci"] },
+  "env.snapshots.keep": "number",
+  "env.snapshots.max_age_days": "number",
+  "env.snapshots.ready": "number",
   "ci.tests.selection": { enum: ["off", "shadow", "enforce"] },
   "ci.tests.quarantine": { enum: ["off", "report", "non-blocking"] },
   "ci.tests.suites": "list",

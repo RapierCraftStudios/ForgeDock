@@ -10,6 +10,15 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-15 — Environment snapshots (#5714)
+
+- Design, failure modes and rejected options: `devdocs/decisions/5714-env-library.md`. User guide: `docs/ENV-LIBRARY.md`.
+- Switch: forge.yaml `env.snapshots.enabled` (default false). The dispatcher (`bin/lean/sandbox-remote.mjs`) adds `spec.env_snapshots {enabled, ready, keep, max_age_days}` and the lane env from `laneEnvFor` (`FORGE_ENV_SNAPSHOTS=1`, `FORGE_ENV_ROOT=/cache/env`, `FORGE_ENV_PREFIX=/work/env`, `FORGE_ENV_LANE_TOOLS`, proxy variables). Off: neither is present.
+- `bin/pool/agent.mjs`: `launch` adds `FORGE_ENV_IMAGE` (the lane image, part of the key) and, after the lane container started, calls `ensureEnv`: one helper container `cs-envbuild-<cache key>` (label `computeshare.env=1`, so the sandbox orphan reaper ignores it; `--rm`) per cache volume, at most every `ENV_ENSURE_GAP_MS` (5 min). Args come from the pure `envEnsureArgs`. It mounts only the repo's cache volume and runs `forgedock env ensure` (clone from `/cache/git/<slug>.git`, build if missing, stage, gc). Never awaited; a failure is a log line. Agent config: `env_build_cpus` (2), `env_build_mem_gb` (4).
+- Mounts are unchanged: the store is `/cache/env`, on the volume that already holds `/cache/work/<id>` (#5696), so a claim is a rename. `bin/pool/warm.mjs` keeps `env_snapshots` in the stored warm spec.
+- `pool/image/entrypoint.sh` writes the apt proxy file when `FORGE_APT_PROXY` is set. `pool/services/` holds the opt-in proxy and git-mirror compose file (not started by anything).
+- Tests: `bin/tests/env-library.test.mjs`.
+
 ## Entry 2026-11-15 — CI runner events (#5688, parent #5687)
 
 - `bin/pool/ci-events.mjs` validates and stores events pushed by CI runners; `bin/pool/router.mjs` exposes them.
