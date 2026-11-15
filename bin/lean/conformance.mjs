@@ -1206,7 +1206,7 @@ function frozenAmendedFiles(frozen, contract, outside, creep) {
  * #4271: the frozen repro_test's red-green proof ({base, head} words from scripts/acceptance-red-green.sh). Anything but
  * HEAD=RAN BASE=FAILED fails; code conformance.unimplemented, so it blocks in shadow too and goes back to the builder.
  * #4334: HEAD=UNRUNNABLE or no words (the harness could not run the test) is env.repro_unrunnable, kind repro_env: an
- * environment error, never a builder resume.
+ * environment error, never a builder resume. So is BASE=UNRUNNABLE with HEAD=RAN (the base checkout could not run it).
  */
 export function reproFailures(contract, { base, head, pristine } = {}) {
   if (head === "RAN" && base === "FAILED") return [];
@@ -1217,6 +1217,12 @@ export function reproFailures(contract, { base, head, pristine } = {}) {
   if (!head || head === "UNRUNNABLE") {
     return [{ code: C.ENV_REPRO_UNRUNNABLE, kind: "repro_env",
       detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on head (environment, not the change); got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}` }];
+  }
+  // A head that ran but a base the harness could not run (e.g. a missing dependency tree in the base checkout) is the
+  // environment too: the change cannot fix it, so it is never a builder resume (AlterLab 40652/40665, BASE=UNRUNNABLE HEAD=RAN).
+  if (head === "RAN" && base === "UNRUNNABLE") {
+    return [{ code: C.ENV_REPRO_UNRUNNABLE, kind: "repro_env",
+      detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on the base (environment, not the change); got BASE=UNRUNNABLE HEAD=RAN` }];
   }
   const skipped = base === "SKIPPED" ? " (base not run: head did not pass)" : "";
   // #5080: the test already passes on the base: the fix is there (a hotfix or another PR), not missing from this change

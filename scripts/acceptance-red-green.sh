@@ -101,9 +101,12 @@ while IFS= read -r f; do
   mkdir -p "$BASE_WT/$(dirname "$f")" && cp -p "$REPO/$f" "$BASE_WT/$f" 2>/dev/null && [ -f "$BASE_WT/$f" ] || OVERLAY_OK=false
 done <<< "$CHANGED"
 # Untracked dependency trees (never in git): link head's so a missing install is not mistaken for a red run (#4334):
-# every node_modules next to a tracked package.json (workspace packages too, e.g. apps/web/node_modules) and a root .venv.
+# every node_modules next to a tracked package.json (workspace packages too, e.g. apps/web/node_modules), and every .venv
+# next to a tracked Python manifest (root or a monorepo service, e.g. services/api/.venv).
 DEPS=$( { git -C "$REPO" ls-files -- package.json '*/package.json' 2>/dev/null | while IFS= read -r p; do
-  d=$(dirname "$p"); [ "$d" = "." ] && echo node_modules || echo "$d/node_modules"; done; echo .venv; } | sort -u )
+  d=$(dirname "$p"); [ "$d" = "." ] && echo node_modules || echo "$d/node_modules"; done
+  git -C "$REPO" ls-files -- pyproject.toml '*/pyproject.toml' poetry.lock '*/poetry.lock' uv.lock '*/uv.lock' 'requirements*.txt' '*/requirements*.txt' 2>/dev/null | while IFS= read -r p; do
+  d=$(dirname "$p"); [ "$d" = "." ] && echo .venv || echo "$d/.venv"; done; echo .venv; } | sort -u )
 while IFS= read -r t; do
   [ -n "$t" ] || continue
   case "$t" in */node_modules/*) continue ;; esac   # a package.json inside an installed tree
