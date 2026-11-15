@@ -8,7 +8,7 @@
  * live in release-review.mjs / release-postmerge.mjs (stubs that block until their parts land). Promotion is opt-in: without
  * `--merge` or forge.yaml `release.auto_merge: true` the job stops at GATE_PASS and prints the merge command.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -478,7 +478,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release deploy --plan [<release id>] [--sha <sha>] [--json] | forgedock release deploy --resume <release id> [--sha <sha>] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release start [--plan <id|hash>] [--approve] [--wave train|release|all] [--milestone <slug>] [--repo owner/repo] | forgedock release go <id> [--plan|--merge|--activate <key>] [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] [--coverage] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release deploy --plan [<release id>] [--sha <sha>] [--json] | forgedock release deploy --resume <release id> [--sha <sha>] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release start [--plan <id|hash>] [--approve] [--wave train|release|all] [--milestone <slug>] [--repo owner/repo] | forgedock release go <id> [--plan|--merge|--activate <key>] [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] [--coverage] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release promote --check|--gate [--sha <sha>] [--digests <file|json>] [--json] | forgedock release promote --attest [--sha <sha>] [--digests <file|json>] [--dry-run] | forgedock release promote --observed pass|fail [--sha <sha>] [--minutes N] | forgedock release promote --report [--last N] | forgedock release promote --images [--base <ref> | --changed a,b] [--previous <file|json>] [--json] | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -610,6 +610,16 @@ export async function releaseFromCli(argv, deps = {}) {
   if (argv[0] === "check-config" || argv[0] === "init") { // #5551: policy file, loaded lazily (release-config imports this module)
     const { checkConfigFromCli, initFromCli } = await import("./release-config.mjs");
     return (argv[0] === "init" ? initFromCli : checkConfigFromCli)(argv.slice(1), { io, cwd });
+  }
+  if (argv[0] === "promote") { // #5711: build once, promote; `promote <gate> --fixture` stays the control verb below
+    const P = await import("./release-promote.mjs");
+    if (P.PROMOTE_FLAGS.some((f) => argv.includes(f))) {
+      const { readPolicy } = await import("./release-config.mjs");
+      const defaultBranch = readBranches(cwd).default || "main";
+      let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: off */ }
+      const policy = P.parsePromoteConfig(raw).enabled ? readPolicy({ io, defaultBranch, cwd }).policy : null; // off: nothing else is read
+      return P.promoteFromCli(argv.slice(1), { io, raw, policy, defaultBranch, env, readFile: (f) => readFileSync(f, "utf8"), appendFile: appendFileSync });
+    }
   }
   const cv = argv[0] === "control" ? argv[1] : argv[0]; // #5556: one implementation, the bare verbs are aliases
   if (CONTROL_VERBS.includes(cv)) {

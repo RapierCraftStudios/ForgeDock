@@ -25,6 +25,7 @@ export const CLOSED = {
   "deploy.engine.services": ["mode", "desired_command", "live_command"],
   "deploy.engine.canary": ["health_command", "low", "medium", "high"],
   "deploy.engine.rollback": ["budget_s", "shift_back_command", "abort_command"],
+  "deploy.promote": ["enabled", "shadow", "required_checks", "evidence_app", "cache_ref", "cache_mode", "builder", "rebuild_all", "services"], // #5711, read by bin/lean/release-promote.mjs
 };
 
 /** Typed keys: list | number | bool | scalar | {enum:[...]}. */
@@ -45,6 +46,11 @@ export const TYPES = {
   "deploy.engine.rollback.budget_s": "number",
   "billing.enabled": "bool",
   "gate.required_checks": "list",
+  "deploy.promote.enabled": "bool",
+  "deploy.promote.shadow": "bool",
+  "deploy.promote.required_checks": "list",
+  "deploy.promote.rebuild_all": "list",
+  "deploy.promote.cache_mode": { enum: ["min", "max"] },
 };
 
 /** Keys the legacy `full` path never reads (the core path reads them: bin/engine-cli.mjs readEnvConfig, readConformanceMode). */

@@ -81,6 +81,9 @@ domains:
       - path: decisions/5712-deploy-stage-engine.md
         authority: recommended
         token_cost: 1300
+      - path: decisions/5711-release-promote.md
+        authority: recommended
+        token_cost: 550
 
   devdocs:
     description: "Devdocs system, frontmatter schema, selective loading, index format"
