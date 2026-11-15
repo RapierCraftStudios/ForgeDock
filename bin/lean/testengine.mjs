@@ -170,7 +170,7 @@ function resolveJs(spec, from, { has, files, packages, aliases }) {
       const hit = star < 0 ? spec === p.key : spec.startsWith(p.key.slice(0, star)) && spec.endsWith(p.key.slice(star + 1));
       if (!hit) continue;
       const mid = star < 0 ? "" : spec.slice(star, spec.length - (p.key.length - star - 1));
-      for (const t of p.targets) { const r = tryFile(pj(a.root, t.replace("*", mid)), has); if (r) return [r]; }
+      for (const t of p.targets) { const r = tryFile(pj(a.root, t.split("*").join(mid)), has); if (r) return [r]; }
     }
     if (a.baseUrl) { const r = tryFile(pj(a.root, spec), has); if (r) return [r]; }
   }
