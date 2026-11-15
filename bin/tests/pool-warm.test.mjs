@@ -22,7 +22,7 @@ function fakeDocker() {
     async inspect(name) { return containers.get(name) ?? null; },
     async remove(name) { containers.delete(name); },
     async listLabelled() { return [...containers.keys()]; },
-    async wipe() {}, async listVolumes() { return []; }, async removeVolume() {} };
+    async wipe() {}, async removeWorkDir() {}, async pruneWorkDirs() {}, async listVolumes() { return []; }, async removeVolume() {} };
 }
 const spec = (id, extra = {}) => ({ id, issue: 7, batch: "b1", repo: { slug: "o/r", url: "https://github.com/o/r.git", ref: "staging" }, env: { GH_TOKEN: "lane-secret" }, command: ["forgedock", "run-issue", "7"], result_file: "/result/7.json", ...extra });
 function fixture() {
