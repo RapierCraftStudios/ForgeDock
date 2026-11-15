@@ -53,6 +53,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { cpus, homedir, loadavg } from "node:os";
 import { dirname, join } from "node:path";
+import { mergeRemoteLog } from "../engine/runlog.mjs";
 import { promisify } from "node:util";
 import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
@@ -486,7 +487,13 @@ export function containerProvider({ batch, repo, image, gitDir, cacheDir = `${ho
       try { s = String(await docker(["inspect", "-f", "{{.State.Status}}", h.id])).trim(); } catch { return "gone"; }
       return ["running", "created", "restarting"].includes(s) ? "running" : "exited";
     },
-    async fetchResult(h) { return readJson(batch.resultFile(h?.issue)); },
+    async fetchResult(h) {
+      const r = readJson(batch.resultFile(h?.issue));
+      if (!r || typeof r !== "object" || !r.runLog) return r;
+      const { runLog, ...rest } = r; // #5697: merge the lane's exported run log into the host run log
+      mergeRemoteLog(process.env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
+      return rest;
+    },
     async teardown(h) {
       try { await docker(["rm", "-f", h.id]); return true; } catch (e) {
         if (/no such container/i.test(errText(e))) return true;

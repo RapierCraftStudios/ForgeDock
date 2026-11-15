@@ -72,3 +72,17 @@ The events take `repo`, `sha`, `run_id`, `job` and the PR number (from `refs/pul
 ### Self-hosted runner hooks
 
 Set `ACTIONS_RUNNER_HOOK_JOB_STARTED="npx forgedock ci-hook job-started"` and `ACTIONS_RUNNER_HOOK_JOB_COMPLETED="npx forgedock ci-hook job-completed"` in the runner's environment (or `.env`), together with the two variables above. They post `job_started` and `job_finished`, and always exit 0; with the URL unset they do nothing.
+
+## Runner health (#5693)
+
+`forgedock ci runner-health` checks the self-hosted runner services on this host and posts a `runner_unhealthy` event (`class: infra`, `step` = `stuck-run`, `service-down`, `orphan-container`, `low-disk` or `low-memory`, the reason in `lines`) per finding, using the same `FORGEDOCK_CI_EVENTS_URL` / `FORGEDOCK_CI_TOKEN` as the emitter. It exits 1 on any finding.
+
+| forge.yaml `ci` key | Meaning |
+|---|---|
+| `repo` | repo whose runners to check (else `--repo`, else `GITHUB_REPOSITORY`; without one the stuck-run check is skipped) |
+| `services[]` | systemd units of the runners, e.g. `actions.runner.<owner>-<repo>.<name>.service` |
+| `min_disk_gb` | free-disk floor, default 10 |
+| `recover` | the timer unit passes `--recover` |
+| `job_timeout_min` | container age that counts as orphaned, default 360 |
+
+`--recover` restarts only the affected runner's service and removes only orphaned containers; without it the plan is printed and nothing is changed. A service is restarted at most once per 10 minutes. `forgedock ci runner-health --print-units` prints a oneshot service and a timer that runs it every 2 minutes; install them with `systemctl enable --now`.

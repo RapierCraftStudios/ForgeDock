@@ -23,7 +23,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
-import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
+import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs, attachRunLog } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
@@ -985,7 +985,8 @@ export async function runFromCli(argv, deps = {}) {
   const recoverCode = flag(argv, "--recover");
   const recoverAttempt = Number(flag(argv, "--recover-attempt"));
   const recover = recoverCode && !recoverCode.startsWith("--") ? { code: recoverCode, attempt: Number.isInteger(recoverAttempt) && recoverAttempt > 0 ? recoverAttempt : 1, final: !argv.includes("--recover-nonfinal") } : null;
-  const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
+  // #5697: a sandbox lane (result under /result/) ships its run log with the result; the host merges it and strips it.
+  const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(resultFile.startsWith("/result/") ? attachRunLog(r, { dir: runDir(), issue, repo }) : r) + "\n"); return r; };
   try {
     await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
   } catch (e) {
