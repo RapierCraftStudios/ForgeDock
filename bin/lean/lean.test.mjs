@@ -2853,6 +2853,17 @@ describe("merge_wait policy", () => {
         assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.trigger), ["merge"]);
         const aware = events(dir, "CI_AWARE"); assert.equal(aware.length, 1); assert.equal(aware[0].event_ts, "2026-11-15T10:00:00Z"); assert.equal(aware[0].source, "router");
       });
+      it("fake clock: the fix round starts within 30 s of the step_failed while the check is still pending", async () => {
+        const w = evWorld([STEP]), dir = tmpDir("core-");
+        let pendingAtRound = null, sent = false;
+        w.io.ciEventsWait = async () => (sent ? new Promise(() => {}) : (sent = true, { events: [{ ...STEP, ts: new Date(w.clock).toISOString() }], next: 1 })); // the step fails when the watcher starts
+        w.io.sleep = async (ms) => { await new Promise((r) => setImmediate(r)); w.clock += ms; }; // fake clock; a sleep elapses as a macrotask, so a ready event wins the race before time passes
+        w.io.failedLogs = async () => { pendingAtRound = !w.fixed; w.fixed = true; return "log"; };
+        const r = await run(w, { dir, verify: V1 });
+        assert.equal(r.terminalReason, "merged", r.reason); assert.equal(pendingAtRound, true, "round began while the check was pending");
+        const a = events(dir, "CI_AWARE")[0], lag = Date.parse(a.aware_ts) - Date.parse(a.event_ts);
+        assert.ok(lag >= 0 && lag <= 30000, `awareness lag ${lag} ms`);
+      });
       it("merge gating unchanged: an event for a non-actionable class never merges while the required check is pending", async () => {
         const w = evWorld([{ ...STEP, lines: ["ECONNRESET registry.npmjs.org"], class: "infra" }]), dir = tmpDir("core-");
         let greenAt = null; w.io.checkStates = async () => { w.polls++; if (w.polls === 4) greenAt = w.merges.length; return [{ name: "build", state: w.polls >= 4 ? "success" : "pending", url: RUN(77, 1) }]; };

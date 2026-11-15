@@ -65,3 +65,15 @@ describe("cancelDecision (#5692)", () => {
     assert.equal(eventLog({ test: "t1", step: "s", lines: ["l1", "l2"] }), "test: t1\nstep: s\nl1\nl2");
   });
 });
+
+describe("forge.yaml ci.fail_fast plumbing (#5692)", () => {
+  it("readCiFailFast returns deterministic only for that value", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs"), { tmpdir } = await import("node:os"), { join } = await import("node:path");
+    const { readCiFailFast } = await import("../engine-cli.mjs");
+    const at = (yaml) => { const d = mkdtempSync(join(tmpdir(), "ci-ff-")); writeFileSync(join(d, "forge.yaml"), yaml); return readCiFailFast(d); };
+    assert.equal(at("ci:\n  fail_fast: deterministic\n"), "deterministic");
+    assert.equal(at("ci:\n  fail_fast: off\n"), undefined);
+    assert.equal(at("name: x\n"), undefined);
+    assert.equal(readCiFailFast(join(tmpdir(), "no-such-dir-5692")), undefined);
+  });
+});
