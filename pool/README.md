@@ -6,6 +6,7 @@ ForgeDock's built-in remote compute pool (imported from computeshare; AGPL-3.0-o
 - `pool/image/` lane image recipe (Dockerfile, shims, entrypoint, `cs-cred` credential relay, `cs-relay` read-only capability relay: allowlisted commands executed on the dispatching host, #4778).
 - `pool/install/` agent installers (Windows/WSL, native Linux, router).
   Native Linux agent (root, systemd): `pool/install/install-agent-linux.sh --router URL --token CODE [--name N --cpus N --mem GB --dry-run]`.
+- `pool/services/` opt-in caching proxies (npm, PyPI, apt) and a read-only git mirror (`docker-compose.yml`); nothing starts them. See `docs/ENV-LIBRARY.md`.
 - Tests: `bin/tests/computeshare.test.mjs`.
 
 The module boundary is the ForgeDock HTTP sandbox protocol: the router speaks it to the dispatcher and relays to agents over HTTP. Sandboxes receive only short-lived GitHub and Claude access tokens; refresh tokens stay on the router host.
