@@ -167,6 +167,6 @@ sources from `pyproject.toml` and is not redirected by these variables.
 
 ## Measuring
 
-- Lanes: `LANE_SETUP_TIMING` step `deps` and `DEPS_PREPARED` (`reason: "env snapshot (rename)"`) in lane run logs.
+- Lanes: `LANE_SETUP_TIMING` step `deps` and `DEPS_PREPARED` (`reason: "env snapshot (rename)"`) in the run logs (`~/.forge/runs/<owner>__<repo>__<issue>.jsonl`).
 - This machine's filesystem: `node bin/env/bench.mjs --files 19677`.
 - CI: the install step's duration on a hit (skipped) against a miss.
