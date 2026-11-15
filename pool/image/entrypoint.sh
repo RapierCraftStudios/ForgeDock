@@ -25,6 +25,10 @@ export FORGE_DEPCACHE_ROOT=/cache/forge-depcache npm_config_store_dir=/cache/pnp
 # Testcontainers' Ryuk reaper never logs "Started" on the sandbox's private dockerd, so every DB test setup failed.
 # The sandbox and its dockerd are discarded after the lane, so the reaper has nothing to add.
 export TESTCONTAINERS_RYUK_DISABLED=true
+# env.proxies.apt (opt-in): route apt through the caching proxy. Unset: apt is untouched.
+if [ -n "${FORGE_APT_PROXY:-}" ]; then
+  printf 'Acquire::http::Proxy "%s";\n' "$FORGE_APT_PROXY" > /etc/apt/apt.conf.d/01forge-proxy 2>/dev/null || true
+fi
 
 echo "[computeshare] sandbox ${CS_SANDBOX_ID:-?} repo ${CS_REPO_SLUG:-?} ref ${CS_REPO_REF:-default} on $(hostname)"
 

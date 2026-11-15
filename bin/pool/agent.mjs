@@ -13,7 +13,7 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
-import { resolveLaneImage, laneImageNow } from "./lane-tools.mjs";
+import { resolveLaneImage, laneImageNow, laneToolsTag } from "./lane-tools.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -56,6 +56,25 @@ export const workVolume = (name) => `cs-work-${name.replace(/^cs-/, "")}`;
 export const workDirOf = (name) => `/cache/work/${name.replace(/^cs-/, "")}`;
 const WORK_SWEEP_MS = 10 * 60000;
 export const safeName = (id) => `cs-${String(id).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 100)}`;
+/** Minimum gap between two environment-snapshot ensure runs for one cache volume. */
+export const ENV_ENSURE_GAP_MS = 5 * 60000;
+/**
+ * `docker run` args for the environment-snapshot helper (env.snapshots): a short-lived container of the lane image that
+ * reads the repo's bare mirror in the cache volume, builds the snapshot for the ref's lockfiles when it is missing,
+ * stages `ready` hardlink copies and collects old snapshots. It writes only under /cache/env, on the same volume as the
+ * lane worktrees (/cache/work), so a lane claims a staged copy with a rename. Pure.
+ */
+export function envEnsureArgs({ volume, image, slug, ref = null, laneTools = [], snapshots = {}, net = [], cpus = 2, mem_gb = 4 }) {
+  const int = (v, d) => (Number.isInteger(v) && v >= 0 ? v : d);
+  return [
+    "--rm", "--name", `cs-envbuild-${volume.replace(/^cs-cache-/, "")}`.slice(0, 120), "--label", "computeshare.env=1",
+    "--cpus", String(cpus), "--memory", `${Math.round(mem_gb * 1024)}m`, ...net, "-v", `${volume}:/cache`,
+    "-e", "FORGE_ENV_ROOT=/cache/env", "-e", `FORGE_ENV_IMAGE=${image}`, "-e", "FORGE_DEPCACHE_ROOT=/cache/forge-depcache", "-e", "npm_config_store_dir=/cache/pnpm-store",
+    "--entrypoint", "forgedock", image, "env", "ensure", "--mirror", `/cache/git/${String(slug).replace(/\//g, "_")}.git`, ...(ref ? ["--ref", String(ref)] : []),
+    "--repo", String(slug), "--ready", String(int(snapshots.ready, 2)), "--keep", String(int(snapshots.keep, 3)), "--max-age-days", String(int(snapshots.max_age_days, 14)),
+    ...(laneTools.length ? ["--lane-tools", [...laneTools].sort().join(",")] : []),
+  ];
+}
 const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
 
 /**
@@ -117,6 +136,20 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active: Object.values(sb()).filter((s) => s.state !== "exited").length, ...diskView(), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
+  /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
+  const envImageOf = (spec) => (spec.lane_tools?.length ? laneToolsTag(spec.image ?? image, spec.lane_tools) : (spec.image ?? image));
+  const envEnsured = new Map(); // cache volume -> last ensure start
+  /**
+   * env.snapshots: start the snapshot helper for the repo, at most once per ENV_ENSURE_GAP_MS and one at a time per cache
+   * volume (the fixed container name refuses a second). Never awaited by a launch and never fails one.
+   */
+  function ensureEnv({ volume, spec, net }) {
+    if (now() - (envEnsured.get(volume) ?? -Infinity) < ENV_ENSURE_GAP_MS) return null;
+    envEnsured.set(volume, now());
+    const args = envEnsureArgs({ volume, image: envImageOf(spec), slug: spec.repo.slug, ref: spec.repo.ref ?? null, laneTools: spec.lane_tools ?? [], snapshots: spec.env_snapshots, net, cpus: cfg.env_build_cpus ?? 2, mem_gb: cfg.env_build_mem_gb ?? 4 });
+    return Promise.resolve().then(() => docker.run(args)).then(() => log.info?.(`env snapshot helper started for ${spec.repo.slug}`), (e) => log.warn?.(`env snapshot helper: ${String(e.stderr || e.message).slice(0, 200)}`));
+  }
+
   async function launch({ spec, cpus, mem_gb, limit = null }) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     const existing = own(spec.id);
@@ -141,7 +174,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
-    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name) };
+    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
+      ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
     const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker };
     sb()[spec.id] = rec;
@@ -187,6 +221,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         laneImage, ...spec.command.map(String),
       ]);
       rec.state = "running";
+      if (spec.env_snapshots?.enabled && spec.repo?.slug) ensureEnv({ volume: rec.cacheVolume, spec, net: netArgs });
     } catch (e) {
       rec.state = "exited";
       rec.finishedAt = now();

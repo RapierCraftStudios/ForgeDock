@@ -143,6 +143,10 @@ export function pySatisfies(spec, v) {
   return String(spec).split("||").some((grp) => grp.replace(/(\^|~=|~|==|!=|>=|<=|>|<)\s+/g, "$1").split(/[,\s]+/).filter(Boolean).every((c) => clauseOk(c, v)));
 }
 /** Full frozen install on a miss, and the warm no-op repair pass on a hit (null: nothing path-dependent to repair). */
+export { commands as depCommands };
+/** The files a component's key hashes, relative to its own dir (lockfile, manifests, package-manager config). */
+const keyFiles = (d, pkgs) => (JS.has(d.eco) ? [d.lock, ...pkgs, "pnpm-workspace.yaml", ".npmrc", ".yarnrc.yml"] : [d.lock, "pyproject.toml", ".python-version"]);
+const expectedTrees = (d, pkgs) => (JS.has(d.eco) ? [...new Set(pkgs.map((p) => (dirname(p) === "." ? "node_modules" : `${dirname(p)}/node_modules`)))] : [".venv"]);
 function commands(d, py = null) {
   // #5651: with an in-range interpreter poetry itself runs under it (`<py> -m poetry`), so its resolver never sees the host default python.
   const poetry = (args) => (py ? [py.cmd, ["-m", "poetry", ...args]] : ["poetry", args]);
@@ -168,6 +172,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   env: procEnv = process.env, installTimeoutMs = DEPCACHE_INSTALL_TIMEOUT_MS, lockWaitMs = DEPCACHE_INSTALL_TIMEOUT_MS, pollMs = 1000,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const disabled = () => String(procEnv.FORGE_DEPCACHE ?? "").trim() === "0";
+  const api = {}; // filled at the end; the env-library hook in prepare() passes it on
   const store = (n) => join(root, STORES, n);
 
   /** Shared package-manager stores for every runner call, so the builder's own installs reuse them too. */
@@ -227,8 +232,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const h = createHash("sha256").update(`v1\0${d.eco}\0${process.platform}-${process.arch}\0`);
     if (d.dir) h.update(`${d.dir}\0`);
     h.update(py ? py.version : await runtime(JS.has(d.eco) ? "node" : "python3")).update("\0");
-    const files = JS.has(d.eco) ? [d.lock, ...pkgs, "pnpm-workspace.yaml", ".npmrc", ".yarnrc.yml"] : [d.lock, "pyproject.toml", ".python-version"];
-    for (const f of files) {
+    for (const f of keyFiles(d, pkgs)) {
       h.update(`${f}\0`);
       try { h.update(fs.readFileSync(join(wt, f))); } catch { h.update("<absent>"); }
       h.update("\0");
@@ -352,7 +356,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     }
   }
 
-  async function prepareOne(wt, keyRoot, d, laneEnv) {
+  async function prepareOne(wt, keyRoot, d, laneEnv, publishSnap = true) {
     const t0 = now();
     let repaired = null;
     const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? repaired, ...(extra.published === undefined ? {} : { published: extra.published }) });
@@ -373,7 +377,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const key = await keyOf(wt, d, pkgs, py);
     const snap = join(keyRoot, `${d.eco}-${key}`);
     const cmds = commands(d, py);
-    const expected = JS.has(d.eco) ? [...new Set(pkgs.map((p) => (dirname(p) === "." ? "node_modules" : `${dirname(p)}/node_modules`)))] : [".venv"];
+    const expected = expectedTrees(d, pkgs);
     const existing = expected.filter((t) => present(join(wt, t)));
     if (existing.length) {
       const broken = brokenTrees(wt, d, existing);
@@ -419,6 +423,10 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       return { trees: treesOf(wt, d, pkgs) };
     };
 
+    if (!publishSnap) { // env snapshot build: the caller publishes the trees itself
+      const ins = await install();
+      return ins.failed ?? done("miss-installed", { key, published: false, reason: "publish off" });
+    }
     const lockPath = `${snap}.lock`;
     const r = await withLock(lockPath, async () => {
       if (fs.existsSync(join(snap, "manifest.json"))) return materialize(); // hit, or another lane published while we waited
@@ -445,18 +453,40 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
    * Materialize or build node_modules/.venv for `wt`; one result per detected ecosystem. Never throws.
    * `env` (#4347): the lane's toolchain env (PATH with the pinned pm shims) for install/repair; absent means the host PATH.
    */
-  async function prepare({ wt, repoKey, env: laneEnv } = {}) {
+  async function prepare({ wt, repoKey, env: laneEnv, publish: publishSnap = true } = {}) {
     if (disabled()) return [{ status: "skipped", eco: null, key: null, ms: 0, reason: "FORGE_DEPCACHE=0" }];
     let found;
     try { found = detect(fs, wt); } catch (e) { return [{ status: "failed", eco: null, key: null, ms: 0, reason: msg(e) }]; }
     if (!found.length) return [{ status: "skipped", eco: null, key: null, ms: 0, reason: "no lockfile" }];
+    let envHit = null;
+    if (String(procEnv.FORGE_ENV_SNAPSHOTS ?? "").trim() === "1" && publishSnap) {
+      // Environment library (bin/env): a whole-environment snapshot for this exact lock set is claimed by rename. The loop
+      // below then finds complete trees (same completeness check as any existing tree); a miss or error is today's path.
+      try { envHit = await (await import("../env/env.mjs")).claimForLane({ wt, deps: api, fs, env: procEnv, now }); } catch { envHit = null; }
+    }
     const keyRoot = join(root, safeSegment(repoKey ?? "repo"));
     const out = [];
     for (const d of found) {
       try {
-        const r = await prepareOne(d.dir ? join(wt, d.dir) : wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined);
-        out.push({ ...r, dir: d.dir ?? "." });
+        const r = await prepareOne(d.dir ? join(wt, d.dir) : wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined, publishSnap);
+        const claimed = envHit && r.status === "skipped" && /already exists in the worktree$/.test(String(r.reason ?? ""));
+        out.push(claimed ? { ...r, status: "hit", key: envHit.key, ms: r.ms + (out.some((x) => x.env) ? 0 : envHit.ms), reason: `env snapshot (${envHit.mode})`, env: true, dir: d.dir ?? "." } : { ...r, dir: d.dir ?? "." });
       } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e), dir: d.dir ?? "." }); }
+    }
+    return out;
+  }
+
+  /**
+   * What `prepare` would install for `wt`, without installing: one entry per detected ecosystem with the files its key
+   * hashes (`inputs`) and the trees an install leaves (`trees`), both relative to `wt`. Used by the environment library.
+   */
+  async function describe({ wt } = {}) {
+    const out = [];
+    for (const d of detect(fs, wt)) {
+      const base = d.dir ? join(wt, d.dir) : wt, at = (f) => (d.dir ? `${d.dir}/${f}` : f);
+      const pkgs = !d.skip && JS.has(d.eco) ? await manifests(base) : [];
+      out.push({ eco: d.eco, lock: d.lock, dir: d.dir ?? ".", ...(d.berry ? { berry: true } : {}), ...(d.skip ? { skip: d.skip } : {}),
+        inputs: d.skip ? [] : keyFiles(d, pkgs).map(at), trees: d.skip ? [] : expectedTrees(d, pkgs).map(at) });
     }
     return out;
   }
@@ -514,6 +544,6 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return removed;
   }
 
-  return { env, prepare, prune, scan, remove, root };
+  return Object.assign(api, { env, prepare, describe, prune, scan, remove, root, linkTree, readOnly });
 }
 

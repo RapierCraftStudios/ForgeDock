@@ -54,6 +54,18 @@ describe("validateForgeYaml (#5315)", () => {
   });
 });
 
+describe("ci.tests block (#5710)", () => {
+  it("accepts the documented keys", () => {
+    const t = BASE + 'ci:\n  mode: auto\n  tests:\n    selection: shadow\n    suites:\n      - "db/** => tests/integration/**"\n    ignore: ["**/*.md"]\n    graduate_after: 50\n    shards: 4\n    quarantine: report\n';
+    assert.deepEqual(validateForgeYaml(t), []);
+  });
+  it("flags an unknown key and wrong types (a typo'd selection would silently stay off)", () => {
+    assert.deepEqual(codes(BASE + "ci:\n  tests:\n    mode: shadow\n"), ["unknown-key:ci.tests.mode"]);
+    assert.deepEqual(codes(BASE + "ci:\n  tests:\n    selection: on\n    shards: many\n    suites: all\n    quarantine: skip\n").sort(),
+      ["wrong-type:ci.tests.quarantine", "wrong-type:ci.tests.selection", "wrong-type:ci.tests.shards", "wrong-type:ci.tests.suites"]);
+  });
+});
+
 describe("gate.required_checks type (#5504)", () => {
   it("accepts block and flow lists, flags a scalar", () => {
     assert.deepEqual(codes(BASE + 'gate:\n  required_checks:\n    - "CI"\n'), []);

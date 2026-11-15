@@ -99,6 +99,22 @@ export function repeatedFlakes(flakes, cfg, now = Date.now()) {
   return [...groups.values()].filter((g) => g.count >= cfg.quarantineAfter);
 }
 
+/**
+ * Quarantine report for the test engine (#5710): the targets `repeatedFlakes` finds, each still run. `mode` `report`
+ * (default) keeps every one blocking; `non-blocking` is the repo's opt-in, and never applies to an unskippable class
+ * (as a check name, or as a path segment of the test file); `off` reports nothing.
+ * @returns {{target, check, test, count, evidence, blocking: boolean, why: string}[]}
+ */
+export function quarantineReport(flakes, { mode = "report", quarantineAfter = 3, windowDays = 14, unskippable = UNSKIPPABLE_CLASSES } = {}, now = Date.now()) {
+  if (mode === "off") return [];
+  return repeatedFlakes(flakes, { quarantineAfter, windowDays }, now).map((g) => {
+    const locked = isUnskippable(g.target, unskippable) || unskippable.some((c) => String(g.test ?? "").split("/").includes(c));
+    const blocking = mode !== "non-blocking" || locked;
+    const why = locked ? "unskippable class: stays blocking" : blocking ? "report only: still blocking" : "non-blocking by the repo's opt-in: still run";
+    return { ...g, blocking, why };
+  });
+}
+
 const markerFor = (target) => `<!-- ${FLAKE_MARKER} target=${target} -->`;
 
 /** The open `flake` issue of `target`, else a new one (label `flake`, evidence). @returns {{issue, created}|null} null for an unskippable target. */

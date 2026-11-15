@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# forge-env: use a ForgeDock environment snapshot in a GitHub Actions job (docs/ENV-LIBRARY.md).
+# Copy this directory to .github/actions/forge-env/ in your repo.
+#
+# The job runs in the snapshot image for the checkout's key (`container: <env.snapshots.image>:<key>`). The image holds
+# the frozen installs at /work/env. This action checks that the image's key equals the checkout's key and then either
+#   mode: prefix (default)  copies the checkout over /work/env and reports it as `workdir`; run your steps there
+#   mode: link              symlinks each dependency tree into the workspace (single-package repos without workspace links)
+# When the keys differ or the job is not in a snapshot image, `hit` is false and nothing is changed: run your normal
+# install step under `if: steps.<id>.outputs.hit != 'true'`. The set of checks a job runs never changes.
+name: forge-env
+description: Use a ForgeDock environment snapshot (dependencies installed once, keyed by lockfiles + toolchain)
+inputs:
+  key:
+    description: The checkout's environment key (`forgedock env key --store oci`)
+    required: true
+  mode:
+    description: prefix | link
+    default: prefix
+  prefix:
+    description: Where the snapshot image holds the trees
+    default: /work/env
+outputs:
+  hit:
+    description: "'true' when the snapshot matched and is in place"
+    value: ${{ steps.use.outputs.hit }}
+  workdir:
+    description: The directory to run steps in (the prefix on a hit in prefix mode, else the workspace)
+    value: ${{ steps.use.outputs.workdir }}
+runs:
+  using: composite
+  steps:
+    - id: use
+      shell: bash
+      env:
+        WANT: ${{ inputs.key }}
+        MODE: ${{ inputs.mode }}
+        PREFIX: ${{ inputs.prefix }}
+      run: |
+        set -euo pipefail
+        man="$PREFIX/.forge-env.json"
+        have=""
+        if [ -f "$man" ]; then have=$(sed -n 's/.*"key":"\([0-9a-f]\{16\}\)".*/\1/p' "$man" | head -1); fi
+        if [ -z "$have" ] || [ "$have" != "$WANT" ]; then
+          echo "forge-env: no snapshot for key $WANT here (image has: ${have:-none}); use the normal install"
+          { echo "hit=false"; echo "workdir=$GITHUB_WORKSPACE"; } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ "$MODE" = "link" ]; then
+          sed -n 's/.*"trees":\[\([^]]*\)\].*/\1/p' "$man" | tr ',' '\n' | tr -d '"' | while read -r t; do
+            [ -n "$t" ] || continue
+            if [ -e "$GITHUB_WORKSPACE/$t" ]; then continue; fi
+            mkdir -p "$(dirname "$GITHUB_WORKSPACE/$t")"
+            ln -s "$PREFIX/$t" "$GITHUB_WORKSPACE/$t"
+          done
+          echo "workdir=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
+        else
+          cp -a "$GITHUB_WORKSPACE/." "$PREFIX/"
+          git config --global --add safe.directory "$PREFIX" || true
+          echo "workdir=$PREFIX" >> "$GITHUB_OUTPUT"
+        fi
+        echo "hit=true" >> "$GITHUB_OUTPUT"
+        echo "forge-env: snapshot $WANT in place ($MODE)"

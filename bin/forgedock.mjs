@@ -3982,8 +3982,8 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
-  "ci-step", "ci-hook",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4220,6 +4220,12 @@ switch (command) {
     exitCode = await runGc(restArgs);
     break;
   }
+  case "env": {
+    // Environment library: per-repo dependency snapshots keyed by lockfiles + toolchain + lane_tools (bin/env)
+    const { envFromCli } = await import("./env/cli.mjs");
+    exitCode = await envFromCli(restArgs);
+    break;
+  }
   case "sandbox": {
     // #5450: operator control of the lane test sandboxes (verify.sandboxes): up <name>... | down | ls
     const { sandboxFromCli } = await import("./lean/testsandbox.mjs");
@@ -4425,6 +4431,17 @@ switch (command) {
         const repo = resolveRepo(null);
         exitCode = await cancelSupersededFromCli(restArgs.slice(1), { gh: defaultGh, repo: isValidRepo(repo) ? repo : null, config: readVerify() ?? {}, seams: ({ repo: r }) => ciRunSeams({ gh: defaultGh, repo: r }) });
       } else exitCode = await ciFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "tests": {
+    // Test engine (#5710): `forgedock tests select|shard|recall` (affected-test selection, shard plan, shadow recall ledger).
+    const { testsFromCli } = await import("./lean/testengine.mjs");
+    try {
+      exitCode = await testsFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
