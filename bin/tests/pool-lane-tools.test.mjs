@@ -4,7 +4,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { RECIPES, parseLaneTool, validateLaneTools, checkRecipes, laneToolsTag, laneToolsDockerfile, resolveLaneImage } from "../pool/lane-tools.mjs";
+import { RECIPES, parseLaneTool, validateLaneTools, checkRecipes, laneToolsTag, laneToolsDockerfile, resolveLaneImage, laneImageNow, LANE_BUILD_RETRY_MS } from "../pool/lane-tools.mjs";
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 import { createAgent } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
@@ -78,8 +79,14 @@ describe("resolveLaneImage", () => {
 });
 
 describe("agent launch and warm pool", () => {
-  it("lane_tools: cold start runs the per-repo image", async () => {
+  it("lane_tools: a cold launch answers 503 + Retry-After while the image builds in the background, then runs it", async () => {
     const docker = fakeDocker(), agent = agentWith(docker);
+    const busy = await agent.launch({ spec: spec("lane-1", { lane_tools: ["promtool@2.54.1"] }), ...SIZE });
+    assert.equal(busy.status, 503);
+    assert.equal(busy.body.code, "lane_tools.building");
+    assert.ok(busy.retryAfter >= 60, "a long enough retry for a cold build");
+    assert.equal(docker.runs.length, 0, "nothing is reserved or started while building");
+    await settle();
     const r = await agent.launch({ spec: spec("lane-1", { lane_tools: ["promtool@2.54.1"] }), ...SIZE });
     assert.equal(r.body.state, "running");
     const run = docker.runs.find((a) => a.includes("cs-lane-1"));
@@ -94,19 +101,53 @@ describe("agent launch and warm pool", () => {
     assert.ok(!/-t[0-9a-f]{12}$/.test(run[run.length - 2]));
     assert.equal(docker.builds.length, 0);
   });
-  it("an unknown recipe fails the launch with the error recorded, no build", async () => {
+  it("an unknown recipe fails the launch with a 422 naming it, no build", async () => {
     const docker = fakeDocker(), agent = agentWith(docker);
     const r = await agent.launch({ spec: spec("lane-3", { lane_tools: ["nosuch"] }), ...SIZE });
-    assert.equal(r.body.state, "exited");
+    assert.equal(r.status, 422);
+    assert.equal(r.body.code, "lane_tools.unknown_recipe");
     assert.match(r.body.error, /nosuch/);
     assert.equal(docker.builds.length, 0);
   });
   it("warm sandboxes launch with the per-repo image", async () => {
     const docker = fakeDocker(), agent = agentWith(docker);
     await agent.launch({ spec: spec("lane-4", { lane_tools: ["playwright"], warm: 1 }), ...SIZE });
+    await settle();
+    await agent.launch({ spec: spec("lane-4", { lane_tools: ["playwright"], warm: 1 }), ...SIZE });
     await agent.warm.replenish();
     const warmRun = docker.runs.find((a) => a.some((x) => String(x).includes("warm-")));
     assert.ok(warmRun, "a warm sandbox was started");
     assert.match(warmRun[warmRun.length - 2], /-t[0-9a-f]{12}$/);
+  });
+});
+
+describe("laneImageNow (shared background build)", () => {
+  it("concurrent cold launches share one build; afterwards the image is returned without a build", async () => {
+    const docker = fakeDocker(), tools = ["postgresql-client"], baseImage = "shared:1";
+    const rs = await Promise.all(Array.from({ length: 9 }, () => laneImageNow({ tools, baseImage, docker })));
+    assert.ok(rs.every((r) => r.building), "every caller is told it is building");
+    await settle();
+    assert.equal(docker.builds.length, 1, "nine launches, one docker build");
+    assert.deepEqual(await laneImageNow({ tools, baseImage, docker }), { image: laneToolsTag(baseImage, tools) });
+    assert.equal(docker.builds.length, 1);
+  });
+  it("concurrent resolveLaneImage callers also share one build", async () => {
+    const docker = fakeDocker(), tools = ["python@3.12"], baseImage = "shared:2";
+    const tags = await Promise.all([1, 2, 3].map(() => resolveLaneImage({ tools, baseImage, docker })));
+    assert.equal(new Set(tags).size, 1);
+    assert.equal(docker.builds.length, 1);
+  });
+  it("a failed build is reported, not retried, inside the retry window; retried after it", async () => {
+    let t = 1000;
+    const now = () => t, docker = fakeDocker({ failBuild: true }), tools = ["playwright"], baseImage = "shared:3";
+    assert.ok((await laneImageNow({ tools, baseImage, docker, now })).building);
+    await settle();
+    const f = await laneImageNow({ tools, baseImage, docker, now });
+    assert.match(f.failed, /apt failed/);
+    assert.equal(docker.builds.length, 1, "no rebuild inside the window");
+    t += LANE_BUILD_RETRY_MS + 1;
+    assert.ok((await laneImageNow({ tools, baseImage, docker, now })).building, "retried after the window");
+    await settle();
+    assert.equal(docker.builds.length, 2);
   });
 });

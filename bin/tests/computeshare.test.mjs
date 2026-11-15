@@ -86,11 +86,12 @@ function routerFixture(agentsCaps) {
     const name = u.hostname;
     calls.push(`${init.method} ${name}${u.pathname}`);
     const cap = agentsCaps[name];
-    let status = 200, body = {};
+    let status = 200, body = {}, extra = {};
     if (u.pathname === "/capacity") body = cap;
+    else if (u.pathname === "/sandboxes" && init.method === "POST" && cap.building) { status = 503; body = { error: "lane image t building", code: "lane_tools.building" }; extra = { "retry-after": "300" }; }
     else if (u.pathname.endsWith("/usage")) body = { minutes: 4.2 };
     else if (u.pathname === "/sandboxes" && init.method === "POST") { const p = JSON.parse(init.body); body = { id: p.spec.id, state: "running", env_has_yaml: Boolean(p.spec.env?.CS_FORGE_YAML_B64) }; status = 201; }
-    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...extra } });
   };
   const dir = tmpDir("cs-router-");
   mkdirSync(join(dir, "cfg"));
@@ -123,6 +124,14 @@ test("router answers 503 with retry-after when no host fits", async () => {
   const r = await router.launch(spec("p2"));
   assert.equal(r.status, 503);
   assert.ok(r.retryAfter > 0);
+});
+
+test("router passes an agent 503 (lane image building) back with its Retry-After, not a generic no-capacity 60s", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 8, mem_free_gb: 16, building: true } });
+  const r = await router.launch(spec("p10"));
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "lane_tools.building");
+  assert.equal(String(r.retryAfter), "300");
 });
 
 test("router renews leases while polled and destroys abandoned sandboxes", async () => {

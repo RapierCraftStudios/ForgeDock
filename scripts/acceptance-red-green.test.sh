@@ -87,6 +87,17 @@ check "workspace node_modules and .venv linked into base; new nested test overla
 [ -d "$R5/apps/web/node_modules/dep" ] && [ -d "$R5/.venv/bin" ] && ok "head dependency trees survive base cleanup" || bad "head dependency trees removed by cleanup"
 
 
+# 11b. Python service venv (AlterLab 40652): a test under services/api runs with services/api/.venv (next to its tracked
+#      pyproject.toml), not the root .venv; base gets that tree linked, so it fails on the defect instead of UNRUNNABLE
+R6="$TMP/r6"; make_repo "$R6"
+mkdir -p "$R6/services/api"; printf '[project]\nname="api"\n' > "$R6/services/api/pyproject.toml"
+printf '.venv/\n' > "$R6/.gitignore"; git -C "$R6" add -A; git -C "$R6" commit -qm svc; git -C "$R6" update-ref refs/remotes/origin/main HEAD
+fix_head "$R6"
+mkdir -p "$R6/services/api/.venv/bin" "$R6/services/api/tests"; printf 'echo venv\n' > "$R6/services/api/.venv/bin/python"
+printf 'bash .venv/bin/python >/dev/null 2>&1 || exit 127\ntest "$(bash ../../app.sh)" = good && echo "1 passed"\n' > "$R6/services/api/tests/t.sh"
+git -C "$R6" add -A; git -C "$R6" commit -qm test
+check "service .venv next to a tracked pyproject.toml is linked into base" "BASE=FAILED HEAD=RAN" "$R6" "cd services/api && bash tests/t.sh"
+
 # 12. #5544 test-only fix: the base's own version of the test fails, head's passes, source unchanged
 R5="$TMP/r5"; make_repo "$R5"; mkdir -p "$R5/tests"; printf 'test "$(bash app.sh)" = good && echo "1 passed"\n' > "$R5/tests/t.sh"
 git -C "$R5" add -A; git -C "$R5" commit -qm "bad test"; git -C "$R5" update-ref refs/remotes/origin/main HEAD

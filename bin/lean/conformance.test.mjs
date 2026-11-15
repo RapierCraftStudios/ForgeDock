@@ -862,7 +862,7 @@ describe("repro_test on bug lanes (#4271)", () => {
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
     assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] });
-    for (const repro of [{ base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
+    for (const repro of [{ base: "SKIPPED", head: "FAILED" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
       assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base} HEAD=${repro.head}`));
@@ -906,6 +906,12 @@ describe("repro_test on bug lanes (#4271)", () => {
       assert.match(pc.failures[0].detail, /test\/leak\.test\.js releases on 429 \(`node --test test\/leak\.test\.js`\): the harness could not run the test on head \(environment, not the change\)/);
       assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base ?? "UNRUNNABLE"} HEAD=UNRUNNABLE$`));
     }
+  });
+  it("BASE=UNRUNNABLE with HEAD=RAN (the base checkout could not run the test) is env.repro_unrunnable, never a builder resume", () => {
+    const k = { ...C, repro_test: RT };
+    const pc = precheck({ contract: k, result: res, changedFiles: files, repro: { base: "UNRUNNABLE", head: "RAN" } });
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["env.repro_unrunnable", "repro_env"]]);
+    assert.match(pc.failures[0].detail, /could not run the test on the base \(environment, not the change\); got BASE=UNRUNNABLE HEAD=RAN$/);
   });
   it("off (no repro option) is today's contract check and precheck exactly", () => {
     assert.deepEqual(validateContract(C, ISSUE), validateContract(C, ISSUE, { repro: false }));

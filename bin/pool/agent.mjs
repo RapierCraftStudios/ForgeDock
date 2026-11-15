@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createServer } from "node:http";
+/** Retry-After for a launch whose lane_tools image is still building: lanes cap capacity deferrals at 3, so 3 × 5 min covers a cold build. */
+const LANE_BUILD_RETRY_AFTER_S = 300;
 import { randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -11,7 +13,7 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
-import { resolveLaneImage } from "./lane-tools.mjs";
+import { resolveLaneImage, laneImageNow } from "./lane-tools.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -121,6 +123,12 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     const h = live(cfg);
     if (!h.ok) return { status: 503, body: { error: `host busy: ${h.reason}`, live: h }, retryAfter: 60 };
+    if (spec.lane_tools?.length) { // #5650 follow-up: never build inside the launch request (router timeout); 503 + retry while it builds
+      let st;
+      try { st = await laneImageNow({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }); } catch (e) { return { status: 422, body: { error: e.message, code: e.code ?? "lane_tools.invalid" } }; }
+      if (st.building) return { status: 503, body: { error: `lane image ${st.tag} building`, code: "lane_tools.building" }, retryAfter: LANE_BUILD_RETRY_AFTER_S };
+      if (st.failed) return { status: 422, body: { error: st.failed, code: "lane_tools.build_failed" } };
+    }
     const name = safeName(spec.id);
     const dir = join(stateDir, "sandboxes", name);
     mkdirSync(join(dir, "result"), { recursive: true });

@@ -187,3 +187,15 @@ test("warm configure keeps lane_tools in the stored spec only when set (#5650)",
   const b = agent.warm.configure({ spec: spec("l-2", { repo: { slug: "o/other", url: "u", ref: "m" } }), ...SIZE, n: 1 });
   assert.equal("lane_tools" in agent.store.data.warm[b.key].spec, false);
 });
+
+test("concurrent replenish calls with slow launches never over-fill the pool (1.60.0: 11 warm for n=1)", async () => {
+  const { agent, docker } = fixture();
+  const run = docker.run.bind(docker);
+  docker.run = async (args) => { await new Promise((r) => setTimeout(r, 20)); return run(args); }; // a slow launch (image build, loaded host)
+  await agent.launch({ spec: spec("lane-1"), ...SIZE });
+  agent.warm.configure({ spec: spec("lane-1"), ...SIZE, n: 1 });
+  await Promise.all(Array.from({ length: 8 }, () => agent.warm.replenish()));
+  assert.equal(agent.warm.list().length, 1);
+  await agent.warm.replenish();
+  assert.equal(agent.warm.list().length, 1, "a later pass keeps it at n");
+});
