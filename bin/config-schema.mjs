@@ -19,6 +19,7 @@ export const TOP_LEVEL = [
 /** Sections whose direct children are a closed set: another child is an unknown key. */
 export const CLOSED = {
   "verification.ci_local": ["mode", "exclude_jobs", "include_jobs", "extra_commands", "services", "budget_minutes", "max_parallel"],
+  "deploy.promote": ["enabled", "shadow", "required_checks", "evidence_app", "cache_ref", "cache_mode", "builder", "rebuild_all", "services"], // #5711, read by bin/lean/release-promote.mjs
 };
 
 /** Typed keys: list | number | bool | scalar | {enum:[...]}. */
@@ -33,6 +34,11 @@ export const TYPES = {
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "billing.enabled": "bool",
   "gate.required_checks": "list",
+  "deploy.promote.enabled": "bool",
+  "deploy.promote.shadow": "bool",
+  "deploy.promote.required_checks": "list",
+  "deploy.promote.rebuild_all": "list",
+  "deploy.promote.cache_mode": { enum: ["min", "max"] },
 };
 
 /** Keys the legacy `full` path never reads (the core path reads them: bin/engine-cli.mjs readEnvConfig, readConformanceMode). */

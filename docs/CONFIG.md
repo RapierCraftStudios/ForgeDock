@@ -838,7 +838,7 @@ The release state (and so the ledger) records `lane` and `minutes: {runs, total}
 
 ### Deploy gate catalogue and false-block telemetry (#5583)
 
-Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-op with zero writes. `forgedock release check-config` validates the file when present. Fields per gate under `gates:` (`schema: 1`): `id`, `protects_against` (origin issue), `where`, `determinism`, `pre_merge_artifact` (fixture), `version`, `mode` (`block|skip|rollback|freeze|warn|red`), `owner`, `review_by` (`YYYY-MM-DD`); admission also needs `on_uncertainty: inconclusive`, `failure_triggers` and `proportionality`.
+Optional; with no `.forge/gates.yaml` (on the ref) every command below is a no-op with zero writes. `forgedock release check-config` validates the file when present. Fields per gate under `gates:` (`schema: 1`): `id`, `protects_against` (origin issue), `where`, `determinism`, `pre_merge_artifact` (fixture), `version`, `mode` (`block|skip|rollback|freeze|warn|red`), `owner`, `review_by` (`YYYY-MM-DD`); admission also needs `on_uncertainty: inconclusive`, `failure_triggers` and `proportionality`. Optional `evidence_check: <required check name>` marks a gate that re-runs work a required check already did; see [`deploy.promote`](#deploypromote-optional) for when that evidence lets the gate be skipped (a safety gate never is).
 
 `.forge/release.yaml` `gates:`: `demote_fb_rate` (percent, default 5), `demote_window` (runs, default 20), `safety` (never demoted; default `migration-immutability`, `identity-preflight`, `backup-freshness`, `health-auto-restore`, plus the unskippable classes).
 
@@ -1081,11 +1081,95 @@ These keys are rejected by `release check-config` until their phase ships:
 | `forgedock release init` | Write the zero-config profile. |
 | `forgedock release control` | Audited controls: `hold`, `resume`, `cancel`, `lane`, `exempt`, `freeze`, `unfreeze`; each also runs as `forgedock release <verb>` and needs `--reason`. `demote`, `promote`, `rollback` and `regate` are control verbs too. |
 | `forgedock release gates` | Gate telemetry (`check`, `demote`, `record`). |
+| `forgedock release promote` | With `--check`, `--gate`, `--attest`, `--observed`, `--report` or `--images`: build once, promote (`deploy.promote` in forge.yaml, #5711). With a gate id and `--fixture`: the control verb. |
 | `forgedock release report` | Model vs measured Actions minutes. |
 | `forgedock intake` | `pause`, `resume` or `status` of issue intake (`_active.intake`). |
 | `forgedock ci budget` | Actions-minute budget and CI placement (#5278). |
 | `controls log` | The `controls.jsonl` audit line every control verb appends; read it through `release status` and `release explain`. |
 | `ci flakes`, `ci nightly` | Records, not commands: the flake ledger (`_active.flakes`) and the nightly result, read through `release status`, `release explain` and `release report`. |
+
+## `deploy.promote` (OPTIONAL)
+
+Build once, promote (#5711). The release commit's CI result is recorded as evidence bound to the commit, its tree and the image digests; the deploy side checks that evidence instead of re-running tests, builds and rehearsals that already passed on the same tree. **Default off.** Once enabled it starts in shadow: it records what it would have skipped while the full pre-gate still runs.
+
+```yaml
+deploy:
+  promote:
+    enabled: true                 # default false: nothing is read or written
+    shadow: true                  # default true: record only. false = act on the evidence
+    required_checks: [unit, build]            # default: gate.required_checks, then .forge/release.yaml ci.required_checks
+    evidence_app: github-actions  # the only app whose evidence check run is trusted (default github-actions)
+    cache_ref: registry.example/acme/buildcache   # registry layer cache, one tag per service
+    cache_mode: max               # min | max (default max)
+    builder: ""                   # buildx builder name (a persistent builder keeps cache mounts)
+    rebuild_all: ["docker/base/**"]           # a change here rebuilds every image
+    services:
+      web:
+        image: registry.example/acme/web
+        context: web              # default "."
+        dockerfile: web/Dockerfile            # default <context>/Dockerfile
+        paths: ["packages/ui/**"] # build inputs outside the context
+        cache_paths: ["/app/.next/cache"]     # build cache mounts the Dockerfile declares
+      api:
+        image: registry.example/acme/api
+        context: services/api
+        paths: ["libs/shared/**", "uv.lock"]
+        cache_paths: ["/root/.cache/uv"]
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `deploy.promote.enabled` | boolean | `false` | Master switch. Anything but `true` is off. |
+| `deploy.promote.shadow` | boolean | `true` | `true`: the decision is recorded and the pre-gate still runs. `false`: accepted evidence skips the pre-gate. |
+| `deploy.promote.required_checks` | list | `gate.required_checks`, then the policy's `ci.required_checks` | Check runs that must be `success` on the attested commit. With none, nothing is attested or skipped. |
+| `deploy.promote.evidence_app` | string | `github-actions` | App slug whose `forge/promote-evidence` and `forge/promote-decision` check runs are read. |
+| `deploy.promote.cache_ref` | string | none | Registry repository for the layer cache; each service uses the tag `<cache_ref>:<service>`. Without it no cache flags are emitted. |
+| `deploy.promote.cache_mode` | `min`\|`max` | `max` | `mode=` of `--cache-to`. |
+| `deploy.promote.builder` | string | none | `--builder` for every build. |
+| `deploy.promote.rebuild_all` | list of globs | none | A changed path matching one rebuilds every image. |
+| `deploy.promote.services.<name>.image` | string | required | Image repository; the build is tagged `<image>:<sha>`. |
+| `deploy.promote.services.<name>.context` | string | `.` | Build context. Every path under it is a build input. |
+| `deploy.promote.services.<name>.dockerfile` | string | `<context>/Dockerfile` | Dockerfile path; also a build input. |
+| `deploy.promote.services.<name>.paths` | list of globs | none | Build inputs outside the context. A service with context `.` and no `paths` is rebuilt on every change. |
+| `deploy.promote.services.<name>.cache_paths` | list | none | Targets of `RUN --mount=type=cache` mounts (a framework build cache, a package-manager cache). |
+| `deploy.promote.services.<name>.cache_ref` | string | `<cache_ref>:<name>` | Layer-cache reference of this service. |
+
+Without `services`, the `units` of `.forge/release.yaml` that name an `image` are used (`paths`, `dockerfile`).
+
+**Evidence.** `forgedock release promote --attest --sha <sha> --digests <file|json>` reads the check runs of the commit and, only when every required check concluded `success` on exactly that commit, writes the attestation `{commit, tree, images, checks: [{name, conclusion, id, run_id}], config_hash}` as the output of a `forge/promote-evidence` check run on the commit. The token must belong to an app with `checks: write` (the workflow `GITHUB_TOKEN` does). A failed, missing, skipped or unfinished required check, a malformed digest, or a configured service without a digest: exit 1, nothing written.
+
+**Decision.** `forgedock release promote --gate --sha <sha> --digests <file|json>` is the deploy-side call. Evidence is looked up on the commit, its parents (a merge commit of the attested head) and the heads of pull requests merged as it (squash). The pre-gate is skipped only when all of these hold; anything else runs the full pre-gate:
+
+- the evidence check run was posted by `evidence_app` and names the commit it is on;
+- the tree to deploy equals the attested tree;
+- every currently required check is in the attestation as `success`, and still is `success` on the attested commit when read again now;
+- every digest to deploy equals the attested digest of that service (`--digests`, else the policy's `deploy.expected_digests_command`);
+- the config hash (required checks and service build inputs) equals the attested one;
+- the block has no finding (an unknown key, a missing image, no required checks).
+
+It prints the decision (`--json`: `{"schema":"forgedock.release.promote/v1","mode","would_skip","skip_pre_gate","reasons","skips","gates"}`), appends `skip_pre_gate=` and `would_skip=` to `$GITHUB_OUTPUT`, and records the decision as a `forge/promote-decision` check run on the commit. In enforce mode a decision that cannot be recorded does not skip. `--check` prints the same explanation and writes nothing.
+
+When `.forge/gates.yaml` exists, each gate with an `evidence_check` is listed as skipped or kept. A gate on the safety allowlist (`gates.safety` and the unskippable classes) is always kept.
+
+**Shadow.** With `shadow: true`, `skip_pre_gate` is always `false`. After the pre-gate, `forgedock release promote --observed pass|fail --sha <sha> [--minutes N]` records its outcome next to the decision. `forgedock release promote --report [--last 30]` counts, over the last commits of the default branch: decisions, would-skips, observed outcomes, agreements, **disagreements** (promote would have skipped a pre-gate that failed) and the pre-gate minutes it would have saved; it exits 1 on any disagreement. Exit criterion for the owner's decision to set `shadow: false`: at least 10 observed would-skip decisions and 0 disagreements.
+
+**Image plan.** `forgedock release promote --images --base <ref> [--sha <sha>] [--json]` plans without running docker. A service is reused (previous digest, no build) only when the changed paths are known, a well-formed previous digest exists (`--previous`, else the attestation of the base commit), no `rebuild_all` path changed and no changed path matches its context, `paths` or Dockerfile. Each service to build gets `docker buildx build` arguments with `--cache-from type=registry,ref=…` and `--cache-to type=registry,ref=…,mode=…`, `--metadata-file .forge/build/<service>.json` (its `containerimage.digest` is the digest to attest) and `--push`. The plan lists each `cache_paths` mount with the id the Dockerfile gives it and warns when the Dockerfile declares no such mount. BuildKit keeps cache mounts in the builder and does not export them with `--cache-to`: use a persistent builder (`builder`) or restore them in the workflow.
+
+```yaml
+# CI on the release commit, after tests and image builds:
+- run: forgedock release promote --attest --sha "$GITHUB_SHA" --digests digests.json
+# Deploy workflow:
+- id: promote
+  run: forgedock release promote --gate --sha "$GITHUB_SHA" --digests digests.json
+- if: steps.promote.outputs.skip_pre_gate != 'true'
+  run: ./scripts/pre-gate.sh        # today's full pre-gate, unchanged
+- if: always() && steps.promote.outputs.skip_pre_gate != 'true'
+  run: forgedock release promote --observed "${{ job.status == 'success' && 'pass' || 'fail' }}" --sha "$GITHUB_SHA"
+```
+
+**Commands that use this section**: `forgedock release promote`
+
+---
 
 ## `issue_watch` (OPTIONAL)
 
