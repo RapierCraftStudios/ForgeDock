@@ -52,6 +52,9 @@ export function liveHeadroom(cfg = {}) {
 }
 export const dindName = (name) => `${name}-dind`;
 export const workVolume = (name) => `cs-work-${name.replace(/^cs-/, "")}`;
+/** #5696: the lane worktree is a plain dir on the cache volume (one mount), so depcache hardlinks never hit EXDEV. */
+export const workDirOf = (name) => `/cache/work/${name.replace(/^cs-/, "")}`;
+const WORK_SWEEP_MS = 10 * 60000;
 export const safeName = (id) => `cs-${String(id).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 100)}`;
 const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
 
@@ -137,15 +140,18 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
-    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "" };
+    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name) };
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
     const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker };
     sb()[spec.id] = rec;
     store.save();
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+    rec.cacheVolume = `cs-cache-${cacheKey}`;
+    rec.workDir = workDirOf(name);
     // Public resolvers: host resolvers like Tailscale MagicDNS are not reachable from the container network.
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
+    const cacheMount = ["-v", `${rec.cacheVolume}:/cache`];
     try {
       // #5650: a repo's lane_tools select a derived image (built once per tool list); none keeps spec.image ?? image.
       const laneImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
@@ -157,7 +163,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         if (limit) { dCpus = limit.dind_cpus; dMem = limit.dind_mem_gb; laneCpus = limit.lane_cpus; laneMem = limit.lane_mem_gb; }
         else { dCpus = Math.min(cfg.dind_cpus ?? 1, cpus - 1); dMem = Math.min(cfg.dind_mem_gb ?? 2, mem_gb - 1); laneCpus = cpus - dCpus; laneMem = mem_gb - dMem; }
         ({ cpus: dCpus, mem: dMem } = clampToVm(dCpus, dMem));
-        work = ["-v", `${workVolume(name)}:/work`];
+        work = cacheMount; // the daemon sees the checkout at the same /cache/work path as the lane
         await docker.run([
           "--name", dindName(name), "--label", LABEL, "--label", `computeshare.id=${spec.id}`, "--label", "computeshare.role=dind",
           "--privileged", "--cpus", String(dCpus), "--memory", mb(dMem), "--memory-swap", mb(dMem + swapFor(limit?.dind_swap_gb)),
@@ -176,7 +182,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         "--cpus", String(laneCpus), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
         "--env-file", envFile, ...laneNet, ...work,
         ...(spec.claim_dir ? ["-v", `${join(dir, "claim")}:/claim`] : []), // #4912: warm sandboxes receive their lane here
-        "-v", `cs-cache-${cacheKey}:/cache`, "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
+        ...(withDocker ? [] : cacheMount), "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
         laneImage, ...spec.command.map(String),
       ]);
       rec.state = "running";
@@ -228,7 +234,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (!r) return false;
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
-    if (r.docker) { await docker.remove(dindName(r.name)); await docker.removeVolume(workVolume(r.name)); }
+    if (r.docker) await docker.remove(dindName(r.name));
+    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { log.warn?.(`work dir ${r.workDir}: ${String(e.stderr || e.message).slice(0, 200)}`); } }
+    else if (r.docker) await docker.removeVolume(workVolume(r.name)); // sandbox launched before #5696
     try { await docker.wipe(r.dir, image); } catch (e) { log.warn?.(`wipe ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
     rmSync(r.dir, { recursive: true, force: true });
     delete sb()[r.id];
@@ -254,10 +262,18 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       const r = await resize(pendingResize);
       log.info?.(`pending resize applied: HTTP ${r.status} ${JSON.stringify(r.body)}`);
     }
-    const knownVols = new Set(Object.values(sb()).map((r) => workVolume(r.name)));
+    const knownVols = new Set(Object.values(sb()).filter((r) => !r.workDir).map((r) => workVolume(r.name)));
     for (const v of await docker.listVolumes("cs-work-")) if (!knownVols.has(v)) { await docker.removeVolume(v); log.info?.(`removed orphan volume ${v}`); }
+    if (t - lastWorkSweep >= WORK_SWEEP_MS) {
+      lastWorkSweep = t;
+      const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
+      for (const v of await docker.listVolumes("cs-cache-")) {
+        try { await docker.pruneWorkDirs(v, image, keep); } catch (e) { log.warn?.(`work sweep ${v}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    }
     store.save();
   }
+  let lastWorkSweep = -Infinity;
 
   // GitHub credentials for a running sandbox: fetched from the router on demand (installation tokens expire hourly).
   const credCache = {};

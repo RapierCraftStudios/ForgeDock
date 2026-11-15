@@ -22,6 +22,9 @@ function fakeDocker() {
     async kill(name, signal) { const c = containers.get(name); if (!c?.running) return false; this.kills.push([name, signal]); c.running = false; c.exitCode = 143; c.finishedAt = new Date().toISOString(); return true; },
     async listLabelled() { return [...containers.keys()]; },
     async wipe() {},
+    workDirs: new Set(),
+    async removeWorkDir(_vol, _image, dir) { this.workDirs.delete(dir); },
+    async pruneWorkDirs(_vol, _image, keep) { for (const d of [...this.workDirs]) if (!keep.includes(d)) this.workDirs.delete(d); },
     volumes: new Set(),
     async listVolumes(prefix) { return [...this.volumes].filter((v) => v.startsWith(prefix)); },
     async removeVolume(v) { this.volumes.delete(v); },
@@ -208,15 +211,40 @@ test("docker sandbox: private daemon sidecar, lane in its netns, shared /work, s
   const [dind, lane] = docker.runs;
   assert.ok(dind.includes("--privileged") && dind.includes("--host=tcp://127.0.0.1:2375") && dind.includes("--tls=false"));
   assert.ok(!dind.join(" ").includes("0.0.0.0"));
-  assert.ok(dind.includes("cs-work-d1:/work") && lane.includes("cs-work-d1:/work"));
+  assert.ok(dind.includes("cs-cache-o-r:/cache") && lane.includes("cs-cache-o-r:/cache"));
+  assert.ok(![...dind, ...lane].some((a) => String(a).includes("cs-work-")));
   assert.deepEqual(lane.slice(lane.indexOf("--network"), lane.indexOf("--network") + 2), ["--network", "container:cs-d1-dind"]);
   assert.equal(lane[lane.indexOf("--cpus") + 1], "2");
   assert.equal(dind[dind.indexOf("--cpus") + 1], "1");
   assert.ok(!lane.join(" ").includes("/var/run/docker.sock") && !dind.join(" ").includes("/var/run/docker.sock"));
-  docker.volumes.add("cs-work-d1");
   await agent.destroy("d1", "test");
   assert.equal(docker.containers.size, 0);
   assert.equal(docker.volumes.size, 0);
+});
+
+test("#5696 lane worktree and depcache share one mount: work dir lives under the /cache volume", async () => {
+  const { agent, docker } = agentFixture();
+  await agent.launch({ spec: spec("w1"), cpus: 1, mem_gb: 1 });
+  const lane = docker.runs[0];
+  const mounts = lane.filter((a, i) => lane[i - 1] === "-v" && /:\/(cache|work)$/.test(a));
+  assert.deepEqual(mounts, ["cs-cache-o-r:/cache"]); // no separate /work mount, so hardlinks from /cache/forge-depcache never cross devices
+});
+
+test("#5696 teardown and the orphan sweep remove work dirs: no /cache/work growth over 20 launches", async () => {
+  const { agent, docker } = agentFixture();
+  for (let i = 0; i < 20; i++) {
+    await agent.launch({ spec: spec(`g${i}`, i % 2 ? { docker: true } : {}), cpus: 1, mem_gb: 1 });
+    const rec = agent.store.data.sandboxes[`g${i}`];
+    assert.equal(rec.workDir, `/cache/work/g${i}`);
+    docker.workDirs.add(rec.workDir); // what the entrypoint creates
+    await agent.destroy(`g${i}`, "test");
+  }
+  assert.equal(docker.workDirs.size, 0);
+  await agent.launch({ spec: spec("live"), cpus: 1, mem_gb: 1 });
+  docker.workDirs.add("/cache/work/live").add("/cache/work/stray");
+  docker.volumes.add("cs-cache-o-r");
+  await agent.reap();
+  assert.deepEqual([...docker.workDirs], ["/cache/work/live"]);
 });
 
 test("router reserves lane + daemon capacity for docker-enabled repos", async () => {

@@ -28,7 +28,7 @@ function fakeDocker() {
     async inspect(name) { return containers.get(name) ?? null; },
     async remove(name) { containers.delete(name); },
     async listLabelled() { return [...containers.keys()]; },
-    async wipe() {},
+    async wipe() {}, async removeWorkDir() {}, async pruneWorkDirs() {},
     async listVolumes() { return []; },
     async removeVolume() {},
   };

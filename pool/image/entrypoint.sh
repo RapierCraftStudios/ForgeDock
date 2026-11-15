@@ -5,6 +5,14 @@
 # All output goes to /csout/lane.log, which the agent streams back to ForgeDock.
 set -euo pipefail
 mkdir -p /csout /result /cache
+if [ -n "${CS_WORK_DIR:-}" ]; then
+  # #5696: one mount for worktree and caches. The real path is used for cd so a private dockerd that mounts the same
+  # volume resolves compose bind mounts identically.
+  cd /
+  mkdir -p "$CS_WORK_DIR"
+  rm -rf /work
+  ln -s "$CS_WORK_DIR" /work
+fi
 exec > >(tee -a /csout/lane.log) 2>&1
 
 export HOME=/root
@@ -12,7 +20,7 @@ export UV_CACHE_DIR=/cache/uv npm_config_cache=/cache/npm POETRY_CACHE_DIR=/cach
 export TMPDIR=/tmp
 # ForgeDock's dependency cache (its pnpm store and snapshots) and pnpm's own store live in the persistent per-repo
 # cache volume, so a lane installs from a warm store instead of downloading every package (a cold monorepo install
-# took ~15 min and hit ForgeDock's install timeout). /cache and /work are different volumes, so pnpm imports by copy.
+# took ~15 min and hit ForgeDock's install timeout). The lane worktree lives in the same volume (/cache/work/<id>, /work is a symlink to it), so installs hardlink from the stores instead of copying across mounts (EXDEV).
 export FORGE_DEPCACHE_ROOT=/cache/forge-depcache npm_config_store_dir=/cache/pnpm-store
 # Testcontainers' Ryuk reaper never logs "Started" on the sandbox's private dockerd, so every DB test setup failed.
 # The sandbox and its dockerd are discarded after the lane, so the reaper has nothing to add.
@@ -40,7 +48,7 @@ checkout_repo() {
     fi
     rm -rf /work/repo
     git clone --quiet --reference "$mirror" ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
-    cd /work/repo
+    cd "$(readlink -f /work/repo)"
   fi
 }
 
@@ -85,7 +93,7 @@ if [ -z "${warm_claimed:-}" ]; then
   checkout_repo
 else
   (cd /work/repo && /usr/local/bin/cs-warm-refresh "${CS_CLAIM_REF:-}")
-  cd /work/repo
+  cd "$(readlink -f /work/repo)"
 fi
 
 if [ -n "${CS_FORGE_YAML_B64:-}" ]; then
