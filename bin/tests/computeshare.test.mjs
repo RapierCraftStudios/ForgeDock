@@ -725,3 +725,45 @@ test("agent capacity reports disk_free_gb and per-sandbox sandbox_disk_mb; route
   assert.equal("disk_used_mb" in j.sandboxes.p2, false);
   assert.equal(j.agents.find((x) => x.name === "a").disk_free_gb, 9.5);
 });
+
+// #5688: CI runner events over the router (ci token POSTs, fd token GETs).
+test("router /ci/events: ci token posts, only the fd token reads, long-poll answers in the same cycle", async () => {
+  const router = createRouter({ state_dir: tmpDir("cs-ci-"), enroll_token: "e", forgedock_token: "fd", ci_tokens: ["ci-1", "ci-2"] }, { fetchFn: async () => new Response("{}"), log: quiet });
+  const call = (method, url, auth, body) => new Promise((resolve) => {
+    let status = 0;
+    const req = { method, url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, socket: {}, async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)); } };
+    router.handle(req, { writeHead(st) { status = st; }, end(b) { resolve({ status, body: b ? JSON.parse(b) : null }); } });
+  });
+  const ev = (extra = {}) => ({ type: "step_failed", repo: "o/r", sha: "abc", run_id: 1, job: "unit", ts: "2026-11-15T00:00:00Z", ...extra });
+  const q = "/ci/events?repo=o%2Fr&sha=abc";
+
+  assert.equal((await call("POST", "/ci/events", "nope", ev())).status, 401);
+  assert.equal((await call("POST", "/ci/events", null, ev())).status, 401);
+  assert.equal((await call("GET", q, "ci-1")).status, 401, "a ci token cannot read");
+  assert.equal((await call("GET", "/status", "ci-1")).status, 401, "a ci token cannot reach other routes");
+  assert.equal((await call("POST", "/sandboxes/claim", "ci-1", {})).status, 401);
+
+  const waiting = call("GET", `${q}&wait=5`, "fd");
+  const t0 = performance.now();
+  const posted = await call("POST", "/ci/events", "ci-2", ev({ lines: ["boom"] }));
+  assert.equal(posted.status, 202);
+  const got = await waiting;
+  assert.ok(performance.now() - t0 < 1000);
+  assert.equal(got.status, 200);
+  assert.deepEqual([got.body.events.length, got.body.events[0].lines, got.body.next], [1, ["boom"], 1]);
+  assert.ok(Number.isFinite(got.body.events[0].received_at));
+
+  assert.equal((await call("POST", "/ci/events", "fd", [ev(), ev({ pr: 9 })])).status, 202, "the fd token may post too");
+  assert.deepEqual((await call("GET", `${q}&since=1`, "fd")).body.events.map((e) => e.seq), [2, 3]);
+  assert.equal((await call("GET", "/ci/events?repo=o%2Fr&pr=9", "fd")).body.events.length, 1);
+
+  const missing = ev(); delete missing.sha;
+  const r400 = await call("POST", "/ci/events", "ci-1", missing);
+  assert.equal(r400.status, 400);
+  assert.match(r400.body.error, /sha/);
+  assert.equal((await call("POST", "/ci/events", "ci-1", ev({ lines: Array(41).fill("x") }))).status, 413);
+  assert.equal((await call("POST", "/ci/events", "ci-1", Array(201).fill(ev()))).status, 413);
+  assert.equal((await call("GET", "/ci/events?repo=o%2Fr", "fd")).status, 400);
+  assert.equal((await call("GET", `${q}&wait=61`, "fd")).status, 400);
+  assert.equal((await call("GET", "/health")).status, 200);
+});

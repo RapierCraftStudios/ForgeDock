@@ -8,6 +8,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
+import { createCiEvents, MAX_WAIT_S } from "./ci-events.mjs";
 import { jsonStore } from "./store.mjs";
 import { versionOf } from "./version.mjs";
 
@@ -29,6 +30,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   const store = jsonStore(join(cfg.state_dir, "router-state.json"), { agents: {}, sandboxes: {} });
   const agents = () => store.data.agents;
   const sbx = () => store.data.sandboxes;
+  // #5688: CI runner events (POST by a `ci` token or the fd token, GET long-poll by the fd token); state in <state_dir>/ci-events/.
+  const ciEvents = createCiEvents({ dir: join(cfg.state_dir, "ci-events"), now });
+  const ciOk = (req) => bearerOk(req, cfg.forgedock_token) || (cfg.ci_tokens ?? []).some((t) => bearerOk(req, t));
+  const ciQuery = (url) => {
+    const repo = url.searchParams.get("repo"), sha = url.searchParams.get("sha"), pr = url.searchParams.get("pr");
+    if (!repo || (!sha && !pr)) return { status: 400, body: { error: "repo and one of sha or pr are required" } };
+    if (pr && !/^\d{1,9}$/.test(pr)) return { status: 400, body: { error: "pr must be an integer" } };
+    const since = Number(url.searchParams.get("since") ?? 0), waitS = Number(url.searchParams.get("wait") ?? 0);
+    if (!Number.isInteger(since) || since < 0 || !Number.isFinite(waitS) || waitS < 0 || waitS > MAX_WAIT_S) return { status: 400, body: { error: `since must be a non-negative integer and wait 0-${MAX_WAIT_S}` } };
+    return { q: { repo, ...(sha ? { sha } : {}), ...(pr ? { pr: Number(pr) } : {}) }, since, waitS };
+  };
   const lane = { cpus: cfg.lane?.cpus ?? 2, mem_gb: cfg.lane?.mem_gb ?? 3 };
   const abandonMs = (cfg.abandon_after_s ?? 1800) * 1000;
   const codes = () => (store.data.codes ??= {});
@@ -354,6 +366,11 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       return { status: r.status, body: r.data };
     })],
     [route("GET", "/version"), fd(async () => ({ status: 200, body: versionOf(cfg.repo_root) }))],
+    [route("POST", "/ci/events"), { fn: async (_p, body) => ({ status: 202, body: ciEvents.ingest(body) }), auth: "ci" }], // #5688
+    [route("GET", "/ci/events"), fd(async (_p, _b, url) => {
+      const c = ciQuery(url);
+      return c.q ? { status: 200, body: await ciEvents.wait(c.q, c.since, c.waitS) } : c;
+    })],
     [route("POST", "/enroll"), { fn: async (_p, body) => enroll(body), auth: "none" }],
     [route("GET", "/bootstrap/install.ps1"), { fn: async (_p, _b, url) => ({ status: 200, body: bootstrapScript(url.searchParams.get("token"), url) }), auth: "enroll" }],
     [route("GET", "/bootstrap/bundle.tar.gz"), { fn: async () => ({ bundle: true }), auth: "enroll" }],
@@ -374,6 +391,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
         const p = match(req, url);
         if (!p) continue;
         if (r.auth === "forgedock" && !bearerOk(req, cfg.forgedock_token)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
+        if (r.auth === "ci" && !ciOk(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
         if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
         if (r.auth === "enroll" && !enrollOk(url.searchParams.get("token"))) return send(res, 401, "unauthorized\n");
         const body = req.method === "POST" ? await readJson(req) : null;
