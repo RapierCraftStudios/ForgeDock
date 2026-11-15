@@ -4,7 +4,7 @@ A pure classifier (`classifyCiFailure`) plus a decision function (`failFastDecis
 ### Changes
 - bin/lean/ci-classify.mjs: new classifier, signature tables, `failFastDecision`, `failFastPolicy`.
 - bin/pool/ci-events.mjs: `createCiEvents` takes optional `classify` and `flakes()`. `ingest` classifies `step_failed`/`test_failed` events that have lines or a test and no `class`.
-- bin/lean/ci-classify.test.mjs: 42-excerpt corpus with a printed accuracy table, a flaky-suspect corpus, the override rules and the fail-fast matrix.
+- bin/lean/ci-classify.test.mjs: 48-excerpt corpus (5 classes, at least 5 each, 4 ecosystems, at least 2 per class) with a printed accuracy table, flaky-suspect entries carrying their ledger, the override rules and the fail-fast matrix.
 - bin/pool/ci-events.test.mjs: ingest classification tests.
 - devdocs/modules/pool.md and lean.md: entries.
 - bin/lean/release-flakes.mjs: unchanged. The needed symbols were already exported.
@@ -16,7 +16,7 @@ A pure classifier (`classifyCiFailure`) plus a decision function (`failFastDecis
 - R5 ✅ the decision is pure; the router is untouched
 - R6 ✅ nothing to export
 - R7 ✅ ci-classify.test.mjs, plus the devdocs entries
-- R8 ✅ 42/42 correct in the corpus, 0 false setup
+- R8 ✅ 48/48 correct in the corpus, 0 false setup, test asserts >=40, >=5 per class (flaky-suspect included), >=2 ecosystems per class
 - R9 ✅ ci-classify.test.mjs, failFastDecision describe
 - R10 ✅ ci-classify.test.mjs, flake ledger describe
 - R11 ✅ release-flakes.test.mjs passes unchanged
