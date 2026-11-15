@@ -78,6 +78,9 @@ domains:
       - path: decisions/5571-release-start.md
         authority: recommended
         token_cost: 450
+      - path: decisions/5712-deploy-stage-engine.md
+        authority: recommended
+        token_cost: 1300
       - path: decisions/5711-release-promote.md
         authority: recommended
         token_cost: 550
