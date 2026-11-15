@@ -22,7 +22,7 @@ export function lanesOf(events) {
   const closeRound = (endTs) => { if (cur?.openRound != null && endTs != null) cur.round_wall_s.push((endTs - cur.openRound) / 1000); if (cur) cur.openRound = null; };
   for (const e of events) {
     const t = ms(e.ts);
-    if (e.event === "RUN_START") { closeRound(null); cur = { version: e.version ?? null, awareness_s: [], rounds: {}, round_wall_s: [], openRound: null }; lanes.push(cur); continue; }
+    if (e.event === "RUN_START") { closeRound(null); cur = { version: e.version ?? null, start: t, awareness_s: [], rounds: {}, round_wall_s: [], openRound: null }; lanes.push(cur); continue; }
     if (!cur) continue;
     if (e.event === "CI_AWARE") { const a = ms(e.aware_ts) ?? t, b = ms(e.event_ts); if (a != null && b != null && a >= b) cur.awareness_s.push((a - b) / 1000); }
     else if (e.event === "CI_FIX_ROUND") { closeRound(t); const k = String(e.pr ?? "?"); cur.rounds[k] = (cur.rounds[k] ?? 0) + 1; cur.openRound = t; }
@@ -31,10 +31,14 @@ export function lanesOf(events) {
   return lanes.filter((l) => l.awareness_s.length || Object.keys(l.rounds).length || true);
 }
 
-/** Report over parsed logs `[{events}]`: per version, awareness latency (median/p90), rounds per PR and wall per round. */
-export function ciAwarenessReport(logs) {
+/**
+ * Report over parsed logs `[{events}]`: per version, awareness latency (median/p90), rounds per PR and wall per round.
+ * `sinceMs` keeps only the lanes whose RUN_START is at or after it (`--since <date>`); a lane with no start time is dropped then.
+ */
+export function ciAwarenessReport(logs, { sinceMs = null } = {}) {
   const by = new Map();
   for (const lg of logs) for (const l of lanesOf(lg)) {
+    if (sinceMs != null && !(l.start >= sinceMs)) continue;
     const g = by.get(l.version ?? "unknown") ?? { version: l.version ?? "unknown", lanes: 0, awareness_s: [], rounds_per_pr: [], round_wall_s: [] };
     g.lanes++; g.awareness_s.push(...l.awareness_s); g.round_wall_s.push(...l.round_wall_s);
     g.rounds_per_pr.push(...Object.values(l.rounds));

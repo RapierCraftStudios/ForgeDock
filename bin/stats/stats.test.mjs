@@ -1109,4 +1109,11 @@ describe("stats --ci-awareness (#5692)", () => {
     assert.match(text, /awareness latency: median 12s, p90 99s \(n=2\)/); assert.match(text, /event-driven/);
     assert.equal(parseArgs(["--ci-awareness"]).ciAwareness, true);
   });
+  it("--since <date> keeps only the lanes started on/after it", () => {
+    const logs = [lane("1.59.0", [], [[7, 100]]), lane("1.60.0", [10], [[8, 100]])];
+    assert.equal(ciAwarenessReport(logs, { sinceMs: Date.parse(T(0)) }).total.lanes, 2);
+    assert.equal(ciAwarenessReport(logs, { sinceMs: Date.parse(T(1)) }).total.lanes, 0);
+    assert.equal(ciAwarenessReport([[{ event: "RUN_START", version: "x" }]], { sinceMs: 1 }).total.lanes, 0); // no start time
+    assert.equal(ciAwarenessReport(logs).total.lanes, 2);
+  });
 });

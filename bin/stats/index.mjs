@@ -41,7 +41,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
-       forgedock stats --ci-awareness [--repo <owner/repo>] [--json]
+       forgedock stats --ci-awareness [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --first-review [--repo <owner/repo>] [--since <date>] [--min-n 20] [--json]
        forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
        forgedock stats --self-filed [--repo <owner/repo>] [--since <date>] [--json]
@@ -98,7 +98,8 @@ Explorer A/B (forge#4418; local run logs only, every run of each log, no GitHub 
                         lean.explore mode (on, off), plus the same issues run in both modes; --json for JSON
 
 Pool (forge#4549; local batch reports, no gh):
-  --ci-awareness        median/p90 CI awareness latency, CI rounds per PR and wall per round, per engine version, from local run logs (#5692)
+  --ci-awareness        median/p90 CI awareness latency, CI rounds per PR and wall per round, per engine version, from local run logs (#5692);
+                        --since <date> keeps only the lanes started on/after that date
   --pool                remote lane minutes, lanes and share per pool agent over --window (default 7d,30d)
 
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
@@ -392,7 +393,11 @@ export async function buildReport(opts, deps = {}) {
   if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
   else if (deps.releaseTimes) releaseTimes = deps.releaseTimes;
   else releaseTimes = gitTagTimes();
-  if (opts.ciAwareness) return { repo, query: { ci_awareness: ciAwarenessReport(readCiLogs(deps.runsDir ?? runsDir(env), repo)) } }; // #5692: local run logs only
+  if (opts.ciAwareness) { // #5692: local run logs only
+    const p = parseSince(opts.since);
+    if (p.sinceVersion) throw new Error("--ci-awareness: --since must be a date (YYYY-MM-DD)");
+    return { repo, query: { ci_awareness: ciAwarenessReport(readCiLogs(deps.runsDir ?? runsDir(env), repo), { sinceMs: p.sinceMs ?? null }) } };
+  }
   if (opts.pool) { // forge#4549: local batch reports only
     const pool = poolUtilisation({ batchRoot: deps.batchRoot ?? batchRoot(env), repo, windows: opts.windows ?? parseWindows("7d,30d"), now: deps.now?.() ?? Date.now() });
     return { repo, query: { pool } };

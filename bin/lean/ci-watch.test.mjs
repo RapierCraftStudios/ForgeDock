@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { watchCi, ciSignal, failedStepsOf, cancelDecision, eventLog } from "./ci-watch.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 /** Fake clock: sleep advances time, never waits. */
 const clock = () => { const c = { t: 0 }; c.sleep = async (ms) => { c.t += ms; }; c.now = () => c.t; return c; };
@@ -68,9 +69,9 @@ describe("cancelDecision (#5692)", () => {
 
 describe("forge.yaml ci.fail_fast plumbing (#5692)", () => {
   it("readCiFailFast returns deterministic only for that value", async () => {
-    const { mkdtempSync, writeFileSync } = await import("node:fs"), { tmpdir } = await import("node:os"), { join } = await import("node:path");
+    const { writeFileSync } = await import("node:fs"), { tmpdir } = await import("node:os"), { join } = await import("node:path");
     const { readCiFailFast } = await import("../engine-cli.mjs");
-    const at = (yaml) => { const d = mkdtempSync(join(tmpdir(), "ci-ff-")); writeFileSync(join(d, "forge.yaml"), yaml); return readCiFailFast(d); };
+    const at = (yaml) => { const d = tmpDir("ci-ff-"); writeFileSync(join(d, "forge.yaml"), yaml); return readCiFailFast(d); };
     assert.equal(at("ci:\n  fail_fast: deterministic\n"), "deterministic");
     assert.equal(at("ci:\n  fail_fast: off\n"), undefined);
     assert.equal(at("name: x\n"), undefined);
