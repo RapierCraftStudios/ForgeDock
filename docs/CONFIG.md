@@ -620,6 +620,42 @@ ci:
 
 `forgedock ci budget [--repo owner/repo] [--json] [--digest] [--propose [--base REF]]` prints the plan, included minutes, month-to-date usage across the account (billing usage API: needs a token that can read the org or user billing), the projection, the active mode, alerts (projected overage, a new burn source such as a repo flipped private) and the parity hit rate (local green -> remote red, per suite). `--digest` adds the per-repo and per-workflow month digest; `--propose` lists the runnable local jobs derived from the repo's workflow files (same tool pins). `--set-mode`, `--budget`, `--reserve`, `--plan` write the `ci` block (see `/forgedock-ci-setup`). Runner minutes are weighted by OS (Linux 1, Windows 2, macOS 10). Caches live in `~/.forge/ci-budget/` (`FORGEDOCK_CI_BUDGET_DIR`).
 
+### `ci.tests` test engine (forge#5710)
+
+Affected-test selection, shard planning and flaky quarantine for `forgedock tests select|shard|recall` (see [test-engine.md](test-engine.md)). Off by default. Block style; the parser flattens these keys under `ci`, so their names are unique within `ci`.
+
+```yaml
+ci:
+  tests:
+    selection: shadow        # off (default) | shadow | enforce (refused until the recall ledger graduated)
+    suites:                  # "<path glob> ... => <test-file glob | @suite | *> ..."
+      - "migrations/** => tests/integration/**"
+    # run_all: ["infra/**"]          # extra globs that select everything (lockfiles, manifests and CI files always do)
+    # ignore: ["**/*.md"]            # changed files that select nothing
+    # test_globs: ["tests/**/*.py"]  # replaces the *.test.* / *.spec.* / __tests__ / test_*.py / *_test.py convention
+    # full_branches: [main, "release/**"]  # head or PR-base branches that always run the full suite
+    graduate_after: 50       # consecutive full runs with 100% failure recall before enforce may skip
+    graduate_min_failing: 1  # of those, subset selections that contained a real failure
+    shards: 4                # default shard count of `tests shard`
+    # shard_target_s: 240    # or derive the count from a per-shard time target
+    quarantine: report       # off | report (default) | non-blocking (opt-in; never for an unskippable class)
+    quarantine_after: 3      # same-commit fail -> pass flips ...
+    quarantine_window_days: 14   # ... inside this window
+    # recall_ledger: /var/lib/forge/recall.jsonl  # default ~/.forge/tests/<owner>__<repo>/recall.jsonl
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `selection` | string | `off` | `off`: nothing is computed. `shadow`: the selection is recorded and the full suite runs. `enforce`: only the selection runs, once the ledger graduated; before that it behaves as `shadow` and says so. |
+| `suites` | list | none | Declared path -> suite map, the fallback for what the import graph cannot see. |
+| `run_all`, `ignore`, `test_globs`, `full_branches` | list | see above | Selection inputs. Changing `suites`, `run_all`, `ignore` or `test_globs` restarts graduation. |
+| `graduate_after`, `graduate_min_failing` | number | 50, 1 | Graduation criterion. |
+| `shards`, `shard_target_s` | number | none | Shard count, or a time target to derive it from. |
+| `quarantine`, `quarantine_after`, `quarantine_window_days` | string, number, number | `report`, 3, 14 | Flaky-test report. Quarantined tests always run. |
+| `recall_ledger` | string | per-repo file under `~/.forge/tests/` | Where the recall ledger lives. |
+
+Scheduled runs and `full_branches` always run the full suite, whatever the mode. **Commands that use this section**: `forgedock tests select`, `forgedock tests shard`, `forgedock tests recall`.
+
 ## `execution` (OPTIONAL)
 
 Owner opt-in for the paid API agent backend (#4257). The API backend is **never the default**: under `--backend auto` (the default) ForgeDock uses the `claude` CLI, and when no CLI is available it fails with `CLI_BACKEND_UNAVAILABLE` instead of billing `ANTHROPIC_API_KEY`.
