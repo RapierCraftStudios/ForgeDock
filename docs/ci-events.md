@@ -46,3 +46,29 @@ jobs:
 ### Events
 
 With `FORGE_CI_EVENTS_URL` set (the router's `POST /ci/events`, #5688), each failed check is POSTed as a best-effort `step_failed` event `{type, step: "preflight:<check>", class: "deterministic-setup", reason, repo, sha}`. A delivery error never changes the exit code. The GitHub check status stays the source of truth for merge gating.
+
+## Runner-side emitter (#5689)
+
+`forgedock ci-step` and `forgedock ci-hook` stream step and test failures to the router while a job runs, so a failure is visible in seconds instead of after the log zip is downloaded. Delivery is best effort: the CI result stays the source of truth.
+
+| Env var | Meaning |
+|---|---|
+| `FORGEDOCK_CI_EVENTS_URL` | the router's `POST /ci/events` URL (`FORGE_CI_EVENTS_URL` is read as a fallback). Unset: nothing is posted. |
+| `FORGEDOCK_CI_TOKEN` | bearer token (a router `ci_tokens[]` entry), sent as `Authorization: Bearer`. |
+
+The events take `repo`, `sha`, `run_id`, `job` and the PR number (from `refs/pull/<n>/merge`) from `GITHUB_REPOSITORY`, `GITHUB_SHA`, `GITHUB_RUN_ID`, `GITHUB_JOB` and `GITHUB_REF`.
+
+### Wrapping a step
+
+```yaml
+      - run: npx forgedock ci-step --name unit -- pnpm test
+        env:
+          FORGEDOCK_CI_EVENTS_URL: ${{ vars.FORGEDOCK_CI_EVENTS_URL }}
+          FORGEDOCK_CI_TOKEN: ${{ secrets.FORGEDOCK_CI_TOKEN }}
+```
+
+`ci-step --name <step> -- <cmd...>` runs the command with its stdout, stderr and exit code passed through unchanged (a signal exits `128+signal`). It posts `step_started`, then on a non-zero exit `step_failed` with `exit_code` and up to 40 lines: the first 40 matching error/fail/Traceback/assert, else the last 40. While the command runs, pytest (`FAILED path::id - msg` plus `path:line: AssertionError`) and vitest/jest (`FAIL path > name` plus `❯ file:line`) output yields one `test_failed` per failing test `{id, file, line, message}`, posted as the line appears. A failed post prints one warning, stops further posts and adds under 2 s.
+
+### Self-hosted runner hooks
+
+Set `ACTIONS_RUNNER_HOOK_JOB_STARTED="npx forgedock ci-hook job-started"` and `ACTIONS_RUNNER_HOOK_JOB_COMPLETED="npx forgedock ci-hook job-completed"` in the runner's environment (or `.env`), together with the two variables above. They post `job_started` and `job_finished`, and always exit 0; with the URL unset they do nothing.
