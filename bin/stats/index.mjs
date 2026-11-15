@@ -17,7 +17,7 @@ import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { buildCard, renderCardMarkdown, renderCardPng, renderCardSvg } from "./card.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, compareEfficiency, formatEfficiencyLines, formatCompareLines, parseWindows } from "./efficiency.mjs";
-import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics } from "./release.mjs";
+import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics, runReleaseLedger, parseLedgerConfig, ledgerSince } from "./release.mjs";
 import { experimentReport, renderExperiment } from "./experiment.mjs";
 import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
@@ -49,6 +49,8 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
        forgedock stats --card [--week|--month] [--include-repo-names] [--public-repo] [--out <dir>] [--repo <owner/repo>]
        forgedock stats --depth [--since <version|date>] [--min-n N] [--offline] [--repo <owner/repo>] [--json]
+       forgedock stats --release-ledger [--repo <owner/repo>] [--since <date|21d>] [--baseline save|compare] [--baseline-file <path>]
+                      [--deploy-workflow <name|file>] [--release-head <branch|any>] [--no-cache] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
 delta against the previous version and a low-n flag for samples under 10. Missing data prints n/a.
@@ -200,6 +202,11 @@ export function parseArgs(argv) {
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--depth") o.depth = true;
     else if (name === "--pool") o.pool = true;
+    else if (name === "--release-ledger") o.releaseLedger = true;
+    else if (name === "--baseline") { const v = take(); if (v !== "save" && v !== "compare") throw new Error("--baseline must be save or compare"); o.baseline = v; }
+    else if (name === "--baseline-file") o.baselineFile = take();
+    else if (name === "--deploy-workflow") o.deployWorkflow = take();
+    else if (name === "--release-head") o.releaseHead = take();
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
     else if (name === "--window") o.windows = parseWindows(take());
     else if (name === "--compare") { // #4491
@@ -241,6 +248,7 @@ export function parseArgs(argv) {
   if ((o.replay || o.enforceDomains || o.riskPaths) && !o.conformanceOutcomes) throw new Error("--replay, --enforce-domains and --risk-paths need --conformance-outcomes");
   if ((o.enforceDomains || o.riskPaths) && !o.replay) throw new Error("--enforce-domains and --risk-paths need --replay");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
+  if ((o.baseline || o.baselineFile || o.deployWorkflow || o.releaseHead) && !o.releaseLedger) throw new Error("--baseline, --baseline-file, --deploy-workflow and --release-head need --release-ledger");
   return o;
 }
 
@@ -348,6 +356,21 @@ export function readAlertConfig(cwd = process.cwd()) {
     }
   } catch { /* no forge.yaml: defaults */ }
   return out;
+}
+
+/** forge.yaml `stats.ledger_*` (+ `branches.staging` as the default release head) for `--release-ledger`. */
+export function readLedgerConfig(cwd = process.cwd()) {
+  try { const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")); return parseLedgerConfig(y?.stats, y?.branches); } catch { return parseLedgerConfig(null, null); }
+}
+
+/** Release state of a managed repo (`release.managed: true`) from its GitHub ledger; [] otherwise or when it cannot be read. */
+async function managedReleaseRecords(gh, repo, sinceMs, cwd = process.cwd()) {
+  try {
+    if (String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.release?.managed ?? "").trim().toLowerCase() !== "true") return [];
+    const { releaseRecords } = await import("../lean/release-ledger.mjs");
+    const api = async (_method, path) => { try { return JSON.parse(await gh(["api", path])); } catch (e) { if (/HTTP 404/.test(String(e?.stderr ?? e?.message ?? ""))) e.status = 404; throw e; } };
+    return await releaseRecords({ io: { api }, repo }, { sinceMs });
+  } catch { return []; }
 }
 
 /** forge.yaml `branding.show_attribution` (default true): the card footer link. */
@@ -501,6 +524,13 @@ export async function runStats(argv, deps = {}) {
   if (!opts.repo || !(multi ? opts.repo.split(",").every(isValidRepo) : isValidRepo(opts.repo))) {
     process.stderr.write(`forgedock stats: could not resolve a valid owner/repo (pass --repo owner/repo)\n`);
     return 2;
+  }
+  if (opts.releaseLedger) { // #5718: its own read path (Actions runs/jobs/steps), no telemetry crawl
+    try {
+      const gh = deps.gh ?? defaultGh;
+      const ledger = deps.ledger ?? await managedReleaseRecords(gh, opts.repo, ledgerSince(opts.since, deps.now?.() ?? Date.now()));
+      return await runReleaseLedger(opts, { gh, config: deps.ledgerConfig ?? readLedgerConfig(), ...deps, ledger });
+    } catch (err) { process.stderr.write(`forgedock stats: ${err.message}\n`); return 1; }
   }
   if (opts.card && (opts.week || opts.month)) opts.since = new Date((deps.now?.() ?? Date.now()) - (opts.week ? 7 : 30) * 86400000).toISOString().slice(0, 10);
   try {
