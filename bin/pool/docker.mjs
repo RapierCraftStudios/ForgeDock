@@ -56,6 +56,13 @@ export const dockerCli = {
     return res;
   },
   async build(dir, tag, buildArgs = {}) { return docker(["build", "-q", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000 }); },
+  /** #5696: removes one lane worktree (/cache/work/<id>) from a cache volume. */
+  async removeWorkDir(volume, image, workDir) { await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", 'rm -rf -- "$1"', "sh", workDir], { timeoutMs: 120000 }); },
+  /** #5696: removes every /cache/work/* dir of a cache volume except the kept ones (full paths). */
+  async pruneWorkDirs(volume, image, keep) {
+    const script = 'for d in /cache/work/* /cache/work/.[!.]*; do [ -e "$d" ] || continue; for k in "$@"; do [ "$d" = "$k" ] && continue 2; done; rm -rf -- "$d"; done';
+    await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", script, "sh", ...keep], { timeoutMs: 120000 });
+  },
   /** Removes files the root-owned lane container wrote into a bind mount, using the lane image itself. */
   async wipe(dir, image) { await docker(["run", "--rm", "--network", "none", "-v", `${dir}:/d`, "--entrypoint", "sh", image, "-c", "rm -rf /d/* /d/.[!.]* 2>/dev/null; true"], { timeoutMs: 120000 }); },
 };

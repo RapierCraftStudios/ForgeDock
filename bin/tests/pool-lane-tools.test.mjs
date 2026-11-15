@@ -16,7 +16,7 @@ function fakeDocker({ have = [], failBuild = false, hang = false } = {}) {
     async hasImage(ref) { return images.has(ref); },
     async build(dir, tag) { this.builds.push({ dir, tag, dockerfile: readFileSync(`${dir}/Dockerfile`, "utf8") }); if (hang) return new Promise(() => {}); if (failBuild) throw Object.assign(new Error("boom"), { stderr: "apt failed" }); images.add(tag); return tag; },
     async run(args) { this.runs.push(args); containers.set(args[args.indexOf("--name") + 1], { running: true, exitCode: 0, startedAt: "", finishedAt: "" }); return "cid"; },
-    async inspect(n) { return containers.get(n) ?? null; }, async remove() {}, async listLabelled() { return []; }, async wipe() {}, async listVolumes() { return []; }, async removeVolume() {} };
+    async inspect(n) { return containers.get(n) ?? null; }, async remove() {}, async listLabelled() { return []; }, async wipe() {}, async removeWorkDir() {}, async pruneWorkDirs() {}, async listVolumes() { return []; }, async removeVolume() {} };
 }
 const spec = (id, extra = {}) => ({ id, issue: 7, repo: { slug: "o/r", url: "u", ref: "main" }, env: {}, command: ["true"], ...extra });
 const agentWith = (docker) => createAgent({ name: "a", listen: { host: "127.0.0.1", port: 7712 }, router_url: "http://r:1", state_dir: tmpDir("lt-"), allow_cpus: 8, allow_mem_gb: 16, token: "t" }, { docker, log: quiet, live: () => ({ ok: true }) });
