@@ -4,14 +4,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { EVENT_TYPES, createCiEvents, validateEvent } from "./ci-events.mjs";
+import { CI_EVENT_TYPES, createCiEvents, validateEvent } from "./ci-events.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
 const ev = (type, extra = {}) => ({ type, repo: "o/r", sha: "abc", run_id: 7, job: "unit", ts: "2026-11-15T00:00:00Z", ...extra });
 const fail = (status, key) => (e) => e.status === status && (key ? e.message.includes(key) : true);
 
 test("all 6 event types validate; optional keys are kept", () => {
-  for (const t of EVENT_TYPES) assert.equal(validateEvent(ev(t)).type, t);
+  for (const t of CI_EVENT_TYPES) assert.equal(validateEvent(ev(t)).type, t);
   const e = validateEvent(ev("test_failed", { pr: 12, step: "s", exit_code: 1, class: "code", lines: ["a"], test: { id: "t1", file: "f.py", line: 3, message: "boom" }, junk: 1 }));
   assert.deepEqual([e.pr, e.step, e.exit_code, e.class, e.lines, e.test.id, e.junk], [12, "s", 1, "code", ["a"], "t1", undefined]);
 });

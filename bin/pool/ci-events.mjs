@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { join } from "node:path";
 
 /** #5688: CI runner events pushed to the pool router and long-polled by agents (parent #5687). */
-export const EVENT_TYPES = ["job_started", "step_started", "step_failed", "test_failed", "job_finished", "runner_unhealthy"];
+export const CI_EVENT_TYPES = ["job_started", "step_started", "step_failed", "test_failed", "job_finished", "runner_unhealthy"];
 export const MAX_BATCH = 200, MAX_LINES = 40, MAX_LINE_CHARS = 500, RING_CAP = 2000, TTL_MS = 24 * 3600 * 1000, MAX_WAIT_S = 60;
 const MAX_STR = 500;
 const DAY_MS = 24 * 3600 * 1000;
@@ -27,7 +27,7 @@ const int = (e, key) => {
 /** Returns the normalized event (known keys only) or throws an error carrying `status` (400 bad key, 413 over a limit) and `key`. */
 export function validateEvent(e) {
   if (!e || typeof e !== "object" || Array.isArray(e)) throw bad("event", "must be an object");
-  if (!EVENT_TYPES.includes(e.type)) throw bad("type", `must be one of ${EVENT_TYPES.join(", ")}`);
+  if (!CI_EVENT_TYPES.includes(e.type)) throw bad("type", `must be one of ${CI_EVENT_TYPES.join(", ")}`);
   const out = { type: e.type, repo: str(e, "repo", true), sha: str(e, "sha", true) };
   const run = e.run_id;
   if (run === undefined || run === null) throw bad("run_id", "is required");
