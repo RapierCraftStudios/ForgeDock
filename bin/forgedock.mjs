@@ -3983,13 +3983,14 @@ const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate",
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
   "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "ci-step", "ci-hook",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
 
 let exitCode = 0;
 // #5301: an App login puts a scoped installation token in this process's env (GH_TOKEN) for child gh calls; no login, no change.
-if (command !== "auth") await applyAuthEnv();
+if (command !== "auth" && command !== "ci-step" && command !== "ci-hook") await applyAuthEnv();
 // #5381: installation tokens live 1h; long-running commands re-resolve before expiry so later gh calls and lanes inherit a fresh one.
 if (AUTH_REFRESH_COMMANDS.has(command)) startAuthRefresh();
 switch (command) {
@@ -4424,6 +4425,13 @@ switch (command) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
     }
+    break;
+  }
+  case "ci-step":
+  case "ci-hook": {
+    // Runner-side CI event emitter (#5689): `forgedock ci-step --name <step> -- <cmd...>`, `forgedock ci-hook job-started|job-completed`.
+    const { ciStepFromCli, ciHookFromCli } = await import("./lean/ci-emit.mjs");
+    exitCode = await (command === "ci-step" ? ciStepFromCli : ciHookFromCli)(restArgs);
     break;
   }
   case "interfaces": {
