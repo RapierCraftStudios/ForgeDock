@@ -17,7 +17,9 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { mergeRemoteLog } from "../engine/runlog.mjs";
 import { safeSegment } from "./ledger.mjs";
 import { scopedEnv } from "./execution.mjs";
 import { resolveCredential } from "./credentials.mjs";
@@ -250,7 +252,10 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     async fetchResult(h) {
       const r = await transport.result(h.id);
       if (r) { await pullLogs(h); await minutesOf(h); }
-      return r ?? null;
+      if (!r) return null;
+      const { runLog, ...rest } = r; // #5697: the lane's run log goes to the host run log, not into the result
+      if (runLog) mergeRemoteLog(env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
+      return rest;
     },
     async capacity() {
       // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down
