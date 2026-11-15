@@ -118,3 +118,26 @@ test("bench: 10000 events ingest at 2000+/s with under 50 MB RSS growth", () => 
   assert.ok(rate >= 2000, `${rate} events/s`);
   assert.ok(grow < 50, `rss +${grow} MB`);
 });
+
+test("ingest classifies step_failed/test_failed without a class (#5690)", () => {
+  const ci = createCiEvents({ dir: tmpDir("ci-class") });
+  ci.ingest([
+    ev("step_failed", { lines: ["sh: tsc: command not found"] }),
+    ev("test_failed", { test: { id: "t1", message: "AssertionError: 1 !== 2" } }),
+    ev("step_failed", { lines: ["sh: tsc: command not found"], class: "infra" }),
+    ev("step_failed"),
+    ev("job_started", { lines: ["sh: tsc: command not found"] }),
+  ]);
+  const got = ci.query({ repo: "o/r", sha: "abc" }).events;
+  assert.deepEqual(got.map((e) => e.class), ["deterministic-setup", "code", "infra", undefined, undefined]);
+});
+
+test("ingest uses an injected classifier and flake ledger; a throwing classifier never rejects the batch (#5690)", () => {
+  let seen;
+  const ci = createCiEvents({ dir: tmpDir("ci-class2"), classify: (x) => { seen = x; return { class: "flaky-suspect" }; }, flakes: () => ["f"] });
+  ci.ingest(ev("step_failed", { lines: ["x"] }));
+  assert.deepEqual(seen.flakes, ["f"]);
+  assert.equal(ci.query({ repo: "o/r", sha: "abc" }).events[0].class, "flaky-suspect");
+  const bad = createCiEvents({ dir: tmpDir("ci-class3"), classify: () => { throw new Error("x"); } });
+  assert.equal(bad.ingest(ev("step_failed", { lines: ["x"] })).accepted, 1);
+});

@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { classifyCiFailure } from "../lean/ci-classify.mjs";
 
 /** #5688: CI runner events pushed to the pool router and long-polled by agents (parent #5687). */
 export const CI_EVENT_TYPES = ["job_started", "step_started", "step_failed", "test_failed", "job_finished", "runner_unhealthy"];
@@ -80,7 +81,8 @@ const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10);
  * Event store. Memory: a ring per (repo, sha), 2000 events, 24 h TTL. Disk: `<dir>/<repo-key>.ndjson`, rotated to
  * `<repo-key>.<YYYY-MM-DD>.ndjson` when the UTC day changes; the last 24 h are reloaded on creation and `seq` resumes.
  */
-export function createCiEvents({ dir, now = () => Date.now(), cap = RING_CAP, ttlMs = TTL_MS } = {}) {
+/** `classify(event, flakes)` fills `class` on failures that lack one; `flakes()` returns the ledger list (default none). Neither cancels anything. */
+export function createCiEvents({ dir, now = () => Date.now(), cap = RING_CAP, ttlMs = TTL_MS, classify = classifyCiFailure, flakes = () => [] } = {}) {
   const rings = new Map(); // `${repo}\n${sha}` -> Ring
   const fileDay = new Map(); // repo-key -> UTC day of its active file's last write
   const waiters = new Set();
@@ -146,13 +148,20 @@ export function createCiEvents({ dir, now = () => Date.now(), cap = RING_CAP, tt
     return { events: out, next: out.length ? out[out.length - 1].seq : Math.max(since, seq) };
   }
 
+  const safeFlakes = () => { try { return flakes() ?? []; } catch { return []; } };
+  const withClass = (e, fl) => {
+    if (!classify || e.class !== undefined || (!e.lines?.length && !e.test) || (e.type !== "step_failed" && e.type !== "test_failed")) return e;
+    try { const c = classify({ step: e.step, lines: e.lines, test: e.test, flakes: fl }); return c?.class ? { ...e, class: c.class } : e; } catch { return e; }
+  };
+
   /** Validates the whole list first (nothing is stored when one event is bad), then stamps `received_at` and `seq`. */
   function ingest(input) {
     const list = Array.isArray(input) ? input : [input];
     if (!list.length) throw Object.assign(new Error("invalid event: body is empty"), { status: 400 });
     if (list.length > MAX_BATCH) throw Object.assign(new Error(`too many events (max ${MAX_BATCH})`), { status: 413 });
     const clean = list.map((e, i) => { try { return validateEvent(e); } catch (err) { if (list.length > 1) err.message = `${err.message} (event ${i})`; throw err; } });
-    const t = now(), stamped = clean.map((e) => ({ ...e, seq: ++seq, received_at: t }));
+    const t = now(), fl = classify ? safeFlakes() : [];
+    const stamped = clean.map((e) => ({ ...withClass(e, fl), seq: ++seq, received_at: t }));
     persist(stamped);
     for (const e of stamped) put(e);
     for (const w of [...waiters]) { const r = query(w.q, w.since); if (r.events.length) { waiters.delete(w); clearTimeout(w.timer); w.resolve(r); } }
