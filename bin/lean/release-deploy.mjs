@@ -8,11 +8,14 @@
  * `{blocked}`, never a throw. The engine never sets a break-glass input and never reruns a deploy while a freeze is set (I26);
  * a run that concluded `success` while live is not the merge sha (or the expected digests) is a failed deploy (I28); no deploy
  * starts without a recorded rollback target (I9). Rationale: devdocs/decisions/5560-release-deploy.md.
+ * With forge.yaml `deploy.engine.enabled` (`ctx.config.deployEngine`, #5712) the step records the rollback target as above and then
+ * hands over to the stage machine in deploy-stages.mjs; without it nothing below changes.
  */
 import { fenced } from "./release-fence.mjs";
 import { buildDispatchArgs } from "./release-control.mjs";
 import { INFRA_SIGNATURES } from "./release-flakes.mjs";
 import { verifyStep, verifyConfigured } from "./release-verify.mjs";
+import { engineOn, runStages } from "./deploy-stages.mjs";
 
 export const BOUNDS = { pollMs: 10_000, runPollMs: 20_000, defaultStageS: 3600, rerunMax: 2, maxAttempts: 3 };
 const json = (s) => JSON.parse(String(s || "null"));
@@ -44,7 +47,7 @@ export async function readTarget(io, cmd) {
 }
 
 /** The freeze variable's value ("" when unset or unreadable-as-absent). A gh failure means unset: `gh variable get` exits non-zero for a missing variable. */
-async function freezeValue(io, repo, name) {
+export async function freezeValue(io, repo, name) {
   if (!name) return "";
   try { return String(await io.gh(["variable", "get", name, "--repo", repo])).trim(); } catch { return ""; }
 }
@@ -145,12 +148,14 @@ const stageS = (d) => (typeof d.stage_timeout_s === "number" ? d.stage_timeout_s
 /** @returns {Promise<{skipped: true}|{live: true, merge, run, reruns}|{blocked: true, reason, hold?}|{stopped: true, why}>} */
 export async function deployStep(ctx) {
   const { io, repo, state } = ctx;
-  const d = ctx.config.deploy;
-  if (!d?.pipelines || !Object.keys(d.pipelines).length) return { skipped: true };
+  const engine = engineOn(ctx.config.deployEngine); // #5712: the stage machine; off = everything below as before
+  const d = engine ? { live_release_command: ctx.config.deployEngine.live_release_command, ...(ctx.config.deploy ?? {}) } : ctx.config.deploy;
+  if (!engine && state.deploy?.engine) return { ...blocked("this release is being deployed by the deploy engine, which is not enabled here; resume it on a host whose forge.yaml has deploy.engine.enabled (the workflow pipeline is never started over a staged deploy)"), hold: { kind: "deploy-engine", label: "needs-agent" } };
+  if (!engine && (!d?.pipelines || !Object.keys(d.pipelines).length)) return { skipped: true };
   const b = { ...BOUNDS, ...(ctx.config.deployBounds ?? {}) };
-  const pipe = d.pipelines[ctx.config.deployPipeline ?? "full"] ?? Object.values(d.pipelines)[0];
-  if (!pipe?.workflow) return blocked("deploy.pipelines has no workflow for this release");
-  let sha = state.steps["post-merge"]?.result?.merge ?? null;
+  const pipe = d.pipelines?.[ctx.config.deployPipeline ?? "full"] ?? Object.values(d.pipelines ?? {})[0];
+  if (!engine && !pipe?.workflow) return blocked("deploy.pipelines has no workflow for this release");
+  let sha = (engine ? ctx.config.deploySha : null) ?? state.steps["post-merge"]?.result?.merge ?? null;
   if (!sha) {
     const pr = state.steps["release-pr"]?.result?.pr;
     const v = json(await io.gh(["pr", "view", String(pr), "--repo", repo, "--json", "state,mergeCommit"]));
@@ -171,6 +176,7 @@ export async function deployStep(ctx) {
     st.target = target; st.expected = expected; st.merge = sha; st.freezeBefore = await freezeValue(io, repo, d.freeze_variable); st.phase = "DEPLOYING";
     ctx.save();
   }
+  if (engine) return runStages(ctx, sha, d);
 
   await reconcile(ctx, d, pipe, sha);
   if (st.phase !== "LIVE_CHECKED" && st.phase !== "LIVE") {

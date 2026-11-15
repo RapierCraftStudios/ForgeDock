@@ -1071,6 +1071,7 @@ These keys are rejected by `release check-config` until their phase ships:
 | `forgedock release p0` | Hotfix lane for an issue or branch (`--units`, `--preempt`, `--yes`). |
 | `forgedock release verify` | Verify a release sha, or re-run deploy verification of a release id. |
 | `forgedock release recover` | Recover a release that stopped mid-deploy. |
+| `forgedock release deploy` | Deploy stage engine (`deploy.engine`): `--plan [<id>] [--sha]` lists the stages that would run and why; `--resume <id> [--sha]` continues from the first failed or incomplete stage. |
 | `forgedock release rollback` | Roll a release back (`--reason`, `--to flag\|unit\|full`, `--later`). |
 | `forgedock release plan` | Build the release plan for a lane. |
 | `forgedock release start` | Start a planned release (`--plan`, `--approve`, `--wave`). |
@@ -1168,6 +1169,73 @@ rollouts:
 A diff that adds a key to one of these files with a default of `false`, `0`, `off` or `null` (#4769) must be covered by an activation row in the contract: a `defer` requirement with bucket `owner:promote:<flag>` (a trailing `*` matches a prefix) or a `deliver` row whose why names the flag. Without one conformance fails with `activation_missing`, and an acceptance criterion naming `shadow`, `cohort` or `treated` fails with `mode_unreachable`. Without `rollouts` nothing changes.
 
 A post-deploy check whose output has a line `BLOCKED: <flag> = off ...` is not a failure: it posts one `FORGE:ROLLOUT_ASK` owner ask per flag on the rollup and parks `awaiting-measurement`; the ask is posted again only when the output (the evidence) changes. `dormancyReport` (`bin/lean/activation.mjs`) lists introduced flags still `off` after `dormant_days`, with days dormant and the parent issue, through an injected read-only `flagState(flag)` hook; a `keep-off` decision for a flag (or `PREFIX*`) silences it.
+
+## `deploy` (OPTIONAL)
+
+`deploy.engine` (#5712) turns the deploy of a release into a resumable stage machine (`bin/lean/deploy-stages.mjs`). Default off: without `enabled: true` the deploy step is unchanged. Your repo keeps its own tooling (ssh, compose, k8s): a stage is a host command (`run`) or a dispatched workflow (`workflow`).
+
+```yaml
+deploy:
+  engine:
+    enabled: true
+    live_release_command: "ops/live-release"      # prints the live sha, or JSON {sha, images}; used when .forge/release.yaml has no deploy.live_release_command
+    stage_timeout_s: 1800                         # default per stage (3600); a stage may set timeout_s
+    colour:
+      active_command: "ops/active-colour"         # prints the colour serving traffic
+      names: [blue, green]                        # default
+    services:
+      mode: shadow                                # off | shadow | enforce (shadow when desired_command is set)
+      desired_command: "ops/digests --sha $FORGE_SHA"   # JSON {service: {digest, config}}
+      live_command: "ops/digests --live"                # same shape, what is running
+    canary:
+      health_command: "ops/health"                # run after each step
+      medium: {steps: [10, 100], wait_s: 120}     # defaults: low [100]; medium [10, 100] 120 s; high [10, 50, 100] 300 s
+    rollback:
+      budget_s: 60                                # timeout of the two commands below
+      shift_back_command: "ops/shift 0"           # traffic back to the old colour
+      abort_command: "ops/down $FORGE_COLOUR"     # optional: stop the idle colour after a pre-traffic failure
+    stages:
+      - {id: build, kind: build, run: "ops/build", inputs: ["services/**"], services: true}
+      - {id: expand, kind: migrate, run: "ops/migrate expand", inputs: ["db/expand/**"]}
+      - {id: deploy-new, kind: deploy, run: "ops/up $FORGE_COLOUR", inputs: ["ops/**"], services: true, check: "ops/is-up $FORGE_COLOUR"}
+      - {id: smoke-new, kind: smoke, run: "tests/smoke/run $FORGE_COLOUR", inputs: ["tests/smoke/**"]}
+      - {id: shift, kind: shift, run: "ops/shift $FORGE_TRAFFIC_PCT", inputs: ["ops/router/**"]}
+      - {id: verify, kind: verify}
+      - {id: retire-old, kind: retire, run: "ops/down $FORGE_OLD_COLOUR", inputs: ["ops/**"]}
+      - {id: contract, kind: contract, run: "ops/migrate contract", inputs: ["db/contract/**"]}
+```
+
+| Stage key | Meaning |
+|-----------|---------|
+| `id` | Unique name. |
+| `kind` | `build`, `migrate`, `deploy`, `smoke`, `shift`, `verify`, `retire`, `contract` or `run` (default). Each kind has an idempotency contract (the engine may run a stage twice): see `devdocs/decisions/5712-deploy-stage-engine.md`. |
+| `run` / `workflow` | Exactly one (a `verify` stage may have neither). A workflow receives the inputs `stage`, `sha`, `release`, `colour`, `old_colour`, `services`, `traffic_pct`, `forge_epoch`. |
+| `inputs` | Path globs. A change to a matching file at the deploy sha re-runs the stage. Default `**` (any commit). |
+| `needs` | Earlier stages whose outputs this stage depends on. Default: all earlier stages. |
+| `services` | `true`: the stage works per service; its key includes the service digests, and in `enforce` mode it is skipped when no service changed. |
+| `check` | Read-only probe that the stage's effect still holds. A done stage is skipped only when it passes; a failure re-runs this stage and all later ones. |
+| `outputs_command` | Prints a JSON object recorded as the stage's outputs. Without it, a `run` stage's last stdout line is used when it is a JSON object. |
+| `timeout_s` | Stage timeout. |
+
+Commands get `FORGE_SHA`, `FORGE_TARGET_SHA` (what was live before), `FORGE_RELEASE`, `FORGE_STAGE`, `FORGE_COLOUR` (new), `FORGE_OLD_COLOUR`, `FORGE_RISK`, `FORGE_SERVICES` (comma list to act on; empty means the engine has no service list), `FORGE_SERVICES_SKIPPED` and, for `shift`, `FORGE_TRAFFIC_PCT`.
+
+Rules the engine enforces:
+
+- **Resume.** Each stage has a checkpoint (inputs hash, outputs, status) in the release state and, for a managed release, on the ledger. A stage is skipped when its checkpoint is done and its inputs are unchanged; so a resume starts at the first failed or incomplete stage, and a fix commit re-runs only the stages whose `inputs` it touches (or whose needed outputs changed).
+- **Smoke before traffic.** A `smoke` stage must come before the first `shift`. A failure before the shift moves no traffic: the old colour keeps serving, and there is no hold, freeze or rollback trigger.
+- **Rollback.** A failure from the shift up to `retire` runs `rollback.shift_back_command` within `rollback.budget_s`. If that fails, the rollback ladder is triggered as before. After `retire` the engine holds for a roll-forward.
+- **Changed services only.** A service is unchanged only when its image digest and config hash both match what is running. `shadow` deploys everything and records what would have been skipped and whether that agreed; `enforce` skips.
+- **Canary by risk class.** The risk class comes from the release risk rules (`risk.rules` of `.forge/release.yaml`, else the defaults) over the files changed since the live sha.
+- **Verification.** A `verify` stage is required. It checks the live record against the deployed sha, runs its own command if it has one, then the `verify` layers of `.forge/release.yaml`.
+
+```bash
+forgedock release deploy --plan <release id>            # which stages would run, and why
+forgedock release deploy --plan --sha <sha> --json      # plan for a commit, as JSON
+forgedock release deploy --resume <release id>          # continue from the first failed or incomplete stage
+forgedock release deploy --resume <release id> --sha <sha>   # same, deploying a later default-branch commit that contains the release merge (a fix)
+```
+
+To turn it off, set `enabled: false` or remove the block. A release already started by the engine must be finished (or rolled back) with the engine on.
 
 ## `post_deploy` (OPTIONAL)
 

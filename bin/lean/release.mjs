@@ -478,7 +478,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
-export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release start [--plan <id|hash>] [--approve] [--wave train|release|all] [--milestone <slug>] [--repo owner/repo] | forgedock release go <id> [--plan|--merge|--activate <key>] [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] [--coverage] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
+export const RELEASE_USAGE = "usage: forgedock release [--repo owner/repo] [--merge] [--watch] [--resume <id>] | forgedock release p0 <#issue | --branch B> [--units a,b] [--preempt] [--yes] | forgedock release verify <sha | release id> [--repo owner/repo] | forgedock release recover <release id> [--repo owner/repo] | forgedock release deploy --plan [<release id>] [--sha <sha>] [--json] | forgedock release deploy --resume <release id> [--sha <sha>] | forgedock release rollback <release id> --reason <text> [--to flag|unit|full] [--later id,id] [--repo owner/repo] [--json] | forgedock release plan [--lane auto|train|release|p0] [--milestone <slug>] [--issues N,N] [--repo owner/repo] [--json] | forgedock release start [--plan <id|hash>] [--approve] [--wave train|release|all] [--milestone <slug>] [--repo owner/repo] | forgedock release go <id> [--plan|--merge|--activate <key>] [--repo owner/repo] | forgedock release status [<id>] [--watch] [--interval s] [--json] | forgedock release explain <id | #issue | PR> [--json] | forgedock release check-config [--ref <git ref>] [--coverage] | forgedock release init [--conductor] | forgedock release control <hold|resume|cancel|lane|exempt|freeze|unfreeze> ... --reason <text> [--repo owner/repo] [--json] (the verbs also work as `forgedock release <verb>`) | forgedock release gates [check [--base <ref>] | demote] [--since 30d] [--json] | forgedock release gates record <release-id> --file <jsonl> | forgedock release report";
 
 /** `forgedock release ...`; @returns the process exit code (0 done or stopped at GATE_PASS, 1 refused, 3 blocked on a manual step). */
 export async function releaseFromCli(argv, deps = {}) {
@@ -573,6 +573,20 @@ export async function releaseFromCli(argv, deps = {}) {
     const def = readBranches(cwd).default || "main";
     return recoverFromCli(argv.slice(1), { io, policy: readPolicy({ io, defaultBranch: def, cwd }).policy ?? {}, def, actor: deps.actor ?? env.GITHUB_ACTOR, host: deps.host });
   }
+  if (argv[0] === "deploy") { // #5712: the deploy stage engine; --plan is read-only, --resume falls through to the release job below
+    const { deployFromCli, readEngine } = await import("./deploy-stages.mjs");
+    const { readPolicy } = await import("./release-config.mjs");
+    const def = readBranches(cwd).default || "main", root = releaseRoot(env), rest = argv.slice(1);
+    let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: the engine is off */ }
+    const pol = readPolicy({ io, defaultBranch: def, cwd }).policy, managed = !!readReleaseConfig(raw).managed && !!io.api;
+    const repo = flag(rest, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
+    const lctx = managed ? { io, repo, credential: "driver" } : null;
+    const load = async (id) => (ID_RE.test(String(id)) ? openRelease(root, id).load() ?? (lctx ? (await readLedger(lctx, id))?.state ?? null : null) : null);
+    const r = await deployFromCli(rest, { io, load, engine: readEngine({ raw, io, def }), config: { deploy: pol?.deploy, policy: pol }, def, repo, lctx });
+    if (typeof r === "number") return r;
+    argv = ["--resume", r.resume, "--repo", repo, ...(flag(rest, "--lane") ? ["--lane", flag(rest, "--lane")] : [])];
+    deps = { ...deps, deploySha: r.sha };
+  }
   if (argv[0] === "gates") { // #5583: catalogue, telemetry report, admission check; release-gates is loaded lazily
     const g = await import("./release-gates.mjs");
     const { readPolicy } = await import("./release-config.mjs");
@@ -620,6 +634,11 @@ export async function releaseFromCli(argv, deps = {}) {
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: defaults */ }
   const config = readReleaseConfig(raw);
   if (config.managed) config.ciPolicy = readCiPolicy(cwd);
+  if (/^deploy:/m.test(raw)) { // #5712: the deploy stage engine, off unless forge.yaml deploy.engine.enabled
+    const { readEngine } = await import("./deploy-stages.mjs");
+    const engine = readEngine({ raw, io, def: readBranches(cwd).default || "main" });
+    if (engine) { config.deployEngine = engine; if (deps.deploySha) config.deploySha = deps.deploySha; }
+  }
   if (config.managed) { // #5560: deploy stages come from the default-branch policy only (I13)
     const { readPolicy } = await import("./release-config.mjs");
     const pol = readPolicy({ io, defaultBranch: readBranches(cwd).default || "main", cwd }).policy;
