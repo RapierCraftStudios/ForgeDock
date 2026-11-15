@@ -1,1 +1,160 @@
-{"status":"fixed","summary":"CI failure impact classifier, fail_fast decision and ingest classification","requirements":[{"id":"R1","status":"implemented","evidence":"bin/lean/ci-classify.mjs:46"},{"id":"R2","status":"implemented","evidence":"bin/lean/ci-classify.mjs:47"},{"id":"R3","status":"implemented","evidence":"bin/pool/ci-events.mjs withClass"},{"id":"R4","status":"implemented","evidence":"bin/lean/ci-classify.mjs failFastDecision"},{"id":"R5","status":"implemented","evidence":"router untouched"},{"id":"R6","status":"implemented","evidence":"no change needed, already exported"},{"id":"R7","status":"implemented","evidence":"bin/lean/ci-classify.test.mjs"},{"id":"R8","status":"implemented","evidence":"bin/lean/ci-classify.test.mjs corpus test"},{"id":"R9","status":"implemented","evidence":"bin/lean/ci-classify.test.mjs"},{"id":"R10","status":"implemented","evidence":"bin/lean/ci-classify.test.mjs"},{"id":"R11","status":"implemented","evidence":"release-flakes.test.mjs unchanged"}],"validation":[{"id":"V1","command":"node --test bin/lean/ci-classify.test.mjs","exit":0},{"id":"V2","command":"node --test bin/pool/ci-events.test.mjs bin/lean/release-flakes.test.mjs bin/lean/ci-preflight.test.mjs","exit":0}],"tests":[{"command":"node --test bin/lean/ci-classify.test.mjs bin/pool/ci-events.test.mjs","result":"pass","fails_without_fix":true}],"self_review":[{"question":"1","answer":"yes","evidence":"R1-R11 mapped in implementation.md"},{"question":"2","answer":"yes","evidence":"ci-events, release-flakes, ci-preflight and pool-lane-tools tests pass"},{"question":"3","answer":"yes","evidence":"forgedock check PASS"},{"question":"4","answer":"yes","evidence":"git diff touches only deliverable paths and tests; release-flakes.mjs unchanged"}],"amendments":[],"not_members":[{"symbol":"ci-classify","test":"bin/lean/batch.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/checks.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/conformance.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/context.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/execution.e2e.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/execution.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/fixround.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/guardgate.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/ledger.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"},{"symbol":"ci-classify","test":"bin/lean/release-mergeback.test.mjs","why":"the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"}]}
+{
+ "status": "fixed",
+ "summary": "CI failure impact classifier, fail_fast decision and ingest classification",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.mjs:46"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.mjs:47"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/pool/ci-events.mjs withClass"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.mjs failFastDecision"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "router untouched"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "no change needed, already exported"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.test.mjs"
+  },
+  {
+   "id": "R8",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.test.mjs corpus test"
+  },
+  {
+   "id": "R9",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.test.mjs"
+  },
+  {
+   "id": "R10",
+   "status": "implemented",
+   "evidence": "bin/lean/ci-classify.test.mjs"
+  },
+  {
+   "id": "R11",
+   "status": "implemented",
+   "evidence": "release-flakes.test.mjs unchanged"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/ci-classify.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/pool/ci-events.test.mjs bin/lean/release-flakes.test.mjs bin/lean/ci-preflight.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "G1",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/release-flakes.test.mjs bin/pool/ci-events.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/ci-classify.test.mjs bin/pool/ci-events.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R11 mapped in implementation.md"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "ci-events, release-flakes, ci-preflight and pool-lane-tools tests pass"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff touches only deliverable paths and tests; release-flakes.mjs unchanged"
+  }
+ ],
+ "amendments": [],
+ "not_members": [
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/context.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/guardgate.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/ledger.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  },
+  {
+   "symbol": "ci-classify",
+   "test": "bin/lean/release-mergeback.test.mjs",
+   "why": "the test exercises its own module (stubs, fixtures, kind lists); it does not enumerate bin/lean modules, so ci-classify is not a member"
+  }
+ ]
+}

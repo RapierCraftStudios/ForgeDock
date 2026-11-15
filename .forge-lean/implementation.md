@@ -22,7 +22,7 @@ A pure classifier (`classifyCiFailure`) plus a decision function (`failFastDecis
 - R11 ✅ release-flakes.test.mjs passes unchanged
 - R12 deferred in the contract (owner:promote:fail_fast)
 ### Verification
-- V1, V2 and G1: all pass.
+- V1, V2 and G1 (release-flakes + ci-events, exit 0) all pass.
 - `forgedock check`: PASS.
 - eslint on the changed files: clean.
 - The new tests fail without the fix: the module and the ingest `class` do not exist on the base.
