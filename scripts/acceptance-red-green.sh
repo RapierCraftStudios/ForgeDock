@@ -22,17 +22,18 @@
 # Bash 3.2 portable.
 set -uo pipefail
 
-REPO=""; BASE_REF=""; CMD=""; TMO=300
+REPO=""; BASE_REF=""; CMD=""; TMO=300; OUTDIR=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo-path) REPO="${2-}"; shift 2 ;;
     --base-ref) BASE_REF="${2-}"; shift 2 ;;
     --test-cmd) CMD="${2-}"; shift 2 ;;
     --timeout) TMO="${2-}"; shift 2 ;;
-    *) echo "usage: acceptance-red-green.sh --repo-path <dir> --base-ref <ref> --test-cmd <cmd> [--timeout <sec>]" >&2; exit 2 ;;
+    --output-dir) OUTDIR="${2-}"; shift 2 ;;
+    *) echo "usage: acceptance-red-green.sh --repo-path <dir> --base-ref <ref> --test-cmd <cmd> [--timeout <sec>] [--output-dir <dir>]" >&2; exit 2 ;;
   esac
 done
-[ -n "$REPO" ] && [ -d "$REPO" ] && [ -n "$BASE_REF" ] && [ -n "$CMD" ] || { echo "usage: acceptance-red-green.sh --repo-path <dir> --base-ref <ref> --test-cmd <cmd> [--timeout <sec>]" >&2; exit 2; }
+[ -n "$REPO" ] && [ -d "$REPO" ] && [ -n "$BASE_REF" ] && [ -n "$CMD" ] || { echo "usage: acceptance-red-green.sh --repo-path <dir> --base-ref <ref> --test-cmd <cmd> [--timeout <sec>] [--output-dir <dir>]" >&2; exit 2; }
 case "$TMO" in ''|*[!0-9]*) TMO=300 ;; esac
 CLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/classify-test-run.sh"
 
@@ -54,6 +55,10 @@ run_in() {
   local dir="$1" out="$WORK/out.$$.txt" rc cls
   if [ -n "$TIMEOUT_BIN" ]; then ( cd "$dir" && "$TIMEOUT_BIN" "$TMO" bash -c "$CMD" ) >"$out" 2>&1; rc=$?
   else ( cd "$dir" && bash -c "$CMD" ) >"$out" 2>&1; rc=$?; fi
+  # #5732: keep each run's output for the caller's failure detail (head.out for the head run, base.out for the first base run)
+  if [ -n "$OUTDIR" ] && [ -d "$OUTDIR" ]; then
+    if [ "$dir" = "$REPO" ]; then cp "$out" "$OUTDIR/head.out" 2>/dev/null; elif [ ! -e "$OUTDIR/base.out" ]; then cp "$out" "$OUTDIR/base.out" 2>/dev/null; fi
+  fi
   case "$rc" in 124|126|127) echo UNRUNNABLE; return ;; esac
   cls=$(bash "$CLS" "$rc" "$out" 2>/dev/null)
   case "$cls" in FAILED|RAN|RAN_NOTHING) ;; *) echo UNRUNNABLE; return ;; esac

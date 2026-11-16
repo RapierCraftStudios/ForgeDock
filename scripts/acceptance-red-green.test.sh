@@ -109,5 +109,13 @@ git -C "$R6" add -A; git -C "$R6" commit -qm t; git -C "$R6" update-ref refs/rem
 printf 'echo "2 passed"\n' > "$R6/tests/t.sh"; git -C "$R6" add -A; git -C "$R6" commit -qm t2
 check "modified test passing on base in both versions has no PRISTINE word (#5544)" "BASE=RAN HEAD=RAN" "$R6" "bash tests/t.sh"
 
+# 14. #5732 --output-dir keeps the head run's output (head failed) and the base run's output (red base); the word line is unchanged
+OD="$TMP/od1"; mkdir -p "$OD"
+got=$(bash "$RG" --repo-path "$R1" --base-ref origin/main --test-cmd "echo 'E   AssertionError: 0.5 != 0.4'; exit 1" --output-dir "$OD" 2>/dev/null)
+if [ "$got" = "BASE=SKIPPED HEAD=FAILED" ] && grep -q "AssertionError: 0.5 != 0.4" "$OD/head.out" && [ ! -e "$OD/base.out" ]; then ok "#5732 --output-dir keeps the failing head output"; else bad "#5732 --output-dir head (got '$got')"; fi
+OD="$TMP/od2"; mkdir -p "$OD"
+got=$(bash "$RG" --repo-path "$R1" --base-ref origin/main --test-cmd "bash tests/t.sh" --output-dir "$OD" 2>/dev/null)
+if [ "$got" = "BASE=FAILED HEAD=RAN" ] && [ -f "$OD/head.out" ] && [ -f "$OD/base.out" ]; then ok "#5732 --output-dir keeps the base output"; else bad "#5732 --output-dir base (got '$got')"; fi
+
 echo "$PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]
