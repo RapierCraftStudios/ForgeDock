@@ -11,6 +11,8 @@ import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #533
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import os from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock, builderFixable } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
@@ -214,6 +216,11 @@ function world(o = {}) {
 }
 const run = (w, extra = {}) => runCore({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: tmpDir("core-"), conformance: "enforce",
   io: w.io, emitTelemetry: async (r) => w.telemetry.push(r), random: () => 0.5, ...extra });
+/** #5728: run `fn` with a fixed, idle load average: precheck.mjs sizes its timeout retry from the real host load, so a loaded host defers the check to CI. */
+async function atIdleLoad(fn) {
+  const real = os.loadavg; os.loadavg = () => [0.1, 0.1, 0.1]; syncBuiltinESMExports();
+  try { return await fn(); } finally { os.loadavg = real; syncBuiltinESMExports(); }
+}
 const builders = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "builder");
 const reviewers = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "reviewer");
 const traj = (w) => w.comments.filter((c) => c.includes("<!-- FORGE:TRAJECTORY -->"));
@@ -6095,7 +6102,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   it("#5332 a precheck round whose only non-zero result is rc 124 does not resume the builder or end ci.red, and is never self_check green", async () => {
     const w = world(); const dir = tmpDir("core-");
     w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
-    const r = await run(w, { dir, precheck: { commands: ["make slow"] } });
+    const r = await atIdleLoad(() => run(w, { dir, precheck: { commands: ["make slow"] } }));
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
     const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
@@ -6105,7 +6112,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   it("#5332 with verify.precheck_block a timed-out check ends env.validate_timeout (not ci.red) naming the command and limit", async () => {
     const w = world();
     w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
-    const r = await run(w, { precheck: { commands: ["make slow"] }, verify: { ...parseVerify({}), precheckBlock: true } });
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["make slow"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
     assert.equal(r.code, ENV_VALIDATE_TIMEOUT); assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0);
     assert.match((w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? ""), /`make slow` \(timed out after 1 s, exit 124\)/);
