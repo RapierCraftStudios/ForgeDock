@@ -618,11 +618,17 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
      * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.
      */
     async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
-      const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
+      let outDir = null;
+      try { outDir = mkdtempSync(join(tmpdir(), "forge-rg-out-")); } catch { /* no output tails, the words still come back */ }
+      const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec), ...(outDir ? ["--output-dir", outDir] : [])];
+      // #5732: the last 64 KB of a run's output, for the failure's output tail; undefined when the harness kept none
+      const tailOf = (f) => { try { const t = readFileSync(join(outDir, f), "utf8"); return t.length > 65536 ? t.slice(-65536) : t; } catch { return undefined; } };
       try {
         const m = /BASE=(\w+) HEAD=(\w+)(?: PRISTINE=(\w+))?/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
-        return m ? { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}) } : null; // #5544: pristine only when the base's own test version failed
-      } catch { return null; }
+        if (!m) return null;
+        const headOutput = outDir ? tailOf("head.out") : undefined, baseOutput = outDir ? tailOf("base.out") : undefined;
+        return { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}), ...(headOutput != null ? { headOutput } : {}), ...(baseOutput != null ? { baseOutput } : {}) }; // #5544: pristine only when the base's own test version failed
+      } catch { return null; } finally { if (outDir) rmSync(outDir, { recursive: true, force: true }); }
     },
     /**
      * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),

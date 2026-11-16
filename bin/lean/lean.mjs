@@ -1709,11 +1709,12 @@ export async function runCore(o) {
       let words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
       if (words.head === "FAILED" && io.runCommand) { // #5020: a head that failed because a tool or env is missing is env.repro_unrunnable, not a red-green verdict
         const hr = await io.runCommand({ command: String(t.command), cwd: wt, timeoutMs: 120000, env: laneEnv() }).then((x) => x?.r ?? x).catch(() => null);
+        if (hr && hr.output != null) words = { ...words, headOutput: String(hr.output) }; // #5732: the head run's output goes into the failure detail
         // release review BUG-1: a module the repo tracks is the change's own failure, never an env miss (same repoHas as the validate rerun)
         const repoHas = repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
         if (reproEnvMiss(hr, { command: String(t.command), repoHas })) words = { ...words, head: "UNRUNNABLE" };
       }
-      ev({ event: "REPRO_RED_GREEN", ...words });
+      { const { headOutput: _h, baseOutput: _b, ...w } = words; ev({ event: "REPRO_RED_GREEN", ...w }); } // #5732: outputs stay out of events
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
       if (reproQuality !== "off" && words.base === "FAILED" && words.head === "RAN") words = { ...words, ...(await reproQualityOf(t)) };
       return words;
@@ -1889,6 +1890,7 @@ export async function runCore(o) {
       for (const f of files) if (/(^|\/)(package\.json|pyproject\.toml|requirements[\w.-]*\.txt)$/.test(f) && !f.split("/").includes("node_modules")) texts.set(f, String(await io.fs.read(`${wt}/${f}`).catch(() => "")));
       return { files, owner: (name) => manifestDepOwner(name, files, (f) => texts.get(f) ?? "") };
     }
+    let reproRecipe = false; // #5732: a validate recipe rewrote repro_test, so its env-provisioning steps are the repo's own
     function freezeRewrites(c) {
       const r = applyValidateRecipes(c, validateRecipes);
       const pd = (id, cmd) => { const to = rewriteProjectDirCommand(cmd); if (to !== cmd) T.decisions.push(`project-dir rewrite of ${id}: \`${cmd}\` -> \`${to}\``); return to; };
@@ -1898,6 +1900,7 @@ export async function runCore(o) {
         if (t && typeof t === "object" && typeof t.command === "string") r.contract = { ...r.contract, repro_test: { ...t, command: pd("repro_test", t.command) } };
       }
       for (const x of r.applied) T.decisions.push(`validate recipe rewrote ${x.id}: \`${x.from}\` -> \`${x.to}\``);
+      if (r.applied.some((x) => x.id === "repro_test")) reproRecipe = true; // #5732: recipe-authored env setup is allowed in repro_test
       const vr = rewriteSubprojectVenv(r.contract, freezeTracked, (rel) => existsSync(join(wt, rel))); // #5683
       r.contract = vr.contract;
       for (const x of vr.applied) T.decisions.push(`sub-project venv rewrite of ${x.id}: \`${x.from}\` -> \`${x.to}\``);
@@ -2286,7 +2289,7 @@ export async function runCore(o) {
         const wtRead = (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }; // #5585: noindex pages are not public
         const freezeBase = pagesConfig ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null; // #5648
         const freezeCheckIds = await (async () => { try { return new Set(Object.keys(await checksAt(git, [base], wt))); } catch { return null; } })(); // first-pass: the base's registered post-deploy check ids
-        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+        let vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds, reproRecipe });
         const found0 = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
         let missed = found0;
         // #5653: an unrunnable command is rewritten from the repo catalogue (forge.yaml recipes first, then CI-derived) before any builder correction
@@ -2296,7 +2299,7 @@ export async function runCore(o) {
           if (rw.applied.length) {
             contract = snapContract(rw.contract);
             for (const x of rw.applied) T.decisions.push(`validate catalogue rewrote unrunnable ${x.id}: \`${x.from}\` -> \`${x.to}\``);
-            vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+            vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds, reproRecipe });
             missed = await preflightValidates(contract);
           }
         }
@@ -2308,7 +2311,7 @@ export async function runCore(o) {
           await persistGenChecks();
           await refreshIssue("contract validation");
           contract = snapContract(contract);
-          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds });
+          vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds, reproRecipe });
         };
         if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
           await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
@@ -3412,7 +3415,8 @@ export async function runCore(o) {
         const list = explained.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
         if (outcome.state === "environment") return await envNeedsHuman(outcome.failures);
         // #5371: a remote sandbox is a different environment from the host: its failed frozen validate is rerun once in a local recovery lane before it counts
-        if (o.placement?.where === "remote" && !recover && outcome.failures?.length && outcome.failures.every((f) => f?.kind === "validate_failed")) {
+        // #5732: so is a repro head failure whose output carries no assertion text (an env error of the sandbox, not a red test)
+        if (o.placement?.where === "remote" && !recover && outcome.failures?.length && outcome.failures.every((f) => f?.kind === "validate_failed" || (f?.kind === "repro_red_green" && f.head === "FAILED" && f.assertion === false))) {
           T.anomalies.push("Remote validate failure: rerun on the host in a local recovery lane before it is terminal");
           return await needsHuman(`A frozen validate command failed in the remote sandbox (exit non-zero on the engine's rerun). The sandbox is a different environment from the host, so no builder resume was spent; the branch is pushed and a local recovery lane reruns the frozen command on the host (pass: the change stands; fail: conformance.unimplemented):\n${list}`, ENV_VALIDATE_PLACEMENT);
         }

@@ -2397,6 +2397,35 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
   });
 
+  it("#5732 a head that failed on an absent interpreter is env.repro_unrunnable with its output, no builder resume", async () => {
+    const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    w.io.runCommand = async () => ({ rc: 1, output: "Creating virtualenv\npoetry env use: python3.11 not found" });
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, "env.repro_unrunnable"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 2, "plan + implement only");
+    assert.match(nh(w), /output tail/); assert.match(nh(w), /python3\.11 not found/);
+  });
+  it("#5732 a red head's output tail reaches the builder resume and the needs-human comment", async () => {
+    const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    w.io.runCommand = async () => ({ rc: 1, output: "not ok 1 - foo handles null\n  AssertionError: expected 3, got undefined" });
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(builders(w).length, 3, "one resume");
+    assert.match(builders(w)[2][4], /AssertionError: expected 3, got undefined/);
+    assert.match(nh(w), /AssertionError: expected 3, got undefined/);
+  });
+  it("#5732 remote placement: a head failure with no assertion text goes to the host recovery lane; one with assertion text resumes the builder", async () => {
+    const remote = { conformance: "enforce", placement: { where: "remote", reason: "mode remote" } };
+    const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    w.io.runCommand = async () => ({ rc: 1, output: "Traceback (most recent call last):\nOSError: [Errno 30] Read-only file system: '/sandbox/.cache'" });
+    const r = await run(w, remote);
+    assert.equal(r.code, ENV_VALIDATE_PLACEMENT); assert.equal(builders(w).length, 2, "no builder resume"); assert.equal(w.merges.length, 0);
+    assert.match(nh(w), /Read-only file system/);
+    const a = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    a.io.runCommand = async () => ({ rc: 1, output: "E   AssertionError: 0.5 != 0.4" });
+    const ar = await run(a, remote);
+    assert.notEqual(ar.code, ENV_VALIDATE_PLACEMENT); assert.equal(builders(a).length, 3, "a real red test resumes the builder");
+  });
+
   it("#5080 a repro that already passes on the base ends already-fixed: the issue closes as completed citing the base, nothing merges, no resume", async () => {
     for (const conformance of ["enforce", "shadow"]) {
       const w = rworld([{ base: "RAN", head: "RAN" }], { changed: ["test/foo.test.js"] });
