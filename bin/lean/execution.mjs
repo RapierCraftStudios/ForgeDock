@@ -47,6 +47,8 @@
  * (`placementText`); a remote lane whose frozen validate commands name a declared one ends before building (`contractHostNeeds`).
  * #4776: the body is read without its quoted material (comments, code, quotes, evidence sections) and the frozen
  * `repro_test` command counts like a validate command, so a quoted evidence query no longer pins a lane to the host.
+ * #5725: body prose pins only on a command signal (`sops -d`, an age key path, `needs: sops`); a bare mention of sops or
+ * credentials.yaml counts only in decisions, contract commands and block summaries (`placementNeeds`).
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -218,22 +220,37 @@ export function placement(exec) {
   return exec?.mode === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1 ? "remote" : "local";
 }
 
-/** Host-only capabilities and the issue-text signals that mean a lane needs them (#4542). */
+/** An explicit need written in prose (#5725): `needs: sops`, `needs sops`, `host capability: sops`. */
+const DECLARE = String.raw`\b(?:needs?|host[ _-]capabilit(?:y|ies))\s*:?\s+`;
+
+/**
+ * Host-only capabilities and the issue-text signals that mean a lane needs them (#4542). #5725: `command` is a signal that
+ * the lane itself uses the capability and counts everywhere, issue prose included; `mention` (only sops and ops_credentials)
+ * merely names it and counts only outside body prose (FORGE:DECISION comments, frozen contract commands, block summaries).
+ */
 const CAPABILITY_SIGNALS = Object.freeze({
-  sops: /\.secrets\/[^\s`'")]*\.enc\.ya?ml|\bsops\b|\bage key\b|\.age\//i,
-  prod_monitor: /\bssh\s+[\w.-]*-monitor\b|\b(?:ovh|netcup)-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor|\bread[- ]only (?:prod(?:uction)? )?(?:prod(?:uction)? )?telemetry\b/i,
-  ops_credentials: /\bcredentials\.yaml\b|\bops[ _-]credentials\b/i,
+  sops: {
+    command: new RegExp(String.raw`\bsops\s+(?:-d|--decrypt|-e|--encrypt|edit|exec-env|exec-file|updatekeys|-i|--in-place|rotate)\b|\.age\/[\w.-]+\.key\b|\.secrets\/[^\s\x60'")]*\.enc\.ya?ml|${DECLARE}sops\b`, "i"),
+    mention: /\.secrets\/[^\s`'")]*\.enc\.ya?ml|\bsops\b|\bage key\b|\.age\//i,
+  },
+  prod_monitor: { command: /\bssh\s+[\w.-]*-monitor\b|\b(?:ovh|netcup)-monitor\b|\bobs-psql\b|\bprod(?:uction)?[ _-]monitor|\bread[- ]only (?:prod(?:uction)? )?(?:prod(?:uction)? )?telemetry\b/i },
+  ops_credentials: {
+    command: /\b(?:cat|less|head|yq|jq|source|grep|sed)\s+\S*credentials\.yaml\b|\bops[ _-]credentials\b/i,
+    mention: /\bcredentials\.yaml\b|\bops[ _-]credentials\b/i,
+  },
 });
 
 /**
  * Host-only capabilities named by `text` (issue body, contract or a builder summary), zero LLM, sorted by name: the
  * built-in signals above, a declared name written out (`prod_monitor`, `prod monitor`) and `exec.hostCapabilityPatterns`.
+ * #5725: `prose: true` (issue body prose) counts only command signals, and a declared name only in declaration form
+ * (`needs: <name>`, `host capability: <name>`), so prose that merely names SOPS no longer pins a lane to the host.
  */
-export function detectNeeds(text, exec = null) {
+export function detectNeeds(text, exec = null, { prose = false } = {}) {
   const t = String(text ?? "");
   const found = new Set();
-  for (const [name, re] of Object.entries(CAPABILITY_SIGNALS)) if (re.test(t)) found.add(name);
-  for (const name of exec?.hostCapabilities ?? []) if (new RegExp(`\\b${name.replace(/[_-]/g, "[ _-]")}\\b`, "i").test(t)) found.add(name);
+  for (const [name, { command, mention }] of Object.entries(CAPABILITY_SIGNALS)) if (command.test(t) || (!prose && mention?.test(t))) found.add(name);
+  for (const name of exec?.hostCapabilities ?? []) if (new RegExp(`${prose ? DECLARE : "\\b"}${name.replace(/[_-]/g, "[ _-]")}\\b`, "i").test(t)) found.add(name);
   for (const { name, pattern } of exec?.hostCapabilityPatterns ?? []) { const re = safeRegExp(pattern); if (re?.test(t)) found.add(name); }
   return [...found].sort();
 }
@@ -292,6 +309,11 @@ function contractCommands(contract) {
  * `<!-- FORGE:CONTRACT -->` comment. `comments` are gh comment objects (`{body}`) or strings; anything else is ignored.
  */
 export function placementText({ body = "", comments = [] } = {}) {
+  return [proseOf(body), ...commentSources(comments)].join("\n");
+}
+
+/** Every `<!-- FORGE:DECISION` comment body and the last frozen contract's validate and repro_test commands (#4785, #4776). */
+function commentSources(comments) {
   const bodies = (Array.isArray(comments) ? comments : []).map((c) => String((typeof c === "string" ? c : c?.body) ?? "").trimStart());
   let validate = [];
   for (const b of bodies) {
@@ -299,7 +321,17 @@ export function placementText({ body = "", comments = [] } = {}) {
     const c = parseContractComment(b)?.contract;
     if (c && typeof c === "object") validate = contractCommands(c);
   }
-  return [proseOf(body), ...bodies.filter((b) => b.startsWith("<!-- FORGE:DECISION")), ...validate].join("\n");
+  return [...bodies.filter((b) => b.startsWith("<!-- FORGE:DECISION")), ...validate];
+}
+
+/**
+ * Host-only capabilities an issue needs for placement (#5725), pure, sorted: body prose (`proseOf`) counts only command
+ * signals (`detectNeeds` `prose: true`), while FORGE:DECISION comments and the frozen contract's commands also count mentions.
+ */
+export function placementNeeds({ body = "", comments = [] } = {}, exec = null) {
+  const found = new Set(detectNeeds(proseOf(body), exec, { prose: true }));
+  for (const n of detectNeeds(commentSources(comments).join("\n"), exec)) found.add(n);
+  return [...found].sort();
 }
 
 /** Declared host capabilities a contract's validate and repro_test commands name (#4785, #4776): `{caps, ids}`, both empty when none. */

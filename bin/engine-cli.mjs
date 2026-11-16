@@ -36,7 +36,7 @@ import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
 import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
-import { parseExecution, detectNeeds, placementText, hostFallbackAllowed } from "./lean/execution.mjs";
+import { parseExecution, placementNeeds, hostFallbackAllowed } from "./lean/execution.mjs";
 import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseCeilingBySize } from "./lean/ceiling.mjs";
@@ -2228,8 +2228,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
-        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, placementNeeds(v, execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
+        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, placementNeeds(v, execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); healthTimers.cancel(); }
