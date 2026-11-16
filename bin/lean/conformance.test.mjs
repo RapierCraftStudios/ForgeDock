@@ -317,6 +317,18 @@ describe("precheck (deterministic, no reviewer)", () => {
     const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
     assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
   });
+  it("#5728 a folded G1 with no recorded result is judged by the engine's rerun", () => {
+    const CG = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "G1", command: "node --test b.test.mjs", regression: true }] };
+    const rs = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const vk = (o) => precheck({ contract: CG, result: rs, changedFiles: files, ...o }).failures.filter((f) => /^validate_/.test(f.kind));
+    assert.deepEqual(vk({ validateRuns: { G1: { rc: 0, output: "", engine: true } } }), [], "a passing engine run counts as passed");
+    const bad = vk({ validateRuns: { G1: { rc: 1, output: "AssertionError: boom", engine: true } } });
+    assert.deepEqual(bad.map((f) => f.kind), ["validate_failed"]); assert.match(bad[0].detail, /boom/); assert.match(bad[0].detail, /exit 1, run by the engine/);
+    assert.deepEqual(vk({}).map((f) => f.kind), ["validate_missing"], "no run at all stays validate_missing");
+    assert.deepEqual(vk({ validateRuns: { G1: { rc: 127, output: "pytest: command not found" } } }).map((f) => f.kind), ["validate_env"]);
+    const ci = precheck({ contract: CG, result: rs, changedFiles: files, ciVerified: true });
+    assert.deepEqual(ci.ciCovered, ["G1"]);
+  });
   it("#4527 a CI-verified head lists the validate ids it accepted without a local result; a ran-and-failed validate still fails", () => {
     const C2 = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "V2", command: "tsc" }, { id: "V3", command: "lint" }] };
     const pc = precheck({ contract: C2, result: { ...res, validation: [{ id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });

@@ -1094,7 +1094,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green, repro_env) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
- * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed. A rerun that passes
+ * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed, or (#5728) with no result at all (not CI-covered). A rerun that passes
  * counts as passed; one that could not find a host tool or module (missingTool, with `repoHas`) is kind validate_env, code
  * env.tool_missing (skipped on a CI-verified head), not a conformance failure.
  * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
@@ -1138,8 +1138,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
     if (ciVerified && leftToCi) { ciCovered.push(v.id); continue; }
-    if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) {
+    // #5728: a row with no recorded result that the engine ran itself is judged like a rerun of a failed row; validate_missing only when nothing ran it
+    const engineRun = leftToCi && validateRuns?.[v.id] ? validateRuns[v.id] : null;
+    if (leftToCi && !engineRun) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
+    else if (engineRun || r.exit !== 0) {
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
@@ -1155,7 +1157,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
