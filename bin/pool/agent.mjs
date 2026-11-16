@@ -54,6 +54,8 @@ export const dindName = (name) => `${name}-dind`;
 export const workVolume = (name) => `cs-work-${name.replace(/^cs-/, "")}`;
 /** #5696: the lane worktree is a plain dir on the cache volume (one mount), so depcache hardlinks never hit EXDEV. */
 export const workDirOf = (name) => `/cache/work/${name.replace(/^cs-/, "")}`;
+/** #5738: private dockerd boot. $1 is the sandbox work dir; /work points at it exactly as in the lane, loopback API only. */
+export const DIND_BOOT = 'mkdir -p "$1" && ln -sfn "$1" /work && exec dind dockerd --host=tcp://127.0.0.1:2375 --tls=false';
 const WORK_SWEEP_MS = 10 * 60000;
 export const safeName = (id) => `cs-${String(id).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 100)}`;
 /** Minimum gap between two environment-snapshot ensure runs for one cache volume. */
@@ -204,7 +206,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
           "--privileged", "--cpus", String(dCpus), "--memory", mb(dMem), "--memory-swap", mb(dMem + swapFor(limit?.dind_swap_gb)),
           ...netArgs, ...work,
           // Bypass dockerd-entrypoint: it adds tcp://0.0.0.0:2375 (reachable from other sandboxes on the bridge).
-          "--entrypoint", "dind", dindImage, "dockerd", "--host=tcp://127.0.0.1:2375", "--tls=false",
+          // #5738: the lane's /work is a symlink to its work dir (entrypoint.sh), so give the daemon the same symlink:
+          // bind sources under /work (`docker run -v /work/x:/y`) must resolve to the checkout, not an empty new dir.
+          "--entrypoint", "sh", dindImage, "-c", DIND_BOOT, "sh", rec.workDir,
         ]);
         laneNet = ["--network", `container:${dindName(name)}`];
       }
