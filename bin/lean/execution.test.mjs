@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, placementNeeds, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
@@ -892,6 +892,60 @@ describe("host capabilities in placement (#4542)", () => {
     const comment = "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } }, "abcdef123456");
     const t = placementText({ body: "b", comments: [{ body: comment }] });
     assert.deepEqual(detectNeeds(t, exec), ["promtool"]);
+  });
+
+  const declSops = () => parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "sops" });
+  const frozen = (cmd) => "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: cmd }] }, "abcdef123456");
+
+  it("#5725 T1: prose that only names the secrets tool does not pin", () => {
+    for (const body of ["add X to SOPS per devdocs/SOPS.md", "the key lives in SOPS", "rotate the age key"]) {
+      for (const exec of [null, declSops()]) {
+        assert.deepEqual(placementNeeds({ body }, exec), [], body);
+        assert.deepEqual(detectNeeds(body, exec, { prose: true }), [], body);
+      }
+      assert.deepEqual(detectNeeds(placementText({ body }), declSops()), ["sops"], `${body}: pinned before #5725`);
+    }
+  });
+
+  it("#5725 T2: commands, key paths and declarations in prose still pin", () => {
+    for (const body of ["run sops -d .secrets/prod.enc.yaml first", "sops exec-env .secrets/x.enc.yaml ./run", "load ~/.age/prod.key",
+      "needs: sops", "host capability: sops", "Edit .secrets/prod.enc.yaml"]) {
+      assert.deepEqual(placementNeeds({ body }), ["sops"], body);
+      assert.deepEqual(placementNeeds({ body }, declSops()), ["sops"], body);
+    }
+  });
+
+  it("#5725 T3: decisions and frozen contract commands still pin on a bare mention", () => {
+    assert.deepEqual(placementNeeds({ body: "x", comments: [{ body: "<!-- FORGE:DECISION -->\nthe owner keeps this in sops" }] }), ["sops"]);
+    assert.deepEqual(placementNeeds({ body: "x", comments: [{ body: frozen("sops -d x.enc.yaml") }] }), ["sops"]);
+    assert.deepEqual(placementNeeds({ body: "the key lives in SOPS", comments: [{ body: "just chatter about sops" }] }), []);
+    assert.deepEqual(contractHostNeeds({ validate: [{ id: "V1", command: "sops -d x.enc.yaml" }] }, { hostCapabilities: ["sops"] }), { caps: ["sops"], ids: ["V1"] });
+  });
+
+  it("#5725 T4: credentials.yaml named in prose does not pin", () => {
+    assert.deepEqual(placementNeeds({ body: "the owner adds the token to credentials.yaml" }), []);
+    assert.deepEqual(placementNeeds({ body: "cat ~/ops/credentials.yaml" }), ["ops_credentials"]);
+    assert.deepEqual(placementNeeds({ body: "needs ops_credentials" }), ["ops_credentials"]);
+    assert.deepEqual(placementNeeds({ body: "x", comments: [{ body: "<!-- FORGE:DECISION -->\nread the token from credentials.yaml" }] }), ["ops_credentials"]);
+  });
+
+  it("#5725 T5: AlterLab#40984 body places remote under mode remote", () => {
+    const body = ["## Problem", "The DataImpulse balance is never estimated and the poller is dormant.", "",
+      "The login is read from `.secrets/prod.enc.yaml` at deploy time.", "", "## Fix", "Wire a balance estimate and alert when the poller stays dormant.", "",
+      "## Owner steps", "- add `proxy.dataimpulse_api_login` to SOPS per `devdocs/SOPS.md`", "",
+      "<!-- FORGE:STATE\n{\"placement\":{\"where\":\"local\",\"reason\":\"host capability: sops\"}}\n-->"].join("\n");
+    const exec = declSops(), view = { body, comments: [] };
+    assert.deepEqual(detectNeeds(placementText(view), exec), ["sops"]); // pinned before #5725
+    const needs = placementNeeds(view, exec);
+    assert.deepEqual(needs, []);
+    assert.equal(placeLane({ exec, needs }).where, "remote");
+    assert.equal(placeLane({ exec, needs: ["sops"] }).where, "local");
+  });
+
+  it("#5725 T6: block-summary recovery and prod monitor signal unchanged", () => {
+    assert.deepEqual(hostCapabilityBlock("this lane has no sops key", { hostCapabilities: ["sops"] }), ["sops"]);
+    assert.deepEqual(placementNeeds({ body: "needs the prod monitor" }), ["prod_monitor"]);
+    assert.deepEqual(placementNeeds({ body: "run ssh ovh-monitor obs-psql for counts" }), ["prod_monitor"]);
   });
 
   it("#4785/#5423 orchestrate: a remote lane that ends env.tool_missing is retried remotely once (sandbox provisioned), see recovery.test.mjs for the host fallback", async () => {
