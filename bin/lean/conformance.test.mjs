@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
+import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -316,6 +316,18 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 124, output: "" } } })), [], "CI-verified head covers a timed-out rerun");
     const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
     assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
+  });
+  it("#5728 a folded G1 with no recorded result is judged by the engine's rerun", () => {
+    const CG = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "G1", command: "node --test b.test.mjs", regression: true }] };
+    const rs = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const vk = (o) => precheck({ contract: CG, result: rs, changedFiles: files, ...o }).failures.filter((f) => /^validate_/.test(f.kind));
+    assert.deepEqual(vk({ validateRuns: { G1: { rc: 0, output: "", engine: true } } }), [], "a passing engine run counts as passed");
+    const bad = vk({ validateRuns: { G1: { rc: 1, output: "AssertionError: boom", engine: true } } });
+    assert.deepEqual(bad.map((f) => f.kind), ["validate_failed"]); assert.match(bad[0].detail, /boom/); assert.match(bad[0].detail, /exit 1, run by the engine/);
+    assert.deepEqual(vk({}).map((f) => f.kind), ["validate_missing"], "no run at all stays validate_missing");
+    assert.deepEqual(vk({ validateRuns: { G1: { rc: 127, output: "pytest: command not found" } } }).map((f) => f.kind), ["validate_env"]);
+    const ci = precheck({ contract: CG, result: rs, changedFiles: files, ciVerified: true });
+    assert.deepEqual(ci.ciCovered, ["G1"]);
   });
   it("#4527 a CI-verified head lists the validate ids it accepted without a local result; a ran-and-failed validate still fails", () => {
     const C2 = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "V2", command: "tsc" }, { id: "V3", command: "lint" }] };
@@ -2148,5 +2160,31 @@ describe("first-pass: an unregistered post-deploy check id fails at freeze, not 
   });
   it("without checkIds (not resolved) the rule is skipped", () => {
     assert.ok(!validateContract(row(), issue).problems.some((p) => /is not registered/.test(p)));
+  });
+});
+
+describe("#5732 repro commands and failures", () => {
+  const rt = (command, o = {}) => validateContract({ ...C, repro_test: { path: "t/x.py", id: "t", command } }, ISSUE, { repro: true, ...o }).problems.filter((p) => /provisions its own environment/.test(p));
+  it("#5732 validateContract rejects a repro command that provisions its environment", () => {
+    for (const bad of ["cd services/api && poetry env use python3.11 -q && poetry install --no-root --no-interaction -q && poetry run pytest -q tests/test_a.py::test_b",
+      "poetry env use -q python3.11 && poetry run pytest tests/x.py -m 'not integration'", "pip install -r requirements.txt && pytest tests/x.py", "python3 -m pip install pytest && pytest x.py", "uv venv && uv run pytest x.py"]) assert.equal(rt(bad).length, 1, bad);
+    assert.match(rt("poetry install && poetry run pytest x.py")[0], /`poetry install`/);
+  });
+  it("#5732 a bare test invocation, a validate row or a recipe-rewritten repro command is accepted", () => {
+    for (const ok of ["poetry run pytest tests/x.py::t", "cd services/api && .venv/bin/pytest -q tests/x.py", "uv run pytest tests/x.py"]) assert.deepEqual(rt(ok), [], ok);
+    assert.deepEqual(rt("poetry install && poetry run pytest x.py", { reproRecipe: true }), []);
+    assert.ok(!validateContract({ ...C, validate: [{ id: "V1", command: "poetry install && poetry run pytest x.py" }] }, ISSUE).problems.some((p) => /provisions/.test(p)));
+  });
+  it("#5732 envProvisioningCommand and assertionFailure", () => {
+    assert.equal(envProvisioningCommand("poetry  env use python3.11 && pytest"), "poetry env use");
+    assert.equal(envProvisioningCommand("pytest tests/pip_install_test.py"), null);
+    for (const yes of ["E       AssertionError: 0.5 != 0.4", "FAILED tests/a.py::t - assert 1 == 2", "not ok 3 - foo", "  ● suite › case", "Tests:  1 failed, 4 passed", "expect(received).toBe(expected)"]) assert.equal(assertionFailure(yes), true, yes);
+    for (const no of ["poetry env use: python3.11 not found", "Could not find the python executable python3.11", "bash: pytest: command not found", "", undefined]) assert.equal(assertionFailure(no), false, String(no));
+  });
+  it("#5732 a repro_red_green row says whether head's output had assertion text; the interpreter signature is an env miss for validates too", () => {
+    const t = { repro_test: { path: "t.py", command: "pytest t.py" } };
+    assert.equal(reproFailures(t, { base: "SKIPPED", head: "FAILED", headOutput: "Could not find the python executable python3.11" })[0].assertion, false);
+    assert.equal(reproFailures(t, { base: "SKIPPED", head: "FAILED", headOutput: "E   AssertionError" })[0].assertion, true);
+    assert.deepEqual(missingTool({ rc: 1, output: "Could not find the python executable python3.11" }), { tool: "Python interpreter", kind: "environment" });
   });
 });

@@ -561,7 +561,7 @@ export function testPlanProblems(c, { required = false } = {}) {
 
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null, baseFiles = null } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null, baseFiles = null, reproRecipe = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -628,6 +628,8 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
       if (guessedUvEnv(t.command)) problems.push(guessedUvProblem("repro_test"));
+      const prov = reproRecipe ? null : envProvisioningCommand(t.command); // #5732: a forge.yaml validate.recipes rewrite may set the env up
+      if (prov) problems.push(`repro_test: the command provisions its own environment (\`${prov}\`); the engine prepares dependencies, so it is host-specific and fails where that interpreter or install is missing (env.repro_unrunnable); use the bare test invocation (e.g. \`poetry run pytest <file>::<test>\`) or a forge.yaml validate.recipes entry`);
       const pdr = projectDirPathMiss(t.command);
       if (pdr) problems.push(projectDirProblem("repro_test", pdr));
       if (vitestQuietFlag(t.command)) problems.push("repro_test: vitest 3 rejects -q/--quiet; use --reporter=dot");
@@ -862,6 +864,8 @@ const ENV_SIGNATURES = [
   [/invalid mount config for type "bind"|bind source path does not exist|error while creating mount source path|mounts denied/i, "Docker bind-mount source"],
   [/Executable doesn't exist at|npx playwright install|browserType\.launch: Executable/i, "Playwright browser"],
   [/\bENOTFOUND\b|\bEAI_AGAIN\b|npm (?:ERR!|error) network|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)/i, "network access for npm"],
+  // #5732: the command picks an interpreter the host does not have (`poetry env use python3.11` on a python3.12-only sandbox)
+  [/Could not find the python executable|poetry env use\b[^\n]*(?:not found|error|failed)|\bpython\d(?:\.\d+)?:? not found|No interpreter found|pyenv: version `[^`]+' is not installed/i, "Python interpreter"],
 ];
 const envSignature = (out) => { const hit = ENV_SIGNATURES.find(([re]) => re.test(out)); return hit ? { tool: hit[1], kind: "environment" } : null; };
 export const SECRET_PAIR_RE = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)\S+/gi;
@@ -920,6 +924,19 @@ export function applyValidateRecipes(contract, recipes) {
   if (t && typeof t === "object" && !Array.isArray(t)) out.repro_test = { ...t, command: rewrite("repro_test", t.command) };
   if (Array.isArray(contract.test_plan)) out.test_plan = contract.test_plan.map((r) => (r && typeof r === "object" ? { ...r, command: rewrite(`test_plan ${r.requirement}`, r.command) } : r)); // #5445
   return { contract: applied.length ? out : contract, applied };
+}
+/**
+ * #5732: the first env-provisioning step of a repro command (`poetry env use`, `poetry install`, `pip install`, `uv venv`,
+ * `uv sync`, `uv pip install`), or null. The engine prepares dependencies (DEPS_PREPARED); the repro command is the bare test run.
+ */
+const ENV_PROVISION_RE = /\b(poetry\s+env\s+use|poetry\s+install|(?:python3?\s+-m\s+)?pip3?\s+install|uv\s+venv|uv\s+sync|uv\s+pip\s+install)\b/;
+export function envProvisioningCommand(command) {
+  return ENV_PROVISION_RE.exec(String(command ?? ""))?.[1].replace(/\s+/g, " ") ?? null;
+}
+/** #5732: true when a failed run's output carries test-failure text (an assertion, a runner's failed-test mark), not only an environment error. */
+const ASSERTION_RE = /AssertionError|\bassert(?:ion)?\b[^\n]*(?:==|!=|failed|error)|^FAILED\s+\S+::|^\s*E\s+(?:assert|Expected)|\bExpected\b[^\n]*\b(?:Received|got|to (?:be|equal))|expect\(|^not ok \d+|^\s*[✗×✖]\s|^\s*● |\bTests?:\s+\d+ failed/m;
+export function assertionFailure(output) {
+  return ASSERTION_RE.test(String(output ?? ""));
 }
 /** #5020: the env.* verdict for a repro command that failed on head because a tool is missing (e.g. an uninstalled Poetry env); null when the failure is the test's own. */
 export function reproEnvMiss(run, opts) {
@@ -1094,7 +1111,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green, repro_env) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
- * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed. A rerun that passes
+ * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed, or (#5728) with no result at all (not CI-covered). A rerun that passes
  * counts as passed; one that could not find a host tool or module (missingTool, with `repoHas`) is kind validate_env, code
  * env.tool_missing (skipped on a CI-verified head), not a conformance failure.
  * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
@@ -1138,8 +1155,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
     if (ciVerified && leftToCi) { ciCovered.push(v.id); continue; }
-    if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) {
+    // #5728: a row with no recorded result that the engine ran itself is judged like a rerun of a failed row; validate_missing only when nothing ran it
+    const engineRun = leftToCi && validateRuns?.[v.id] ? validateRuns[v.id] : null;
+    if (leftToCi && !engineRun) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
+    else if (engineRun || r.exit !== 0) {
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
@@ -1155,7 +1174,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})${outputTail(rerun?.output)}` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
@@ -1208,28 +1227,31 @@ function frozenAmendedFiles(frozen, contract, outside, creep) {
  * #4334: HEAD=UNRUNNABLE or no words (the harness could not run the test) is env.repro_unrunnable, kind repro_env: an
  * environment error, never a builder resume. So is BASE=UNRUNNABLE with HEAD=RAN (the base checkout could not run it).
  */
-export function reproFailures(contract, { base, head, pristine } = {}) {
+export function reproFailures(contract, { base, head, pristine, headOutput, baseOutput } = {}) {
   if (head === "RAN" && base === "FAILED") return [];
+  // #5732: the last 20 lines of each run's output, so a failing test reads differently from a broken environment
+  const tail = (label, out) => { const t = outputTail(out, 20); return t ? t.replace("\n  output tail", `\n  ${label} output tail`) : ""; };
+  const tails = `${tail("head", headOutput)}${tail("base", baseOutput)}`;
   // #5544: head's test passes on base source but the base's own version of it fails: a test-only fix, not already fixed
   if (head === "RAN" && base === "RAN" && pristine === "FAILED") return [];
   const t = contract?.repro_test ?? {};
   const name = [t.path, t.id].filter((x) => !blank(x)).join(" ") || "repro_test";
   if (!head || head === "UNRUNNABLE") {
     return [{ code: C.ENV_REPRO_UNRUNNABLE, kind: "repro_env",
-      detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on head (environment, not the change); got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}` }];
+      detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on head (environment, not the change); got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}${tails}` }];
   }
   // A head that ran but a base the harness could not run (e.g. a missing dependency tree in the base checkout) is the
   // environment too: the change cannot fix it, so it is never a builder resume (AlterLab 40652/40665, BASE=UNRUNNABLE HEAD=RAN).
   if (head === "RAN" && base === "UNRUNNABLE") {
     return [{ code: C.ENV_REPRO_UNRUNNABLE, kind: "repro_env",
-      detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on the base (environment, not the change); got BASE=UNRUNNABLE HEAD=RAN` }];
+      detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on the base (environment, not the change); got BASE=UNRUNNABLE HEAD=RAN${tails}` }];
   }
   const skipped = base === "SKIPPED" ? " (base not run: head did not pass)" : "";
   // #5080: the test already passes on the base: the fix is there (a hotfix or another PR), not missing from this change
   if (base === "RAN") return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_base_green",
-    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)` }];
-  return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
-    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
+    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=RAN HEAD=RAN: it passes on the base already (the fix may already be on the base)${tails}` }];
+  return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green", head, assertion: assertionFailure(headOutput), // #5732: lean.mjs routes a remote head failure with no assertion text to the host
+    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}${tails}` }];
 }
 
 /** #5446: a repro_test every targeted mutation of the fix survived. Only under lean.repro_quality: enforce; patch_echo is the reviewer's call. */

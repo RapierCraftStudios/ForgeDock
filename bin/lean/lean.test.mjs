@@ -11,6 +11,8 @@ import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #533
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import os from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock, builderFixable } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
@@ -214,6 +216,11 @@ function world(o = {}) {
 }
 const run = (w, extra = {}) => runCore({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: tmpDir("core-"), conformance: "enforce",
   io: w.io, emitTelemetry: async (r) => w.telemetry.push(r), random: () => 0.5, ...extra });
+/** #5728: run `fn` with a fixed, idle load average: precheck.mjs sizes its timeout retry from the real host load, so a loaded host defers the check to CI. */
+async function atIdleLoad(fn) {
+  const real = os.loadavg; os.loadavg = () => [0.1, 0.1, 0.1]; syncBuiltinESMExports();
+  try { return await fn(); } finally { os.loadavg = real; syncBuiltinESMExports(); }
+}
 const builders = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "builder");
 const reviewers = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "reviewer");
 const traj = (w) => w.comments.filter((c) => c.includes("<!-- FORGE:TRAJECTORY -->"));
@@ -1749,6 +1756,48 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await runShadow(p)).terminalReason, "merged"); assert.equal(builders(p).length, 2);
   });
 
+  it("#5728 engine-folded G rows with no recorded result are run by the engine: a pass merges with no resume, a failure resumes once as validate_failed", async () => {
+    const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }, { id: "G2", command: "node --test test/baz.test.js", regression: true }] };
+    const vrows = [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }];
+    const w = world({ contract: GC, validation: vrows }), ran = [];
+    w.io.runCommand = async (a) => { ran.push(a.command); return { rc: 0, output: "" }; };
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2, "plan + implement: no resume for G rows");
+    assert.ok(ran.includes("node --test test/bar.test.js") && ran.includes("node --test test/baz.test.js"), "the engine ran G1 and G2");
+    assert.ok(w.comments.some((c) => /Validate G1, G2 had no recorded result: the engine ran them/.test(c)), "decision note");
+    // a failing engine run is an actionable resume, never validate_missing
+    const f = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }, { id: "G2", command: "x", exit: 0 }] });
+    f.io.runCommand = async (a) => (/bar/.test(a.command) ? { rc: 1, output: "AssertionError: bar boom" } : { rc: 0, output: "" });
+    await runShadow(f);
+    assert.equal(builders(f).length, 3, "one resume");
+    assert.match(builders(f)[2][4], /validate G1 .*failed \(exit 1, run by the engine: no recorded result\)[\s\S]*bar boom/);
+    assert.doesNotMatch(builders(f)[2][4], /has no recorded result`?$|validate G1 \(`[^`]*`\) has no recorded result/);
+  });
+  it("#5728 a CI-verified head is not rerun for rows left to CI; with no io.runCommand the row stays validate_missing", async () => {
+    const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
+    const w = world({ contract: GC, validation: [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }] });
+    delete w.io.runCommand;
+    const r = await runShadow(w);
+    assert.notEqual(r.terminalReason, "merged"); assert.ok(builders(w).length >= 3, "validate_missing resumes the builder");
+  });
+  it("#5728 a fix resume that hits the context ceiling restarts with the failure list, not the full build prompt", async () => {
+    const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
+    const vrows = [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }];
+    const w = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }] });
+    w.io.runCommand = async () => ({ rc: 1, output: "AssertionError: bar boom" });
+    const orig = w.io.runner, seen = []; let thrown = false;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push(c.prompt);
+      if (c.role === "builder" && c.resume && !thrown && /^The change does not conform/.test(c.prompt)) { thrown = true; throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 1, usage: null }); }
+      return orig(c);
+    };
+    await runShadow(w, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 120000 });
+    assert.ok(thrown, "the fix resume hit the ceiling");
+    const restart = seen[seen.indexOf(seen.find((x, i) => i > 1 && /validate G1/.test(x))) + 1];
+    assert.ok(restart, "a restart followed the resume");
+    assert.match(restart, /validate G1/); assert.match(restart, /fixing one failure/);
+    assert.doesNotMatch(restart, /The engine froze \.forge-lean\/contract\.json/);
+  });
   it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
     const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
     const probe = (w) => { const ran = []; w.io.probeCommand = async (a) => { ran.push(a); return { rc: /^'python3' .*'yaml'/.test(a.command) ? 3 : 0, output: "" }; }; return ran; };
@@ -2346,6 +2395,35 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
     const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("#5732 a head that failed on an absent interpreter is env.repro_unrunnable with its output, no builder resume", async () => {
+    const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    w.io.runCommand = async () => ({ rc: 1, output: "Creating virtualenv\npoetry env use: python3.11 not found" });
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, "env.repro_unrunnable"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 2, "plan + implement only");
+    assert.match(nh(w), /output tail/); assert.match(nh(w), /python3\.11 not found/);
+  });
+  it("#5732 a red head's output tail reaches the builder resume and the needs-human comment", async () => {
+    const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    w.io.runCommand = async () => ({ rc: 1, output: "not ok 1 - foo handles null\n  AssertionError: expected 3, got undefined" });
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(builders(w).length, 3, "one resume");
+    assert.match(builders(w)[2][4], /AssertionError: expected 3, got undefined/);
+    assert.match(nh(w), /AssertionError: expected 3, got undefined/);
+  });
+  it("#5732 remote placement: a head failure with no assertion text goes to the host recovery lane; one with assertion text resumes the builder", async () => {
+    const remote = { conformance: "enforce", placement: { where: "remote", reason: "mode remote" } };
+    const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    w.io.runCommand = async () => ({ rc: 1, output: "Traceback (most recent call last):\nOSError: [Errno 30] Read-only file system: '/sandbox/.cache'" });
+    const r = await run(w, remote);
+    assert.equal(r.code, ENV_VALIDATE_PLACEMENT); assert.equal(builders(w).length, 2, "no builder resume"); assert.equal(w.merges.length, 0);
+    assert.match(nh(w), /Read-only file system/);
+    const a = rworld([{ base: "SKIPPED", head: "FAILED" }]);
+    a.io.runCommand = async () => ({ rc: 1, output: "E   AssertionError: 0.5 != 0.4" });
+    const ar = await run(a, remote);
+    assert.notEqual(ar.code, ENV_VALIDATE_PLACEMENT); assert.equal(builders(a).length, 3, "a real red test resumes the builder");
   });
 
   it("#5080 a repro that already passes on the base ends already-fixed: the issue closes as completed citing the base, nothing merges, no resume", async () => {
@@ -6053,7 +6131,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   it("#5332 a precheck round whose only non-zero result is rc 124 does not resume the builder or end ci.red, and is never self_check green", async () => {
     const w = world(); const dir = tmpDir("core-");
     w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
-    const r = await run(w, { dir, precheck: { commands: ["make slow"] } });
+    const r = await atIdleLoad(() => run(w, { dir, precheck: { commands: ["make slow"] } }));
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
     const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
@@ -6063,7 +6141,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   it("#5332 with verify.precheck_block a timed-out check ends env.validate_timeout (not ci.red) naming the command and limit", async () => {
     const w = world();
     w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
-    const r = await run(w, { precheck: { commands: ["make slow"] }, verify: { ...parseVerify({}), precheckBlock: true } });
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["make slow"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
     assert.equal(r.code, ENV_VALIDATE_TIMEOUT); assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0);
     assert.match((w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? ""), /`make slow` \(timed out after 1 s, exit 124\)/);
@@ -8266,8 +8344,8 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const cmds = ["node --test t1.js", "node --test t2.js", "node --test t3.js", "node --test t4.js"];
     const w = lworld({ result: { ...RESULT, tests: cmds.map((command) => ({ command, result: "pass" })) } }), dir = tmpDir("light-par-");
     let live = 0, max = 0;
-    const seen = [];
-    w.io.runCommand = async (a) => { live++; max = Math.max(max, live); seen.push(a.env?.FORGE_HOST_PARALLELISM); await new Promise((r) => setTimeout(r, 5)); live--; return { rc: 0, output: "" }; };
+    const seen = [], first = new Set(); // #5728: only the light run of each command; the engine's later run of the derived V rows (no recorded result) is sequential, full share
+    w.io.runCommand = async (a) => { live++; max = Math.max(max, live); if (!first.has(a.command)) { first.add(a.command); seen.push(a.env?.FORGE_HOST_PARALLELISM); } await new Promise((r) => setTimeout(r, 5)); live--; return { rc: 0, output: "" }; };
     const prev = process.env.FORGE_HOST_PARALLELISM;
     process.env.FORGE_HOST_PARALLELISM = "2";
     try { await run(w, { dir, ...ON }); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
