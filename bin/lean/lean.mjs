@@ -2062,18 +2062,18 @@ export async function runCore(o) {
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
     function fixRound(...a) { return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
+    // #5728: a context-ceiling restart of a fix resume carries the failure list (no diff), not the full build prompt
+    const fixResumeRestart = (task) => () => fixSessionPrompt({ task, stat: "", base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
     async function fixRoundRaw(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
       await notePitfall(trigger, failureText); await escalateOn(trigger); // #4375: learned once the same gate passes; #4394
-      // #5728: a context-ceiling restart of a fix resume carries the failure list (no diff), not the full build prompt
-      const resumeRestart = () => fixSessionPrompt({ task, stat: "", base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
-      if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, resumeRestart, { mode: "resume", trigger });
+      if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, fixResumeRestart(task), { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
       const ex = [".", `:!${LEAN_DIR}`], diff = narrow ? "" : String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => "")), stat = narrow ? "" : String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
       const prompt = narrow ? narrowFixPrompt({ task, contract: frozen, files: narrow.files }) : fixSessionPrompt({ task, diff, stat, base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
       const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: escalated ? null : fixModel ?? reviewerModel, mode: "fresh", keepSession: true, ...(narrow ? { profile: "narrow" } : {}), trigger });
       if (!sessionId || String(await git(["rev-parse", "HEAD"])).trim() !== before) return r;
       T.decisions.push(`Fresh ${kind} fix session made no commit; builder session resumed once`);
-      return await builder(++attemptN, task, sessionId, false, resumeRestart, { mode: "resume", trigger });
+      return await builder(++attemptN, task, sessionId, false, fixResumeRestart(task), { mode: "resume", trigger });
     }
     /** #5348: commit what the engine applied without a model (only the files it wrote); the findings it fixed were named by a detector. */
     async function mechCommit(gate, applied, paths) {

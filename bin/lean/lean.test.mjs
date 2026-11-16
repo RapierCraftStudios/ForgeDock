@@ -8315,8 +8315,8 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const cmds = ["node --test t1.js", "node --test t2.js", "node --test t3.js", "node --test t4.js"];
     const w = lworld({ result: { ...RESULT, tests: cmds.map((command) => ({ command, result: "pass" })) } }), dir = tmpDir("light-par-");
     let live = 0, max = 0;
-    const seen = [];
-    w.io.runCommand = async (a) => { live++; max = Math.max(max, live); seen.push(a.env?.FORGE_HOST_PARALLELISM); await new Promise((r) => setTimeout(r, 5)); live--; return { rc: 0, output: "" }; };
+    const seen = [], first = new Set(); // #5728: only the light run of each command; the engine's later run of the derived V rows (no recorded result) is sequential, full share
+    w.io.runCommand = async (a) => { live++; max = Math.max(max, live); if (!first.has(a.command)) { first.add(a.command); seen.push(a.env?.FORGE_HOST_PARALLELISM); } await new Promise((r) => setTimeout(r, 5)); live--; return { rc: 0, output: "" }; };
     const prev = process.env.FORGE_HOST_PARALLELISM;
     process.env.FORGE_HOST_PARALLELISM = "2";
     try { await run(w, { dir, ...ON }); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
