@@ -605,3 +605,23 @@ describe("#5592 env.tool_missing recovery is not a verbatim replay", () => {
     assert.match(r.rows[0].detail, /same `env\.tool_missing` as the run before it/);
   });
 });
+
+describe("#5727 a recipe-less remote tool miss", () => {
+  const go = (script) => {
+    const calls = [];
+    return orchestrate({ issues: [7], parallel: 2, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 1 }, readBody: async () => "",
+      remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "test" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async (_n, _l, ctx = {}) => { calls.push([ctx.placement?.where ?? null, ctx.recover?.attempt ?? 0]); return script[Math.min(calls.length - 1, script.length - 1)]; } }).then((rows) => ({ rows, calls }));
+  };
+  const noRecipe = { terminalReason: "needs-human", code: "env.tool_missing", detail: "Remote sandbox lacks forgedock, and no lane_tools recipe exists for it.", placement: { where: "remote" }, toolNoRecipe: true };
+  const other = { terminalReason: "needs-human", code: "env.tool_missing", detail: "Environment error: the host is missing promtool, so validate command(s) could not run", placement: { where: "local" } };
+  it("#5727 recipe-less remote tool miss recovers on the host without consuming an attempt", async () => {
+    const r = await go([noRecipe, other, { terminalReason: "merged", pr: 1 }]);
+    assert.deepEqual(r.calls, [["remote", 0], ["local", 1], ["local", 1]], "the free host recovery leaves the one attempt for the next failure");
+    assert.equal(r.rows.find((x) => x.issue === 7).outcome, "merged");
+  });
+  it("#5727 a recipe-less miss without the fact is charged as before", async () => {
+    const r = await go([{ ...noRecipe, toolNoRecipe: undefined }, other, { terminalReason: "merged", pr: 1 }]);
+    assert.equal(r.calls.length, 2);
+  });
+});

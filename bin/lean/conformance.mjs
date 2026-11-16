@@ -1044,6 +1044,9 @@ export function cliUsageError({ rc, output } = {}) {
 }
 const FORGEDOCK_ENTRY_RE = /^\/.*\/forgedock\/bin\/(?:lean\/checks|forgedock)\.mjs$/;
 const FORGEDOCK_TOKEN_RE = /(?<![\w./-])\/[^\s'"`;&|()]*\/forgedock\/bin\/(lean\/checks|forgedock)\.mjs/g;
+/** #5727: the portable placeholders a frozen command names forgedock's entry points by (the lane env exports both). */
+export const FORGEDOCK_CHECKS_VAR = "FORGEDOCK_CHECKS_CLI", FORGEDOCK_ENTRY_VAR = "FORGEDOCK_ENTRY_CLI";
+const FORGEDOCK_PLACEHOLDER_RE = /\$(?:\{FORGEDOCK_(CHECKS|ENTRY)_CLI\}|FORGEDOCK_(CHECKS|ENTRY)_CLI(?!\w))/g;
 /**
  * #5005: a frozen validate command names forgedock's own entry point by the absolute path of the install that wrote it; on
  * the host that runs it that path may not exist. Rewrites each such token whose file is missing to this install's path.
@@ -1052,9 +1055,33 @@ export function resolveForgedockPaths(command, { exists = () => true, checksCli,
   return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => {
     const here = which === "forgedock" ? forgedockCli : checksCli;
     return here && !exists(tok) ? here : tok;
+  }).replace(FORGEDOCK_PLACEHOLDER_RE, (tok, a, b) => { // #5727: the portable frozen form always names this install
+    const here = (a ?? b) === "ENTRY" ? forgedockCli : checksCli;
+    return here || tok;
   });
 }
-const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
+/** #5727: every absolute forgedock entry-point token becomes its portable placeholder, so a frozen contract names no install path. Pure. */
+export function portableForgedockPaths(command) {
+  return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => `$${which === "forgedock" ? FORGEDOCK_ENTRY_VAR : FORGEDOCK_CHECKS_VAR}`);
+}
+const RESOLVED_RUNNERS = ["runCommand", "probeCommand", "preflightRun", "redGreen"];
+/**
+ * #5727: `io` with its command runners (runCommand, probeCommand, preflightRun, redGreen) resolving `command` through
+ * resolveForgedockPaths before the call, so no execution site runs a frozen forgedock path of another install. Other members untouched.
+ */
+export function resolvingIo(io, opts = {}) {
+  if (!io || typeof io !== "object") return io;
+  const wrapped = new Map(); // live view: a member set on io later is seen; a runner is wrapped per function
+  return new Proxy(io, {
+    get(t, k, r) {
+      const fn = Reflect.get(t, k, r);
+      if (!RESOLVED_RUNNERS.includes(k) || typeof fn !== "function") return fn;
+      if (!wrapped.has(fn)) wrapped.set(fn, (a, ...rest) => fn.call(t, a && typeof a === "object" && typeof a.command === "string" ? { ...a, command: resolveForgedockPaths(a.command, opts) } : a, ...rest));
+      return wrapped.get(fn);
+    },
+  });
+}
+const KIND_NAME = { "forgedock-path": "forgedock install path", command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
  * (or rc 127), python "No module named x" (top-level package), node "Cannot find module|package 'x'" (bare specifiers only).
@@ -1067,7 +1094,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const py = PY_MISSING_RE.exec(out);
   if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
   const js = NODE_MISSING_RE.exec(out);
-  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "command" }; // #5005: the host's forgedock install is not at the frozen path
+  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "forgedock-path" }; // #5005, #5727: an install-path mismatch, never a lane_tools candidate (not a TOOL_KIND)
   if (js) {
     const spec = js[1], scoped = spec.startsWith("@");
     if (!scoped && spec.includes("/")) return null;

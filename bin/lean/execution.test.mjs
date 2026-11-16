@@ -907,6 +907,21 @@ describe("host capabilities in placement (#4542)", () => {
     assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
   });
 
+  it("#5727 placeOf does not retry a recipe-less tool miss remotely", async () => {
+    for (const toolNoRecipe of [true, false]) {
+      const calls = [];
+      await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
+        remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+        runOne: async (n, _l, ctx = {}) => {
+          calls.push({ placement: ctx.placement?.where, reason: ctx.placement?.reason });
+          return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code: "env.tool_missing", detail: "Remote sandbox lacks forgedock, and no lane_tools recipe exists for it.", placement: { where: "remote" }, ...(toolNoRecipe ? { toolNoRecipe } : {}) };
+        } });
+      assert.equal(calls.length, 2);
+      if (toolNoRecipe) { assert.equal(calls[1].placement, "local"); assert.notEqual(calls[1].reason, "retry remotely after sandbox provisioning"); }
+      else assert.equal(calls[1].reason, "retry remotely after sandbox provisioning");
+    }
+  });
+
   it("#5371 orchestrate: a remote env.validate_placement or mechanical failure is requeued on a different placement", async () => {
     for (const code of ["env.validate_placement", "env.repro_unrunnable"]) {
       const calls = [];

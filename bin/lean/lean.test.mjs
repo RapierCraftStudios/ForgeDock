@@ -7,6 +7,7 @@ import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { CHECKS_CLI } from "./prompts.mjs"; // #5727
 import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #5338
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
@@ -911,6 +912,43 @@ describe("core work-on", () => {
     const r = await run(l, { dir: tmpDir("lean-5423b-"), ...remote });
     assert.equal(r.code, "env.tool_missing");
     assert.ok(!l.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(l.edits));
+  });
+
+  describe("#5727 frozen forgedock install paths", () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const H41009 = "/home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs"; // #41009's frozen V5 names the host install
+    const STALE = existsSync(H41009) ? "/opt/absent-5727/lib/node_modules/forgedock/bin/lean/checks.mjs" : H41009; // on that host itself, an equally stale path
+    const V5 = `node ${STALE} --base origin/staging`;
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V5", command: V5 }] };
+    const stale = (cmd) => (String(cmd).includes(STALE) ? { rc: 1, output: `node:internal/modules/cjs/loader\nError: Cannot find module '${STALE}'\n code: 'MODULE_NOT_FOUND'` } : { rc: 0, output: "" });
+    it("#5727 remote preflight runs a stale forgedock checks path as this install's path", async () => {
+      const w = world({ contract }); const seen = [];
+      w.io.probeCommand = async (a) => { seen.push(a.command); return stale(a.command); };
+      w.io.preflightRun = async (a) => { seen.push(a.command); return stale(a.command); };
+      const r = await run(w, { dir: tmpDir("lean-5727a-"), ...remote });
+      assert.notEqual(r.code, "env.tool_missing", r.detail);
+      assert.notEqual(r.terminalReason, "needs-human", r.detail);
+      assert.ok(builders(w).length >= 2, "the builder implements");
+      assert.ok(seen.some((c) => c.includes(CHECKS_CLI)), JSON.stringify(seen));
+      assert.ok(!seen.some((c) => c.includes(STALE)), "no runner saw the stale path");
+    });
+    it("#5727 a frozen contract carries no absolute forgedock install path", async () => {
+      const w = world({ contract });
+      await run(w, { dir: tmpDir("lean-5727b-") });
+      const posted = w.comments.find((x) => x.includes("FORGE:CONTRACT"));
+      assert.ok(posted, "contract posted");
+      assert.doesNotMatch(posted, /\/forgedock\/bin\//);
+      assert.match(posted, /\$FORGEDOCK_CHECKS_CLI --base origin\/staging/);
+    });
+    it("#5727 light-lane and precheck runners receive the resolved forgedock path", async () => {
+      const w = world({ contract }); const ran = [];
+      w.io.preflightRun = async (a) => { ran.push(a.command); return stale(a.command); }; // a local (host) placement runs it too
+      const r = await run(w, { dir: tmpDir("lean-5727c-"), placement: { where: "local", reason: "x" } });
+      assert.notEqual(r.code, "env.tool_missing", r.detail);
+      const v5 = ran.filter((c) => /--base origin\/staging/.test(c));
+      assert.ok(v5.length >= 1, JSON.stringify(ran));
+      assert.ok(v5.every((c) => c.includes(CHECKS_CLI) && !c.includes("$FORGEDOCK")), JSON.stringify(v5));
+    });
   });
 
   describe("#5652 in-sandbox recipe install", () => {
@@ -2373,7 +2411,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", PATH: "/rt/toolchain/bin:/usr/bin" };
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
     assert.deepEqual(ran.map((a) => [a.command, a.env]), [["npm run lint", lane], ["node --test test/foo.test.js", lane]]);
