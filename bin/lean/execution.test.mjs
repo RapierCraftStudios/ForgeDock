@@ -7,7 +7,8 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, placementNeeds, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import * as executionModule from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
@@ -894,6 +895,8 @@ describe("host capabilities in placement (#4542)", () => {
     assert.deepEqual(detectNeeds(t, exec), ["promtool"]);
   });
 
+  // Namespace lookup (#5725): the file still loads on a base without this export, so the repro fails as an assertion, not a link error.
+  const placementNeeds = (...a) => executionModule.placementNeeds(...a);
   const declSops = () => parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "sops" });
   const frozen = (cmd) => "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: cmd }] }, "abcdef123456");
 
