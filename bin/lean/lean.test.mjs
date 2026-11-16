@@ -1749,6 +1749,48 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await runShadow(p)).terminalReason, "merged"); assert.equal(builders(p).length, 2);
   });
 
+  it("#5728 engine-folded G rows with no recorded result are run by the engine: a pass merges with no resume, a failure resumes once as validate_failed", async () => {
+    const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }, { id: "G2", command: "node --test test/baz.test.js", regression: true }] };
+    const vrows = [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }];
+    const w = world({ contract: GC, validation: vrows }), ran = [];
+    w.io.runCommand = async (a) => { ran.push(a.command); return { rc: 0, output: "" }; };
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2, "plan + implement: no resume for G rows");
+    assert.ok(ran.includes("node --test test/bar.test.js") && ran.includes("node --test test/baz.test.js"), "the engine ran G1 and G2");
+    assert.ok(w.comments.some((c) => /Validate G1, G2 had no recorded result: the engine ran them/.test(c)), "decision note");
+    // a failing engine run is an actionable resume, never validate_missing
+    const f = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }, { id: "G2", command: "x", exit: 0 }] });
+    f.io.runCommand = async (a) => (/bar/.test(a.command) ? { rc: 1, output: "AssertionError: bar boom" } : { rc: 0, output: "" });
+    await runShadow(f);
+    assert.equal(builders(f).length, 3, "one resume");
+    assert.match(builders(f)[2][4], /validate G1 .*failed \(exit 1, run by the engine: no recorded result\)[\s\S]*bar boom/);
+    assert.doesNotMatch(builders(f)[2][4], /has no recorded result`?$|validate G1 \(`[^`]*`\) has no recorded result/);
+  });
+  it("#5728 a CI-verified head is not rerun for rows left to CI; with no io.runCommand the row stays validate_missing", async () => {
+    const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
+    const w = world({ contract: GC, validation: [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }] });
+    delete w.io.runCommand;
+    const r = await runShadow(w);
+    assert.notEqual(r.terminalReason, "merged"); assert.ok(builders(w).length >= 3, "validate_missing resumes the builder");
+  });
+  it("#5728 a fix resume that hits the context ceiling restarts with the failure list, not the full build prompt", async () => {
+    const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
+    const vrows = [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }];
+    const w = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }] });
+    w.io.runCommand = async () => ({ rc: 1, output: "AssertionError: bar boom" });
+    const orig = w.io.runner, seen = []; let thrown = false;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push(c.prompt);
+      if (c.role === "builder" && c.resume && !thrown && /^The change does not conform/.test(c.prompt)) { thrown = true; throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 1, usage: null }); }
+      return orig(c);
+    };
+    await runShadow(w, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 120000 });
+    assert.ok(thrown, "the fix resume hit the ceiling");
+    const restart = seen[seen.indexOf(seen.find((x, i) => i > 1 && /validate G1/.test(x))) + 1];
+    assert.ok(restart, "a restart followed the resume");
+    assert.match(restart, /validate G1/); assert.match(restart, /fixing one failure/);
+    assert.doesNotMatch(restart, /The engine froze \.forge-lean\/contract\.json/);
+  });
   it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
     const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
     const probe = (w) => { const ran = []; w.io.probeCommand = async (a) => { ran.push(a); return { rc: /^'python3' .*'yaml'/.test(a.command) ? 3 : 0, output: "" }; }; return ran; };
