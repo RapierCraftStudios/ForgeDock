@@ -184,7 +184,7 @@ export function renderShadowReview({ would, failures = [], review, contract, deg
 }
 
 // ---- PR body ----
-export function renderPrBody({ issue, investigation, contract, implementation, result, gitFiles = [], tracked = [] }) {
+export function renderPrBody({ issue, investigation, contract, implementation, result, gitFiles = [], tracked = [], visual = "" }) {
   const root = section(investigation, "Root Cause") || line(norm(result).root_cause);
   const dels = contract?.deliverables ?? [];
   const deliver = dels.length ? ["| File | Change | Requirements |", "| --- | --- | --- |", ...dels.map((d) => `| ${esc(d.path)} | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`)].join("\n")
@@ -194,7 +194,7 @@ export function renderPrBody({ issue, investigation, contract, implementation, r
   // #4404: requirements measured outside the lane; the change delivers their instrumentation, the named job the result
   const oob = (contract?.requirements ?? []).filter((r) => r?.verify === "out_of_band");
   const outOfBand = oob.length ? `\n\n## Verified out of band\n${oob.map((r) => `- ${escl(r.id)}: ${escl(r.quote)} (job ${r.evidence ? `\`${escl(r.evidence).replace(/`/g, "'")}\`` : "not named"})`).join("\n")}` : "";
-  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}${visualSection(implementation)}\n\nCloses #${issue}`;
+  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}${visual ? `\n\n${visual}` : visualSection(implementation)}\n\nCloses #${issue}`;
 }
 
 // ---- trajectory ----

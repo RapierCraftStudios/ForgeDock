@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePagesConfig, pageChange, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved } from "./pagegate.mjs";
+import { parsePagesConfig, pageChange, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved, isShotRef } from "./pagegate.mjs";
 import { pagePlanNote, domainChecksBlock } from "./prompts.mjs";
 import { pathDomains } from "./review-trigger.mjs";
 import { validateContract, precheck } from "./conformance.mjs";
@@ -148,5 +148,16 @@ describe("copy-only edits to existing pages (#5648)", () => {
     assert.equal(contractBriefProblems(c, cfg).length, 1);
     assert.deepEqual(contractBriefProblems(c, cfg, { baseFiles: [docs, mig, gen] }), []);
     assert.deepEqual(contractBriefProblems({ deliverables: [{ path: gen }] }, cfg), []);
+  });
+  it("#5770: free text is not a screenshot; engine-captured links pass with no builder screenshots; a failed capture is page_visual_failed", async () => {
+    const o = { cfg, files, diff, readFile: body, tracked: files, added: [], designApproved: true };
+    assert.deepEqual(kinds(await pageFailures({ ...o, result: { page_gate: { screenshots: ["390/1440 per spec"] } } })), ["page_visual_missing"]);
+    assert.deepEqual(kinds(await pageFailures({ ...o, result: { page_gate: { screenshots: ["a-390.png", "a-1440.png"] } }, exists: () => false })), ["page_visual_missing"]);
+    const captures = { screenshots: ["https://raw.githubusercontent.com/o/r/abc/1/a-390.png", "https://raw.githubusercontent.com/o/r/abc/1/a-1440.png"], errors: [] };
+    assert.deepEqual(await pageFailures({ ...o, result: {}, captures }), []);
+    const f = await pageFailures({ ...o, result: {}, captures: { screenshots: [], errors: [{ route: "/a", viewport: 390, error: "blank page" }] } });
+    assert.deepEqual(kinds(f), ["page_visual_failed"]);
+    assert.match(f[0].detail, /blank page/);
+    assert.equal(isShotRef("see PR"), false);
   });
 });
