@@ -11,18 +11,24 @@ export function rollupPending(entry) {
   return String(entry.status ?? "").toUpperCase() !== "COMPLETED";
 }
 
+/** `release.hold_merges_during_release_ci` of a parsed release policy; default true (absent policy, key or section). */
+export function holdEnabled(policy) {
+  return policy?.release?.hold_merges_during_release_ci !== false;
+}
+
 /**
  * @param {object} o
  * @param {(args: string[]) => Promise<string>} o.gh   gh runner
  * @param {string} o.repo
  * @param {string} o.branch   the branch the lane merges into (without `origin/`)
  * @param {string[]} [o.defaults]  default branch names; a release PR targets one of them
- * @param {boolean} [o.enabled]  `release.hold_merges_during_release_ci` (default true)
+ * @param {boolean} [o.enabled]  explicit switch (false disables)
+ * @param {object|null} [o.policy]  parsed release policy; `release.hold_merges_during_release_ci: false` disables
  * @param {() => Promise<object|null>} [o.readActive]  the `_active` record, for the manual hold
  * @returns {Promise<{held: boolean, kind?: "manual"|"release-ci", reason?: string, pr?: number}>}
  */
-export async function releaseMergeHold({ gh, repo, branch, defaults = [], enabled = true, readActive = null }) {
-  if (enabled === false || !branch) return { held: false };
+export async function releaseMergeHold({ gh, repo, branch, defaults = [], enabled = true, policy = null, readActive = null }) {
+  if (enabled === false || !holdEnabled(policy) || !branch) return { held: false };
   try {
     const a = readActive ? await readActive() : null;
     const m = a?.mergeHold;

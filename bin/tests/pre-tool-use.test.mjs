@@ -2169,7 +2169,7 @@ describe("main-checkout mutation guard (issue #3650)", () => {
       input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } }),
       encoding: "utf-8",
       timeout: 10000,
-      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "1", ...extraEnv },
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "1", FORGE_LANE_WORKTREE: "", ...extraEnv },
       cwd,
     });
     return { exitCode: r.status ?? -1, stderr: r.stderr || "" };

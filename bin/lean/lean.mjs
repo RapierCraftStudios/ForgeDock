@@ -3936,10 +3936,11 @@ export async function runCore(o) {
       try { dcoFailed = ((lastStates ?? await io.checkStates?.(pr)) ?? []).filter((x) => /\bdco\b/i.test(String(x?.name ?? "")) && x.state === "failure" && (!x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head)))); } catch { dcoFailed = []; }
       if (dcoFailed.length) return await needsHuman(`DCO check failed on PR #${pr} (${[...new Set(dcoFailed.map((x) => x.name))].join(", ")}); a commit lacks a sign-off or has a placeholder author, which would block the release. Nothing merged.`, OUTCOME_CODES.CI_DCO);
       // #5709: a merge into the integration branch restarts CI of an open release PR (head = this branch): hold until it ends
-      let heldSince = null;
+      let heldSince = null, holdPolicy = null;
+      try { const { parsePolicy, POLICY_PATH } = await import("./release-config.mjs"); const d = defaults.find(Boolean); if (d) holdPolicy = parsePolicy(String(await git(["show", `origin/${d}:${POLICY_PATH}`]))).policy ?? null; } catch { holdPolicy = null; } // no policy file: default on
       for (;;) {
         const target = String(resumed?.base ?? lane ?? "");
-        const hold = await releaseMergeHold({ gh: ghc, repo, branch: target, defaults, enabled: holdMergesDuringReleaseCi, readActive: async () => { const { readActive } = await import("./release-ledger.mjs"); return readActive({ io, repo, credential: "driver" }); } });
+        const hold = await releaseMergeHold({ gh: ghc, repo, branch: target, defaults, enabled: holdMergesDuringReleaseCi, policy: holdPolicy, readActive: async () => { const { readActive } = await import("./release-ledger.mjs"); return readActive({ io, repo, credential: "driver" }); } });
         if (!hold.held) break;
         if (heldSince === null) { heldSince = now(); T.merge = [policyText, "merge.held_release"]; T.decisions.push(`merge.held_release: ${hold.reason}; PR #${pr} stays open and green`); ev({ event: "MERGE_HELD_RELEASE", pr, kind: hold.kind, releasePr: hold.pr ?? null }); }
         if (now() - heldSince >= ciMaxMinutes * 60000) return await finish("ci-pending", `PR #${pr} merge held ${ciMaxMinutes} min (${hold.reason}); rerun resumes the PR`, { pr });

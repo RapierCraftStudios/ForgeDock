@@ -3881,13 +3881,15 @@ describe("base-sync (#4100)", () => {
 
   const RELEASE_PENDING = [{ number: 40, baseRefName: "main", statusCheckRollup: [{ __typename: "CheckRun", status: "IN_PROGRESS" }] }];
   it("#5709 merge.held_release: holds while the release PR CI runs, merges after it ends", async () => {
-    let polls = 0;
-    const w = world({ releasePrs: () => (++polls <= 3 ? RELEASE_PENDING : []) });
-    const r = await run(w);
+    let polls = 0, mergesWhileHeld = 0;
+    const w = world({ releasePrs: (ww) => { mergesWhileHeld += ww.merges.length; return ++polls <= 3 ? RELEASE_PENDING : []; } });
+    const progress = [];
+    const r = await run(w, { onProgress: (p) => progress.push(p) });
     assert.equal(r.terminalReason, "merged");
     assert.ok(polls >= 4, "re-checked until the release PR finished");
+    assert.equal(mergesWhileHeld, 0, "no merge into staging while held");
     assert.equal(w.merges.length, 1);
-    assert.ok(JSON.stringify(w).includes("merge.held_release") || w.clock >= 90000, "held before merging");
+    assert.ok(progress.some((p) => p.phase === "merge" && /merge\.held_release: release PR #40/.test(p.detail ?? "")), "merge.held_release recorded");
   });
   it("#5709 a persistent hold ends ci-pending without pushing to the base", async () => {
     const w = world({ releasePrs: RELEASE_PENDING });
@@ -3899,6 +3901,12 @@ describe("base-sync (#4100)", () => {
     assert.equal((await run(world({ releasePrs: [] }))).terminalReason, "merged");
     const w = world({ releasePrs: RELEASE_PENDING });
     assert.equal((await run(w, { holdMergesDuringReleaseCi: false })).terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
+  });
+  it("#5709 release.hold_merges_during_release_ci: false in .forge/release.yaml disables the held_release wait", async () => {
+    const w = world({ releasePrs: RELEASE_PENDING });
+    const g = w.io.git; w.io.git = async (a, o) => (a[0] === "show" && /\.forge\/release\.yaml$/.test(a.at(-1)) ? "schema: 1\nrelease: {hold_merges_during_release_ci: false}\n" : g(a, o));
+    assert.equal((await run(w)).terminalReason, "merged");
     assert.equal(w.merges.length, 1);
   });
 

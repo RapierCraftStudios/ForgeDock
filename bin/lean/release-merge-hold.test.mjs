@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { releaseMergeHold, rollupPending } from "./release-merge-hold.mjs";
+import { releaseMergeHold, rollupPending, holdEnabled } from "./release-merge-hold.mjs";
 
 const run = (rows) => async () => JSON.stringify(rows);
 const O = (gh, extra = {}) => ({ gh, repo: "o/r", branch: "staging", defaults: ["main"], ...extra });
@@ -20,6 +20,9 @@ describe("release merge hold (#5709)", () => {
   });
   it("is off when release.hold_merges_during_release_ci is false", async () => {
     assert.equal((await releaseMergeHold(O(run([PEND]), { enabled: false }))).held, false);
+    assert.equal((await releaseMergeHold(O(run([PEND]), { policy: { release: { hold_merges_during_release_ci: false } } }))).held, false);
+    assert.equal((await releaseMergeHold(O(run([PEND]), { policy: { release: { hold_merges_during_release_ci: true } } }))).held, true);
+    assert.equal(holdEnabled(null), true); assert.equal(holdEnabled({ schema: 1 }), true); assert.equal(holdEnabled({ release: {} }), true);
   });
   it("holds on a manual hold and fails open on read errors", async () => {
     const m = await releaseMergeHold(O(run([]), { readActive: async () => ({ mergeHold: { reason: "r" } }) }));

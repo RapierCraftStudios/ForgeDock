@@ -73,6 +73,7 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
     lease: lease ? { holder: unk(lease.holder), epoch: unk(lease.epoch), heartbeat_age_s: hb ?? "unknown" } : "unknown",
     hold: active ? !!(active.holds?.[id] ?? active.holds?.["*"] ?? active.cancelled?.[id]) : "unknown",
     merge_hold: active ? (active.mergeHold ? { reason: active.mergeHold.reason ?? null, actor: active.mergeHold.actor ?? null, at: active.mergeHold.at ?? null } : null) : "unknown",
+    merge_hold_release_ci: pr?.ci && !TERMINAL.includes(status) && pr.ci.pending > 0 ? { pr: pr.number, pending: pr.ci.pending } : null, // #5709: lanes hold merges into the integration branch while this runs
     intake: active?.intake ? (active.intake.paused ? "paused" : "open") : "unknown",
     cut_sha: unk(state.release?.snapshot),
     review: verdict ? { verdict, head: pr?.head ?? "unknown" } : "unknown",
@@ -121,7 +122,7 @@ const show = (v) => (typeof v === "object" && v !== null ? Object.entries(v).map
 
 export function renderReleaseStatus(s) {
   if (!s) return "no active release";
-  const head = `${s.id}  ${s.repo}  status=${s.status}${s.next_step ? ` next=${s.next_step}` : ""}  source=${s.source}  hold=${s.hold === true ? "yes" : s.hold === false ? "no" : s.hold}${s.merge_hold && s.merge_hold !== "unknown" ? `  merge_hold=yes (${s.merge_hold.reason ?? "no reason"})` : ""}  intake=${s.intake}`;
+  const head = `${s.id}  ${s.repo}  status=${s.status}${s.next_step ? ` next=${s.next_step}` : ""}  source=${s.source}  hold=${s.hold === true ? "yes" : s.hold === false ? "no" : s.hold}${s.merge_hold && s.merge_hold !== "unknown" ? `  merge_hold=yes (${s.merge_hold.reason ?? "no reason"})` : s.merge_hold_release_ci ? `  merge_hold=release-ci (PR #${s.merge_hold_release_ci.pr}, ${s.merge_hold_release_ci.pending} pending)` : ""}  intake=${s.intake}`;
   const lines = [head];
   if (s.reason) lines.push(`  rejected: ${s.reason}`);
   if (s.steps.length) {
