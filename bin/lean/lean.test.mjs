@@ -2907,6 +2907,28 @@ describe("merge_wait policy", () => {
       assert.ok(traj(w)[0].includes("carried forward across the CI fix round"));
     });
 
+    describe("#5768 a validate with no row after a merge-time CI fix round is re-run, not parked", () => {
+      const ciWorld = (o) => {
+        const w = world(o); w.reran = []; w.ran = [];
+        w.io.requiredChecks = async () => ["build"];
+        w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+        w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: RUN(77, w.reran.length + 1) }];
+        w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+        return w;
+      };
+      const fixRun = (w, dir) => run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
+
+      it("re-runs the unrecorded validate once on the fix head, records the row and merges", async () => {
+        const w = ciWorld({ validation: [], resumeValidation: [] }), dir = tmpDir("core-");
+        const base = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return base ? base(a) : { rc: 0, output: "" }; };
+        const r = await fixRun(w, dir);
+        assert.equal(r.terminalReason, "merged", r.reason);
+        const written = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+        assert.ok(written.validation.some((x) => x.id === "V1" && x.rerun === true && x.exit === 0), "the re-run row is recorded");
+        assert.ok(traj(w)[0].includes("the engine re-ran"));
+      });
+    });
+
     describe("#5692 CI events start the fix round before the check completes", () => {
       /** `build` stays pending until the builder's fix lands; `evts` is what the router has for the head. */
       const evWorld = (evts) => {
