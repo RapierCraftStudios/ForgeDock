@@ -9085,6 +9085,14 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
     const h = withWeb(world({ contract: withTool("zzcheck") })); probing(h, "zzcheck");
     assert.equal((await run(h, { dir: tmpDir("lean-5683b-"), ...remote })).code, "env.tool_missing");
   });
+  it("#5764 forgedock (the engine CLI that runs the lane in the sandbox) is never a remote tool miss", async () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const w = world({ contract: { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "forgedock check" }] } });
+    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: tmpDir("lean-5764d-"), ...remote });
+    assert.notEqual(r.code, "env.tool_missing");
+    assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /Remote sandbox lacks/);
+  });
   it("#5764 a vite miss with a tracked package.json and a ruff miss with a tracked pyproject are prepared in the sandbox, never given a recipe", async () => {
     const remote = { placement: { where: "remote", reason: "mode remote" } };
     const withTool = (tool) => ({ ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: `${tool} check x` }] });

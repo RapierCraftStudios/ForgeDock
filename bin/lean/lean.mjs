@@ -2417,7 +2417,7 @@ export async function runCore(o) {
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
         // #5331: a tool the sandbox itself lacks (probed where the lane runs) ends the lane before the builder implements; the tool-missing recovery places it on the host (orchestrate placeOf)
         const remoteDeps = await depOwnerOf(); // #5683: a tool that is a tracked manifest dependency is prepared in the sandbox, never a lane_tools recipe or a host tool
-        const ownedDep = (t) => remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
+        const ownedDep = (t) => t === "forgedock" || remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
         let tm0 = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => [])), tm = notOwned(tm0);
         if (tm0.tools.length && !tm.tools.length) { try { if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); ev({ event: "REMOTE_PROJECT_DEPS", tools: tm0.tools }); } catch { /* the install gate reports failures */ } }
         if (tm.tools.length) { // #5423: provision the sandbox once (nested lockfiles, pytest) and re-probe before giving the lane up

@@ -3339,7 +3339,7 @@ Remote tool install and host fallback (#5652): a remote lane whose frozen valida
 
 `RECIPES.shellcheck` (unversioned, #5763) apt-installs `shellcheck`, so a repo whose frozen validates run it declares `execution.lane_tools: [shellcheck]` instead of parking as `env.tool_missing`. When a tool has no recipe the park message lists the known recipes.
 
-Binary aliases (#5764): `pool/lane-tools.mjs` `recipeFor(tool)` maps a binary a recipe provides to that recipe (`python3`/`python3.N`/`pip3` to `python`, `psql`/`pg_dump` to `postgresql-client`, `xvfb-run` to `xvfb`), so the remote tool-miss split in `lean.mjs` installs it instead of parking with "no lane_tools recipe"; an alias installs the unversioned recipe (`python@3.12` does not provide `python3`). `forge.yaml` entries still take only `RECIPES` names. `forgedock` as a remote validate tool stays unhandled (deferred).
+Binary aliases (#5764): `pool/lane-tools.mjs` `recipeFor(tool)` maps a binary a recipe provides to that recipe (`python3`/`python3.N`/`pip3` to `python`, `psql`/`pg_dump` to `postgresql-client`, `xvfb-run` to `xvfb`), so the remote tool-miss split in `lean.mjs` installs it instead of parking with "no lane_tools recipe"; an alias installs the unversioned recipe (`python@3.12` does not provide `python3`). `forge.yaml` entries still take only `RECIPES` names. `forgedock` is never a remote tool miss: the engine CLI runs the lane in the sandbox (`sandbox-remote.mjs`), so it is present there.
 
 ## Entry 2026-11-15 — `forgedock ci preflight`: deterministic pre-flight fast lane (#5691)
 
