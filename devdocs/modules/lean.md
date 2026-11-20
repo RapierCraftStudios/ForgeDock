@@ -2243,6 +2243,15 @@ rows recorded before the round are carried forward (marked `carried: true`, writ
 it), the fix head goes through `ciVerify("merge")` under remote verify before `doReview` (as the base-sync retry, #4527), and a
 validate id still unrecorded is `engine.validate_result_lost`, not a conformance failure.
 
+## Entry 2026-11-20 — A validate with no row after a CI fix round is re-run, not parked (#5768)
+
+Issue #5709 parked `engine.validate_result_lost` on a finished PR. Root cause: the #4708 carry-forward only sees the rows in the
+in-memory `result.validation` at the start of the round, so a row that was never there (engine-run validates, or rows an earlier
+fix round already dropped) cannot be carried, and the park fired before the engine's own no-row run (#5728) was reached. Now
+`mergeFixRound` runs each still-unrecorded validate once with `rerunFailedValidatesRaw` on the fix head, records the row
+(`rerun: true`, written to `result.json`) and parks `engine.validate_result_lost` only when the engine cannot run commands or a
+validate still has no row after the re-run.
+
 ## Entry 2026-10-27 — Due-date gate, parked sweep and owner asks for post-deploy follow-ups (#4689)
 
 A post-deploy item may carry `due:YYYY-MM-DD`: `postDeployGate` (`prefilter.mjs`) parks it `awaiting-due` (labels

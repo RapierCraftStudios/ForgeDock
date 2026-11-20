@@ -3765,7 +3765,17 @@ export async function runCore(o) {
       // #4708: the fix head is CI-verified before its review, as in the base-sync retry (#4527), so validates left to CI are covered
       if (remoteVerify) { const v = await ciVerify("merge"); if (v.done) return v.done; }
       const rows = Array.isArray(result?.validation) ? result.validation : [], headNow = await gitOut(["rev-parse", "HEAD"]);
-      const lost = (effective.validate ?? []).filter((v) => !rows.some((x) => x?.id === v.id) && !(remoteVerify && ciVerifiedHead === headNow)).map((v) => v.id);
+      let lost = (effective.validate ?? []).filter((v) => !rows.some((x) => x?.id === v.id) && !(remoteVerify && ciVerifiedHead === headNow)).map((v) => v.id);
+      if (lost.length && io.runCommand) { // #5768: a validate with no row is run once by the engine on the fix head before the lane parks
+        const ran = await rerunFailedValidatesRaw({ ...effective, validate: (effective.validate ?? []).filter((v) => lost.includes(v.id)) });
+        const fresh = (effective.validate ?? []).filter((v) => ran?.[v.id]).map((v) => ({ id: v.id, command: v.command, exit: ran[v.id].rc, rerun: true }));
+        if (fresh.length) {
+          result = { ...result, validation: [...rows, ...fresh] };
+          try { await io.fs.write(`${wt}/${RESULT_FILE}`, `${JSON.stringify(result)}\n`); } catch { /* the gate reads what is on disk */ }
+          T.decisions.push(`Validate result(s) ${fresh.map((x) => x.id).join(", ")} missing after the CI fix round: the engine re-ran ${fresh.length > 1 ? "them" : "it"} on the fix head (exit ${fresh.map((x) => x.exit).join(", ")})`);
+        }
+        lost = lost.filter((id) => !ran?.[id]);
+      }
       if (lost.length) return await needsHuman(`Validate result(s) ${lost.join(", ")} missing after a CI fix round on PR #${pr}: the earlier results were lost and none could be carried forward; nothing merged.`, OUTCOME_CODES.ENGINE_VALIDATE_RESULT_LOST);
       const rv = await doReview(); // never merge an unreviewed head
       if (!rv) return await needsHuman("Reviewer returned no parseable verdict after a CI fix round.", OUTCOME_CODES.REVIEW_NO_VERDICT);
