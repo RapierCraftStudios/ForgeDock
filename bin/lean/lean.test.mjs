@@ -107,6 +107,7 @@ function world(o = {}) {
       if (a[0] === "api" && a.includes("PATCH") && a.some((x) => /\/comments\/9000$/.test(x))) { statusLogical(w, a[a.indexOf("-f") + 1].replace(/^body=/, "")); w.statusPatches.push(a); return "{}"; } // #5592: the one FORGE:STATUS comment
       if (a[0] === "api" && a.includes("PATCH")) { w.patches.push(a); return "{}"; }
       if (a[0] === "api") return a.some((x) => /\/comments$/.test(x)) ? (w.issueComments ?? []).map((c) => JSON.stringify(c)).join("\n") : "";
+      if (k === "pr list" && a.some((x) => /statusCheckRollup/.test(x))) return JSON.stringify(typeof o.releasePrs === "function" ? o.releasePrs(w) : (o.releasePrs ?? [])); // #5709: release PR lookup
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
@@ -3876,6 +3877,29 @@ describe("base-sync (#4100)", () => {
     assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 0, "no base-sync");
     assert.equal(w.merges.length, 0); assert.ok(!syncComment(w));
     assert.ok(!w.edits.some((e) => e.includes("needs-human")));
+  });
+
+  const RELEASE_PENDING = [{ number: 40, baseRefName: "main", statusCheckRollup: [{ __typename: "CheckRun", status: "IN_PROGRESS" }] }];
+  it("#5709 merge.held_release: holds while the release PR CI runs, merges after it ends", async () => {
+    let polls = 0;
+    const w = world({ releasePrs: () => (++polls <= 3 ? RELEASE_PENDING : []) });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(polls >= 4, "re-checked until the release PR finished");
+    assert.equal(w.merges.length, 1);
+    assert.ok(JSON.stringify(w).includes("merge.held_release") || w.clock >= 90000, "held before merging");
+  });
+  it("#5709 a persistent hold ends ci-pending without pushing to the base", async () => {
+    const w = world({ releasePrs: RELEASE_PENDING });
+    const r = await run(w, { ciMaxMinutes: 1 });
+    assert.equal(r.terminalReason, "ci-pending");
+    assert.equal(w.merges.length, 0);
+  });
+  it("#5709 no release PR, or the hold disabled, leaves merge behaviour unchanged", async () => {
+    assert.equal((await run(world({ releasePrs: [] }))).terminalReason, "merged");
+    const w = world({ releasePrs: RELEASE_PENDING });
+    assert.equal((await run(w, { holdMergesDuringReleaseCi: false })).terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
   });
 
   it("a resumed run with a conflicting PR re-plans, verifies, then syncs in the same session", async () => {

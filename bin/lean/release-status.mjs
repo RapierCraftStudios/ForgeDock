@@ -72,6 +72,7 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
     steps, pr,
     lease: lease ? { holder: unk(lease.holder), epoch: unk(lease.epoch), heartbeat_age_s: hb ?? "unknown" } : "unknown",
     hold: active ? !!(active.holds?.[id] ?? active.holds?.["*"] ?? active.cancelled?.[id]) : "unknown",
+    merge_hold: active ? (active.mergeHold ? { reason: active.mergeHold.reason ?? null, actor: active.mergeHold.actor ?? null, at: active.mergeHold.at ?? null } : null) : "unknown",
     intake: active?.intake ? (active.intake.paused ? "paused" : "open") : "unknown",
     cut_sha: unk(state.release?.snapshot),
     review: verdict ? { verdict, head: pr?.head ?? "unknown" } : "unknown",
@@ -120,7 +121,7 @@ const show = (v) => (typeof v === "object" && v !== null ? Object.entries(v).map
 
 export function renderReleaseStatus(s) {
   if (!s) return "no active release";
-  const head = `${s.id}  ${s.repo}  status=${s.status}${s.next_step ? ` next=${s.next_step}` : ""}  source=${s.source}  hold=${s.hold === true ? "yes" : s.hold === false ? "no" : s.hold}  intake=${s.intake}`;
+  const head = `${s.id}  ${s.repo}  status=${s.status}${s.next_step ? ` next=${s.next_step}` : ""}  source=${s.source}  hold=${s.hold === true ? "yes" : s.hold === false ? "no" : s.hold}${s.merge_hold && s.merge_hold !== "unknown" ? `  merge_hold=yes (${s.merge_hold.reason ?? "no reason"})` : ""}  intake=${s.intake}`;
   const lines = [head];
   if (s.reason) lines.push(`  rejected: ${s.reason}`);
   if (s.steps.length) {

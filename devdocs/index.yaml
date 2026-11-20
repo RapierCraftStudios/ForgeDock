@@ -60,6 +60,9 @@ domains:
       - path: decisions/5560-release-deploy.md
         authority: recommended
         token_cost: 600
+      - path: decisions/5709-release-merge-hold.md
+        authority: recommended
+        token_cost: 400
       - path: decisions/5562-release-verify.md
         authority: recommended
         token_cost: 500

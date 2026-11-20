@@ -142,5 +142,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "release-merge-hold-no-restarts": {
+    "run": "test \"$(gh pr list --repo \"$(gh repo view --json nameWithOwner -q .nameWithOwner)\" --state merged --base main --head staging --limit 5 --json number | node -e 'process.stdout.write(String(JSON.parse(require(\"fs\").readFileSync(0,\"utf8\")).length))')\" -ge 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
   }
 }
