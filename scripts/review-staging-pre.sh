@@ -14,7 +14,7 @@
 #           gh read blocks (TYPE=gate-read-failure, never waived by an override): no GATE_PASS without real reads (forge#4470).
 #   scope   0B.1: writes DIR/<N>_scope.env (printf %q, read by 7A), DIR/<N>_bundle-pr-files.txt and DIR/<N>_scope.json
 #           {scope_mode, reviewed_pr_count, reviewed_commits, unreviewed_commits, unreviewed_files, cross_pr_files,
-#           deploy_wiring_files, degraded_prs}; prints the one-line SCOPE_MODE summary. Per-PR reads run FORGE_SCOPE_PARALLELISM (default 8) at a time
+#           deploy_wiring_files, degraded_prs, ci_net}; prints the one-line SCOPE_MODE summary and the CI_NET line (forge#5760). Per-PR reads run FORGE_SCOPE_PARALLELISM (default 8) at a time
 #           and retry; a PR whose read still fails is degraded (its commits stay unreviewed) and the rest stay scoped. Global failures widen to full.
 # Exit: 2 on a usage error.
 #
@@ -454,15 +454,20 @@ fi
 # Deploy/runtime readiness files are always in scope: migrations, env, workflows, compose/infra, dependency manifests.
 _DW=$(git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --name-only) || { SCOPE_MODE=full; _DW=""; }
 DEPLOY_WIRING_FILES=$(printf '%s\n' "$_DW" | grep -E '(^|/)(migrations?/|\.github/workflows/|infra/|deploy/|docker-compose[^/]*\.ya?ml$|\.env[^/]*$|Dockerfile[^/]*$|package(-lock)?\.json$|pnpm-lock\.yaml$|yarn\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|poetry\.lock$|go\.(mod|sum)$|Cargo\.(toml|lock)$)' || true)
+# forge#5760: the bundle's net CI change (workflows, jobs, annotated minutes); fail-soft, never blocks the scope step.
+_CIG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)/bin/lean/ci-gate.mjs"
+CI_NET=$( [ -f "$_CIG" ] && node "$_CIG" net --base "origin/$DEFAULT_BRANCH" --head "origin/$STAGING_BRANCH" 2>/dev/null | grep '^CI_NET:' | head -n 1 )
+[ -n "$CI_NET" ] || CI_NET="CI_NET: unknown (ci-gate not runnable)"
 # Persist the results for 7A (a later Bash call is a fresh shell). %q keeps multi-line file lists intact.
 printf 'SCOPE_MODE=%q\nCROSS_PR_FILES=%q\nUNREVIEWED_FILES=%q\nDEPLOY_WIRING_FILES=%q\n' "$SCOPE_MODE" "${CROSS_PR_FILES:-}" "${UNREVIEWED_FILES:-}" "${DEPLOY_WIRING_FILES:-}" > "$_SD/${PR_NUMBER}_scope.env"
 echo "SCOPE_MODE=$SCOPE_MODE reviewed_prs=$REVIEWED_PR_COUNT unreviewed_commits=$(echo $UNREVIEWED_COMMITS | wc -w) unreviewed_files=$(echo "$UNREVIEWED_FILES" | grep -c .) cross_pr_files=$(echo "$CROSS_PR_FILES" | grep -c .)"
+echo "$CI_NET"
 # JSON twin of scope.env for the CLI: commit lists are space separated, file lists newline separated.
 _jw() { printf '%s\n' "${1:-}" | tr ' ' '\n' | sed '/^$/d' | jq -R . | jq -s .; }
 _jn() { printf '%s\n' "${1:-}" | sed '/^$/d' | jq -R . | jq -s .; }
 jq -n --arg mode "$SCOPE_MODE" --argjson n "${REVIEWED_PR_COUNT:-0}" \
   --argjson rc "$(_jw "$REVIEWED_COMMITS")" --argjson uc "$(_jw "$UNREVIEWED_COMMITS")" \
-  --argjson uf "$(_jn "${UNREVIEWED_FILES:-}")" --argjson cf "$(_jn "${CROSS_PR_FILES:-}")" --argjson dw "$(_jn "${DEPLOY_WIRING_FILES:-}")" --argjson dp "$(_jw "$DEGRADED_PRS" | jq -c "map(tonumber)")" \
-  '{scope_mode: $mode, reviewed_pr_count: $n, reviewed_commits: $rc, unreviewed_commits: $uc, unreviewed_files: $uf, cross_pr_files: $cf, deploy_wiring_files: $dw, degraded_prs: $dp}' \
+  --argjson uf "$(_jn "${UNREVIEWED_FILES:-}")" --argjson cf "$(_jn "${CROSS_PR_FILES:-}")" --argjson dw "$(_jn "${DEPLOY_WIRING_FILES:-}")" --argjson dp "$(_jw "$DEGRADED_PRS" | jq -c "map(tonumber)")" --arg cinet "$CI_NET" \
+  '{scope_mode: $mode, reviewed_pr_count: $n, reviewed_commits: $rc, unreviewed_commits: $uc, unreviewed_files: $uf, cross_pr_files: $cf, deploy_wiring_files: $dw, degraded_prs: $dp, ci_net: $cinet}' \
   > "$_SD/${PR_NUMBER}_scope.json" || { echo "review-staging-pre: could not write ${PR_NUMBER}_scope.json" >&2; exit 1; }
 exit 0

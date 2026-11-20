@@ -66,6 +66,15 @@ describe("ci.tests block (#5710)", () => {
   });
 });
 
+describe("ci.budget block (#5760)", () => {
+  it("accepts the four keys beside the #5278 ci keys", () => {
+    assert.deepEqual(validateForgeYaml(BASE + "ci:\n  mode: auto\n  budget:\n    max_workflows: 12\n    max_ci_jobs: 40\n    monthly_minutes: 50000\n    shared_regression_job: regression\n"), []);
+  });
+  it("flags an unknown key and a non-number max", () => {
+    assert.deepEqual(codes(BASE + "ci:\n  budget:\n    max_jobs: 3\n    max_workflows: many\n").sort(), ["unknown-key:ci.budget.max_jobs", "wrong-type:ci.budget.max_workflows"]);
+  });
+});
+
 describe("gate.required_checks type (#5504)", () => {
   it("accepts block and flow lists, flags a scalar", () => {
     assert.deepEqual(codes(BASE + 'gate:\n  required_checks:\n    - "CI"\n'), []);

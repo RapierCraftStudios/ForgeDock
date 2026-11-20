@@ -23,6 +23,8 @@ export const CLOSED = {
   "env.proxies": ["npm", "pypi", "apt", "git"],
   // #5710 test engine. The one-level parser flattens these under `ci`, so every name is unique within `ci`.
   "ci.tests": ["selection", "suites", "run_all", "ignore", "test_globs", "full_branches", "graduate_after", "graduate_min_failing", "shards", "shard_target_s", "quarantine", "quarantine_after", "quarantine_window_days", "recall_ledger"],
+  // #5760 CI budget gate (bin/lean/ci-gate.mjs). Flattened under `ci` too: monthly_minutes is the same key as #5278's ci.monthly_minutes.
+  "ci.budget": ["max_workflows", "max_ci_jobs", "monthly_minutes", "shared_regression_job"],
   // #5712: the deploy stage engine (bin/lean/deploy-stages.mjs); the stage entries themselves are checked by validateEngine
   "deploy.engine": ["enabled", "live_release_command", "stage_timeout_s", "colour", "services", "canary", "rollback", "stages"],
   "deploy.engine.colour": ["active_command", "names"],
@@ -59,6 +61,10 @@ export const TYPES = {
   "ci.tests.shard_target_s": "number",
   "ci.tests.quarantine_after": "number",
   "ci.tests.quarantine_window_days": "number",
+  "ci.budget.max_workflows": "number",
+  "ci.budget.max_ci_jobs": "number",
+  "ci.budget.monthly_minutes": "number",
+  "ci.budget.shared_regression_job": "scalar",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "deploy.engine.enabled": "bool",
   "deploy.engine.stage_timeout_s": "number",

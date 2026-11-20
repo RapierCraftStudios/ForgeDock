@@ -153,6 +153,12 @@ describe("#4574 amendment slips", () => {
 
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+  it("#5760 ciBudgetFailures surface as precheck failures", () => {
+    const f = { code: "conformance.unimplemented", kind: "ci_budget_unannotated", detail: "x" };
+    const r = precheck({ contract: C, result: res, changedFiles: files, ciBudgetFailures: [f] });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.failures, [f]);
+  });
   it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);

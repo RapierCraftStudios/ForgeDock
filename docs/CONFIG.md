@@ -1649,6 +1649,35 @@ ci:
 
 State lives in a `FORGE:INTEGRATION` block in the milestone description. A red run files or updates one `integration-red` issue on the milestone (failing specs, merge range); the next green run closes it. `/deploy-info` shows open ones as a ship-gate risk and `/pipeline-status` shows each milestone's last green run. Schedule it with cron or a scheduled workflow: `forgedock integration run [--repo owner/repo] [--milestone TITLE] [--force]` (exit 1 when a run is red; `forgedock integration status` prints each last green run); `forgedock orchestrate` also runs it every `every_merges` merges.
 
+
+### `ci.budget` CI budget gate (forge#5760)
+
+The lane check (`bin/lean/ci-gate.mjs`, wired into the lean precheck) runs on every lane whose diff changes `.github/workflows/*.yml|yaml`; it needs no config. A lane that adds a workflow file, adds a job, or adds a step that runs a single test file must either fold it into `shared_regression_job` or carry a comment in the workflow YAML:
+
+```yaml
+# FORGE:CI_BUDGET trigger=pull_request:src/gpu/** minutes=120/month why=needs a GPU runner the shared job lacks
+```
+
+On a new workflow the comment can sit anywhere in the file; on a new job or step it goes inside the job or on the comment lines directly above its id. `trigger=`, `minutes=` and `why=` are all required.
+
+```yaml
+ci:
+  budget:
+    max_workflows: 15
+    max_ci_jobs: 40
+    monthly_minutes: 50000
+    shared_regression_job: regression   # a job id, or a test dir (contains "/") one-file checks must live under
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_workflows` | number | unset (no cap) | Workflow files allowed; a lane over it fails unless it removes as many as it adds. |
+| `max_ci_jobs` | number | unset (no cap) | Jobs across all workflows; same rule. |
+| `monthly_minutes` | number | unset | Actions minutes per month, shown in the release-bundle `CI_NET:` line. The forge.yaml parser flattens `ci`, so this is the same key as `ci.monthly_minutes` (#5278). Keep the other `ci.budget` names unique within `ci`. |
+| `shared_regression_job` | string | unset | Where new one-file checks belong; a step added to this job (or running a file under this dir) needs no annotation. |
+
+Failure kinds (`conformance.unimplemented`): `ci_budget_unannotated`, `ci_budget_annotation_invalid`, `ci_budget_exceeded`, and `ci_hygiene`. `ci_hygiene` covers a new workflow or job with no `concurrency`, no job-level `timeout-minutes`, no `paths`/`paths-ignore` on `push`/`pull_request`, or no job-level `if:` on `issues`/`issue_comment`/`pull_request_review_comment`/`discussion_comment` events. The staging review prints the bundle's net change (`CI_NET: workflows ±N, jobs ±M, est. minutes/month ±K`). This block is separate from the `.forge/release.yaml` `ci.budget` (`on_exceed`) block.
+
 ## `execution` (OPTIONAL)
 
 Where `forgedock orchestrate` runs its lanes (forge#4253). Block style only.
