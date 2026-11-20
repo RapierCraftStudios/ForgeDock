@@ -237,6 +237,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
+New CI (#5760): join ci.budget.shared_regression_job, else annotate \`# FORGE:CI_BUDGET trigger= minutes= why=\`; a new workflow/job needs concurrency, timeout-minutes, paths, event if:.
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
