@@ -16,6 +16,7 @@ export const RECIPES = {
   "postgresql-client": { versioned: true, steps: (v) => [apt(v ? `postgresql-client-${v}` : "postgresql-client")] },
   python: { versioned: true, steps: (v) => [apt(v ? `python${v} python${v}-venv` : "python3 python3-venv")] },
   xvfb: { versioned: false, steps: () => [apt("xvfb xauth")] }, // headless X for browser/GUI tests that call xvfb-run
+  shellcheck: { versioned: false, steps: () => [apt("shellcheck")] }, // shell-script linter for validate commands
   playwright: { versioned: true, steps: (v) => [`RUN npx --yes playwright${v ? `@${v}` : ""} install --with-deps chromium`] },
   // Example of a release-tarball tool; the version is required.
   promtool: { versioned: true, steps: (v) => [`RUN curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${v ?? "2.54.1"}/prometheus-${v ?? "2.54.1"}.linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'`] },

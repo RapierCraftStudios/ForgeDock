@@ -3337,6 +3337,8 @@ Remote tool install and host fallback (#5652): a remote lane whose frozen valida
 
 `pool/lane-tools.mjs` `RECIPES.xvfb` (unversioned) apt-installs `xvfb xauth` into the lane image, so a repo whose tests call `xvfb-run` declares it once in `execution.lane_tools` instead of apt-installing it in `env.setup` on every lane (each lane paid the download; on a slow pool uplink `env.setup` hit its 900 s timeout).
 
+`RECIPES.shellcheck` (unversioned, #5763) apt-installs `shellcheck`, so a repo whose frozen validates run it declares `execution.lane_tools: [shellcheck]` instead of parking as `env.tool_missing`. When a tool has no recipe the park message lists the known recipes.
+
 ## Entry 2026-11-15 — `forgedock ci preflight`: deterministic pre-flight fast lane (#5691)
 
 `ci-preflight.mjs` `runCiPreflight` runs workflow lint (actionlint, else a small YAML syntax scan), per-ecosystem lockfile drift (pnpm/npm/uv/poetry), `ci.preflight.generated[]` (`"<cmd> :: <paths>"`, run then `git diff --exit-code`), env drift (workflow `env:` keys from secrets/vars vs `.env.example`) and `ci.preflight.tools[]`, under one deadline (`ci.preflight.timeout_s`, default 60 s). Absent tool or config means skip, never fail; exit 1 only on a fail. The one-level forge.yaml parser flattens `ci.preflight.*` under `ci` (`generated`, `tools`, `timeout_s`). `ci-budget.mjs` `ciFromCli` routes `preflight` to it; `ci budget` is unchanged. With `FORGE_CI_EVENTS_URL` set, failures are POSTed best-effort as `step_failed` events (#5688 contract). See `docs/ci-events.md`.
