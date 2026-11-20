@@ -181,7 +181,7 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
 `<!-- FORGE:DECISION -->` comment (what, why, alternative) on the issue, or on the batch for batch-wide choices. The
 runner posts its own decisions (recovery, relaunch, dependency requeue, sub-issues added). The decisions you take
 yourself:
-- **Requirement tracked post-deploy:** post `<!-- FORGE:DECISION {"requirement":"R5","disposition":"post-deploy","quote":"<the row's quote>","why":"..."} -->`. Include `quote` so the decision still finds the row after a renumbering; never name a check id the PR does not add to `.forge/post-deploy-checks.json` (the decided row is check-less, routed to the orchestrator).
+- **Requirement tracked post-deploy:** `<!-- FORGE:DECISION {"requirement":"R5","disposition":"post-deploy","quote":"<row quote>"} -->`; `quote` survives renumbering. Never add a check id.
 - **Recovery and retries:** relaunch, resume, fix-ci, base-sync, and stopping and relaunching a stuck lane.
 - **Scheduling:** K changes under host pressure, ordering, adding logical `Depends on` edges, and adding newly filed or
   decomposed sub-issues to the running batch.
