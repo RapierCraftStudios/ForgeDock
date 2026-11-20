@@ -927,6 +927,16 @@ describe("core work-on", () => {
       assert.notEqual(r.code, "env.tool_missing");
       assert.notEqual(r.terminalReason, "needs-human");
     });
+    it("#5764 a python3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
+      const w = world({ contract: withTool("python3") }); let ok = false; const cmds = [];
+      const base = w.io.runCommand;
+      w.io.runCommand = async (a) => { if (/apt-get install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
+      probing(w, "python3", () => ok);
+      const r = await run(w, { dir: tmpDir("lean-5764a-"), ...remote });
+      assert.equal(cmds.length, 1);
+      assert.notEqual(r.code, "env.tool_missing");
+      assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
+    });
     it("a tool with no recipe ends the lane naming it, saying no recipe exists and pointing to execution.lane_tools", async () => {
       const w = world({ contract: withTool("zzcheck") }); probing(w, "zzcheck", () => false);
       const r = await run(w, { dir: tmpDir("lean-5652b-"), ...remote });
@@ -9074,5 +9084,28 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
     assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
     const h = withWeb(world({ contract: withTool("zzcheck") })); probing(h, "zzcheck");
     assert.equal((await run(h, { dir: tmpDir("lean-5683b-"), ...remote })).code, "env.tool_missing");
+  });
+  it("#5764 forgedock (the engine CLI that runs the lane in the sandbox) is never a remote tool miss", async () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const w = world({ contract: { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "forgedock check" }] } });
+    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: tmpDir("lean-5764d-"), ...remote });
+    assert.notEqual(r.code, "env.tool_missing");
+    assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /Remote sandbox lacks/);
+  });
+  it("#5764 a vite miss with a tracked package.json and a ruff miss with a tracked pyproject are prepared in the sandbox, never given a recipe", async () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const withTool = (tool) => ({ ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: `${tool} check x` }] });
+    const probing = (w, tool) => { w.io.probeCommand = async (a) => ({ rc: new RegExp(tool).test(JSON.stringify(a)) ? 127 : 0, output: "" }); };
+    const installs = (w) => { const base = w.io.runCommand; const seen = []; w.io.runCommand = async (a) => { if (/apt-get install|tar -xz/.test(a.command)) seen.push(a.command); return base(a); }; return seen; };
+    const w = withWeb(world({ contract: withTool("vite") })); probing(w, "vite"); const seen = installs(w); w.io.deps = { prepare: async () => [] };
+    const r = await run(w, { dir: tmpDir("lean-5764b-"), ...remote });
+    assert.notEqual(r.code, "env.tool_missing"); assert.equal(seen.length, 0);
+    const g = world({ contract: withTool("ruff") }); probing(g, "ruff"); const seen2 = installs(g); g.io.deps = { prepare: async () => [] };
+    const gi = g.io.git; g.io.git = async (a, ...x) => (a[0] === "ls-files" && !a.includes(".forge-lean/") ? `${await gi(a, ...x)}\napi/pyproject.toml` : gi(a, ...x));
+    g.files[`${WT}/api/pyproject.toml`] = '[project]\ndependencies = ["ruff>=0.4"]\n';
+    const r2 = await run(g, { dir: tmpDir("lean-5764c-"), ...remote });
+    assert.notEqual(r2.code, "env.tool_missing"); assert.equal(seen2.length, 0);
+    assert.doesNotMatch(g.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
   });
 });
