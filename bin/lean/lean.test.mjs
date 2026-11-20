@@ -927,6 +927,16 @@ describe("core work-on", () => {
       assert.notEqual(r.code, "env.tool_missing");
       assert.notEqual(r.terminalReason, "needs-human");
     });
+    it("#5764 a python3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
+      const w = world({ contract: withTool("python3") }); let ok = false; const cmds = [];
+      const base = w.io.runCommand;
+      w.io.runCommand = async (a) => { if (/apt-get install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
+      probing(w, "python3", () => ok);
+      const r = await run(w, { dir: tmpDir("lean-5764a-"), ...remote });
+      assert.equal(cmds.length, 1);
+      assert.notEqual(r.code, "env.tool_missing");
+      assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
+    });
     it("a tool with no recipe ends the lane naming it, saying no recipe exists and pointing to execution.lane_tools", async () => {
       const w = world({ contract: withTool("zzcheck") }); probing(w, "zzcheck", () => false);
       const r = await run(w, { dir: tmpDir("lean-5652b-"), ...remote });
