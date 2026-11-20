@@ -147,7 +147,10 @@ describe("max_workflows / max_ci_jobs (#5760 R8)", () => {
     const c = parseCiBudget({ max_ci_jobs: "2" });
     const job = "  # FORGE:CI_BUDGET trigger=pr minutes=5 why=x\n  e2e:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: npm run e2e\n";
     assert.deepEqual(kinds(ciGateFindings({ cfg: c, base: { [CI]: BASE_CI }, head: { [CI]: BASE_CI + job } })), ["ci_budget_exceeded"]);
-    const folded = BASE_CI.replace(/  lint:\n(?:    .*\n|      .*\n)*?(?=  regression:)/, "") + job;
+    const folded = BASE_CI.replace(/  lint:\n(?:    .*\n)*?(?=  regression:)/, "") + job;
+    // the fold removes exactly the lint job (regression guard for the unambiguous, non-backtracking pattern)
+    assert.ok(!folded.includes("lint:") && !folded.includes("npm run lint"));
+    assert.ok(folded.includes("  regression:\n") && folded.endsWith(job));
     assert.deepEqual(ciGateFindings({ cfg: c, base: { [CI]: BASE_CI }, head: { [CI]: folded } }), []);
   });
 });
