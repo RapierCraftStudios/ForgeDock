@@ -112,7 +112,7 @@ function world(o = {}) {
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
       if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: o.viewComments ?? [], ...(o.labels ? { labels: o.labels } : {}) }); }
-      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: a[2] === "7" && o.body ? o.body : ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
+      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: a[2] === "7" && o.body ? o.body : ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: a[2] === "7" ? (o.viewComments ?? []) : [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -5242,6 +5242,25 @@ describe("batch robustness (#4112-#4115)", () => {
     const w2 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk({ ...state, contract: "000000000000" })] });
     await run(w2, { recover: { code: "ci.red", attempt: 1 } });
     assert.ok(!w2.comments.some((c) => c.includes("FORGE:AMENDMENT-STATE")));
+  });
+  it("#5773 a structured decision does not make the frozen contract stale; a requeue neither renumbers a re-added row nor drops the decision", async () => {
+    const dir = tmpDir("decision-5773-");
+    const Q = "Existing callers of foo keep working.";
+    const add = (why) => ({ kind: "add-requirement", requirement: { id: "R2", quote: Q, disposition: "post-deploy" }, why });
+    const state = { contract: contractHash(contractJson(CONTRACT)), amendments: [add("live run"), add("same row, other why")] };
+    const am = { body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "add-requirement", target: "R2", why: "live run" }], {}, state)}`, author_association: "OWNER", user: { type: "User", login: "op" } };
+    const dec = { body: `<!-- FORGE:DECISION {"requirement":"R3","disposition":"post-deploy","quote":"${Q}"} -->\n**R3 is tracked post-deploy by the orchestrator.**`, author_association: "OWNER", user: { type: "User", login: "op" } };
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), am, dec], viewComments: [{ body: dec.body, authorAssociation: "OWNER", author: { login: "op" } }],
+      reviews: [conf({}, { ...CONTRACT, requirements: [...CONTRACT.requirements, { id: "R2", quote: Q, disposition: "defer" }] })] });
+    const out = await run(w, { dir });
+    assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+    assert.doesNotMatch(builders(w)[0][4], /PLANNING ONLY/);
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "CONTRACT_STALE").length, 0);
+    assert.ok(!w.comments.some((c) => c.includes("renumbered")), "a replayed add-requirement is not renumbered");
+    const posted = w.comments.filter((c) => c.includes("FORGE:AMENDMENT-STATE")).at(-1);
+    if (posted) assert.equal(parseAmendmentsComment(posted).amendments.filter((a) => a.kind === "add-requirement").length, 1);
+    assert.match(traj(w)[0], /FORGE:DECISION applied to the amended contract: R2/);
+    assert.equal(out.terminalReason, "merged", traj(w)[0]);
   });
   it("#4899 recovery lane keeps enforcing a guard that was not superseded", async () => {
     const mkGuard = (issue) => ({ v: 1, issue, pr: issue * 10, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: `guard ${issue}` });

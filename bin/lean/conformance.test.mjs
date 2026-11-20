@@ -2194,3 +2194,52 @@ describe("#5732 repro commands and failures", () => {
     assert.deepEqual(missingTool({ rc: 1, output: "Could not find the python executable python3.11" }), { tool: "Python interpreter", kind: "environment" });
   });
 });
+
+import { dedupeAddRequirements } from "./conformance.mjs";
+describe("#5773 operator decisions survive requeue and amendment replay", () => {
+  const Q5 = "Backfill dry-run lists all affected historical charges with counts; the real run creates invoices with no customer emails [type:manual]";
+  const Q = "the real run creates invoices with no customer emails";
+  const Q6 = "Post-deploy: one live quick deposit as the production test identity yields a downloadable invoice in the dashboard";
+  const ISS = `## Acceptance\n- ${Q5}\n- ${Q6}`;
+  const frozen = { requirements: [{ id: "R5", quote: Q5, disposition: "deliver" }, { id: "R6", quote: Q6, disposition: "deliver" }], deliverables: [{ id: "D1", path: "scripts/backfill.py", requirements: ["R5", "R6"] }], preserve: [], validate: [] };
+  const dec = (j) => ({ body: `<!-- FORGE:DECISION ${JSON.stringify(j)} -->\n**tracked post-deploy**` });
+  const BOT = "<!-- FORGE:CONTRACT -->\n{}";
+  it("#5773 a structured decision comment does not change the issue scope (the frozen contract is not stale)", () => {
+    const iss = { title: "t", body: ISS };
+    assert.equal(scopeText(iss, [{ body: BOT }, dec({ requirement: "R5", disposition: "post-deploy" })]), scopeText(iss, [{ body: BOT }]));
+  });
+  it("#5773 a decision matches by quote over a stale id, and the decided row is checkless", () => {
+    const c = { ...frozen, requirements: [...frozen.requirements, { id: "R11", quote: "other row", disposition: "deliver" }, { id: "R12", quote: Q, disposition: "post-deploy", check: "made-up-check" }] };
+    const out = applyRequirementDecisions(c, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]);
+    assert.deepEqual(out.applied, [], "a post-deploy row is not a deliver/defer row");
+    const c2 = { ...c, requirements: c.requirements.map((r) => (r.id === "R12" ? { ...r, disposition: "deliver" } : r)) };
+    const out2 = applyRequirementDecisions(c2, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]);
+    assert.deepEqual(out2.applied, ["R12"], "the quote wins over the renumbered id");
+    const r12 = out2.contract.requirements.find((r) => r.id === "R12");
+    assert.equal(r12.check, undefined); assert.equal(r12.engine_check, undefined);
+    assert.deepEqual(applyRequirementDecisions(out2.contract, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]).applied, [], "idempotent");
+    assert.deepEqual(applyRequirementDecisions(c2, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: "no such row" })]).applied, ["R11"], "id fallback");
+  });
+  it("#5773 dedupeAddRequirements keeps the last add per quote and drops one that repeats a frozen row", () => {
+    const add = (id, quote, why) => ({ kind: "add-requirement", requirement: { id, quote, disposition: "post-deploy" }, why });
+    const am = [{ kind: "amend-requirement", requirement: "R5", text: "dry-run only", why: "w" }, add("R11", Q, "a"), add("R11", Q, "b"), add("R12", Q6, "c")];
+    const d = dedupeAddRequirements(frozen, am);
+    assert.deepEqual(d.amendments.map((a) => a.why ?? a.kind), ["w", "b"]);
+    assert.deepEqual(d.dropped.map((x) => x.id), ["R11", "R12"]);
+  });
+  it("#5773 the #41245 replay: decision -> requeue -> rows keep their ids, stay tracked post-deploy and pass the check-id gate", () => {
+    const add = (id, quote, why) => ({ kind: "add-requirement", requirement: { id, quote, disposition: "post-deploy" }, why });
+    const replay = [{ kind: "amend-requirement", requirement: "R5", text: "Backfill dry-run lists all affected historical charges with counts", why: "real run moves to R11" }, add("R11", Q, "live Stripe run"), add("R11", Q, "no-email guarantee in code"), add("R12", Q6, "binding decision R6")];
+    const comments = [{ body: BOT }, dec({ requirement: "R5", disposition: "post-deploy" }), dec({ requirement: "R6", disposition: "post-deploy" }), dec({ requirement: "R12", disposition: "post-deploy", quote: Q })];
+    for (let run = 0; run < 3; run++) {
+      const a = applyAmendments(frozen, dedupeAddRequirements(frozen, replay).amendments, ISS);
+      assert.deepEqual(a.problems, []);
+      const ad = applyRequirementDecisions(a.contract, comments);
+      const eff = deferChecklessPostDeploy(ad.contract).contract;
+      assert.deepEqual(eff.requirements.map((r) => r.id), ["R5", "R6", "R11"], "no renumbered R12+");
+      for (const r of eff.requirements) { assert.equal(r.disposition, "defer", r.id); assert.equal(r.bucket, ORCHESTRATOR_BUCKET, r.id); assert.equal(r.check, undefined, r.id); }
+      const pc = precheck({ contract: eff, result: { requirements: [], validation: [] }, changedFiles: ["scripts/backfill.py"], checkIds: new Set() });
+      assert.ok(!pc.failures.some((f) => f.kind === "check_unknown"), JSON.stringify(pc.failures));
+    }
+  });
+});

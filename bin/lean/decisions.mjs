@@ -81,7 +81,7 @@ export function parseDecisionComment(body, { issue = null } = {}) {
   } catch { return null; }
 }
 
-/** #5547: `<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy","why":"..."} -->` -> {requirement, disposition, why}; null for anything else (anchored records included). */
+/** #5547: `<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy","why":"...","quote":"..."} -->` -> {requirement, disposition, why, quote?}; null for anything else (anchored records included). */
 export function parseRequirementDecision(body) {
   const m = MARKER_RE.exec(String(body ?? "").split("\n", 1)[0]);
   if (!m) return null;
@@ -89,7 +89,8 @@ export function parseRequirementDecision(body) {
     const raw = JSON.parse(m[1]);
     const id = typeof raw?.requirement === "string" ? raw.requirement.trim() : "";
     if (!/^R\d+$/.test(id) || raw.disposition !== "post-deploy") return null;
-    return { requirement: id, disposition: "post-deploy", why: one(raw.why) };
+    const quote = one(raw.quote, 400); // #5773: the row's quote, so the decision survives a renumbering
+    return { requirement: id, disposition: "post-deploy", why: one(raw.why), ...(quote ? { quote } : {}) };
   } catch { return null; }
 }
 
