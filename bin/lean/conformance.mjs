@@ -1525,6 +1525,7 @@ export function autoPostDeployE2e(contract, only = null) {
   });
   return { contract: converted.length ? { ...contract, requirements } : contract, converted };
 }
+const DECISION_WHY = "operator FORGE:DECISION"; // #5773: the why prefix of a decided row (idempotence marker)
 /**
  * #5547: apply trusted structured operator decisions (`<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy"} -->`) to a
  * frozen contract: a deliver/defer row becomes a checkless post-deploy row (deferChecklessPostDeploy then routes it). Only comments after
@@ -1534,14 +1535,48 @@ export function applyRequirementDecisions(contract, comments = []) {
   const list = Array.isArray(comments) ? comments : [];
   const at = list.map((c) => String(c?.body ?? "").trimStart().startsWith("<!-- FORGE:CONTRACT")).lastIndexOf(true);
   const ds = list.slice(at + 1).map((c) => parseRequirementDecision(c?.body)).filter(Boolean);
+  const rows = Array.isArray(contract?.requirements) ? contract.requirements : [];
+  // #5773: a decision's quote wins over its id (a requeue may have renumbered the row); the id is the fallback
+  const nq = (q) => norm(q).replace(/\s+/g, " ").trim();
+  const target = (d) => {
+    const q = d.quote ? nq(d.quote) : "";
+    const byQuote = q ? rows.find((r) => nq(r?.quote) === q) ?? rows.find((r) => nq(r?.quote).includes(q)) : null; // exact before contains
+    return byQuote ?? rows.find((r) => r?.id === d.requirement) ?? null;
+  };
+  const decided = new Map();
+  for (const d of ds) { const r = target(d); if (r && !decided.has(r.id)) decided.set(r.id, d); }
   const applied = [];
-  const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
-    const d = ds.find((x) => x.requirement === r?.id);
-    if (!d || !["deliver", "defer"].includes(r.disposition)) return r;
+  const requirements = rows.map((r) => {
+    const d = decided.get(r?.id);
+    // #5773: a check-less post-deploy row (added by an amendment) is decided too; one with a check id keeps it, the check-id gate judges it
+    const open = ["deliver", "defer"].includes(r?.disposition) || (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r.check ?? "")));
+    if (!d || !open || String(r.why ?? "").startsWith(DECISION_WHY)) return r;
     applied.push(r.id);
-    return { ...r, e2e_tracked: true, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "operator decision: the run needs spend or a third-party host outside the lane", why: `operator FORGE:DECISION: tracked post-deploy by the orchestrator, needs spend or a third-party host${d.why ? ` (${d.why})` : ""} (#5547)` };
+    const { check: _check, engine_check: _engine, ...rest } = r; // #5773: a decided row is checkless; a check id it had is dropped
+    return { ...rest, e2e_tracked: true, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "operator decision: the run needs spend or a third-party host outside the lane", why: `${DECISION_WHY}: tracked post-deploy by the orchestrator, needs spend or a third-party host${d.why ? ` (${d.why})` : ""} (#5547)` };
   });
   return { contract: applied.length ? { ...contract, requirements } : contract, applied };
+}
+/**
+ * #5773: replayed amendments (priorAmendments plus the builder's re-emitted rows) keep one `add-requirement` per quote, the
+ * last, and drop one whose quote is already a row of `contract` (the frozen contract), so a requeue does not renumber the
+ * same row (#5365 renumbering still applies to distinct quotes). Other kinds pass through in order. Pure.
+ */
+export function dedupeAddRequirements(contract, amendments = []) {
+  const nq = (q) => norm(q).replace(/\s+/g, " ").trim();
+  const list = Array.isArray(amendments) ? amendments : [];
+  const frozenQuotes = new Set((contract?.requirements ?? []).map((r) => nq(r?.quote)).filter(Boolean));
+  const isAdd = (a) => a?.kind === "add-requirement" && typeof a?.requirement?.quote === "string" && nq(a.requirement.quote);
+  const last = new Map();
+  list.forEach((a, i) => { if (isAdd(a)) last.set(nq(a.requirement.quote), i); });
+  const dropped = [];
+  const kept = list.filter((a, i) => {
+    if (!isAdd(a)) return true;
+    const q = nq(a.requirement.quote);
+    if (frozenQuotes.has(q) || last.get(q) !== i) { dropped.push({ id: a.requirement.id, quote: a.requirement.quote }); return false; }
+    return true;
+  });
+  return { amendments: kept, dropped };
 }
 /** #5468: the row ids named by `e2e_row` failures when every failure is one; null otherwise (anything else blocks as before). */
 export function loneE2eRows(failures) {

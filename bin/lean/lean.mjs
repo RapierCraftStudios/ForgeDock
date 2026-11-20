@@ -22,7 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
@@ -2957,7 +2957,7 @@ export async function runCore(o) {
     let effective = frozen, review = null, lastAmend = "", resumes = 0, lastFailKey = null, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
-    let pendingDecisions = [], firstRounds = null, firstReply = null;
+    let pendingDecisions = [], firstRounds = null, firstReply = null, lastDecided = "";
     let baseTree = null; // #4695: the base file list, read once and only when a decision amendment needs it
     let genPaths = null; // forge#4519: maintenance.generated_paths from hotspots.sh (plan facts; one config-only call without them, never on light lanes)
     async function amend() {
@@ -2967,8 +2967,16 @@ export async function runCore(o) {
       const addedPaths = wantsDecision ? String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").filter(Boolean) : [];
       const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
       const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
-      const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
+      const dd = dedupeAddRequirements(frozen, [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own]); // #5773: a requeue does not renumber a re-added row
+      const all = dd.amendments;
+      if (dd.dropped.length) T.decisions.push(`add-requirement ${dd.dropped.map((x) => x.id).join(", ")} dropped: its quote is already a contract row or re-added later (#5773)`);
       const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null, addedPaths, defaultWhy: engineWhy });
+      const ad = applyRequirementDecisions(a.contract, trustedComments); // #5773: the operator's decision wins over replayed amendments and reaches amendment-added rows
+      if (ad.applied.length) {
+        a.contract = deferChecklessPostDeploy(ad.contract).contract;
+        const k = ad.applied.join(", ");
+        if (k !== lastDecided) { lastDecided = k; T.decisions.push(`FORGE:DECISION applied to the amended contract: ${k} tracked post-deploy`); }
+      }
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;

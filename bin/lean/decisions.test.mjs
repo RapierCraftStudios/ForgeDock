@@ -97,4 +97,8 @@ describe("#5547 requirement decisions", () => {
     assert.equal(parseRequirementDecision('<!-- FORGE:DECISION {"choice":"x","anchors":["a.js"]} -->'), null);
     assert.equal(parseRequirementDecision("FORGE:DECISION prose"), null);
   });
+  it("#5773 an optional quote is returned; without it the decision parses as before", () => {
+    assert.deepEqual(parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R12","disposition":"post-deploy","quote":"  the real run   creates invoices "} -->'), { requirement: "R12", disposition: "post-deploy", why: "", quote: "the real run creates invoices" });
+    assert.equal("quote" in parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy"} -->'), false);
+  });
 });
