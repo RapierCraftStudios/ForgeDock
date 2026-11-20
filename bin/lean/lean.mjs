@@ -5,6 +5,7 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
+import { releaseMergeHold } from "./release-merge-hold.mjs";
 import { issuePrMarker, supersedeOlderPrs, openPrBlockingClose } from "./orphan-pr.mjs";
 import { resolveFindingLabel } from "./findinglabel.mjs";
 import { spawnSync } from "node:child_process";
@@ -319,7 +320,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -3978,6 +3979,19 @@ export async function runCore(o) {
       let dcoFailed = [];
       try { dcoFailed = ((lastStates ?? await io.checkStates?.(pr)) ?? []).filter((x) => /\bdco\b/i.test(String(x?.name ?? "")) && x.state === "failure" && (!x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head)))); } catch { dcoFailed = []; }
       if (dcoFailed.length) return await needsHuman(`DCO check failed on PR #${pr} (${[...new Set(dcoFailed.map((x) => x.name))].join(", ")}); a commit lacks a sign-off or has a placeholder author, which would block the release. Nothing merged.`, OUTCOME_CODES.CI_DCO);
+      // #5709: a merge into the integration branch restarts CI of an open release PR (head = this branch): hold until it ends
+      let heldSince = null, holdPolicy = null;
+      try { const { parsePolicy, POLICY_PATH } = await import("./release-config.mjs"); const d = defaults.find(Boolean); if (d) holdPolicy = parsePolicy(String(await git(["show", `origin/${d}:${POLICY_PATH}`]))).policy ?? null; } catch { holdPolicy = null; } // no policy file: default on
+      for (;;) {
+        const target = String(resumed?.base ?? lane ?? "");
+        const hold = await releaseMergeHold({ gh: ghc, repo, branch: target, defaults, enabled: holdMergesDuringReleaseCi, policy: holdPolicy, readActive: async () => { const { readActive } = await import("./release-ledger.mjs"); return readActive({ io, repo, credential: "driver" }); } });
+        if (!hold.held) break;
+        if (heldSince === null) { heldSince = now(); T.merge = [policyText, "merge.held_release"]; T.decisions.push(`merge.held_release: ${hold.reason}; PR #${pr} stays open and green`); ev({ event: "MERGE_HELD_RELEASE", pr, kind: hold.kind, releasePr: hold.pr ?? null }); }
+        if (now() - heldSince >= ciMaxMinutes * 60000) return await finish("ci-pending", `PR #${pr} merge held ${ciMaxMinutes} min (${hold.reason}); rerun resumes the PR`, { pr });
+        onProgress({ event: "phase_paused", phase: "merge", detail: `merge.held_release: ${hold.reason}` });
+        await sleep(30000);
+        await renew();
+      }
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
       try {

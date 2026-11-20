@@ -15,11 +15,11 @@ import { UNSKIPPABLE_CLASSES, isUnskippable, parseFlakeConfig, canQuarantine } f
 
 export const CONTROL_SCHEMA = "forgedock.release.control/v1";
 export const CONTROL_MARKER = "FORGE:CONTROL";
-export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote", "rollback", "regate"];
+export const VERBS = ["hold", "resume", "cancel", "lane", "exempt", "freeze", "unfreeze", "demote", "promote", "rollback", "regate", "merge-hold", "merge-release"];
 export { UNSKIPPABLE_CLASSES as UNSKIPPABLE };
 export const EXEMPT_MAX_H = { skip: 24, quarantine: 14 * 24 };
 export const LANES = ["train", "release", "p0", "exclude"];
-const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes", "rollbacks", "regates"];
+const OWNED = ["holds", "cancelled", "lanes", "exemptions", "freeze", "gateModes", "rollbacks", "regates", "mergeHold"];
 export const DEMOTE_MAX_H = 30 * 24;
 const BREAK_GLASS = /^(override_freeze|acknowledge_hotfix_revert|override_.*|acknowledge_.*)$/;
 
@@ -81,6 +81,8 @@ export async function runControl(verb, argv, ctx) {
       if (verb === "resume") delete next[id]; else next[id] = { reason, actor, at };
       return { patch: { [key]: next }, before, after: next[id] ?? null };
     };
+  } else if (verb === "merge-hold" || verb === "merge-release") { // #5709: a manual hold on lane merges into the integration branch
+    apply = (a) => ({ patch: { mergeHold: verb === "merge-hold" ? { reason, actor, at } : null }, before: a.mergeHold ?? null, after: verb === "merge-hold" ? { reason, actor, at } : null });
   } else if (verb === "lane") {
     const force = flagOf(argv, "--force");
     if (!LANES.includes(force)) return fail(`lane: --force must be one of ${LANES.join("|")}`);

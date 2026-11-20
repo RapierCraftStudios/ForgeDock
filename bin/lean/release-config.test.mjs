@@ -179,4 +179,9 @@ describe("features.flag_policy (#5571)", () => {
     for (const v of ["require", "warn", "off"]) assert.deepEqual(check(OK + `features: {flag_policy: ${v}}\n`), [], v);
     assert.match(check(OK + "features: {flag_policy: maybe}\n").join(), /flag_policy/);
   });
+
+  it("release.hold_merges_during_release_ci is a boolean (#5709)", () => {
+    for (const v of ["true", "false"]) assert.deepEqual(check(OK + `release: {hold_merges_during_release_ci: ${v}}\n`), [], v);
+    assert.match(check(OK + "release: {hold_merges_during_release_ci: maybe}\n").join(), /hold_merges_during_release_ci/);
+  });
 });

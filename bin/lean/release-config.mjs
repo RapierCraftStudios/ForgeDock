@@ -38,6 +38,7 @@ const PIPELINE = obj({ workflow: S, trigger: en("push", "dispatch"), inputs: { t
 export const POLICY_SCHEMA = obj({
   schema: { t: "integer", e: [1] },
   branches: obj({ default: S, integration: SN, train: S, release: S, hotfix: S }),
+  release: obj({ hold_merges_during_release_ci: B }), // #5709: default true (applied by release-merge-hold.mjs callers)
   trust: obj({ actors: list(), require_verified_commits: B }),
   state: obj({ ledger_prefix: S, lease_ttl_s: N, heartbeat_s: N }),
   units: { t: "map", v: obj({ paths: list(), image: SN, criticality: en("low", "medium", "high"), tests: list(), verify: list(), service_pipeline: B, single_host_ok: B, dockerfile: SN, surface: en("service", "web", "edge") }) },

@@ -186,4 +186,19 @@ describe("release control regate verb (#5584)", () => {
     assert.match((await runControl("regate", [RID, "--ref", "f"], base(w))).error, /--reason is required/);
     assert.match((await runControl("regate", [RID, "--reason", "r"], base(w))).error, /no release/);
   });
+
+  it("merge-hold / merge-release set and clear a manual hold, audited (#5709)", async () => {
+    const w = world();
+    assert.equal((await runControl("merge-hold", [], base(w))).error, "merge-hold: --reason is required");
+    const h = await runControl("merge-hold", ["--reason", "release CI"], base(w));
+    assert.equal(h.ok, true);
+    assert.equal(w.active.mergeHold.reason, "release CI");
+    assert.equal(h.entry.verb, "merge-hold"); assert.equal(h.entry.before, null); assert.equal(h.entry.after.reason, "release CI");
+    assert.match(w.controls, /"verb":"merge-hold"/);
+    const r = await runControl("merge-release", ["--reason", "done"], base(w));
+    assert.equal(r.ok, true);
+    assert.equal(w.active.mergeHold ?? null, null);
+    assert.equal(r.entry.before.reason, "release CI");
+    assert.match(w.controls, /"verb":"merge-release"/);
+  });
 });

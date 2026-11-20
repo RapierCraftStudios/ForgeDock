@@ -143,6 +143,12 @@
     "timeout": 120,
     "for": "7d"
   },
+  "release-merge-hold-no-restarts": {
+    "run": "test \"$(gh pr list --repo \"$(gh repo view --json nameWithOwner -q .nameWithOwner)\" --state merged --base main --head staging --limit 5 --json number | node -e 'process.stdout.write(String(JSON.parse(require(\"fs\").readFileSync(0,\"utf8\")).length))')\" -ge 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "30d"
+  },
   "shellcheck-recipe-no-park": {
     "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|contains(\"lacks shellcheck\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
     "pass": "exit 0",

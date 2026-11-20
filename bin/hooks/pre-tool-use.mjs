@@ -824,6 +824,10 @@ async function checkPrTarget(command) {
     if (head && /^staging$/.test(head)) {
       return null; // deploy flow — allowed
     }
+    // #5709: a snapshot release branch (release/<id>, cut by the snapshot-release path) is also a deploy head.
+    if (head && /^release\/[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9._-]+)*$/.test(head)) {
+      return null;
+    }
 
     return [
       `[ForgeDock] BLOCKED: PR targets "${base}" — pipeline rule violation.`,
