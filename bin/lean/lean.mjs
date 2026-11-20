@@ -29,7 +29,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { hasRecipe, installLaneTools } from "../pool/lane-tools.mjs";
+import { hasRecipe, installLaneTools, RECIPES } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -2437,7 +2437,7 @@ export async function runCore(o) {
             tm = notOwned(toolMisses(await preflightValidates(frozen).catch(() => [])));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           }
-          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES).`, OUTCOME_CODES.ENV_TOOL_MISSING);
+          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES). Known recipes: ${Object.keys(RECIPES).join(", ")}.`, OUTCOME_CODES.ENV_TOOL_MISSING);
         }
         if (tm.tools.length) {
           ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });

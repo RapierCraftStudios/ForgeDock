@@ -934,6 +934,7 @@ describe("core work-on", () => {
       const txt = w.comments.map((c) => c.body ?? c).join("\n");
       assert.match(txt, /lacks zzcheck, and no lane_tools recipe exists for it/);
       assert.match(txt, /execution\.lane_tools/);
+      assert.match(txt, /Known recipes: .*shellcheck/);
     });
     it("a failed in-sandbox install ends the lane with the stderr tail", async () => {
       const w = world({ contract: withTool("promtool") }); probing(w, "promtool", () => false);
