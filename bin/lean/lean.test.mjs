@@ -2927,6 +2927,19 @@ describe("merge_wait policy", () => {
         assert.ok(written.validation.some((x) => x.id === "V1" && x.rerun === true && x.exit === 0), "the re-run row is recorded");
         assert.ok(traj(w)[0].includes("the engine re-ran"));
       });
+
+      it("carries the recorded row forward and re-runs only the validate that has none", async () => {
+        const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "node test/second.test.js" }] };
+        const v1 = [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }];
+        const w = ciWorld({ contract, validation: v1, resumeValidation: [] }), dir = tmpDir("core-");
+        const base = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return base ? base(a) : { rc: 0, output: "" }; };
+        const r = await fixRun(w, dir);
+        assert.equal(r.terminalReason, "merged", r.reason);
+        const written = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+        assert.deepEqual(written.validation.map((x) => [x.id, x.carried === true, x.rerun === true]), [["V1", true, false], ["V2", false, true]]);
+        assert.equal(w.ran.filter((c) => /second/.test(c)).length >= 1, true, "V2 was re-run by the engine");
+        assert.equal(w.ran.filter((c) => /second/.test(c) === false && /foo/.test(c)).length, 0, "V1 was not re-run");
+      });
     });
 
     describe("#5692 CI events start the fix round before the check completes", () => {
