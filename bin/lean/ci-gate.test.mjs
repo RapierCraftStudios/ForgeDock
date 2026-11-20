@@ -3,9 +3,7 @@
 // #5760: CI budget gate fixtures (in-memory base/head workflow maps).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { parseCiBudget, parseAnnotation, scanWorkflow, singleTestFile, singleTestFileSteps, ciGateFindings, netCiChange, ciBudgetFailures, ciGateCli } from "./ci-gate.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 
@@ -188,7 +186,7 @@ describe("config, net change and wiring", () => {
   });
   it("the CLI prints CI_NET unknown on a bad ref and usage on bad args", async () => {
     const out = [];
-    const cwd = mkdtempSync(join(tmpdir(), "ci-gate-"));
+    const cwd = tmpDir("ci-gate-");
     assert.equal(await ciGateCli(["net", "--base", "nope", "--head", "nope2"], { print: (s) => out.push(s), cwd }), 0);
     assert.match(out[0], /^CI_NET: unknown \(/);
     assert.equal(await ciGateCli(["net"], { print: (s) => out.push(s) }), 2);
