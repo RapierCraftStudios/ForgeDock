@@ -1370,7 +1370,37 @@ const AUTH_FAILURE_RE = /Failed to authenticate|authentication_error|OAuth token
 export function detectAuthFailure(stdout, output = "") {
   const env = parseCliEnvelope(stdout);
   if (env) return env.is_error === true && typeof env.result === "string" && AUTH_FAILURE_RE.test(env.result);
+  // forge#5762: a JSON envelope cut off before `result` is not evidence of a login failure.
+  if (typeof stdout === "string" && stdout.trimStart().startsWith("{")) return false;
   return typeof output === "string" && AUTH_FAILURE_RE.test(output);
+}
+
+const MAX_CLI_RESULT_LEN = 500;
+/** forge#5762: masks credential-looking tokens before CLI text is stored in a lane or run log. */
+export function redactCliText(text) {
+  return String(text)
+    .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, "$1 [redacted]")
+    .replace(/\b((?:access|refresh|oauth|api)[_-]?(?:token|key)|authorization)(["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, "$1$2[redacted]");
+}
+
+/**
+ * forge#5762: the facts a failed CLI run reports: `result` and `is_error` (redacted, capped) and whether the CLI never
+ * reached the API (`duration_api_ms` 0, read from the raw text when the envelope is cut off). Never throws.
+ * @returns {{cliResult?:string, cliIsError?:boolean, cliApiMs?:number}}
+ */
+export function cliFailureFacts(stdout) {
+  const env = parseCliEnvelope(stdout);
+  const facts = {};
+  if (env) {
+    if (typeof env.result === "string") facts.cliResult = sanitizeAndCap(redactCliText(env.result), MAX_CLI_RESULT_LEN);
+    if (typeof env.is_error === "boolean") facts.cliIsError = env.is_error;
+    if (typeof env.duration_api_ms === "number") facts.cliApiMs = env.duration_api_ms;
+  } else if (typeof stdout === "string") {
+    const m = /"duration_api_ms"\s*:\s*(\d+)/.exec(stdout.slice(0, 4096));
+    if (m) facts.cliApiMs = Number(m[1]);
+  }
+  return facts;
 }
 
 /**
@@ -1873,6 +1903,9 @@ export function runCliBackend({
       // forge#5168: a failed login (never when the usage limit already matched,
       // which keeps precedence) lets the lane defer as `backend.auth`.
       else if (detectAuthFailure(stdout, output)) err.authFailure = true;
+      // forge#5762: keep the CLI's own result text; an exit that never reached the API and is no login or limit is transient.
+      Object.assign(err, cliFailureFacts(stdout));
+      if (!err.usageLimit && !err.authFailure && err.cliApiMs === 0 && result.status === 1) err.cliFailed = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so

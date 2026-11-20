@@ -3947,6 +3947,22 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
   });
 
+  it("#5762 a CLI exit that never reached the API defers backend.cli_failed with the result text and account", async () => {
+    const w = world(); projector(w, null);
+    const cliErr = Object.assign(new Error("claude CLI exited with status 1. Output: {\"duration_api_ms\":0"), { code: "CLI_BACKEND_FAILED", cliFailed: true, cliResult: "spawn EAGAIN", cliIsError: true });
+    const orig = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") throw cliErr; return orig(c); };
+    const prev = process.env.TOKENBATON_ACCOUNT; process.env.TOKENBATON_ACCOUNT = "3";
+    let r; try { r = await run(w); } finally { if (prev === undefined) delete process.env.TOKENBATON_ACCOUNT; else process.env.TOKENBATON_ACCOUNT = prev; }
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "backend.cli_failed");
+    assert.equal(r.retryInSeconds, 120);
+    assert.equal(r.backendId, undefined, "no account hold");
+    assert.match(r.detail, /account 3/);
+    assert.match(r.detail, /spawn EAGAIN/);
+    assert.equal(r.cliResult, "spawn EAGAIN");
+    assert.equal(r.account, "3");
+  });
+
   it("#5168 an error that is both a usage limit and auth-like stays rate_limited", async () => {
     const w = world();
     failFirstBuilder(w, limitErr({ authFailure: true, resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm" }));
