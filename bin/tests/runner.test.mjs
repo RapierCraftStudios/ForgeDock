@@ -63,6 +63,8 @@ import {
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  redactCliText,
+  cliFailureFacts,
   engineConfigKey,
   sanitizeCliModel,
   sanitizeMaxTurns,
@@ -4042,6 +4044,11 @@ describe("#5762 CLI failure facts and err.cliFailed", () => {
     const e = run(JSON.stringify({ duration_api_ms: 0, is_error: true, result: "Please run /login" }));
     assert.equal(e.authFailure, true);
     assert.equal(e.cliFailed, undefined);
+  });
+  it("redactCliText masks bearer tokens and cliFailureFacts never throws on junk", () => {
+    assert.doesNotMatch(redactCliText("Authorization: Bearer abcdefghijklmnop"), /abcdefghijklmnop/);
+    assert.deepEqual(cliFailureFacts(undefined), {});
+    assert.equal(cliFailureFacts('{"duration_api_ms":0,').cliApiMs, 0);
   });
   it("an envelope cut off before result is cliFailed (api ms 0), never auth", () => {
     const e = run('{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"x","total_cost_usd":0,');
