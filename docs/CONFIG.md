@@ -925,6 +925,8 @@ One row per key path of `POLICY_SCHEMA` (`bin/lean/release-config.mjs`). `<name>
 | `branches.train` | string | none | Branch prefix or name for train waves. |
 | `branches.release` | string | none | Branch prefix or name for release waves. |
 | `branches.hotfix` | string | none | Branch prefix or name for hotfix (P0) branches. |
+| `release` | object | - | Release-merge settings. |
+| `release.hold_merges_during_release_ci` | boolean | `true` | While a release PR (head = the integration branch, base = the default branch) has CI running, lane merges into the integration branch wait (`merge.held_release`) so they do not restart that CI; `false` disables the hold. |
 | `trust` | object | - | Who the pipeline believes. |
 | `trust.actors` | array | none | Logins whose control comments and commits are trusted. |
 | `trust.require_verified_commits` | boolean | off | Refuse release commits that are not verified. |
