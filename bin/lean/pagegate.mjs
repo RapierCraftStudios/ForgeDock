@@ -4,7 +4,7 @@
  * #5428: the page gate. A diff that adds or changes a public page needs an approved design (FORGE:DESIGN_SPEC), an SEO intent/ICP brief
  * and a GEO brief in the contract (`page_gate`), and passes deterministic checks (sitemap, metadata, canonical, structured data, internal
  * links, forbidden raw-JSON/null-sample patterns). forge.yaml `pages: {enabled, routes, icp_doc, require, sitemap, metadata_patterns,
- * canonical_patterns, structured_data_patterns, forbid_patterns, lint}`. On by default only for repos with Next `app/**\/page.*` files;
+ * canonical_patterns, structured_data_patterns, forbid_patterns, lint, capture, viewports}`. On by default only for repos with Next `app/**\/page.*` files;
  * `enabled: false` or no pages = off. Deterministic, 0 LLM calls; core stays repo-agnostic (#1347), like docsgate.mjs.
  */
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -42,6 +42,9 @@ export function parsePagesConfig(raw, { hasAppPages = false } = {}) {
     sitemap: pick(obj.sitemap, DEFAULTS.sitemap).map(norm), metadata_patterns: pick(obj.metadata_patterns, DEFAULTS.metadata),
     canonical_patterns: pick(obj.canonical_patterns, DEFAULTS.canonical), structured_data_patterns: pick(obj.structured_data_patterns, DEFAULTS.structured),
     forbid_patterns: pick(obj.forbid_patterns, DEFAULTS.forbid), lint: typeof obj.lint === "string" && obj.lint.trim() ? obj.lint.trim() : null,
+    // #5770: the engine-run capture command (renders the changed routes on a browser host) and the viewports it must cover
+    capture: typeof obj.capture === "string" && obj.capture.trim() ? obj.capture.trim() : null,
+    viewports: (() => { const v = [...new Set(list(obj.viewports).map(Number).filter((n) => Number.isInteger(n) && n > 0))]; return v.length ? v : [390, 1440]; })(),
   };
 }
 
@@ -152,6 +155,12 @@ export function addedByFile(diff) {
   return out;
 }
 
+const SHOT_RE = /^(?:https?:\/\/\S+|[\w@~./+-]+\.(?:png|jpe?g|webp|gif))$/i;
+/** #5770: a screenshot entry is an http(s) link or an image path (never free text); a path must exist when `exists` is given. */
+export const isShotRef = (s, exists = null) => SHOT_RE.test(s) && (/^https?:/i.test(s) || !exists || Boolean(exists(s)));
+/** The configured viewports no valid screenshot entry names. */
+export const viewportsMissing = (shots, viewports, exists = null) => viewports.filter((v) => !shots.some((s) => isShotRef(s, exists) && new RegExp(`(?:^|\\D)${v}(?:\\D|$)`).test(s)));
+
 /** URL path served by a Next page file, or null. */
 export function pageRouteOf(file) {
   const m = /(?:^|\/)app\/(?:(.*)\/)?page\.[cm]?[jt]sx?$/.exec(String(file ?? ""));
@@ -164,7 +173,7 @@ const LINK_RE = /href\s*=\s*\{?\s*["'`](\/[^"'`#?\s{}$]*)/g;
  * Blocking failures (conformance.unimplemented) for the pages a diff adds or changes. `readFile(path)` returns worktree content or "";
  * `tracked` the repo's files; `designApproved` true/false/null (unknown skips); `run({command})` -> {rc, output} for `pages.lint`.
  */
-export async function pageFailures({ cfg, files = [], diff = "", result = null, readFile = () => "", tracked = null, designApproved = null, run = null, added = null }) {
+export async function pageFailures({ cfg, files = [], diff = "", result = null, readFile = () => "", tracked = null, designApproved = null, run = null, added = null, captures = null, exists = null }) {
   // #5648: generated pages are exempt; a modified copy-only page takes the visual-check path (no spec, no new-page briefs)
   const kind = (f) => pageChange(f, { added, diff, threshold: cfg?.rewrite_threshold, generated: cfg?.generated, readFile });
   const pages = pageFiles(files, cfg, { readFile }).filter((f) => kind(f) !== "generated"), dOnly = designOnlyFiles(files, cfg).filter((f) => kind(f) !== "generated"), uiFiles = [...pages, ...dOnly];
@@ -174,8 +183,10 @@ export async function pageFailures({ cfg, files = [], diff = "", result = null, 
   const row = (kind, detail) => out.push({ code: C, kind, detail });
   if (cfg.require.includes("design")) {
     if (designApproved === false && specFiles.length) row("page_design_missing", `${specFiles.slice(0, 3).join(", ")} is a public page but the issue has no approved FORGE:DESIGN_SPEC: run /design before building`);
-    const shots = list(j.screenshots).join(" ");
-    if (!/390/.test(shots) || !/1440/.test(shots)) row("page_visual_missing", `${uiFiles.slice(0, 3).join(", ")}: the result's page_gate.screenshots must name a 390px and a 1440px visual check attached to the PR`);
+    // #5770: the engine's capture (screenshots it produced and uploaded) counts like builder evidence; entries must be links or existing paths
+    const vps = cfg.viewports?.length ? cfg.viewports : [390, 1440], shots = [...list(j.screenshots), ...list(captures?.screenshots)];
+    if (captures?.errors?.length) row("page_visual_failed", `${uiFiles.slice(0, 3).join(", ")}: the engine's visual capture failed: ${captures.errors.slice(0, 5).map((e) => `${e.route ?? "?"}${e.viewport ? `@${e.viewport}` : ""}: ${e.error}`).join("; ")}`);
+    else if (viewportsMissing(shots, vps, exists).length) row("page_visual_missing", `${uiFiles.slice(0, 3).join(", ")}: page_gate.screenshots must be links or existing paths to a ${vps.join("px and a ")}px visual check attached to the PR (free text does not count)`);
   }
   const all = [...new Set([...(tracked ?? []), ...files].map(norm))];
   if (briefPages.length && cfg.require.includes("seo_intent")) {

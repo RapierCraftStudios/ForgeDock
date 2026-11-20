@@ -10,7 +10,7 @@ import { resolveFindingLabel } from "./findinglabel.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
-import { hostname as osHostname } from "node:os";
+import { hostname as osHostname, tmpdir as osTmpdir } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { testAdequacyRows, testAdequacyFailures, testAdequacyTelemetry, adequacyCounts, regressionRan } from "./testadequacy.mjs";
 import { readSelfReview, compareSelfReview, firstReviewRecord, selfCheckFailures } from "./selfreview.mjs";
@@ -68,6 +68,7 @@ import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs
 import { docsFailures } from "./docsgate.mjs";
 import { ciBudgetFailures, parseCiBudget } from "./ci-gate.mjs";
 import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
+import { changedRoutes, captureVisualCheck, publishToRef, visualMarkdown } from "./page-capture.mjs"; // #5770
 import { uiBuildRule, uiIssue, uiChanged } from "./ui-quality.mjs"; // #5330
 import { designGate, designGateNote, designFailures, specApproved as designSpecOk } from "./design-gate.mjs"; // #5330
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
@@ -370,6 +371,7 @@ export async function runCore(o) {
   /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
   const ghw = (args) => retrying(() => ghc(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
   const git = (args, o = {}) => io.git(args, { cwd: wt, ...o });
+  let pageVisual = null; // #5770: the engine's visual capture {sha, screenshots, errors, rows}, kept for the page gate and the PR body
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
   let usageUnknown = false, inflight = null; // #5334: a killed session streamed nothing; the builder call in flight (flushed when a signal ends the run)
@@ -3232,7 +3234,13 @@ export async function runCore(o) {
       const docsFail = docsConfig ? await docsFailures({ cfg: docsConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5428: forge.yaml pages: a public page needs design, SEO and GEO briefs and passes the deterministic page checks; unset = no check
       const addedNow = String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); // #5648: new vs modified pages
-      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      // #5770: forge.yaml pages.capture: the engine renders the changed routes (no browser in the builder session) and uploads the shots; once per head
+      const pageRoutes = pagesConfig?.capture && io.runCommand ? changedRoutes(files, pagesConfig, { readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } }) : [];
+      if (pageRoutes.length) {
+        const headSha = String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim(), capDir = join(osTmpdir(), `forge-visual-${runId}`) /* outside the worktree: the lane commits .forge-lean */, runIn = ({ command, env }) => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: { ...laneEnv(), ...env } });
+        if (pageVisual?.sha !== headSha || pageVisual.errors.length) pageVisual = { sha: headSha, ...(await captureVisualCheck({ cfg: pagesConfig, routes: pageRoutes, dir: capDir, run: runIn, read: (p) => { try { return readFileSync(p); } catch { return null; } }, publish: (fs_) => publishToRef({ run: runIn, dir: capDir, files: fs_, slug: repo, runId }) })) };
+      }
+      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, captures: pageVisual, exists: (p) => existsSync(join(wt, p)), added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5330: forge.yaml design.routes (opt-in, blocking only): a user-visible page needs an approved spec and passes the deterministic visual critique
       const designFail = designFailures({ cfg: designConfig, files, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
       // #5284: forge.yaml topology.prod_parity: declared production-only surfaces this diff touches need a check result or a justification
@@ -3534,14 +3542,14 @@ export async function runCore(o) {
     laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", withLink(isSplit ? (o.refactorModule ?? (await import("./refactor.mjs"))).renderSplitPrBody({ issue, ...split })
-        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked }))])).trim();
+        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked, visual: visualMarkdown(pageVisual, pagesConfig?.viewports) }))])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
     await emit({ event: "PR_OPENED", pr });
     if (!resumed?.pr && !adoptPr) { try { const old = await supersedeOlderPrs({ repo, io: { gh: ghw }, issue, newPr: pr }); if (old.length) T.decisions.push(`Superseded older open PR(s) ${old.map((n) => `#${n}`).join(", ")} (one live PR per issue)`); } catch { /* best effort: the orphan sweep closes it later */ } } // #5505
     if (resumed?.pr && closing.tracked.length) { // an existing PR still has to link the tracking issues visibly
-      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", withLink(renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked }))]); }
+      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", withLink(renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked, visual: visualMarkdown(pageVisual, pagesConfig?.viewports) }))]); }
       catch (e) { e.deferCode = OUTCOME_CODES.FOLLOWUP_UNAVAILABLE; e.deferDetail = `could not link the tracking issues on PR #${pr}; nothing merged, rerun to retry`; throw e; }
     }
     if (degraded) {
