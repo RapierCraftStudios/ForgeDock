@@ -63,6 +63,8 @@ import {
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  redactCliText,
+  cliFailureFacts,
   engineConfigKey,
   sanitizeCliModel,
   sanitizeMaxTurns,
@@ -4015,6 +4017,43 @@ describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
     const e = run(JSON.stringify({ is_error: false, result: "You've hit your session limit \u00b7 resets 3pm (UTC)" }));
     assert.equal(e.resetAtEpochMs, undefined);
     assert.equal(e.usageLimit, undefined);
+  });
+});
+
+describe("#5762 CLI failure facts and err.cliFailed", () => {
+  const run = (stdout) => {
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 5762", args: ["5762"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude",
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr: "", error: undefined }),
+      });
+    } catch (err) { thrown = err; }
+    return thrown;
+  };
+  it("keeps the redacted result and is_error; a non-login result with duration_api_ms 0 is cliFailed, not auth", () => {
+    const e = run(JSON.stringify({ duration_api_ms: 0, is_error: true, result: "spawn failed token=sk-ant-abcdef123456789" }));
+    assert.equal(e.cliIsError, true);
+    assert.match(e.cliResult, /spawn failed/);
+    assert.doesNotMatch(e.cliResult, /abcdef123456789/);
+    assert.equal(e.cliFailed, true);
+    assert.equal(e.authFailure, undefined);
+  });
+  it("a login result stays authFailure and is not cliFailed", () => {
+    const e = run(JSON.stringify({ duration_api_ms: 0, is_error: true, result: "Please run /login" }));
+    assert.equal(e.authFailure, true);
+    assert.equal(e.cliFailed, undefined);
+  });
+  it("redactCliText masks bearer tokens and cliFailureFacts never throws on junk", () => {
+    assert.doesNotMatch(redactCliText("Authorization: Bearer abcdefghijklmnop"), /abcdefghijklmnop/);
+    assert.deepEqual(cliFailureFacts(undefined), {});
+    assert.equal(cliFailureFacts('{"duration_api_ms":0,').cliApiMs, 0);
+  });
+  it("an envelope cut off before result is cliFailed (api ms 0), never auth", () => {
+    const e = run('{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"x","total_cost_usd":0,');
+    assert.equal(e.cliFailed, true);
+    assert.equal(e.authFailure, undefined);
   });
 });
 

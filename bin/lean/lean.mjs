@@ -30,7 +30,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { hasRecipe, installLaneTools } from "../pool/lane-tools.mjs";
+import { hasRecipe, installLaneTools, RECIPES } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -148,6 +148,24 @@ export function builderFixable(failures) {
 }
 /** #5168: retry-in for a `backend.auth` deferral; the batch holds the account for it (an operator `--set-env` fix runs under a new identity). */
 const AUTH_RETRY_SECONDS = 900;
+/** #5762: retry-in for a `backend.cli_failed` deferral (transient, not an account condition). */
+const CLI_FAILED_RETRY_SECONDS = 120;
+/** #5762: the account number (digits only) a lane used: the rotator's capture, else TOKENBATON_ACCOUNT / CLAUDE_CONFIG_DIR `.claude-<n>`; null when unknown. */
+export function laneAccountNumber(env = process.env, account = null) {
+  if (account != null && /^\d+$/.test(String(account))) return String(account);
+  if (/^\d+$/.test(env?.TOKENBATON_ACCOUNT ?? "")) return env.TOKENBATON_ACCOUNT;
+  const m = /[\\/]\.claude-(\d+)[\\/]?$/.exec(env?.CLAUDE_CONFIG_DIR ?? "");
+  return m ? m[1] : null;
+}
+/** #5762: the CLI result/is_error text and account carried on a deferral and its RUN_TERMINAL. */
+function cliDeferFacts(e, account) {
+  const acct = laneAccountNumber(process.env, account);
+  return { ...(e?.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e?.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(acct ? { account: acct } : {}) };
+}
+function cliDetail(e, account) {
+  const acct = laneAccountNumber(process.env, account);
+  return ` [${acct ? `account ${acct}; ` : ""}is_error=${e?.cliIsError ?? "?"}; result=${e?.cliResult != null ? JSON.stringify(e.cliResult) : "none"}]`;
+}
 /** #4323/#4334: precheck failure codes that are environment errors (state "environment"), never a builder resume. */
 const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND]);
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
@@ -632,7 +650,8 @@ export async function runCore(o) {
     }
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
-    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
+    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.cliResult != null ? { cli_result: extra.cliResult } : {}), ...(typeof extra.cliIsError === "boolean" ? { cli_is_error: extra.cliIsError } : {}), ...(extra.account ? { account: extra.account } : {}), // #5762
+      ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
       ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
@@ -847,8 +866,11 @@ export async function runCore(o) {
     return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
-  const authDeferral = (e) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator),
-    deferDetail: `claude CLI authentication failed (login expired or invalid); held until the login is fixed: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
+  const authDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator), ...cliDeferFacts(e, account),
+    deferDetail: `claude CLI authentication failed (login expired or invalid); held until the login is fixed${cliDetail(e, account)}: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
+  /** #5762: a claude exit that never reached the API and was no login failure: a short capped retry, no account hold. */
+  const cliFailedDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_CLI_FAILED, retryInSeconds: CLI_FAILED_RETRY_SECONDS, ...cliDeferFacts(e, account),
+    deferDetail: `claude CLI exited without reaching the API${cliDetail(e, account)}; retried shortly: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
   /** #5236: no account has room: the lane ends deferred `quota.exhausted` (earliest reset) and emits QUOTA_EXHAUSTED, never a spawn or a far pause. */
   const exhaustedStop = (e, x, role) => { ev({ event: "QUOTA_EXHAUSTED", phase: role, earliestReset: x.earliestReset }); return exhaustedDeferral(e, { earliestReset: x.earliestReset, backendId: laneBackendId(process.env, rotator), now: now() }); };
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
@@ -873,7 +895,8 @@ export async function runCore(o) {
       catch (e) {
         watch?.stop(); watch?.refresh(); // #5268: the account the shim exec'd, read before the limited child is gone or now
         let epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
-        if (e?.authFailure === true && e.usageLimit !== true && epoch === null) { const x = smartRotator ? poolExhausted(rotator, laneLimited) : null; throw x ? exhaustedStop(e, x, args.role) : authDeferral(e); } // #5236: an auth failure with no account room is exhaustion // #5168: an account condition, never engine-error
+        if (e?.authFailure === true && e.usageLimit !== true && epoch === null) { const x = smartRotator ? poolExhausted(rotator, laneLimited) : null; throw x ? exhaustedStop(e, x, args.role) : authDeferral(e, account); } // #5236: an auth failure with no account room is exhaustion // #5168: an account condition, never engine-error
+        if (e?.cliFailed === true && e.usageLimit !== true && epoch === null) throw cliFailedDeferral(e, account); // #5762
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
         if (smartRotator) { // #5205: exclude the limited account and relaunch the same args (resume kept) pinned to another, at once
           if (account !== null) { const until = epoch !== null && epoch > now() ? epoch : now() + DEFAULT_SESSION_LIMIT_WAIT_MS; laneLimited.set(account, until); try { rotator.markLimited(account, until); } catch { /* best effort */ } }
@@ -1392,7 +1415,7 @@ export async function runCore(o) {
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) {
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}) }, e.deferCode); // #4662; #5168 backendId
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...(e.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(e.account ? { account: e.account } : {}) }, e.deferCode); // #4662; #5168 backendId
     return finish("engine-error", `cannot read issue: ${e.message}`);
   }
   const priorState = stateOf(iss.body); // #4400: the last run's end (the lease write keeps its terminal fields), read before this run ends
@@ -2415,7 +2438,7 @@ export async function runCore(o) {
             tm = notOwned(toolMisses(await preflightValidates(frozen).catch(() => [])));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           }
-          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES).`, OUTCOME_CODES.ENV_TOOL_MISSING);
+          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES). Known recipes: ${Object.keys(RECIPES).join(", ")}.`, OUTCOME_CODES.ENV_TOOL_MISSING);
         }
         if (tm.tools.length) {
           ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });
@@ -3032,7 +3055,7 @@ export async function runCore(o) {
           run.findings = parseVerifierFindings(rr?.text, { pathExists: (x) => listed.has(x) });
           run.cost_usd = num(rr?.costUsd) ?? 0;
         } catch (e) {
-          if (e?.deferUsageLimit || e?.deferCode === OUTCOME_CODES.BACKEND_AUTH) throw e; // #5168: a login failure (backend.auth) is not swallowed as a verifier error
+          if (e?.deferUsageLimit || e?.deferCode === OUTCOME_CODES.BACKEND_AUTH || e?.deferCode === OUTCOME_CODES.BACKEND_CLI_FAILED) throw e; // #5168: a login failure (backend.auth) is not swallowed as a verifier error
           run.error = String(e?.code || e?.message || e).split("\n")[0].slice(0, 200);
           T.anomalies.push(`Independent verifier failed at ${head.slice(0, 12)}: ${run.error}`);
         }
@@ -4060,7 +4083,7 @@ export async function runCore(o) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env, rotator) }, OUTCOME_CODES.RATE_LIMITED);
     }
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...quotaFacts(e) }, e.deferCode); // #5168: backendId keys the account hold; #5236 reset
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...(e.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(e.account ? { account: e.account } : {}), ...quotaFacts(e) }, e.deferCode); // #5168: backendId keys the account hold; #5236 reset
     // #4505: a turn overrun is mechanical: a non-human end the batch recovers, needs-human only once a budget recovery failed too
     if (e?.laneCode === OUTCOME_CODES.BUDGET_EXCEEDED && !(recover?.final && recover.code === OUTCOME_CODES.BUDGET_EXCEEDED)) {
       return finish("budget-exceeded", e.message, { code: OUTCOME_CODES.BUDGET_EXCEEDED, branch, ...(recover ? { recovery: true } : {}) }, OUTCOME_CODES.BUDGET_EXCEEDED);

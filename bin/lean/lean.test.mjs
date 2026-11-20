@@ -935,6 +935,7 @@ describe("core work-on", () => {
       const txt = w.comments.map((c) => c.body ?? c).join("\n");
       assert.match(txt, /lacks zzcheck, and no lane_tools recipe exists for it/);
       assert.match(txt, /execution\.lane_tools/);
+      assert.match(txt, /Known recipes: .*shellcheck/);
     });
     it("a failed in-sandbox install ends the lane with the stderr tail", async () => {
       const w = world({ contract: withTool("promtool") }); probing(w, "promtool", () => false);
@@ -3977,6 +3978,22 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(sleeps.length, 0);
     assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
     assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+  });
+
+  it("#5762 a CLI exit that never reached the API defers backend.cli_failed with the result text and account", async () => {
+    const w = world(); projector(w, null);
+    const cliErr = Object.assign(new Error("claude CLI exited with status 1. Output: {\"duration_api_ms\":0"), { code: "CLI_BACKEND_FAILED", cliFailed: true, cliResult: "spawn EAGAIN", cliIsError: true });
+    const orig = w.io.runner; w.io.runner = async (c) => { if (c.role === "builder") throw cliErr; return orig(c); };
+    const prev = process.env.TOKENBATON_ACCOUNT; process.env.TOKENBATON_ACCOUNT = "3";
+    let r; try { r = await run(w); } finally { if (prev === undefined) delete process.env.TOKENBATON_ACCOUNT; else process.env.TOKENBATON_ACCOUNT = prev; }
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "backend.cli_failed");
+    assert.equal(r.retryInSeconds, 120);
+    assert.equal(r.backendId, undefined, "no account hold");
+    assert.match(r.detail, /account 3/);
+    assert.match(r.detail, /spawn EAGAIN/);
+    assert.equal(r.cliResult, "spawn EAGAIN");
+    assert.equal(r.account, "3");
   });
 
   it("#5168 an error that is both a usage limit and auth-like stays rate_limited", async () => {

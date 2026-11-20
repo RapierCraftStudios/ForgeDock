@@ -1828,6 +1828,11 @@ describe("#5168: --requeue accepts engine-error; a claude login failure is held,
     assert.deepEqual(b.readRequeued().map((e) => e.issue), [1]);
   });
 
+  it("#5762 deferPolicy retries backend.cli_failed shortly, capped, with no account hold", () => {
+    assert.deepEqual(deferPolicy({ code: "backend.cli_failed", retryInSeconds: 120 }, { now: 0, deferrals: 0, maxDeferrals: 3 }), { delayMs: 120_000 });
+    assert.deepEqual(deferPolicy({ code: "backend.cli_failed", retryInSeconds: 120 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true });
+  });
+
   it("#5168 deferPolicy holds backend.auth like a usage limit: never capped, never counted", () => {
     assert.deepEqual(deferPolicy({ code: "backend.auth", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900_000, hold: true });
     assert.equal(deferPolicy({ code: "backend.auth" }, { now: 0 }).hold, true);

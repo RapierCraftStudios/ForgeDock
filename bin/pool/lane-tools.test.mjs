@@ -23,4 +23,9 @@ describe("#5652 in-sandbox lane tool install", () => {
   it("the image Dockerfile still uses the RUN steps", () => {
     assert.match(laneToolsDockerfile("base:1", ["postgresql-client"]), /\nRUN apt-get update/);
   });
+  it("#5763 shellcheck is an unversioned apt recipe in the derived image", () => {
+    assert.ok(hasRecipe("shellcheck"));
+    assert.match(installCommands("shellcheck")[0], /^apt-get update && apt-get install -y --no-install-recommends shellcheck /);
+    assert.match(laneToolsDockerfile("base:1", ["shellcheck"]), /\nRUN apt-get update && apt-get install -y --no-install-recommends shellcheck /);
+  });
 });
