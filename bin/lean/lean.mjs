@@ -42,6 +42,7 @@ import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
+import { deriveCiPrecheck, ciPrecheckOutcome, parseCiPrecheckConfig } from "./ci-precheck.mjs";
 import { runChecks, runWithTimeoutRetry, splitPrecheckResults, timedOutDetail, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
@@ -116,6 +117,7 @@ import { pickSalvage } from "./salvage-resume.mjs";
 import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
+import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
@@ -562,6 +564,7 @@ export async function runCore(o) {
   async function heavyStep(phase, fn) { const g = await heavyAcquire(phase); try { return await fn(); } finally { try { g?.release?.(); } catch { /* fail-open */ } } }
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
   let ledger = null, deleteLocalBranch = false, laneHead = null; // #4958: laneHead = {branch, sha, pushedTo}
+  let deletionRefusal = null; // #5819: evidence of a checkpoint that refused tracked-file deletions; the lane ends engine-error, nothing pushed
   const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
   const protectedBranch = (b) => isProtectedLaneBranch(b, { issue, lane, branches, defaults });
   /** Teardown from the ledger (#4179), on every exit path: builder pids, checkpoint of unpushed work, run tmp, worktree, branch, docker. */
@@ -663,6 +666,11 @@ export async function runCore(o) {
     if (!deferTail) {
       await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
       await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
+      if (deletionRefusal && !String(detail).includes(deletionRefusal)) { // #5819: a refused checkpoint ends the lane engine-error, with the evidence
+        if (reason !== "engine-error") ev({ event: "TERMINAL_OVERRIDDEN", from: reason, to: "engine-error", why: "checkpoint refused tracked-file deletions" });
+        detail = `${deletionRefusal}${detail ? ` (lane was ending ${reason}: ${String(detail).split("\n")[0].slice(0, 200)})` : ` (lane was ending ${reason})`}`;
+        reason = "engine-error"; codeOverride = OUTCOME_CODES.ENGINE_ERROR;
+      }
     }
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
@@ -964,6 +972,7 @@ export async function runCore(o) {
     return r;
   };
   const gitPush = async (args) => {
+    if (deletionRefusal && !args.includes("--delete")) throw Object.assign(new Error(deletionRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR }); // #5819
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       await reconcileLaneBranch();
       try { await signOffUnpushed(); }
@@ -982,9 +991,23 @@ export async function runCore(o) {
 
   /** After a timeout/idle kill: commit uncommitted work as a checkpoint and push the lane branch so a rerun resumes from it (#4112). */
   async function checkpoint(reason) {
+    if (deletionRefusal) { ev({ event: "CHECKPOINT_SKIPPED", reason, why: "an earlier checkpoint refused tracked-file deletions (#5819): nothing is pushed" }); return false; }
     try {
       const dirty = String(await git(["status", "--porcelain"])).trim();
-      if (dirty) { await git(["add", "-A"]); if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); } // #4590: tool state is never staged
+      if (dirty) {
+        await git(["add", "-A"]);
+        // #5819: deletions of base-tracked files outside the deliverables are never committed: unstaged, restored, and the lane ends engine-error unpushed
+        let keep = []; // the contract's deliverables (read here: keepPaths is declared further down)
+        try { keep = (JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`))?.deliverables ?? []).map((d) => d?.path).filter((x) => typeof x === "string"); } catch { /* no contract yet: nothing is a deliverable */ }
+        const dg = await guardStagedDeletions({ git, base, keep, max: o.checkpointMaxDeletions ?? maxForeignDeletions(io.env ?? process.env) });
+        if (dg.refused) {
+          deletionRefusal = deletionEvidence(dg, `checkpoint after ${reason}`);
+          ev({ event: "CHECKPOINT_DELETIONS_REFUSED", reason, deleted: dg.deleted.length, foreign: dg.foreign.length, sample: dg.foreign.slice(0, 20), restored: Boolean(dg.restored), ...(dg.error ? { error: dg.error } : {}) });
+          T.anomalies.push(deletionRefusal);
+        }
+        if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); // #4590: tool state is never staged
+        if (deletionRefusal) { ev({ event: "CHECKPOINT", reason, dirty: true, pushed: false, refused: true }); return false; } // committed locally, never pushed; the worktree is kept
+      }
       const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
       if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
@@ -993,6 +1016,7 @@ export async function runCore(o) {
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
   async function rescuePush(reason, rejected) {
+    if (deletionRefusal) return false; // #5819: never push past a refused checkpoint
     // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
     try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
     // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
@@ -1658,6 +1682,10 @@ export async function runCore(o) {
       setupStep("deps", tD);
       for (const r of Array.isArray(res) ? res : []) {
         ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
+        if (r?.restore) { // #5819: a failed publish/materialize touched tracked files; depcache checked them out again
+          ev({ event: "DEPS_WORKTREE_RESTORED", eco: r.eco ?? null, status: r.status ?? null, ...r.restore });
+          T.anomalies.push(r.restore.error ? `Dependency cache (${r.eco}): restoring tracked files after a failed ${r.status} failed: ${r.restore.error}` : `Dependency cache (${r.eco}): ${r.restore.restored} tracked file(s) missing after a failed ${r.status} were restored${r.restore.missing ? ` (${r.restore.missing} still missing)` : ""} (#5819)`);
+        }
         if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
       }
     }
@@ -2591,7 +2619,22 @@ export async function runCore(o) {
     // #4297: its commands run, so the map comes from the base ref (else the operator's checkout), never the lane worktree
     const testMap = io.runCommand ? (await readTestMapAtRef(git, base)) ?? (await readTestMap([cwd], io.fs?.read)) : null;
     // #4331: a learned command the map covers runs only when its globs match a changed file; unmapped ones always run (#4315)
-    const pickChecks = () => planPrecheck({ testMap, files, learned: learnedCommands, maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
+    // #5820: the PR's required CI jobs (scripts/ci-local plan, heavy jobs CI-only) join the round as derived commands
+    const ciCfg = o.precheck?.ci ?? parseCiPrecheckConfig(null);
+    let ciRequired, ciDerived = new Map(); // command -> {job, name, why, steps}
+    const ciGaveUp = new Set(); // jobs found unrunnable in an earlier round: recorded once, not rerun
+    async function ciPrecheckPlan(round) {
+      ciDerived = new Map();
+      if (ciCfg.mode === "off" || isSplit || !io.ciLocalPlan || !io.fs?.write) return [];
+      if (ciRequired === undefined) { try { ciRequired = (await io.requiredChecks?.(lane)) ?? null; } catch { ciRequired = null; } }
+      const p = await deriveCiPrecheck({ buildPlan: io.ciLocalPlan, required: ciRequired, cfg: ciCfg, wt, base, lane, files, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, writeFile: (rel, text) => io.fs.write(`${wt}/${rel}`, text), skipJobs: ciGaveUp });
+      for (const c of p.commands) ciDerived.set(c.command, c);
+      ev({ event: "CI_PRECHECK_PLAN", round, source: p.source, ...(p.note ? { note: p.note } : {}), commands: p.commands.map(({ job, name, workflow, kind, why, steps, command }) => ({ job, name, workflow, kind, why, steps, command })), skipped: p.skipped, unrunnable: p.unrunnable });
+      if (!round) T.decisions.push(`CI precheck (${p.source}): ${p.commands.length ? p.commands.map((c) => `${c.name} (${c.why})`).join(", ") : "no job to run locally"}${p.unrunnable.length ? `; unrunnable: ${p.unrunnable.map((u) => `${u.name}: ${u.reason}`).join("; ")}` : ""}`);
+      return p.commands.map((c) => c.command);
+    }
+    let ciCommands = await ciPrecheckPlan(0);
+    const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
     let picked = pickChecks();
     // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it
     const verifyFacts = { commands: null, structure: null, undeclaredEdges: [], docs: null, precheck: null, amendments: [], hotspots: false };
@@ -2600,7 +2643,7 @@ export async function runCore(o) {
       precheckRan = true;
       for (let round = 0; ; round++) {
         await renew();
-        if (round) picked = pickChecks();
+        if (round) { ciCommands = await ciPrecheckPlan(round); picked = pickChecks(); }
         const precheckCommands = picked.commands;
         // #4318/#4331: one round has a total budget (lean.precheck.max_minutes, else verify.precheck_total_seconds); the
         // commands run concurrently up to the host worker cap; the rest are deferred to CI, not failed. #4344: one heavy
@@ -2611,7 +2654,17 @@ export async function runCore(o) {
         const round$ = await runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: picked.perCommandMs, now,
           acquire: () => heavyAcquire("precheck"),
           run: ({ command, timeoutMs, workers: share }) => { workers = share; const env = laneEnv(); return io.runCommand({ command, cwd: wt, timeoutMs, env: env.FORGE_HOST_PARALLELISM ? { ...env, FORGE_HOST_PARALLELISM: String(share) } : env }); } });
-        const { results, deferred } = round$;
+        const { deferred } = round$;
+        // #5820: a derived CI job that could not run (ci-local degraded, timeout, no tool) is recorded, never a fix round
+        const ciRows = round$.results.filter((x) => ciDerived.has(x.command)).map((x) => ({ x, c: ciDerived.get(x.command), out: ciPrecheckOutcome(x) }));
+        const ciSkip = new Set(ciRows.filter((r) => r.out.status === "unrunnable" || r.out.status === "deferred").map((r) => r.x.command));
+        const results = round$.results.filter((x) => !ciSkip.has(x.command));
+        if (ciDerived.size) {
+          const ciDeferred = deferred.filter((c) => ciDerived.has(c)).map((c) => ({ job: ciDerived.get(c).job, name: ciDerived.get(c).name, status: "deferred-to-ci", reason: "precheck budget reached" }));
+          const rows = [...ciRows.map(({ x, c, out }) => ({ job: c.job, name: c.name, status: out.status, rc: x.rc, ms: x.ms, ...(out.reason ? { reason: out.reason } : {}) })), ...ciDeferred];
+          ev({ event: "CI_PRECHECK_RESULT", round, green: rows.every((r) => r.status !== "fail"), results: rows });
+          for (const r of rows.filter((y) => y.status === "unrunnable" || y.status === "deferred")) { ciGaveUp.add(r.job); T.anomalies.push(`CI precheck job ${r.name} ${r.status} locally (${r.reason}); left to CI`); }
+        }
         precheckMs += round$.ms; precheckDeferred += deferred.length;
         if (deferred.length) T.anomalies.push(`deferred-to-ci: pre-PR check budget ${totalMs / 1000} s reached; left to CI: ${deferred.map((c) => `\`${c}\``).join(", ")}`);
         const { failed, timedOut } = splitPrecheckResults(results); // #5332: rc 124 is host load, never a failing check
@@ -2636,7 +2689,8 @@ export async function runCore(o) {
           const rel = `${CHECK_LOG_DIR}/precheck-${round + 1}-${i + 1}.log`;
           let logPath = null;
           if (io.fs.write) { try { await io.fs.write(`${wt}/${rel}`, String(f.output ?? "")); logPath = rel; } catch { /* tail only */ } }
-          return { command: f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
+          const ci = ciDerived.get(f.command); // #5820: name the CI job and its steps, not only the ci-local invocation
+          return { command: ci ? `${f.command}  # CI job "${ci.name}" (${ci.why}): ${ci.steps.join(" && ").slice(0, 400)}` : f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
         }));
         await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");

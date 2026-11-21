@@ -152,6 +152,9 @@ function world(o = {}) {
       if (a[0] === "rev-parse" && a[1] === "HEAD^{tree}") return "0".repeat(40);
       if (a.includes("commit-tree")) return "c".repeat(40);
       if (a[0] === "diff" && a.includes("--diff-filter=A")) return (w.added ?? []).join("\0"); // #4590: files the branch added vs the base
+      if (a[0] === "diff-index" && a.includes("--cached")) return (w.stagedDeletions ?? []).map((p) => `D\0${p}\0`).join(""); // #5819: the checkpoint's staged deletions
+      if (a[0] === "ls-tree" && w.stagedDeletions) return a.slice(a.indexOf("--") + 1).filter((p) => !(w.laneAdded ?? []).includes(p)).join("\0"); // #5819: on the base unless the lane added it
+      if (a[0] === "checkout" && a.includes("HEAD") && w.stagedDeletions) { w.restoredPaths = [...(w.restoredPaths ?? []), ...a.slice(a.indexOf("--") + 1)]; return ""; }
       if (a[0] === "rm" && a[1] === "--cached" && w.added) w.added = w.added.filter((f) => !a.includes(f));
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
@@ -5949,6 +5952,39 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
     tornDown(w, "dirty needs-human");
   });
 
+  it("#5819 a checkpoint whose staged diff deletes tracked files outside the deliverables is refused: restored, nothing pushed, engine-error with evidence", async () => {
+    const w = ledgered({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    const dir = tmpDir("core-5819-");
+    w.stagedDeletions = ["packages/adapters/src/index.ts", "packages/adapters/migrations/0001.sql", "src/foo.js"]; // src/foo.js is a deliverable
+    const r = await run(w, { mergeWait: "all", dir });
+    assert.equal(r.terminalReason, "engine-error");
+    const commit = gitIdx(w, (a) => a[0] === "commit" && a.some((x) => /checkpoint after exit \(needs-human\)/.test(x)));
+    assert.ok(commit > 0, "the remaining changes are committed locally");
+    const pushAfter = w.calls.slice(commit).filter((c) => c[0] === "git" && c[1] === "push" && !c.includes("--delete"));
+    assert.deepEqual(pushAfter, [], "nothing is pushed after the refused checkpoint");
+    assert.deepEqual(w.restoredPaths, ["packages/adapters/src/index.ts", "packages/adapters/migrations/0001.sql"], "only the non-deliverable deletions are checked out again");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "reset" && c.includes("packages/adapters/src/index.ts") && !c.includes("src/foo.js")), "and unstaged");
+    const ev = readLog(dir, 7);
+    const refused = ev.find((e) => e.event === "CHECKPOINT_DELETIONS_REFUSED");
+    assert.equal(refused.foreign, 2); assert.equal(refused.deleted, 3); assert.equal(refused.restored, true);
+    const term = ev.find((e) => e.event === "RUN_TERMINAL");
+    assert.equal(term.reason, "engine-error"); assert.equal(term.code, "engine.error");
+    assert.ok(ev.some((e) => e.event === "TERMINAL_OVERRIDDEN" && e.from === "needs-human"));
+    assert.ok(ev.some((e) => e.event === "TEARDOWN_KEPT"), "the worktree is kept for inspection");
+  });
+
+  it("#5819 deletions listed as deliverables (and files the lane added itself) still checkpoint and push", async () => {
+    const w = ledgered({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    w.stagedDeletions = ["src/foo.js", "src/lane-scratch.js"]; w.laneAdded = ["src/lane-scratch.js"];
+    const r = await run(w, { mergeWait: "all" });
+    assert.equal(r.terminalReason, "needs-human");
+    const commit = gitIdx(w, (a) => a[0] === "commit" && a.some((x) => /checkpoint after exit \(needs-human\)/.test(x)));
+    const push = gitIdx(w, (a) => a[0] === "push" && a.includes("feat/issue-7-lean") && !a.includes("--delete"));
+    assert.ok(commit > 0 && push > commit, `commit ${commit} < push ${push}`);
+    assert.equal(w.restoredPaths, undefined, "nothing restored");
+    tornDown(w, "deliverable deletion");
+  });
+
   it("a checkpoint that cannot push keeps the worktree and leaves worktree + branch listed in the ledger", async () => {
     const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
     const w = ledgered({ dirty: true, pushErrors: [msg, msg, msg] });
@@ -9375,6 +9411,78 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
     const r2 = await run(g, { dir: tmpDir("lean-5764c-"), ...remote });
     assert.notEqual(r2.code, "env.tool_missing"); assert.equal(seen2.length, 0);
     assert.doesNotMatch(g.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
+  });
+});
+
+describe("#5820 required CI checks run in the lane before the PR opens", () => {
+  const ciJob = (key, name, cmd) => ({ id: `gha:ci:${key}`, source: "github-actions", name, workflow: ".github/workflows/ci.yml", steps: [{ name: cmd, command: cmd, cwd: ".", kind: "check" }], services: [], needs: [] });
+  const ciPlan = { version: 1, repo: WT, jobs: [ciJob("lint", "Lint", "pnpm lint"), ciJob("unit", "Unit tests", "pnpm vitest run"), ciJob("e2e", "E2E", "pnpm playwright test")] };
+  const isCi = (c) => /ci-local\.sh' run/.test(c);
+  /** A world whose ci-local plan is `ciPlan` and whose base requires `required`; `ciRun(command, n)` answers each derived run. */
+  const ciWorld = ({ required = ["Lint", "E2E"], ciRun = () => ({ rc: 0, output: "CI_LOCAL_RESULT: PASS" }), plan = async () => ciPlan } = {}) => {
+    const w = world(); w.ran = []; let n = 0, reqCalls = 0;
+    w.io.ciLocalPlan = plan;
+    w.io.requiredChecks = async () => (reqCalls++ ? [] : required); // the first read is the precheck's; the merge policy then sees none
+    w.io.runCommand = async ({ command }) => { w.ran.push(command); w.seq.push(isCi(command) ? "ci-precheck" : "check"); return isCi(command) ? ciRun(command, n++) : { rc: 0, output: "" }; };
+    return w;
+  };
+
+  it("a failing required job goes back to the builder as a precheck fix round with its log, then the PR opens green", async () => {
+    let fixed = false;
+    const w = ciWorld({ ciRun: () => (fixed ? { rc: 0, output: "CI_LOCAL_RESULT: PASS" } : { rc: 1, output: "src/foo.js:3 no-unused-vars\nCI_LOCAL_FAIL: gha:ci:lint | step: pnpm lint | exit 1\nCI_LOCAL_RESULT: FAIL" }) });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) fixed = true; return inner(c); };
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const log = readLog(dir, 7);
+    const plan = log.find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.equal(plan.source, "required");
+    assert.deepEqual(plan.commands.map((c) => [c.job, c.why, c.steps]), [["gha:ci:lint", 'required check "Lint"', ["pnpm lint"]]]);
+    assert.match(plan.skipped.find((s) => s.job === "gha:ci:e2e").reason, /^heavy \(e2e\)/, "the required e2e job stays CI-only");
+    assert.ok(`${WT}/.forge-lean/ci-precheck/gha_ci_lint.json` in w.files, "the one-job ci-local plan is written");
+    const res = log.filter((e) => e.event === "CI_PRECHECK_RESULT");
+    assert.deepEqual(res.map((e) => [e.round, e.green, e.results.map((x) => x.status)]), [[0, false, ["fail"]], [1, true, ["pass"]]]);
+    const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
+    assert.equal(fix.length, 1); assert.match(fix[0][4], /CI job "Lint"/); assert.match(fix[0][4], /no-unused-vars/);
+    assert.ok(w.seq.indexOf("ci-precheck") < w.seq.indexOf("pr"), "the precheck runs before the PR");
+    assert.ok(log.findIndex((e) => e.event === "CI_PRECHECK_PLAN") < log.findIndex((e) => e.event === "PR_OPENED"));
+  });
+
+  it("green: no fix round, the PR opens; no required checks falls back to the lint and unit jobs", async () => {
+    const w = ciWorld({ required: [] }); const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const log = readLog(dir, 7);
+    const plan = log.find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.equal(plan.source, "fallback"); assert.deepEqual(plan.commands.map((c) => c.job), ["gha:ci:lint", "gha:ci:unit"]);
+    assert.equal(w.ran.filter(isCi).length, 2);
+    assert.deepEqual(log.filter((e) => e.event === "CI_PRECHECK_RESULT").map((e) => e.green), [true]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0);
+    assert.equal(w.prs.length, 1);
+  });
+
+  it("unrunnable (ci-local degraded, or no planner) is recorded with its reason and never blocks the PR", async () => {
+    const w = ciWorld({ ciRun: () => ({ rc: 2, output: "CI_LOCAL_RESULT: DEGRADED reason=budget_exhausted" }) }); const dir = tmpDir("core-");
+    const r = await run(w, { dir, verify: { ...parseVerify({}), precheckBlock: true } });
+    assert.equal(r.terminalReason, "merged");
+    const res = readLog(dir, 7).filter((e) => e.event === "CI_PRECHECK_RESULT");
+    assert.deepEqual(res.map((e) => e.results.map((x) => [x.status, x.reason])), [[["unrunnable", "budget_exhausted"]]]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no fix round for an unrunnable job");
+    const t = traj(w).join("\n"); assert.match(t, /CI precheck job Lint unrunnable locally \(budget_exhausted\)/);
+
+    const w2 = ciWorld({ plan: async () => { throw new Error("yq not found"); } }); const dir2 = tmpDir("core-");
+    const r2 = await run(w2, { dir: dir2 });
+    assert.equal(r2.terminalReason, "merged"); assert.equal(w2.ran.filter(isCi).length, 0);
+    const p2 = readLog(dir2, 7).find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.match(p2.unrunnable[0].reason, /CI check plan unavailable: yq not found/);
+  });
+
+  it("lean.ci_precheck off runs nothing and logs no plan", async () => {
+    const w = ciWorld(); const dir = tmpDir("core-");
+    await run(w, { dir, precheck: { ci: { mode: "off", include: [], exclude: [], maxJobs: 8 } } });
+    assert.equal(w.ran.filter(isCi).length, 0);
+    assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
   });
 });
 

@@ -13,7 +13,7 @@ import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 const RECOVERING_LABEL = "workflow:recovering";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
 import { localLaneCap } from "./lean/admission.mjs";
@@ -44,6 +44,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { parseCiBudget } from "./lean/ci-gate.mjs";
+import { parseCiPrecheckConfig } from "./lean/ci-precheck.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
@@ -573,10 +574,17 @@ export function readPrecheckBudget(cwd = process.cwd()) {
     return raw !== "" && Number.isFinite(n) && n >= 1 && n <= 120 ? n : undefined;
   } catch { return undefined; }
 }
-/** runCore `precheck` option: {commands, maxMinutes} from learned.test_commands and lean.precheck.max_minutes; {} when neither is set. */
+/** #5820: forge.yaml `lean.ci_precheck*` (flat keys) -> {mode, include, exclude, maxJobs}; null when none is set or unreadable. */
+export function readCiPrecheck(cwd = process.cwd()) {
+  try {
+    const l = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {};
+    return Object.keys(l).some((k) => k.startsWith("ci_precheck")) ? parseCiPrecheckConfig(l) : null;
+  } catch { return null; }
+}
+/** runCore `precheck` option: {commands, maxMinutes, ci} from learned.test_commands, lean.precheck.max_minutes and lean.ci_precheck*; {} when none is set. */
 function readPrecheckOptions(cwd = process.cwd()) {
-  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd);
-  return commands || maxMinutes ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}) } } : {};
+  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd), ci = readCiPrecheck(cwd);
+  return commands || maxMinutes || ci ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}), ...(ci ? { ci } : {}) } } : {};
 }
 /**
  * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
@@ -2174,6 +2182,33 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
     missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
   };
+  // #4785: decisions and the frozen contract's validate commands too. #5824: one view per issue; the plan pass's view is
+  // used once by the runner's first read (no second gh call), later reads (requeue, --add) see the live body.
+  const planViews = new Map();
+  const viewOf = async (n) => {
+    const v = await viewIssue(leanIo.gh, repo, n, maint || registry || hybrid ? "title,body,labels,comments,author,milestone" : "title,body,comments,author,milestone");
+    if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null);
+    trustedOf.set(n, bodyTrusted(v));
+    if (maint || registry || hybrid) labelsOf.set(n, (v.labels ?? []).map((x) => x.name));
+    needsOf.set(n, placementNeeds(v, execForNeeds));
+    if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay));
+    return v;
+  };
+  const readBody = async (n) => { const v = planViews.get(n); planViews.delete(n); return (v ?? await viewOf(n)).body; };
+  // #5824: the dependency DAG is built in code and printed as the plan table at a fresh start; a resume keeps the planned one.
+  const dagMod = await import("./lean/dag.mjs");
+  let dag = plan?.dag ?? null;
+  if (!resumeId && deps.planDag !== false) {
+    try {
+      const views = new Map();
+      await (await import("./lean/pmap.mjs")).mapLimit(issues, 6, async (n) => {
+        try { const v = await viewOf(n); planViews.set(n, v); views.set(n, dagMod.planView(v, { trusted: trustedOf.get(n) === true })); } catch { /* unreadable: no edges; the runner reads it again */ }
+      });
+      dag = dagMod.buildDag(issues, views, { exists: (p) => existsSync(join(cwd, p)) });
+      for (const l of dagMod.formatPlan(issues, views, dag, { parallel, parallelFrom: flag(argv, "--parallel") != null ? "--parallel" : "default" })) sink.line(l);
+      batch.writePlan({ ...batch.readPlan(), dag: { edges: dag.edges, overlaps: dag.overlaps } });
+    } catch (e) { sink.line(`plan: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
+  }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
     resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
@@ -2247,9 +2282,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         crossLane.push(e);
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
-      readBody: maint || registry || hybrid
-        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, placementNeeds(v, execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
-        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, placementNeeds(v, execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+      readBody, logicalDeps: (n) => dagMod.logicalDepsOf(dag, n), // #5824: the plan's logical edges
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); healthTimers.cancel(); }
@@ -2286,6 +2319,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { day = execBudget ? execBudget.dayTotals() : null; } catch { day = null; }
   const sbxLine = formatSandboxSummary(rows, { budget: execConf?.budget ?? null, day });
   if (sbxLine) report.push(sbxLine);
+  let removedEdges = [];
+  if (dag?.edges?.length) try { // #5824: planned edges an operator removed (body edited) before the batch ended
+    removedEdges = await dagMod.falseHolds(dag, async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,author"); return dagMod.declaredDeps(n, { body: v.body, trusted: bodyTrusted(v) }); });
+    report.push(dagMod.formatFalseHolds(dag, removedEdges));
+  } catch { report.push("false holds: n/a"); }
   if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   report.push(formatReclaimed(reclaimed));
@@ -2298,7 +2336,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
   try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
-  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, ...(dag?.edges ? { dag: { planned: dag.edges.length, falseHolds: removedEdges } } : {}), report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
