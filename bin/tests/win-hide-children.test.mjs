@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promisify } from "node:util";
-import { withHide, hideFileArgs, hideCmdArgs, shouldInstall, install } from "../win-hide-children.mjs";
+import { withHide, hideFileArgs, hideCmdArgs, shouldInstall, shouldWrap, pipedStdio, install } from "../win-hide-children.mjs";
 
 const H = { windowsHide: true };
 const cb = () => {};
@@ -65,4 +65,23 @@ test("install wraps a child_process-shaped object, keeps promisify working, and 
   seen.length = 0;
   assert.deepEqual(await promisify(fake.exec)("dir", { cwd: "c" }), { stdout: "ok" });
   assert.deepEqual(seen, [["exec.p", "dir", { cwd: "c", windowsHide: true }]]);
+});
+
+test("detached + piped stdio drops detached (child keeps a windowless console its children share)", () => {
+  assert.deepEqual(withHide({ detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }), { detached: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  assert.deepEqual(withHide({ detached: true }), { detached: false, windowsHide: true }); // default stdio is pipe
+  // fire-and-forget children (ignore / file fds) must still outlive the parent
+  assert.deepEqual(withHide({ detached: true, stdio: "ignore" }), { detached: true, stdio: "ignore", windowsHide: true });
+  assert.deepEqual(withHide({ detached: true, stdio: ["ignore", 7, 7] }), { detached: true, stdio: ["ignore", 7, 7], windowsHide: true });
+});
+
+test("pipedStdio recognises every piped shape", () => {
+  for (const s of [undefined, "pipe", "overlapped", ["ignore", "pipe", "ignore"], [null, 3, 3], ["pipe"]]) assert.equal(pipedStdio(s), true, JSON.stringify(s));
+  for (const s of ["ignore", "inherit", ["ignore", "ignore", "ignore"], ["ignore", 5, 5], ["inherit", "inherit", "inherit"]]) assert.equal(pipedStdio(s), false, JSON.stringify(s));
+});
+
+test("shouldWrap: every win32 run (the detached rule applies interactively too), with the opt-out", () => {
+  assert.equal(shouldWrap({ platform: "win32", env: {} }), true);
+  assert.equal(shouldWrap({ platform: "linux", env: {} }), false);
+  assert.equal(shouldWrap({ platform: "win32", env: { FORGEDOCK_NO_WINDOWS_HIDE: "1" } }), false);
 });
