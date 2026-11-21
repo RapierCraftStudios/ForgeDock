@@ -1771,7 +1771,7 @@ describe("conformance shadow mode (the default)", () => {
       assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, conformance); assert.equal(w.merges.length, 0);
       assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
       assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
-      assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
+      assert.deepEqual(ran.map((a) => [a.command, posixPath(a.cwd)]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
     }
   });
@@ -1816,7 +1816,7 @@ describe("conformance shadow mode (the default)", () => {
     const rb = await run(bad.w, { conformance: "enforce", dir });
     assert.equal(rb.terminalReason, "needs-human"); assert.equal(bad.w.merges.length, 0);
     assert.match(nhBody(bad.w), /frozen command runs and fails \(exit 1\)/);
-    assert.ok(bad.ran.some((a) => a.command === "node --test test/foo.test.js" && a.cwd === WT && a.env), "the frozen command is rerun in the worktree with the lane env");
+    assert.ok(bad.ran.some((a) => a.command === "node --test test/foo.test.js" && posixPath(a.cwd) === WT && a.env), "the frozen command is rerun in the worktree with the lane env");
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "SUBSTITUTE_RERUN").map((e) => e.runs), [[{ id: "V1", rc: 1 }], [{ id: "V1", rc: 1 }]]);
     const good = lane({ rc: 1, output: "no tests ran: no test files matched test/foo.test.js" });
     assert.equal((await run(good.w, { conformance: "enforce" })).terminalReason, "merged");
@@ -1881,7 +1881,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(builders(w).length, 3, "plan + one contract correction + implement");
     assert.match(builders(w)[1][4], /V1: needs Python module 'yaml' \(for python3\), which this host lacks[\s\S]*repo's own toolchain/);
-    assert.ok(ran.every((a) => a.cwd === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
+    assert.ok(ran.every((a) => posixPath(a.cwd) === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[true, []]]);
     // still missing after the correction: advisory only, the lane goes on (the post-build rerun is the gate)
     const dir2 = tmpDir("preflight-");
@@ -1918,7 +1918,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(b[1][4], /V4: running it on the base worktree stopped before any test ran: needs Python module 'httpx'[\s\S]*repo's own toolchain/);
     assert.doesNotMatch(b[1][4], /V[123]:/, "RED on base is not a miss");
     assert.match(b[2][4], /The engine froze/, "the correction lands before the implement builder");
-    assert.ok(ran.every(([, cwd]) => cwd === WT));
+    assert.ok(ran.every(([, cwd]) => posixPath(cwd) === WT));
     const firstImpl = w.seq.indexOf("builder-resume", w.seq.indexOf("builder-resume") + 1);
     assert.ok(ran.every(([, , at]) => at < firstImpl), "every run happens before the implement session");
     const pf = readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT");
@@ -2229,7 +2229,7 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.equal(builders(w).length, 3); assert.equal(reviewers(w).length, 1);
     assert.match(builders(w)[2][4], /@s\/db -> @s\/core \(dependencies, packages\/db\/package\.json\)[\s\S]*add it to the contract with a reason, or remove it/);
     assert.equal(builders(w)[2][2], null, "#4363: a fresh fix session");
-    assert.deepEqual(w.structureCalls[0], { cwd: "/wt/lean-7", base: "origin/staging" });
+    assert.deepEqual({ ...w.structureCalls[0], cwd: posixPath(w.structureCalls[0].cwd) }, { cwd: "/wt/lean-7", base: "origin/staging" });
     const e = readLog(dir, 7).find((x) => x.event === "STRUCTURE_DELTA");
     assert.equal(e.edges_added, 1);
     assert.ok(readLog(dir, 7).findIndex((x) => x.event === "STRUCTURE_DELTA") < readLog(dir, 7).findIndex((x) => x.event === "CONFORMANCE"), "before the conformance review");
@@ -8995,7 +8995,7 @@ describe("#5347 builders open with one batch of independent reads", () => {
 });
 
 describe("#5347 lane: the build opens with its independent reads in one turn", () => {
-  it("a lane whose contract names two deliverables hands the builder the opening batch; the builder's one-turn reads through the real stream parser record calls/turn >= 2", async () => {
+  it("a lane whose contract names two deliverables hands the builder the opening batch; the builder's one-turn reads through the real stream parser record calls/turn >= 2", { skip: process.platform === "win32" && "the fake CLI is a #!/bin/sh script" }, async () => {
     const { runCliBackendAsync } = await import("../runner.mjs");
     const { toolStats } = await import("./toolstats.mjs");
     const two = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R1"] }] };
