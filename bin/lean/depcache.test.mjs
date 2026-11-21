@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, lstatSync, readlinkSync, readdirSync, symlinkSync, rmSync, renameSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join, dirname, relative } from "node:path";
 import { makeDepCache } from "./depcache.mjs";
@@ -686,5 +687,115 @@ describe("depcache (#5651): no silent fallback to an out-of-range default python
     const [r] = await makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5651n" });
     assert.notEqual(r.status, "failed", JSON.stringify(r));
     assert.match(r.reason ?? "", /--no-root/);
+  });
+});
+
+describe("depcache (#5819): a failed publish or materialize never touches workspace package sources", () => {
+  const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8" });
+  const SRC = Array.from({ length: 6 }, (_, i) => `packages/adapters/src/f${i}.ts`);
+  /** A pnpm workspace in a real git repo; node_modules ignored. */
+  const wsRepo = (base, name) => {
+    const wt = join(base, "wt", name);
+    mkdirSync(wt, { recursive: true });
+    put(join(wt, "package.json"), '{"name":"web","private":true}');
+    put(join(wt, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+    put(join(wt, "pnpm-lock.yaml"), "lockfileVersion: 9\nlodash: 4.17.21\n");
+    put(join(wt, "packages/a/package.json"), '{"name":"a"}');
+    put(join(wt, "packages/adapters/package.json"), '{"name":"@scope/adapters"}');
+    for (const f of SRC) put(join(wt, f), `export const v = "${f}";\n`);
+    put(join(wt, ".gitignore"), "node_modules/\n");
+    sh(wt, "init", "-q"); sh(wt, "config", "user.email", "t@t"); sh(wt, "config", "user.name", "t");
+    sh(wt, "add", "-A"); sh(wt, "commit", "-q", "-m", "base");
+    return wt;
+  };
+  /** Real git; the fake pnpm, plus pnpm's link of the workspace package (absolute, as a Windows junction reads back). */
+  const wsExec = (f) => async (cmd, args, o = {}) => {
+    if (cmd === "git") return execFileSync("git", args, { cwd: o.cwd, encoding: "utf8" });
+    const out = await f.exec(cmd, args, o);
+    if (cmd === "pnpm" && !args.includes("--offline")) {
+      mkdirSync(join(o.cwd, "node_modules/@scope"), { recursive: true });
+      symlinkSync(join(o.cwd, "packages/adapters"), join(o.cwd, "node_modules/@scope/adapters"));
+    }
+    return out;
+  };
+  const eperm = () => Object.assign(new Error("EPERM: operation not permitted, symlink"), { code: "EPERM" });
+  /** Windows without the symlink privilege, where a junction reads as a plain directory (the worst case for a tree walk). */
+  const winFs = ({ junctions = true, extra = {} } = {}) => ({
+    ...fs,
+    readdirSync: (p, o) => {
+      const l = fs.readdirSync(p, o);
+      if (!o?.withFileTypes) return l;
+      return l.map((e) => {
+        if (!e.isSymbolicLink()) return e;
+        let dir = false;
+        try { dir = fs.statSync(join(p, e.name)).isDirectory(); } catch { /* dangling */ }
+        return dir ? { name: e.name, isSymbolicLink: () => false, isDirectory: () => true, isFile: () => false } : e;
+      });
+    },
+    symlinkSync: (t, p, type) => { if (type !== "junction" || !junctions) throw eperm(); return fs.symlinkSync(t, p); },
+    ...extra,
+  });
+  const clean = (wt) => sh(wt, "status", "--porcelain").trim();
+  const filesUnder = (dir) => { const out = []; const walk = (d) => { for (const e of readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) walk(p); else out.push(p); } }; walk(dir); return out; };
+
+  it("publish: a link to a workspace package is recreated (a junction on EPERM), never entered, copied or chmodded", async () => {
+    const base = scratch(), root = join(base, "cache"), wt = wsRepo(base, "a");
+    const before = statSync(join(wt, SRC[0]));
+    const [r] = await makeDepCache({ root, exec: wsExec(fakeExec()), env: {}, fs: winFs(), platform: "win32", pollMs: 5 }).prepare({ wt, repoKey: "r" });
+    assert.equal(r.status, "miss-installed", JSON.stringify(r));
+    assert.equal(r.published, true, r.reason);
+    assert.equal(clean(wt), "", "every tracked file untouched");
+    assert.equal(statSync(join(wt, SRC[0])).mode, before.mode, "the source was not made read-only through a hardlink");
+    const [snap] = snapDirs(root, "pnpm");
+    assert.ok(lstatSync(join(snap, "node_modules/@scope/adapters")).isSymbolicLink(), "the snapshot holds a link, not the package");
+    const inos = new Set(SRC.map((f) => statSync(join(wt, f)).ino));
+    assert.deepEqual(filesUnder(snap).filter((p) => !lstatSync(p).isSymbolicLink() && inos.has(statSync(p).ino)), [], "no workspace source is hardlinked into the cache");
+  });
+
+  it("a publish that fails mid-way (EPERM, no junction either) leaves every tracked file and no tmp dir", async () => {
+    const base = scratch(), root = join(base, "cache"), wt = wsRepo(base, "a");
+    const [r] = await makeDepCache({ root, exec: wsExec(fakeExec()), env: {}, fs: winFs({ junctions: false }), platform: "win32", pollMs: 5 }).prepare({ wt, repoKey: "r" });
+    assert.equal(r.status, "miss-installed");
+    assert.equal(r.published, false);
+    assert.match(r.reason, /^publish failed: EPERM/);
+    assert.equal(clean(wt), "");
+    for (const f of SRC) assert.ok(existsSync(join(wt, f)), f);
+    assert.equal(r.restore, undefined, "nothing was missing");
+    assert.deepEqual(readdirSync(join(root, "r")).filter((n) => /\.tmp-/.test(n)), []);
+    assert.equal(snapDirs(root, "pnpm").length, 0);
+  });
+
+  it("tracked files that go missing during a failed publish are checked out again, with the evidence on the result", async () => {
+    const base = scratch(), root = join(base, "cache"), wt = wsRepo(base, "a");
+    let hit = false;
+    const destructive = { ...fs, linkSync: (s, d) => { if (!hit) { hit = true; rmSync(join(wt, "packages/adapters/src"), { recursive: true }); throw eperm(); } return fs.linkSync(s, d); } };
+    const [r] = await makeDepCache({ root, exec: wsExec(fakeExec()), env: {}, fs: destructive, pollMs: 5 }).prepare({ wt, repoKey: "r" });
+    assert.equal(r.published, false);
+    assert.deepEqual({ restored: r.restore.restored, missing: r.restore.missing }, { restored: SRC.length, missing: 0 });
+    assert.deepEqual([...r.restore.sample].sort(), [...SRC].sort());
+    assert.equal(clean(wt), "", "the worktree is whole again before the lane goes on");
+  });
+
+  it("materialize: a failed repair removes the linked trees without following the workspace link", async () => {
+    const base = scratch(), root = join(base, "cache");
+    const a = wsRepo(base, "a");
+    const [ra] = await makeDepCache({ root, exec: wsExec(fakeExec()), env: {}, pollMs: 5 }).prepare({ wt: a, repoKey: "r" });
+    assert.equal(ra.published, true, ra.reason);
+    const b = wsRepo(base, "b");
+    const [rb] = await makeDepCache({ root, exec: wsExec(fakeExec({ failRepair: true })), env: {}, fs: winFs(), platform: "win32", pollMs: 5 }).prepare({ wt: b, repoKey: "r" });
+    assert.equal(rb.status, "materialize-fallback", JSON.stringify(rb));
+    for (const wt of [a, b]) { assert.equal(clean(wt), "", wt); for (const f of SRC) assert.ok(existsSync(join(wt, f)), `${wt} ${f}`); }
+  });
+
+  it("safeRm unlinks links, never their targets, and refuses a worktree path outside node_modules/.venv", async () => {
+    const base = scratch(), wt = wsRepo(base, "a");
+    const cache = makeDepCache({ root: join(base, "cache"), exec: wsExec(fakeExec()), env: {}, fs: winFs(), platform: "win32" });
+    mkdirSync(join(wt, "node_modules/@scope"), { recursive: true });
+    symlinkSync(join(wt, "packages/adapters"), join(wt, "node_modules/@scope/adapters"));
+    put(join(wt, "node_modules/x/index.js"), "x");
+    assert.throws(() => cache.safeRm(join(wt, "packages"), wt), (e) => e.code === "EFORGE_PROTECTED");
+    cache.safeRm(join(wt, "node_modules"), wt);
+    assert.ok(!existsSync(join(wt, "node_modules")));
+    assert.equal(clean(wt), "");
   });
 });

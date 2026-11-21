@@ -116,6 +116,7 @@ import { pickSalvage } from "./salvage-resume.mjs";
 import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
+import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
@@ -561,6 +562,7 @@ export async function runCore(o) {
   async function heavyStep(phase, fn) { const g = await heavyAcquire(phase); try { return await fn(); } finally { try { g?.release?.(); } catch { /* fail-open */ } } }
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
   let ledger = null, deleteLocalBranch = false, laneHead = null; // #4958: laneHead = {branch, sha, pushedTo}
+  let deletionRefusal = null; // #5819: evidence of a checkpoint that refused tracked-file deletions; the lane ends engine-error, nothing pushed
   const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
   const protectedBranch = (b) => isProtectedLaneBranch(b, { issue, lane, branches, defaults });
   /** Teardown from the ledger (#4179), on every exit path: builder pids, checkpoint of unpushed work, run tmp, worktree, branch, docker. */
@@ -662,6 +664,11 @@ export async function runCore(o) {
     if (!deferTail) {
       await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
       await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
+      if (deletionRefusal && !String(detail).includes(deletionRefusal)) { // #5819: a refused checkpoint ends the lane engine-error, with the evidence
+        if (reason !== "engine-error") ev({ event: "TERMINAL_OVERRIDDEN", from: reason, to: "engine-error", why: "checkpoint refused tracked-file deletions" });
+        detail = `${deletionRefusal}${detail ? ` (lane was ending ${reason}: ${String(detail).split("\n")[0].slice(0, 200)})` : ` (lane was ending ${reason})`}`;
+        reason = "engine-error"; codeOverride = OUTCOME_CODES.ENGINE_ERROR;
+      }
     }
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
@@ -963,6 +970,7 @@ export async function runCore(o) {
     return r;
   };
   const gitPush = async (args) => {
+    if (deletionRefusal && !args.includes("--delete")) throw Object.assign(new Error(deletionRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR }); // #5819
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       await reconcileLaneBranch();
       try { await signOffUnpushed(); }
@@ -981,9 +989,21 @@ export async function runCore(o) {
 
   /** After a timeout/idle kill: commit uncommitted work as a checkpoint and push the lane branch so a rerun resumes from it (#4112). */
   async function checkpoint(reason) {
+    if (deletionRefusal) { ev({ event: "CHECKPOINT_SKIPPED", reason, why: "an earlier checkpoint refused tracked-file deletions (#5819): nothing is pushed" }); return false; }
     try {
       const dirty = String(await git(["status", "--porcelain"])).trim();
-      if (dirty) { await git(["add", "-A"]); if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); } // #4590: tool state is never staged
+      if (dirty) {
+        await git(["add", "-A"]);
+        // #5819: deletions of base-tracked files outside the deliverables are never committed: unstaged, restored, and the lane ends engine-error unpushed
+        const dg = await guardStagedDeletions({ git, base, keep: await keepPaths(), max: o.checkpointMaxDeletions ?? maxForeignDeletions(io.env ?? process.env) });
+        if (dg.refused) {
+          deletionRefusal = deletionEvidence(dg, `checkpoint after ${reason}`);
+          ev({ event: "CHECKPOINT_DELETIONS_REFUSED", reason, deleted: dg.deleted.length, foreign: dg.foreign.length, sample: dg.foreign.slice(0, 20), restored: Boolean(dg.restored), ...(dg.error ? { error: dg.error } : {}) });
+          T.anomalies.push(deletionRefusal);
+        }
+        if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); // #4590: tool state is never staged
+        if (deletionRefusal) { ev({ event: "CHECKPOINT", reason, dirty: true, pushed: false, refused: true }); return false; } // committed locally, never pushed; the worktree is kept
+      }
       const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
       if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
@@ -992,6 +1012,7 @@ export async function runCore(o) {
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
   async function rescuePush(reason, rejected) {
+    if (deletionRefusal) return false; // #5819: never push past a refused checkpoint
     // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
     try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
     // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
@@ -1657,6 +1678,10 @@ export async function runCore(o) {
       setupStep("deps", tD);
       for (const r of Array.isArray(res) ? res : []) {
         ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
+        if (r?.restore) { // #5819: a failed publish/materialize touched tracked files; depcache checked them out again
+          ev({ event: "DEPS_WORKTREE_RESTORED", eco: r.eco ?? null, status: r.status ?? null, ...r.restore });
+          T.anomalies.push(r.restore.error ? `Dependency cache (${r.eco}): restoring tracked files after a failed ${r.status} failed: ${r.restore.error}` : `Dependency cache (${r.eco}): ${r.restore.restored} tracked file(s) missing after a failed ${r.status} were restored${r.restore.missing ? ` (${r.restore.missing} still missing)` : ""} (#5819)`);
+        }
         if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
       }
     }
