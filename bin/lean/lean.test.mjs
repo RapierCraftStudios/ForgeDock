@@ -10,6 +10,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #5338
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
@@ -2354,7 +2355,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
     assert.ok(approxTokens(plan) <= 2650, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1925, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 1675 tokens`); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2025, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2025 tokens`); // 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2894,7 +2895,7 @@ describe("comment templates", () => {
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 2550, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
-    assert.ok(approxTokens(impl) <= 1900, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
+    assert.ok(approxTokens(impl) <= 2000, `implement prompt is ${approxTokens(impl)} of 2000 tokens`); // 2000: #5752 // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -5376,7 +5377,10 @@ describe("batch robustness (#4112-#4115)", () => {
     const w = world({ prList: [] });
     const g = w.io.git; w.io.git = async (a, o) => (a[0] === "show" && /:src\/foo\.js$/.test(a.at(-1)) ? weakBody : g(a, o));
     w.io.runCommand = async (a) => ({ rc: String(a?.cwd).includes("guardbase-") ? 0 : 1, output: "guard test failed" });
-    const r = await run(w, { dir, loadGuards: async () => [{ v: 1, issue: 9, pr: 90, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: "guard 9" }] });
+    // the guard copy lands in the fake worktree (/wt/lean-7): keep those writes in memory so the test runs on any host
+    const inWt = (p) => /^[\/]wt[\/]/.test(String(p).replace(/^[A-Za-z]:/, ""));
+    const guardFs = { ...nodeFs, mkdirSync: (p, o) => (inWt(p) ? undefined : nodeFs.mkdirSync(p, o)), writeFileSync: (p, d, o) => (inWt(p) ? undefined : nodeFs.writeFileSync(p, d, o)), rmSync: (p, o) => (inWt(p) ? undefined : nodeFs.rmSync(p, o)) };
+    const r = await run(w, { dir, guardFs, loadGuards: async () => [{ v: 1, issue: 9, pr: 90, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: "guard 9" }] });
     const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner")]);
     assert.doesNotMatch(text, /conformance\.guard_broken/, "a weak guard is never a guard_broken failure");
     assert.ok(r.terminalReason === "merged" || !/guard #9/.test(JSON.stringify(w.comments.filter((c) => /NEEDS_HUMAN/.test(c)))), "the guard is not why the lane stops");
@@ -8566,7 +8570,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /One turn, many calls: when several reads, greps, git show\/log\/blame or gh calls do not depend on each other, issue them all in the same turn/);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1900, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`); // 1900: #5760
+    assert.ok(approxTokens(builderImplementPrompt()) <= 2000, `implement prompt is ${approxTokens(builderImplementPrompt())} of 2000 tokens`); // 1900: #5760; 2000: #5752
     assert.ok(approxTokens(builderPlanPrompt(7)) <= 2550, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
@@ -8910,7 +8914,7 @@ describe("prompt budgets (#4969)", () => {
     assert.notEqual(moved, impl);
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
-    assert.ok(approxTokens(moved) <= 1900, `implement prompt from a deep checkout is ${approxTokens(moved)} of 1700 tokens`); // 1900: #5760
+    assert.ok(approxTokens(moved) <= 2000, `implement prompt from a deep checkout is ${approxTokens(moved)} of 2000 tokens`); // 1900: #5760; 2000: #5752
   });
 });
 
