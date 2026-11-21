@@ -337,6 +337,19 @@ describe("core work-on", () => {
     assert.ok(traj(w)[0].includes("| Close | issue closed (completed) |"));
   });
 
+  it("#5734 builder already-fixed with a trusted prod-failure decision does not close and goes needs-human", async () => {
+    const dec = { authorAssociation: "OWNER", author: { login: "op" }, url: "https://github.com/o/r/issues/7#issuecomment-5",
+      body: "<!-- FORGE:DECISION -->\nRequeue: verified failing in prod after #40727 went live: Reddit success rate ~0%." };
+    const w = world({ changed: [], viewComments: [dec], result: { status: "already-fixed", summary: "PR #40727 is an ancestor", evidence: ["a.js:1"], tests: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.closed.length, 0);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("failing in production") && c.includes("issuecomment-5")));
+    const w2 = world({ changed: [], viewComments: [{ ...dec, authorAssociation: "NONE", author: { login: "rando" } }], result: { status: "already-fixed", summary: "done", evidence: ["a.js:1"], tests: [] } });
+    assert.equal((await run(w2)).terminalReason, "invalid", "an untrusted author's claim does not block the close");
+    assert.equal(w2.closed.length, 1);
+  });
+
   it("a failed needs-human comment is recorded as an anomaly and the lane still ends needs-human (#4905)", async () => {
     const w = world({ changed: [], result: { status: "invalid", summary: "trust me", evidence: [], tests: [] } });
     const gh = w.io.gh;
