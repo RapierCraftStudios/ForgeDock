@@ -148,7 +148,8 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, session, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
-      baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses) }; // #4410: tool calls per turn, re-reads
+      baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses), // #4410: tool calls per turn, re-reads
+      endTokens: r.endTokens ?? null, toolUses: Array.isArray(r.toolUses) ? r.toolUses : null }; // #5812: the route hand-off sizes the plan session and lists what it read
   };
 }
 

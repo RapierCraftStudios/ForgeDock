@@ -123,6 +123,39 @@ ${d || "(no changes yet)"}
 ${est}Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
+/**
+ * #5812: the routed builder's opening digest. A build that starts fresh after BUILDER_ROUTE (instead of resuming the
+ * planning session) gets the plan's outcome, not its transcript: the frozen contract's deliverables and decisions, its
+ * open (non-deliver) requirements, the files planning read, its "Build reads:" list and the branch state. At most
+ * `maxBytes`; the contract and the investigation stay on disk as the authority.
+ */
+export function routeDigestPrompt({ contract = null, read = [], buildReads = "", planTokens = null, stat = "", diff = "", base = "", check = "", maxBytes = 32 * 1024 } = {}) {
+  const c = contract && typeof contract === "object" ? contract : {};
+  const one = (s, n) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  const list = (xs, max) => `${xs.slice(0, max).map((x) => `- ${x}`).join("\n")}${xs.length > max ? `\n- (+${xs.length - max} more)` : ""}\n`;
+  const rows = (x) => (Array.isArray(x) ? x.filter((v) => v && typeof v === "object") : []);
+  const deliverables = rows(c.deliverables).map((d) => `${d.path ?? "?"}${d.change ? `: ${one(d.change, 160)}` : ""}`);
+  const decisions = rows(c.decisions).map((k) => `${k.id ?? "K?"} ${one(k.choice, 200)}${k.justification ? ` (${one(k.justification, 160)})` : ""}`);
+  const open = rows(c.requirements).filter((r) => r.disposition && r.disposition !== "deliver").map((r) => `${r.id ?? "R?"} ${r.disposition}: ${one(r.quote, 160)}`);
+  const reads = [...new Set((Array.isArray(read) ? read : []).filter((p) => typeof p === "string" && p))];
+  const budget = Math.max(2048, Number(maxBytes) || 0);
+  const st = String(stat ?? "").trim(), br = String(buildReads ?? "").trim().slice(0, 3000), ck = String(check ?? "").trim().slice(0, 2000);
+  const d = st ? boundDiff(String(diff ?? ""), { stat, base, maxBytes: Math.floor(budget / 3) }).trim() : "";
+  const sections = [
+    deliverables.length ? `Deliverables:\n${list(deliverables, 40)}` : "",
+    decisions.length ? `Decisions:\n${list(decisions, 20)}` : "",
+    open.length ? `Open (not delivered in this lane; do not implement):\n${list(open, 20)}` : "",
+    reads.length ? `Files planning read (already understood; re-read only what you edit):\n${list(reads, 40)}` : "",
+    br ? `Planning's build reads:\n${br}\n` : "",
+    st ? `Branch state (git diff --stat ${base}...HEAD):\n${st.slice(0, 3000)}\n${d ? `\n${d}\n` : ""}` : "",
+    ck ? `Last validate result (${LEAN_DIR}/self-check.json):\n${ck}\n` : "",
+  ].join("");
+  const head = `\n\nRoute hand-off: planning ran in a separate session${planTokens ? ` (it ended at about ${planTokens} context tokens)` : ""} that this session does not inherit. Its outcome is on disk: ${CONTRACT_FILE} is the frozen authority and ${INVESTIGATION_FILE} holds the root cause, affected files and test plan; read both first. The digest below is what planning established; do not survey it again.\n\n<route_digest>\n`;
+  const room = budget - Buffer.byteLength(head) - 40;
+  const fitted = Buffer.byteLength(sections) <= room ? sections : `${Buffer.from(sections).subarray(0, Math.max(0, room)).toString().replace(/�+$/, "")}\n[digest truncated]\n`;
+  return `${head}${fitted}</route_digest>`;
+}
+
 /** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */
 export function turnBudgetWrapupPrompt({ size = "?", budget = 0, used = 0, grant = 5, stat = "", diff = "", base = "", check = "" } = {}) {
   const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();

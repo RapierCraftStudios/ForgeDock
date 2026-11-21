@@ -7563,6 +7563,41 @@ describe("#4362 attempt triggers", () => {
     assert.match(restart, /Its last tool call: Edit /);
   });
 
+  it("#5812: a planning session above the hand-off bound is not resumed: the build starts fresh from a bounded digest", async () => {
+    const lane = (planTokens, opts = {}) => {
+      const w = world({ dirty: true }); const seen = []; const orig = w.io.runner;
+      w.io.runner = async (c) => {
+        if (c.role === "builder") seen.push({ resume: c.resume ?? null, prompt: c.prompt, contextMax: c.contextMax ?? 0 });
+        const r = await orig(c);
+        return c.role === "builder" && seen.length === 1 ? { ...r, endTokens: planTokens, text: "planned.\nBuild reads: src/foo.js:1-20", toolUses: [{ msg: "m1", name: "Read", path: "src/bar.js" }] } : r;
+      };
+      return { w, seen, go: async () => { const dir = tmpDir("core-route-"); const r = await run(w, { dir, contextCeilingTokens: 120000, ...opts }); return { r, log: readLog(dir, 7) }; } };
+    };
+    const big = lane(96000);
+    const { r, log } = await big.go();
+    assert.equal(r.terminalReason, "merged");
+    const build = big.seen[1];
+    assert.equal(build.resume, null, "the build does not inherit the planning transcript");
+    assert.match(build.prompt, /The engine froze \.forge-lean\/contract\.json/);
+    assert.match(build.prompt, /Route hand-off: planning ran in a separate session \(it ended at about 96000 context tokens\)/);
+    assert.match(build.prompt, /Deliverables:\n- src\/foo\.js: guard null/);
+    assert.match(build.prompt, /Files planning read .*:\n- src\/bar\.js/);
+    assert.match(build.prompt, /Planning's build reads:\nsrc\/foo\.js:1-20/);
+    assert.equal(build.contextMax, 120000, "the ceiling still applies");
+    const ho = log.find((e) => e.event === "ROUTE_HANDOFF");
+    assert.deepEqual([ho.mode, ho.plan_tokens, ho.bound], ["digest", 96000, 40000]);
+    assert.ok(ho.digest_bytes > 0 && ho.digest_bytes <= 32 * 1024, "the digest is bounded");
+    assert.ok(!log.some((e) => e.event === "CONTEXT_CEILING"));
+    const small = lane(20000);
+    await small.go();
+    assert.equal(small.seen[1].resume, "sess-1", "a planning session under the bound is resumed (its cache is cheaper)");
+    assert.doesNotMatch(small.seen[1].prompt, /Route hand-off/);
+    const off = lane(96000, { routeHandoffTokens: 0 });
+    const offRun = await off.go();
+    assert.equal(off.seen[1].resume, "sess-1", "0 turns the hand-off off");
+    assert.equal(offRun.log.find((e) => e.event === "ROUTE_HANDOFF").mode, "resume");
+  });
+
   it("#5346: engine.context_ceiling_by_size sets the ceiling per lane size (size S here), the global one otherwise", async () => {
     const w = world({ dirty: true }); const caps = []; const orig = w.io.runner;
     w.io.runner = async (c) => { if (c.role === "builder") caps.push(c.contextMax ?? 0); return orig(c); };
@@ -8274,10 +8309,13 @@ describe("#4395 lane profile", () => {
     writeFileSync(`${d}/fake`, `#!/bin/sh\necho '${msg("m1", 5000)}'\necho '${msg("m2", 9000)}'\necho '${result}'\n`); chmodSync(`${d}/fake`, 0o755);
     const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true });
     assert.equal(r.baselineTokens, 5310);
+    assert.equal(r.endTokens, 9310, "#5812: the last turn's context");
     const fresh = await makeLeanRunner({ runCli: async () => ({ text: "", baselineTokens: 5310 }) })({ role: "builder", issue: 7, cwd: d, resume: null, system: "", prompt: "go" });
     assert.equal(fresh.baselineTokens, 5310);
     const resumed = await makeLeanRunner({ runCli: async () => ({ text: "", baselineTokens: 90000 }) })({ role: "builder", issue: 7, cwd: d, resume: "s-1", system: "", prompt: "go" });
     assert.equal(resumed.baselineTokens, null);
+    const ended = await makeLeanRunner({ runCli: async () => ({ text: "", endTokens: 9310, toolUses: [{ name: "Read", path: "a.js" }] }) })({ role: "builder", issue: 7, cwd: d, resume: "s-1", system: "", prompt: "go" });
+    assert.deepEqual([ended.endTokens, ended.toolUses], [9310, [{ name: "Read", path: "a.js" }]], "#5812: passed through for the route hand-off");
   });
 });
 
