@@ -1557,6 +1557,63 @@ describe("worktree salvage and orphaned processes (#4162)", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     assert.equal(salvageRefs(w).length, 0);
   });
+  // #5825: a lane folder that is not this repo's worktree is never salvaged or written to with git
+  const NOT_LINKED = { ok: false, why: "the lane folder has no .git link (not a git worktree)", evidence: { worktree: WT } };
+  const gitIdx5825 = (w, f) => w.calls.findIndex((c) => c[0] === "git" && f(c.slice(1)));
+  it("#5825 a leftover lane folder without a .git link is quarantined (no git salvage in it) and a fresh registered worktree is added", async () => {
+    const dir = tmpDir("core-5825-q-");
+    const w = world({ wtExists: true, salvageTrees: [T1] });
+    let gone = false; const moved = [];
+    w.io.fs.exists = async (p) => !gone && p.startsWith(WT);
+    const git0 = w.io.git;
+    w.io.git = async (a, o) => { if (a[0] === "worktree" && a[1] === "add") gone = false; return git0(a, o); };
+    w.io.confine = { verify: async () => (moved.length ? { ok: true } : NOT_LINKED), quarantine: async ({ wt }) => { moved.push(wt); gone = true; return "/wt/.quarantine/lean-7-1"; } };
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(moved, [WT]);
+    const add = gitIdx5825(w, (a) => a[0] === "worktree" && a[1] === "add");
+    assert.ok(add > 0, "a fresh worktree is added");
+    assert.ok(!w.calls.slice(0, add).some((c) => c[0] === "git" && ["add", "write-tree", "commit-tree"].includes(c[1])), "nothing is staged in the unlinked folder");
+    assert.equal(salvageRefs(w).length, 0);
+    const q = readLog(dir, 7).find((e) => e.event === "WORKTREE_QUARANTINED");
+    assert.equal(q.to, "/wt/.quarantine/lean-7-1"); assert.match(q.why, /no \.git link/);
+  });
+
+  it("#5825 a lane folder git does not resolve to its own worktree stops engine-error before any git write, with evidence", async () => {
+    const dir = tmpDir("core-5825-s-");
+    const w = world({ dirty: true });
+    w.io.confine = { verify: async () => ({ ok: false, why: "git resolves the lane folder to toplevel /repo, not the lane worktree", evidence: { worktree: WT, toplevel: "/repo", common_dir: "/repo/.git", repo_common_dir: "/repo/.git" } }), quarantine: async () => null };
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "engine-error");
+    const add = gitIdx5825(w, (a) => a[0] === "worktree" && a[1] === "add");
+    assert.ok(add >= 0);
+    assert.ok(!w.calls.slice(add + 1).some((c) => c[0] === "git" && ["add", "commit", "push", "rm", "reset", "checkout"].includes(c[1])), "no git write after the worktree add");
+    assert.equal(builders(w).length, 0, "no builder session starts");
+    const ev = readLog(dir, 7);
+    const nc = ev.find((e) => e.event === "WORKTREE_NOT_CONFINED");
+    assert.equal(nc.toplevel, "/repo"); assert.equal(nc.at, "lane start");
+    assert.equal(ev.find((e) => e.event === "RUN_TERMINAL").reason, "engine-error");
+  });
+
+  it("#5825 a lane folder that loses its link mid-run: the checkpoint stages and pushes nothing, the lane ends engine-error", async () => {
+    const dir = tmpDir("core-5825-c-");
+    const w = world({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    w.io.confine = { verify: async () => (builders(w).length ? NOT_LINKED : { ok: true }), quarantine: async () => null };
+    const r = await run(w, { dir, mergeWait: "all" });
+    assert.equal(r.terminalReason, "engine-error");
+    const first = w.calls.findIndex((c) => c[0] === "runner" && c[1] === "builder");
+    assert.ok(!w.calls.slice(first).some((c) => c[0] === "git" && ["add", "commit", "push"].includes(c[1]) && !c.includes("--delete")), "no add/commit/push once the link is gone");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "WORKTREE_NOT_CONFINED"));
+  });
+
+  it("#5825 lane child processes and lane git calls carry GIT_CEILING_DIRECTORIES = the worktree parent", async () => {
+    const w = world(); const envs = [];
+    const git0 = w.io.git;
+    w.io.git = async (a, o) => { if (o?.cwd === WT) { envs.push([a.join(" "), o.env ?? {}]); } return git0(a, o); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(envs.filter(([, e]) => e.GIT_CEILING_DIRECTORIES?.split(":")[0] !== "/wt").map(([a]) => a), [], "every lane git call is ceiled");
+    assert.ok(envs.length > 0);
+    assert.ok(w.envs.filter(Boolean).every((e) => e.GIT_CEILING_DIRECTORIES?.split(":")[0] === "/wt"), "every runner session is ceiled");
+  });
 
   it("procsInDir reads cwd links from a /proc tree and skips this process and its ancestors", () => {
     const root = tmpDir("proc-"), wtDir = tmpDir("wt-");
@@ -2389,7 +2446,8 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", PATH: "/rt/toolchain/bin:/usr/bin" };
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, PATH: "/rt/toolchain/bin:/usr/bin" };
+    assert.equal(lane.GIT_CEILING_DIRECTORIES.split(":")[0], "/wt", "#5825: lane children are ceiled at the worktree parent");
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
     assert.deepEqual(ran.map((a) => [a.command, a.env]), [["npm run lint", lane], ["node --test test/foo.test.js", lane]]);
@@ -4272,10 +4330,10 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
 
   it("#4103 'already exists' on add cleans the leftover and retries; index.lock and packed-refs.lock are retried", async () => {
     for (const msg of ["fatal: '/wt/lean-7' already exists", "fatal: Unable to create '/r/.git/index.lock': File exists.", "error: cannot lock ref: Unable to create '/r/.git/packed-refs.lock': File exists", "fatal: could not lock config file /r/.git/config: File exists"]) {
-      const w = world(); let failed = false; const removed = [];
-      w.io.fs.exists = async (p) => failed && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+      const w = world(); let failed = false, gone = false; const removed = [];
+      w.io.fs.exists = async (p) => failed && !gone && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); gone = true; }; // #5825: a removed leftover is gone until the add
       const g = w.io.git;
-      w.io.git = async (a, o2) => { if (a[0] === "worktree" && a[1] === "add" && !failed) { failed = true; throw Object.assign(new Error(msg), { stderr: msg }); } return g(a, o2); };
+      w.io.git = async (a, o2) => { if (a[0] === "worktree" && a[1] === "add" && !failed) { failed = true; throw Object.assign(new Error(msg), { stderr: msg }); } if (a[0] === "worktree" && a[1] === "add") gone = false; return g(a, o2); };
       const r = await run(w);
       assert.equal(r.terminalReason, "merged", msg);
       if (/already exists/.test(msg)) assert.deepEqual(removed, ["/wt/lean-7"]);
