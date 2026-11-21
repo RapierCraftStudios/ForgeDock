@@ -6210,6 +6210,20 @@ describe("shared dependency cache wiring (#4220)", () => {
     assert.equal(readLog(dir, 7).filter((e) => e.event === "PREFLIGHT_TOOL_MISSING").length, 0);
   });
 
+  it("#5804 a tool missing for an unrelated sub-project is only logged: the lane continues and merges; a named sub-project path fails fast", async () => {
+    const row = { status: "failed", eco: "poetry", dir: "services/worker", key: "k", ms: 3, reason: "tool not found: spawn poetry ENOENT" };
+    const dir = tmpDir("deps-5804-sub-");
+    const w = world(); depsIo(w, { results: [row] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged", "changes under src/ never need the worker's poetry");
+    assert.ok(builders(w).length >= 2, "plan and implement ran");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "PREFLIGHT_TOOL_MISSING").length, 0);
+    const w2 = world({ body: `${ISSUE_BODY}\n\nThe handler in services/worker/app/main.py calls foo.` }); depsIo(w2, { results: [row] });
+    const r2 = await run(w2, { dir: tmpDir("deps-5804-sub2-") });
+    assert.equal(r2.code, OUTCOME_CODES.ENV_TOOL_MISSING);
+    assert.equal(w2.calls.filter((c) => c[0] === "runner").length, 0, "no builder session");
+  });
+
   it("#5804 a resumed lane whose frozen contract declares an env tool the host lacks ends env.tool_missing before any session", async () => {
     const contract = { ...CONTRACT, test_plan: [{ requirement: "R1", proof: "the pytest case no longer errors at collection", level: "unit", level_reason: "cheapest level that observes it", repro: "no-repro", reason: "env-only", command: "node --test test/foo.test.js", env: ["pytest"] }] };
     const h = contractHash(contractJson(contract));

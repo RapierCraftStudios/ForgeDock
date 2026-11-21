@@ -157,10 +157,17 @@ describe("#5447 unrunnable tests: install classification and the Tests summary",
       { status: "failed", eco: "poetry", dir: "svc", code: "env.tool_missing", reason: "poetry is not available under python3.12" },
       { status: "failed", eco: "npm", dir: ".", reason: "install failed: ERESOLVE" },
       { status: "hit", eco: "uv", reason: "tool not found: spawn uv ENOENT" },
-    ]);
+    ], { files: ["./svc/app/main.py"] });
     assert.deepEqual(r.map((m) => m.tool), ["pnpm", "poetry"]);
     assert.match(r[1].label, /^poetry in svc: /);
     assert.deepEqual(toolMissingInstalls(null), []);
+  });
+  it("#5804 a sub-project install counts only when a named or deliverable path is under it; the root install always counts", () => {
+    const rows = [{ status: "failed", eco: "poetry", dir: "services/worker", reason: "tool not found: spawn poetry ENOENT" }];
+    assert.deepEqual(toolMissingInstalls(rows), [], "no files place the change: the gate judges it");
+    assert.deepEqual(toolMissingInstalls(rows, { files: ["web/src/a.ts", "services/workers/x.py"] }), [], "a sibling prefix is not under it");
+    assert.deepEqual(toolMissingInstalls(rows, { files: ["services/worker/app.py"] }).map((m) => m.tool), ["poetry"]);
+    assert.deepEqual(toolMissingInstalls([{ status: "failed", eco: "pnpm", reason: "tool not found: spawn pnpm ENOENT" }]).map((m) => m.tool), ["pnpm"], "no dir is the root");
   });
   it("testRunSummary counts declared, ran, red->green and skipped(reason)", () => {
     const c = { validate: [{ id: "V1", command: "a" }, { id: "V2", command: "b" }], repro_test: { command: "c" } };
