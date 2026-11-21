@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { releaseMergeHold, rollupPending, holdEnabled } from "./release-merge-hold.mjs";
+import { CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const run = (rows) => async () => JSON.stringify(rows);
 const O = (gh, extra = {}) => ({ gh, repo: "o/r", branch: "staging", defaults: ["main"], ...extra });
@@ -34,5 +35,19 @@ describe("release merge hold (#5709)", () => {
     assert.equal(rollupPending({ __typename: "StatusContext", state: "PENDING" }), true);
     assert.equal(rollupPending({ __typename: "CheckRun", status: "QUEUED" }), true);
     assert.equal(rollupPending({ __typename: "CheckRun", status: "COMPLETED" }), false);
+  });
+  it("#5777: the always-pending forge/deploy-gate status and other report-only gate checks do not hold a merge", async () => {
+    const gate = { __typename: "StatusContext", context: "forge/deploy-gate", state: "PENDING" };
+    const done = { __typename: "CheckRun", name: "ci", status: "COMPLETED" };
+    assert.equal(rollupPending(gate), false);
+    assert.equal((await releaseMergeHold(O(run([{ ...PEND, statusCheckRollup: [gate, done] }])))).held, false);
+    const others = [{ __typename: "CheckRun", name: "forgedock/verify", status: "IN_PROGRESS" }, { __typename: "CheckRun", name: "Check for FORGE gate markers", status: "QUEUED" }];
+    assert.equal((await releaseMergeHold(O(run([{ ...PEND, statusCheckRollup: [gate, ...others, done] }])))).held, false);
+    for (const n of CI_EXCLUDED_CHECKS) {
+      assert.equal(rollupPending({ __typename: "CheckRun", name: n, status: "IN_PROGRESS" }), false, n);
+      assert.equal(rollupPending({ __typename: "StatusContext", context: n, state: "PENDING" }), false, n);
+    }
+    const real = await releaseMergeHold(O(run([{ ...PEND, statusCheckRollup: [gate, { __typename: "CheckRun", name: "ci", status: "IN_PROGRESS" }] }])));
+    assert.equal(real.held, true); assert.equal(real.kind, "release-ci");
   });
 });
