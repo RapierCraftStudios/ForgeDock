@@ -25,9 +25,9 @@ import { readEngine } from "./deploy-stages.mjs";
 import { checksAt, runNamedChecks, tickItems, addMonitoringLabel, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { fixSha, readProbeConfig, resolveDefaultBranch, spawnProbe, clearAwaitingPromotion, markPostDeployFailed, POST_DEPLOY_FAILED_LABEL, OUTPUT_TAIL } from "./probe.mjs";
 import { REMEDIATION_TRACKED_MARKER } from "./issuewatch-reconcile.mjs";
+import { AWAITING_PROMOTION_LABEL } from "./prefilter.mjs";
 
 export const MERGED_LABELS = ["workflow:merged", "workflow:merged-unverified"];
-export const AWAITING_PROMOTION_LABEL = "awaiting-promotion";
 const CHECK_RE = /\[check:\s*([a-z0-9][a-z0-9._-]{0,63})\s*\]/g;
 const short = (s) => String(s ?? "").slice(0, 12);
 const labelsOf = (iss) => (iss?.labels ?? []).map((l) => String(l?.name ?? l));
