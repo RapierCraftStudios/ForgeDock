@@ -245,6 +245,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    mid-edit: a crossing with an Edit/Write/MultiEdit/NotebookEdit `tool_use` unanswered waits for its `tool_result` (hard stop
    at 1.25x). The restart prompt adds `<established>` (files read, files edited, last tool, from `handoffFacts`), and
    `toolStats` carries `first_edit_turn` so `context_restart` attempts show turns-to-first-edit.
+   **Route hand-off** (#5812): the runner reports `endTokens` (the last turn's context). The plan and correction calls record
+   it, along with the files planning read and its "Build reads:" reply. At the build, `routeHandoff` (`ceiling.mjs`) compares it
+   with `engine.route_handoff_tokens` (`readCoreLimits` → `routeHandoffTokens`; default 40000, capped at half the lane
+   ceiling; 0 = always resume). Above the bound the build does not resume the planning session. It starts fresh with the
+   implement prompt plus `routeDigestPrompt` (at most 32 KB): deliverables, contract decisions, open non-deliver rows,
+   planning's reads and build reads, and the branch state from `restartFacts`. At or under the bound, or when no size was
+   reported, the build resumes as before. Every build logs
+   `ROUTE_HANDOFF {mode, plan_tokens, bound, digest_bytes, pack_bytes, lane_profile}`.
    **Turn budget** (#4392, `budget.mjs`, forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100, 0 = off;
    `readCoreLimits` → runCore `turnBudgets`): at contract freeze (or a resumed frozen contract) `laneSize` sizes the lane
    from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L); an L lane gets +10 turns per distinct deliverable path above 5 (cap +2x the L base) and a `budget.exceeded` recovery of L another +ceil(base/2) (`scaledExtra`, #4587). While `stage ===

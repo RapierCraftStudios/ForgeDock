@@ -2115,6 +2115,7 @@ const CONTEXT_HARD_CAP = 1.25;
  * heavy step, test or lint child) the kill waits until idleMs + `busyMs` of silence, `onIdleExtend(info)` is told once per
  * idle stretch, and a later kill carries `extended: true` and `heavyQueue` (info.heavyQueue).
  * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
+ * #5812: and `endTokens`, the last assistant turn's context (what a `--resume` of the session starts from).
  * #4410: a stream result (and a CLI_TURNS / CLI_CONTEXT error) carries `toolUses`, [{msg, name, path, cmd}] per tool_use
  * (deduped by tool_use id, capped at TOOL_USES_MAX), for bin/lean/toolstats.mjs; absent on the non-stream path.
  * #5334: every stream kill (CLI_IDLE, CLI_TIMEOUT, a host kill's CLI_BACKEND_FAILED) carries the usage, `turns` and `toolUses`
@@ -2292,6 +2293,9 @@ export async function runCliBackendAsync(opts) {
   const first = msgUsage.values().next().value;
   if (stream && toolUses.size && r && typeof r === "object") r.toolUses = [...toolUses.values()];
   if (first && r && typeof r === "object") r.baselineTokens = toFiniteUsageNumber(first.input_tokens) + toFiniteUsageNumber(first.cache_read_input_tokens) + toFiniteUsageNumber(first.cache_creation_input_tokens);
+  // #5812: the last assistant turn's context: what a resume of this session starts from
+  const last = [...msgUsage.values()].pop();
+  if (last && r && typeof r === "object") r.endTokens = toFiniteUsageNumber(last.input_tokens) + toFiniteUsageNumber(last.cache_read_input_tokens) + toFiniteUsageNumber(last.cache_creation_input_tokens);
   return r;
 }
 
