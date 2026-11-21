@@ -264,7 +264,7 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
   it("#5087 a declared topology.route_reachability that rejects the new route blocks before merge (#38241 fixture)", async () => {
     const ingress = path.join(tmpDir("ingress-"), "check-ingress.sh");
     fs.writeFileSync(ingress, "for p in \"$@\"; do case \"$p\" in /api/v1/batch*) ;; /api/v1/*) echo \"unreachable: $p -> api\" >&2; exit 1 ;; esac; done\n");
-    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress}`, verify: { maxRounds: 0 } } });
+    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress.replace(/\\/g, "/")}`, verify: { maxRounds: 0 } } });
     assert.equal(o.staging.search, false, "staging untouched");
     assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
     assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));

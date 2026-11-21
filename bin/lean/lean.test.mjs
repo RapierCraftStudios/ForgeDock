@@ -44,6 +44,7 @@ const approxTokens = (s) => rawTokens(String(s).replaceAll(INSTALL_ROOT, "<root>
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
 
 const WT = "/wt/lean-7";
+const posixPath = (p) => String(p).replace(/\\/g, "/");
 /** #5333: the engine appends the stage-stamp rule to every builder prompt; strip it to compare against the bare template. */
 const unstamp = (s) => String(s).replace(/\n\nStage notes: make the first line[^\n]*/, "");
 const STAGE_MD = {
@@ -212,7 +213,8 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
+    // the engine builds paths with node:path, so on Windows they arrive as \wt\lean-7\…; the fake fs keys on POSIX paths
+    fs: { ...(o.wtExists ? { exists: async (p) => posixPath(p).startsWith("/wt/lean-7") } : {}), stat: async (p) => (posixPath(p) in w.files ? { mtimeMs: w.mtimes[posixPath(p)] ?? 1 } : null), read: async (p) => { if (!(posixPath(p) in w.files)) throw new Error("ENOENT"); return w.files[posixPath(p)]; }, append: async (p, t) => { w.files[posixPath(p)] = (w.files[posixPath(p)] ?? "") + t; }, write: async (p, t) => { w.files[posixPath(p)] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
       if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
