@@ -105,6 +105,8 @@ export const OUTCOME_CODES = Object.freeze({
   STRUCTURE_UNDECLARED_EDGE: "structure.undeclared_edge", // forge#4159: a workspace package.json edge the contract does not name
   DOCS_STALE: "docs.stale", // the target repo's devdocs freshness rule still fails after one builder resume
   MAINTENANCE_HOTSPOT_GROWTH: "maintenance.hotspot_growth", // forge#4195: an over-threshold file grew past growth_lines without hotspot-exempt
+  MAINTENANCE_COUNTER_GROWTH: "maintenance.counter_growth", // forge#5751: a forge.yaml recurrence.counters count grew without a "counter-ok: <name>" decision
+  RECURRENCE_DESIGN_MISSING: "recurrence.design_missing", // forge#5751: a recurring issue's design lane contract lacks why_failed, delete/replace and a measurable outcome
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // refactor:split lane (forge#4211): deterministic refusals and the move proof; every one leaves no edit behind.
