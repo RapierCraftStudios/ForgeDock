@@ -9,6 +9,7 @@
  * such blob gets today's plain `git worktree add`. A failed sparse step falls back to a full checkout; never fails a lane.
  */
 import { join } from "node:path";
+import { isAbsPath } from "./winspawn.mjs";
 
 export const DEFAULT_SPARSE_MAX_KB = 1024;
 
@@ -57,7 +58,8 @@ export async function addLaneWorktree(git, write, { cwd, wt, addArgs, ref, maxBl
   try {
     await g(["sparse-checkout", "set", "--no-cone", "/*"]);
     const file = String(await g(["rev-parse", "--git-path", "info/sparse-checkout"])).trim();
-    await write(file.startsWith("/") ? file : join(wt, file), `${sparsePatterns(plan.excludes).join("\n")}\n`);
+    // #5825: git prints `C:/...` on Windows: a startsWith("/") test joined it under the worktree (a stray `C` folder there)
+    await write(isAbsPath(file) ? file : join(wt, file), `${sparsePatterns(plan.excludes).join("\n")}\n`);
     await g(["read-tree", "-mu", "HEAD"]);
     return { sparse: true, excluded: plan.excludes.length, bytes: plan.bytes };
   } catch (e) {

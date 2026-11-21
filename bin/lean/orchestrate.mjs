@@ -51,6 +51,7 @@
  * when only held issues (and their dependents) remain and nothing runs, the batch ends with them `held` ("held by operator"), and a `--resume <id> <issue...>` naming them (or `--release`) re-admits them.
  * `getBlocked()` (#4773, the `blocked` label) is read on every pass: the issues it returns are in the batch but not dispatched; removing the label
  * releases them on the next pass (the batch polls while only blocked issues wait). `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author.
+ * `logicalDeps(n)` (#5824) adds the plan's logical edges (bin/lean/dag.mjs: a dependency's new contract deliverable the issue names).
  *
  * Maintenance budget (#4197), off unless `maintenance: {share, whenIdle}` is passed: `classify(issue)` gives each issue
  * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
@@ -328,7 +329,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, logicalDeps = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -494,9 +495,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     estimates.set(n, Number.isFinite(v) && v > 0 ? v : EST_DEFAULT_MIN.M);
   };
   // #4773: a declaration line is an edge only when the body's author is trusted (the engine's admission applies the same rule).
+  // #5824: `logicalDeps(n)` adds the plan's code-derived logical edges (bin/lean/dag.mjs), trusted or not.
   const declared = async (n, body) => {
-    if (typeof trusted === "function") { let ok = false; try { ok = (await trusted(n)) === true; } catch { ok = false; } if (!ok) return []; }
-    return parseDeps(body, n);
+    let extra = [];
+    try { extra = typeof logicalDeps === "function" ? (logicalDeps(n) ?? []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n) : []; } catch { extra = []; }
+    if (typeof trusted === "function") { let ok = false; try { ok = (await trusted(n)) === true; } catch { ok = false; } if (!ok) return extra; }
+    return [...new Set([...parseDeps(body, n), ...extra])];
   };
   // #5112: a dependency that ended `decomposed` (sub-issues joined, mode not off) is its sub-issues, to a fixpoint; used on every edge write.
   const throughDecomposed = (ds) => {

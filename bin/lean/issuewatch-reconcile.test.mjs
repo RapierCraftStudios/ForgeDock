@@ -49,3 +49,33 @@ test("#5529 redriveStep waits for claude on a missing-executable claim, re-drive
   assert.equal(driven.filter((n) => n === 2).length, 2, "budget of 2 re-drives");
   assert.equal(state.outcomes[3].kind, "parked");
 });
+
+test("remediateStep: a remediation exit 0 posts one FORGE:TRACKED hand-off while the issue is open (#5704)", async () => {
+  const { remediateStep, REMEDIATION_TRACKED_MARKER } = await import("./issuewatch-reconcile.mjs");
+  const comments = [];
+  let state = "OPEN";
+  const io = {
+    remediate: () => ({ poll: () => ({ code: 0 }) }),
+    gh: async (a) => {
+      if (a[1] === "view") return JSON.stringify({ state, comments: comments.map((body) => ({ body })) });
+      if (a[1] === "comment") { comments.push(a[a.indexOf("--body") + 1]); return ""; }
+      throw new Error(`unexpected gh ${a.join(" ")}`);
+    },
+  };
+  const settled = [], failed = [];
+  const run = async (st) => { const handles = new Map(); await remediateStep({ watch: { name: "w" }, repo: "o/r", io, state: st, handles, now: 1, settle: (n) => settled.push(n), fail: (n) => failed.push(n) }); await remediateStep({ watch: { name: "w" }, repo: "o/r", io, state: st, handles, now: 2, settle: (n) => settled.push(n), fail: (n) => failed.push(n) }); };
+  const st = { outcomes: { 7: { kind: "parked", code: "conformance.e2e_unverified" } } };
+  await run(st);
+  assert.equal(st.remediated[7].status, "done");
+  assert.deepEqual(settled, [7]);
+  assert.deepEqual(failed, []);
+  assert.equal(comments.length, 1);
+  assert.ok(comments[0].startsWith(REMEDIATION_TRACKED_MARKER));
+  // idempotent: a second remediation of the same issue finds the marker and posts nothing
+  await run({ outcomes: { 7: { kind: "parked", code: "x" } } });
+  assert.equal(comments.length, 1);
+  // a closed issue gets nothing
+  state = "CLOSED"; comments.length = 0;
+  await run({ outcomes: { 7: { kind: "parked", code: "x" } } });
+  assert.equal(comments.length, 0);
+});

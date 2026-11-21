@@ -30,6 +30,7 @@ import { parseVersioned } from "./seqversioned.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
+import { verifyLaneWorktree, quarantineDir } from "./laneconfine.mjs";
 
 /** #5531: children started by this process's gh/script helpers still running; the schedd kills them on close so none outlives the daemon. */
 const liveChildren = new Set();
@@ -134,7 +135,7 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
-    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || "claude";
+    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || resolveSpawn("claude", []).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
     // #5516: fullSession keeps slash commands/Skill/Task (the release test gate invokes /test-gate); otherwise the lean minimal group
@@ -664,6 +665,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
       }
     },
+    /** #5825: is the lane folder a worktree of this repo (toplevel + common dir), and moving aside a folder that is not. */
+    confine: { verify: ({ wt, cwd }) => verifyLaneWorktree({ git: run("git"), exists: async (p) => existsSync(p), wt, cwd }), quarantine: async ({ wt }) => quarantineDir(wt) },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */
     proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },
     fs: {
