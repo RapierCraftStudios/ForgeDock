@@ -2256,6 +2256,12 @@ builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `S
 The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
+#5752 weak vs strong: `materialize` tags each job with `isWeakGuardTest(body, path)` (`weakguard.mjs`, deterministic, over the base body).
+A weak guard (reads file text, imports no local non-test module, runs no process, every assertion a literal-presence form) that fails is
+excluded from `guardFailures`; `weakGuardNotes` turns it into a trajectory decision and a `guard_weak` event (`guard_run` gains `weak`).
+Strong guards are unchanged. A `{"kind":"supersedes","mechanism":"<name>","why":""}` amendment is stored as `contract.mechanisms`; precheck then
+drops a `guard_broken` row whose test is in `removedPathsOf` (the lane deleted it), and `supersededIds(contract, selected, removedPaths)` adds
+guards whose every test file was deleted, so the supersession comment reaches them too. A surviving test still needs a per-guard supersedes.
 `normalizeAmendment` maps the near-synonyms `supersede-guard`, `supersede` and `supersedes-guard` to `supersedes` (#4916), and the `applyAmendments` rows pre-pass expands a `supersedes` amendment carrying `guards: [...]` into one `{guard, why}` row per id (same `why`; a single `guard` is kept too). Each row still hits the `GUARD_ID_RE` check and the reviewer still judges it; other unknown kinds keep the valid-kinds error.
 #4856: `normalizeAmendment` compares kinds case-insensitively with `_` as `-` (`Scope_Deferral`), and `AMEND_SLIPS` also maps `deferred`, `deferral` and `scope-deferral` to `defer`. Only recognised kinds are rewritten, so `scope-note` and any other unlisted kind keep their spelling in the unknown-kind error (it lists `AMEND_KINDS`).
 
@@ -3490,6 +3496,16 @@ The gate is on without config; the caps apply only when set. `bin/engine-cli.mjs
 ## Entry 2026-11-21 — release fix lane spawns with the sandbox env (#5785)
 
 `realSeam().runLane` in `release-review.mjs` shadowed the sandbox env (`laneEnv(env, laneStrip)`) with its `lane` (name) parameter, so the fix lane was spawned with `env: "staging"`, an empty environment with no PATH, gh or claude auth. The env is now `sandboxEnv`; `--lane` still gets the lane name. `realSeam` takes an optional `spawn` (default `node:child_process` spawn) so a test can assert the child env (driver token stripped, PATH kept).
+
+## Entry 2026-11-21 — weak guards, mechanism supersedes, outcome evidence (#5752)
+
+Guard gate: a broken weak guard (a base test that only asserts literals exist in file text; `bin/lean/weakguard.mjs`) is a review note and a
+`guard_weak` event, not `conformance.guard_broken`; behavioural tests stay strong. One `supersedes` amendment with `mechanism` retires every broken
+guard whose test files the lane deleted (`contract.mechanisms`, precheck and `supersededIds`). New `bin/lean/outcomeevidence.mjs`: forge.yaml
+`outcome_evidence: {paths: {area: globs}, corpus: {area: globs}}` (off when unset, read by `readEnvConfig` as `outcomeEvidenceConfig`); a lane
+touching an area needs a `result.outcome_evidence` before/after row on a declared corpus, and its post-deploy checks a metric `baseline`
+(`rawChecksAt` reads the raw entries). Failures are `conformance.unimplemented` rows (kinds `outcome_evidence_missing|invalid|regressed|baseline_missing`),
+no new outcome code. The builder prompt adds the negative-examples rule for new keyword/regex classifiers and documents both amendment and row shapes.
 
 ## Entry 2026-11-21 — live reconcile: merged is not live (#5704)
 

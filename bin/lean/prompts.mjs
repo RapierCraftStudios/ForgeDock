@@ -266,13 +266,15 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
 - {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row. An impossible deliverable is a defer, not a new kind.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
-- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure.
+- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure; {"kind":"supersedes","mechanism":"<name>","why":""} retires every guard whose test this lane deletes.
 - {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
 New CI (#5760): join ci.budget.shared_regression_job, else annotate \`# FORGE:CI_BUDGET trigger= minutes= why=\`; a new workflow/job needs concurrency, timeout-minutes, paths, event if:.
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
+A new keyword/regex classifier ships negative examples (inputs it must not match).
+A forge.yaml outcome_evidence area change needs result outcome_evidence [{area,metric,corpus,before,after,better}] measured on recorded real inputs; its post-deploy checks get a numeric baseline.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
 

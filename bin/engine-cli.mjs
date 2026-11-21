@@ -6,6 +6,7 @@
  */
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { parseDocsConfig } from "./lean/docsgate.mjs";
+import { parseOutcomeEvidenceConfig } from "./lean/outcomeevidence.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
 import { parseDesignConfig } from "./lean/design-gate.mjs";
 import { execFileSync } from "node:child_process";
@@ -605,6 +606,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     const rr = s(y?.topology?.route_reachability); // #5087: repo-supplied command: exits non-zero when the ingress does not deliver the added route paths (args) to their service
     const dc = parseDocsConfig(y?.docs); // #5419: forge.yaml docs: (off unless required_for is set)
+    const oe = parseOutcomeEvidenceConfig(y?.outcome_evidence); // #5752: forge.yaml outcome_evidence: (off unless paths declares an area)
     const cb = ["max_workflows", "max_ci_jobs", "monthly_minutes", "shared_regression_job"].some((k) => y?.ci?.[k] !== undefined) ? parseCiBudget(y.ci) : null; // #5760: forge.yaml ci.budget (flattened into ci)
     let appPages = false; // #5428: default-on trigger: the repo tracks Next app/**/page.* files
     try { appPages = String(execFileSync("git", ["ls-files", "--", "*page.*"], { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] })).split("\n").some((f) => PAGE_RE.test(f)); } catch { /* not a git checkout: off */ }
@@ -613,7 +615,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(s(y?.validate?.regenerate) ? { validateRegenerate: s(y.validate.regenerate) } : {}), ...(catalog.length ? { validateCatalogSources: catalog } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(cb ? { ciBudget: cb } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(rc ? { recurrenceConfig: rc } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(s(y?.validate?.regenerate) ? { validateRegenerate: s(y.validate.regenerate) } : {}), ...(catalog.length ? { validateCatalogSources: catalog } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(oe ? { outcomeEvidenceConfig: oe } : {}), ...(cb ? { ciBudget: cb } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(rc ? { recurrenceConfig: rc } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];

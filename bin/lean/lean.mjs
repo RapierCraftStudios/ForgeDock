@@ -71,6 +71,7 @@ import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { docsFailures } from "./docsgate.mjs";
+import { outcomeEvidenceFailures, rawChecksAt } from "./outcomeevidence.mjs";
 import { ciBudgetFailures, parseCiBudget } from "./ci-gate.mjs";
 import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
 import { changedRoutes, captureVisualCheck, publishToRef, visualMarkdown } from "./page-capture.mjs"; // #5770
@@ -79,7 +80,7 @@ import { designGate, designGateNote, designFailures, specApproved as designSpecO
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { startSpeculative } from "./overlap.mjs";
-import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
+import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment, weakGuardNotes } from "./guardgate.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
 import { floorRoute, parseBuilderRouting, provisionalRoute, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
@@ -339,7 +340,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -3353,7 +3354,7 @@ export async function runCore(o) {
       return out;
     }
     /** #4693: select the guards this diff intersects and rerun their base test files; zero cost when none is selected. Best effort: an error skips the gate. */
-    let guardSel = [], guardNoted = ""; let guardEv = null; // #4705: this pass's guard_run event, emitted by the caller once the added wall time is known
+    let guardSel = [], guardNoted = "", laneRemoved = []; let guardEv = null; // #5752: laneRemoved: the lane's deleted paths, for mechanism-retired guards // #4705: this pass's guard_run event, emitted by the caller once the added wall time is known
     async function guardGate(files) {
       let sel = [], r = null; guardEv = null;
       try {
@@ -3361,12 +3362,14 @@ export async function runCore(o) {
         const picked = guards.length ? await selectGuards({ guards, files, git: (a) => git(a), base }) : { selected: [], mergeBase: null };
         sel = picked.selected; guardSel = sel;
         if (!sel.length) return [];
-        r = await runGuards({ selected: sel, mergeBase: picked.mergeBase, contract: effective, guardCommand: vcfg.guardCommand, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), parallelism: Number(process.env.FORGE_HOST_PARALLELISM) || 2 });
+        r = await runGuards({ selected: sel, mergeBase: picked.mergeBase, contract: effective, guardCommand: vcfg.guardCommand, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), parallelism: Number(process.env.FORGE_HOST_PARALLELISM) || 2, ...(o.guardFs ? { fs: o.guardFs } : {}) });
       } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: 0, broken: 0, skipped: 0, wall_ms: 0, error: true }; return []; }
       const note = `Guard gate selected ${sel.map((x) => `#${x.guard.issue} (${x.reason})`).join("; ")}${r.skipped.length ? `; skipped: ${r.skipped.join("; ")}` : ""}${r.failures.length && shadow ? "; shadow: would block" : ""}`;
       if (note !== guardNoted) { guardNoted = note; T.decisions.push(note); }
-      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), reasons: Object.fromEntries(sel.map((x) => [x.guard.issue, x.reason])), batches: r.batches, ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
+      const weak = weakGuardNotes(r.runs); // #5752: a broken weak guard (literal-presence test) is a review note, not a park
+      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), reasons: Object.fromEntries(sel.map((x) => [x.guard.issue, x.reason])), batches: r.batches, ran: r.runs.length, broken: r.failures.length, weak: weak.length, skipped: r.skipped.length, wall_ms: r.ms };
       for (const f of r.failures) ev({ event: "guard_broken", guard: f.guard, test: f.test });
+      for (const w of weak) { ev({ event: "guard_weak", guard: w.guard, test: w.test }); if (!T.decisions.includes(w.note)) T.decisions.push(w.note); }
       return r.failures;
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
@@ -3452,6 +3455,8 @@ export async function runCore(o) {
       const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
       // #5419: forge.yaml docs: user-facing surfaces need docs, and added /docs links must resolve; unset = no check
       const docsFail = docsConfig ? await docsFailures({ cfg: docsConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      // #5752: forge.yaml outcome_evidence: a touched declared area needs a before/after on recorded real inputs; unset = no check
+      const outcomeFail = outcomeEvidenceConfig ? outcomeEvidenceFailures({ cfg: outcomeEvidenceConfig, files, result, contract: effective, exists: (p) => existsSync(join(wt, p)), checks: effective.requirements?.some((r) => r.disposition === "post-deploy") ? await rawChecksAt(git, [base, "HEAD"]) : null }) : [];
       // #5428: forge.yaml pages: a public page needs design, SEO and GEO briefs and passes the deterministic page checks; unset = no check
       const addedNow = String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); // #5648: new vs modified pages
       // #5770: forge.yaml pages.capture: the engine renders the changed routes (no browser in the builder session) and uploads the shots; once per head
@@ -3477,7 +3482,8 @@ export async function runCore(o) {
       const repoHas = (validateRuns && Object.keys(validateRuns).length) || Object.keys(substitutedRuns ?? {}).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
-      const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
+      const removedPaths = (effective.validate ?? []).some((v) => v.substituted) || effective.mechanisms?.length ? await removedPathsOf(git, base) : []; // #4990; #5752: a mechanism supersedes retires deleted guard tests
+      laneRemoved = removedPaths ?? [];
       const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
       const baselineRuns = [];
       for (const b of matchBaselines(files, vcfg.baselines)) { // #5448: project baseline suites for the changed paths, enforced
@@ -3488,7 +3494,7 @@ export async function runCore(o) {
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
       // #5760: CI budget gate (always on: annotation + hygiene; max_* only when set); one git diff when no workflow changed
       const ciBudgetFail = await ciBudgetFailures({ cfg: ciBudget ?? parseCiBudget(null), base, git }).catch((e) => { ev({ event: "CI_BUDGET_GATE_ERROR", error: String(e?.message ?? e).slice(0, 200) }); return []; });
-      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, counters, recurrence, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, ciBudgetFailures: ciBudgetFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, counters, recurrence, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, outcomeEvidenceFailures: outcomeFail, ciBudgetFailures: ciBudgetFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
       const depFail = depInstallFailures({ results: depResults, changedFiles: files });
       for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);
@@ -4308,7 +4314,7 @@ export async function runCore(o) {
         T.decisions.push(`Interface ${d.supersedes} superseded by ${d.id}: ${n.map((x) => `${x.consumer} ${x.action}${x.issue ? ` #${x.issue}` : ""}`).join(", ")}`);
       }
     } catch (e) { T.anomalies.push(`decision records not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
-    for (const sp of supersededIds(effective, guardSel)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
+    for (const sp of supersededIds(effective, guardSel, laneRemoved)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
       try { await ghw(["issue", "comment", sp.guard.slice(1), "-R", repo, "--body", supersessionComment({ guard: sp.guard, pr, why: sp.why })]); ev({ event: "supersedes_accepted", guard: sp.guard, pr }); T.decisions.push(`Guard ${sp.guard} superseded: ${sp.why}`); } catch (e) { T.anomalies.push(`supersession of ${sp.guard} not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
     }
     postRun.add("guard", async () => { try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io: { ...io, git: (a, op) => io.git(a, { ...op, env: { ...laneGitEnv, ...op?.env } }) }, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ } }); // #5437
