@@ -97,6 +97,19 @@ describe("annotation and single-file steps", () => {
     assert.equal(singleTestFile("run: cat x.test.mjs"), null);
     assert.deepEqual(singleTestFileSteps(["npm ci", "pytest tests/test_a.py"]), [{ line: 1, file: "tests/test_a.py" }]);
   });
+  it("singleTestFile ignores runner words inside paths and non-command lines (#5787)", () => {
+    for (const l of ["      - run: echo scripts/foo.test.sh", "      - name: check scripts/foo.test.sh", "          - scripts/foo.test.sh", "run: cat x.test.sh", "      - name: Run vitest on a.test.ts", "run: cat lib/bash/x.test.mjs"]) assert.equal(singleTestFile(l), null, l);
+    assert.equal(singleTestFile("run: npm ci && bash scripts/foo.test.sh"), "scripts/foo.test.sh");
+    assert.equal(singleTestFile("        npx vitest run src/a.test.ts"), "src/a.test.ts");
+    const head = BASE_CI.replace("      - run: npm run lint", "      - run: npm run lint\n      - name: check scripts/foo.test.sh\n      - run: echo scripts/foo.test.sh");
+    assert.deepEqual(ciGateFindings({ cfg, base: { [CI]: BASE_CI }, head: { [CI]: head } }), []);
+  });
+  it("singleTestFile still flags real runner steps (#5787 over-narrowing guard)", () => {
+    assert.equal(singleTestFile("run: cd x && pytest tests/test_a.py"), "tests/test_a.py");
+    assert.equal(singleTestFile("run: sh scripts/foo.test.sh"), "scripts/foo.test.sh");
+    const head = BASE_CI.replace("      - run: npm run lint", "      - run: npm run lint\n      - run: bash scripts/foo.test.sh");
+    assert.deepEqual(kinds(ciGateFindings({ cfg, base: { [CI]: BASE_CI }, head: { [CI]: head } })), ["ci_budget_unannotated"]);
+  });
 });
 
 describe("new jobs and hygiene", () => {

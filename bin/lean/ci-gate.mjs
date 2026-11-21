@@ -19,7 +19,9 @@ const C = OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED;
 export const WORKFLOW_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 const COMMENT_EVENTS = ["issues", "issue_comment", "pull_request_review_comment", "discussion_comment"];
 const PATH_EVENTS = ["push", "pull_request", "pull_request_target"];
-const RUNNER_RE = /\b(?:node\s+(?:[^\s]+\s+)*--test|vitest|jest|pytest|go\s+test|playwright\s+test|mocha|bash|sh)\b/;
+// A runner at command position: segment start, after env assignments and a launcher, never inside a path or extension (#5787).
+const RUNNER_RE = /^(?:\w+=\S*\s+)*(?:(?:npx|bunx|pnpm(?:\s+exec)?|yarn|uv\s+run|poetry\s+run|python3?\s+-m)\s+)?(?:[^\s;&|]*\/)?(?:node\s+(?:[^\s]+\s+)*--test|vitest|jest|pytest|go\s+test|playwright\s+test|mocha|bash|sh)(?=\s|$)/;
+const YAML_KEY_RE = /^["']?[A-Za-z_][\w-]*["']?\s*:(?:\s|$)/;
 const TEST_FILE_RE = /^(?:[^\s'"]*\/)?(?:[^\s/'"]+\.(?:test|spec)\.[a-z0-9]+|[^\s/'"]+_test\.[a-z0-9]+|test_[^\s/'"]+\.py)$/i;
 const ANNOT_RE = /#\s*FORGE:CI_BUDGET\b(.*)$/;
 
@@ -112,7 +114,8 @@ function addedLineIdx(base, head) {
 /** The single test file a run line invokes, or null (a test runner with exactly one test-file argument). */
 export function singleTestFile(line) {
   const cmd = String(line ?? "").replace(/^\s*-?\s*(?:run\s*:\s*[|>]?)?/, "").trim();
-  if (!cmd || cmd.startsWith("#") || !RUNNER_RE.test(cmd)) return null;
+  if (!cmd || cmd.startsWith("#") || YAML_KEY_RE.test(cmd)) return null; // name:, if:, with: keys are not commands
+  if (!cmd.split(/&&|\|\||[;|]|\$\(/).some((seg) => RUNNER_RE.test(seg.trim()))) return null;
   const files = cmd.split(/\s+/).map((t) => t.replace(/^["']|["'];?$/g, "")).filter((t) => TEST_FILE_RE.test(t));
   return files.length === 1 ? files[0] : null;
 }
