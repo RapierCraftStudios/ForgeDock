@@ -449,6 +449,21 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
+    /**
+     * #5820: the scripts/ci-local plan of the lane's change (CI definitions from the base ref plus the lane's edits, change
+     * scoped), in a child process so the yq calls never block the lane. Rejects with ci-local's DEGRADED reason (no yq).
+     */
+    async ciLocalPlan({ repo: wt, base, baseBranch, files = [] }) {
+      const list = join(wt, ".forge-lean", "ci-precheck", "files.txt");
+      mkdirSync(dirname(list), { recursive: true }); writeFileSync(list, `${files.join("\n")}\n`);
+      try {
+        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+        return JSON.parse(String(stdout));
+      } catch (e) {
+        const why = /CI_LOCAL_RESULT: DEGRADED reason=(.*)/.exec(String(e?.stdout ?? ""))?.[1] ?? String(e?.stderr || e?.message || e).split("\n")[0];
+        throw new Error(why);
+      }
+    },
     /** [{name, state: success|failure|pending, url, head}] for the PR's checks; `head` is the PR head the rollup belongs to (#4240). */
     async checkStates(pr) {
       const j = JSON.parse(await run("gh")(["pr", "view", String(pr), "-R", repo, "--json", "statusCheckRollup,headRefOid"]));

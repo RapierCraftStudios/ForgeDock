@@ -9377,3 +9377,75 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
     assert.doesNotMatch(g.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
   });
 });
+
+describe("#5820 required CI checks run in the lane before the PR opens", () => {
+  const ciJob = (key, name, cmd) => ({ id: `gha:ci:${key}`, source: "github-actions", name, workflow: ".github/workflows/ci.yml", steps: [{ name: cmd, command: cmd, cwd: ".", kind: "check" }], services: [], needs: [] });
+  const ciPlan = { version: 1, repo: WT, jobs: [ciJob("lint", "Lint", "pnpm lint"), ciJob("unit", "Unit tests", "pnpm vitest run"), ciJob("e2e", "E2E", "pnpm playwright test")] };
+  const isCi = (c) => /ci-local\.sh' run/.test(c);
+  /** A world whose ci-local plan is `ciPlan` and whose base requires `required`; `ciRun(command, n)` answers each derived run. */
+  const ciWorld = ({ required = ["Lint", "E2E"], ciRun = () => ({ rc: 0, output: "CI_LOCAL_RESULT: PASS" }), plan = async () => ciPlan } = {}) => {
+    const w = world(); w.ran = []; let n = 0, reqCalls = 0;
+    w.io.ciLocalPlan = plan;
+    w.io.requiredChecks = async () => (reqCalls++ ? [] : required); // the first read is the precheck's; the merge policy then sees none
+    w.io.runCommand = async ({ command }) => { w.ran.push(command); w.seq.push(isCi(command) ? "ci-precheck" : "check"); return isCi(command) ? ciRun(command, n++) : { rc: 0, output: "" }; };
+    return w;
+  };
+
+  it("a failing required job goes back to the builder as a precheck fix round with its log, then the PR opens green", async () => {
+    let fixed = false;
+    const w = ciWorld({ ciRun: () => (fixed ? { rc: 0, output: "CI_LOCAL_RESULT: PASS" } : { rc: 1, output: "src/foo.js:3 no-unused-vars\nCI_LOCAL_FAIL: gha:ci:lint | step: pnpm lint | exit 1\nCI_LOCAL_RESULT: FAIL" }) });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) fixed = true; return inner(c); };
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const log = readLog(dir, 7);
+    const plan = log.find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.equal(plan.source, "required");
+    assert.deepEqual(plan.commands.map((c) => [c.job, c.why, c.steps]), [["gha:ci:lint", 'required check "Lint"', ["pnpm lint"]]]);
+    assert.match(plan.skipped.find((s) => s.job === "gha:ci:e2e").reason, /^heavy \(e2e\)/, "the required e2e job stays CI-only");
+    assert.ok(`${WT}/.forge-lean/ci-precheck/gha_ci_lint.json` in w.files, "the one-job ci-local plan is written");
+    const res = log.filter((e) => e.event === "CI_PRECHECK_RESULT");
+    assert.deepEqual(res.map((e) => [e.round, e.green, e.results.map((x) => x.status)]), [[0, false, ["fail"]], [1, true, ["pass"]]]);
+    const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
+    assert.equal(fix.length, 1); assert.match(fix[0][4], /CI job "Lint"/); assert.match(fix[0][4], /no-unused-vars/);
+    assert.ok(w.seq.indexOf("ci-precheck") < w.seq.indexOf("pr"), "the precheck runs before the PR");
+    assert.ok(log.findIndex((e) => e.event === "CI_PRECHECK_PLAN") < log.findIndex((e) => e.event === "PR_OPENED"));
+  });
+
+  it("green: no fix round, the PR opens; no required checks falls back to the lint and unit jobs", async () => {
+    const w = ciWorld({ required: [] }); const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const log = readLog(dir, 7);
+    const plan = log.find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.equal(plan.source, "fallback"); assert.deepEqual(plan.commands.map((c) => c.job), ["gha:ci:lint", "gha:ci:unit"]);
+    assert.equal(w.ran.filter(isCi).length, 2);
+    assert.deepEqual(log.filter((e) => e.event === "CI_PRECHECK_RESULT").map((e) => e.green), [true]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0);
+    assert.equal(w.prs.length, 1);
+  });
+
+  it("unrunnable (ci-local degraded, or no planner) is recorded with its reason and never blocks the PR", async () => {
+    const w = ciWorld({ ciRun: () => ({ rc: 2, output: "CI_LOCAL_RESULT: DEGRADED reason=budget_exhausted" }) }); const dir = tmpDir("core-");
+    const r = await run(w, { dir, verify: { ...parseVerify({}), precheckBlock: true } });
+    assert.equal(r.terminalReason, "merged");
+    const res = readLog(dir, 7).filter((e) => e.event === "CI_PRECHECK_RESULT");
+    assert.deepEqual(res.map((e) => e.results.map((x) => [x.status, x.reason])), [[["unrunnable", "budget_exhausted"]]]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no fix round for an unrunnable job");
+    const t = traj(w).join("\n"); assert.match(t, /CI precheck job Lint unrunnable locally \(budget_exhausted\)/);
+
+    const w2 = ciWorld({ plan: async () => { throw new Error("yq not found"); } }); const dir2 = tmpDir("core-");
+    const r2 = await run(w2, { dir: dir2 });
+    assert.equal(r2.terminalReason, "merged"); assert.equal(w2.ran.filter(isCi).length, 0);
+    const p2 = readLog(dir2, 7).find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.match(p2.unrunnable[0].reason, /CI check plan unavailable: yq not found/);
+  });
+
+  it("lean.ci_precheck off runs nothing and logs no plan", async () => {
+    const w = ciWorld(); const dir = tmpDir("core-");
+    await run(w, { dir, precheck: { ci: { mode: "off", include: [], exclude: [], maxJobs: 8 } } });
+    assert.equal(w.ran.filter(isCi).length, 0);
+    assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
+  });
+});

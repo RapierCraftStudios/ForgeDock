@@ -42,6 +42,7 @@ import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
+import { deriveCiPrecheck, ciPrecheckOutcome, parseCiPrecheckConfig } from "./ci-precheck.mjs";
 import { runChecks, runWithTimeoutRetry, splitPrecheckResults, timedOutDetail, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
@@ -2590,7 +2591,22 @@ export async function runCore(o) {
     // #4297: its commands run, so the map comes from the base ref (else the operator's checkout), never the lane worktree
     const testMap = io.runCommand ? (await readTestMapAtRef(git, base)) ?? (await readTestMap([cwd], io.fs?.read)) : null;
     // #4331: a learned command the map covers runs only when its globs match a changed file; unmapped ones always run (#4315)
-    const pickChecks = () => planPrecheck({ testMap, files, learned: learnedCommands, maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
+    // #5820: the PR's required CI jobs (scripts/ci-local plan, heavy jobs CI-only) join the round as derived commands
+    const ciCfg = o.precheck?.ci ?? parseCiPrecheckConfig(null);
+    let ciRequired, ciDerived = new Map(); // command -> {job, name, why, steps}
+    const ciGaveUp = new Set(); // jobs found unrunnable in an earlier round: recorded once, not rerun
+    async function ciPrecheckPlan(round) {
+      ciDerived = new Map();
+      if (ciCfg.mode === "off" || isSplit || !io.ciLocalPlan || !io.fs?.write) return [];
+      if (ciRequired === undefined) { try { ciRequired = (await io.requiredChecks?.(lane)) ?? null; } catch { ciRequired = null; } }
+      const p = await deriveCiPrecheck({ buildPlan: io.ciLocalPlan, required: ciRequired, cfg: ciCfg, wt, base, lane, files, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, writeFile: (rel, text) => io.fs.write(`${wt}/${rel}`, text), skipJobs: ciGaveUp });
+      for (const c of p.commands) ciDerived.set(c.command, c);
+      ev({ event: "CI_PRECHECK_PLAN", round, source: p.source, ...(p.note ? { note: p.note } : {}), commands: p.commands.map(({ job, name, workflow, kind, why, steps, command }) => ({ job, name, workflow, kind, why, steps, command })), skipped: p.skipped, unrunnable: p.unrunnable });
+      if (!round) T.decisions.push(`CI precheck (${p.source}): ${p.commands.length ? p.commands.map((c) => `${c.name} (${c.why})`).join(", ") : "no job to run locally"}${p.unrunnable.length ? `; unrunnable: ${p.unrunnable.map((u) => `${u.name}: ${u.reason}`).join("; ")}` : ""}`);
+      return p.commands.map((c) => c.command);
+    }
+    let ciCommands = await ciPrecheckPlan(0);
+    const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
     let picked = pickChecks();
     // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it
     const verifyFacts = { commands: null, structure: null, undeclaredEdges: [], docs: null, precheck: null, amendments: [], hotspots: false };
@@ -2599,7 +2615,7 @@ export async function runCore(o) {
       precheckRan = true;
       for (let round = 0; ; round++) {
         await renew();
-        if (round) picked = pickChecks();
+        if (round) { ciCommands = await ciPrecheckPlan(round); picked = pickChecks(); }
         const precheckCommands = picked.commands;
         // #4318/#4331: one round has a total budget (lean.precheck.max_minutes, else verify.precheck_total_seconds); the
         // commands run concurrently up to the host worker cap; the rest are deferred to CI, not failed. #4344: one heavy
@@ -2610,7 +2626,17 @@ export async function runCore(o) {
         const round$ = await runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: picked.perCommandMs, now,
           acquire: () => heavyAcquire("precheck"),
           run: ({ command, timeoutMs, workers: share }) => { workers = share; const env = laneEnv(); return io.runCommand({ command, cwd: wt, timeoutMs, env: env.FORGE_HOST_PARALLELISM ? { ...env, FORGE_HOST_PARALLELISM: String(share) } : env }); } });
-        const { results, deferred } = round$;
+        const { deferred } = round$;
+        // #5820: a derived CI job that could not run (ci-local degraded, timeout, no tool) is recorded, never a fix round
+        const ciRows = round$.results.filter((x) => ciDerived.has(x.command)).map((x) => ({ x, c: ciDerived.get(x.command), out: ciPrecheckOutcome(x) }));
+        const ciSkip = new Set(ciRows.filter((r) => r.out.status === "unrunnable" || r.out.status === "deferred").map((r) => r.x.command));
+        const results = round$.results.filter((x) => !ciSkip.has(x.command));
+        if (ciDerived.size) {
+          const ciDeferred = deferred.filter((c) => ciDerived.has(c)).map((c) => ({ job: ciDerived.get(c).job, name: ciDerived.get(c).name, status: "deferred-to-ci", reason: "precheck budget reached" }));
+          const rows = [...ciRows.map(({ x, c, out }) => ({ job: c.job, name: c.name, status: out.status, rc: x.rc, ms: x.ms, ...(out.reason ? { reason: out.reason } : {}) })), ...ciDeferred];
+          ev({ event: "CI_PRECHECK_RESULT", round, green: rows.every((r) => r.status !== "fail"), results: rows });
+          for (const r of rows.filter((y) => y.status === "unrunnable" || y.status === "deferred")) { ciGaveUp.add(r.job); T.anomalies.push(`CI precheck job ${r.name} ${r.status} locally (${r.reason}); left to CI`); }
+        }
         precheckMs += round$.ms; precheckDeferred += deferred.length;
         if (deferred.length) T.anomalies.push(`deferred-to-ci: pre-PR check budget ${totalMs / 1000} s reached; left to CI: ${deferred.map((c) => `\`${c}\``).join(", ")}`);
         const { failed, timedOut } = splitPrecheckResults(results); // #5332: rc 124 is host load, never a failing check
@@ -2635,7 +2661,8 @@ export async function runCore(o) {
           const rel = `${CHECK_LOG_DIR}/precheck-${round + 1}-${i + 1}.log`;
           let logPath = null;
           if (io.fs.write) { try { await io.fs.write(`${wt}/${rel}`, String(f.output ?? "")); logPath = rel; } catch { /* tail only */ } }
-          return { command: f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
+          const ci = ciDerived.get(f.command); // #5820: name the CI job and its steps, not only the ci-local invocation
+          return { command: ci ? `${f.command}  # CI job "${ci.name}" (${ci.why}): ${ci.steps.join(" && ").slice(0, 400)}` : f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
         }));
         await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");
