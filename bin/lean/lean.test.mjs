@@ -42,6 +42,18 @@ const INSTALL_PATH_RE = /\S*?[\\/](?=bin[\\/][\w.\\/-]+\.mjs)/g;
 const approxTokens = (s) => rawTokens(String(s).replaceAll(INSTALL_ROOT, "<root>").replace(INSTALL_PATH_RE, "<root>/"));
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
+// The fake world keys its files by POSIX paths ("/wt/lean-7"); on a win32 host path.join/dirname would turn them into
+// "\wt\lean-7" and every full-lane test would miss them. Keep POSIX-rooted inputs POSIX; real Windows paths are untouched.
+if (process.platform === "win32") {
+  const pathMod = (await import("node:path")).default;
+  const posixy = (p) => typeof p === "string" && p.startsWith("/") && !p.includes("\\");
+  const { join: wJoin, dirname: wDirname } = pathMod;
+  pathMod.join = (...a) => (posixy(a[0]) ? pathMod.posix.join(...a) : wJoin(...a));
+  pathMod.dirname = (p) => (posixy(p) ? pathMod.posix.dirname(p) : wDirname(p));
+  // Tests isolate ~/.forge by setting HOME; win32 os.homedir() reads USERPROFILE, so honour HOME as POSIX does
+  const realHome = os.homedir; os.homedir = () => process.env.HOME || realHome();
+  syncBuiltinESMExports();
+}
 
 const WT = "/wt/lean-7";
 /** #5333: the engine appends the stage-stamp rule to every builder prompt; strip it to compare against the bare template. */
