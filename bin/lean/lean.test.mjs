@@ -9377,3 +9377,25 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
     assert.doesNotMatch(g.comments.map((c) => c.body ?? c).join("\n"), /no lane_tools recipe/);
   });
 });
+
+describe("#5821 API role backend in the run log", () => {
+  it("PHASE_ATTEMPT_USAGE carries the reviewer's backend; a fallback logs API_ROLE_FALLBACK", async () => {
+    const w = world();
+    const inner = w.io.runner;
+    w.io.runner = async (c) => {
+      const res = await inner(c);
+      if (c.role !== "reviewer") return res;
+      return { ...res, backend: "cli", apiFallback: { role: "reviewer", mode: "api", reason: "no_api_key", detail: "ANTHROPIC_API_KEY is not set" } };
+    };
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const log = readLog(dir, 7);
+    const review = log.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "review");
+    assert.ok(review.length >= 1 && review.every((e) => e.backend === "cli"));
+    assert.ok(log.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement").every((e) => !("backend" in e)), "the builder's records are unchanged");
+    const fb = log.filter((e) => e.event === "API_ROLE_FALLBACK");
+    assert.equal(fb.length, review.length);
+    assert.deepEqual({ phase: fb[0].phase, role: fb[0].role, reason: fb[0].reason }, { phase: "review", role: "reviewer", reason: "no_api_key" });
+  });
+});
