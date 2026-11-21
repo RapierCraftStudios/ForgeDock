@@ -1477,7 +1477,7 @@ describe("mutation check (#4913)", () => {
     const { tmpDir } = await import("../tests/_tmp.mjs");
     const d = tmpDir("mut-");
     const g = (...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
-    g("init", "-q", "-b", "main"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base");
+    g("init", "-q", "-b", "main"); g("config", "core.autocrlf", "false"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base"); // #5751: autocrlf off, else a host autocrlf restores CRLF
     g("checkout", "-qb", "lane"); writeFileSync(join(d, "a.js"), "a2\n"); g("rm", "-q", "b.js"); g("add", "a.js"); g("commit", "-qm", "change");
     const r = await runMutationCheck({ targets: [{ id: "R1", commands: [{ id: "V1", command: "t" }] }], files: ["a.js", "b.js"], base: "main",
       git: async (a) => g(...a), runCommand: async () => ({ rc: 1 }), cwd: d, tmp: d });
