@@ -211,7 +211,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
 ${LEAN_DIR}/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}
 
-A trusted FORGE:DECISION/FORGE:VERIFIED/FORGE:PROBE comment recording a production failure after the merged fix overrides ancestry: for an outcome criterion (success rate, metric, prod behaviour) never report already-fixed or invalid from a merged ancestor PR alone.
+A trusted comment recording a prod failure after the merged fix overrides ancestry: never report already-fixed for an outcome criterion from ancestry alone.
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.
