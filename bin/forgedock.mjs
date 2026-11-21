@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Must stay the first import: defaults windowsHide for detached/background runs on Windows (see module).
+import "./win-hide-children.mjs";
 import { fileURLToPath } from "url";
 import { dirname, join, relative, resolve, sep } from "path";
 import { mkdir, lstat, readlink, readdir, unlink, readFile, writeFile } from "fs/promises";
