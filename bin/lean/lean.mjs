@@ -27,7 +27,7 @@ import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote } f
 import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
-import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
+import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
 import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
@@ -198,6 +198,8 @@ export const REVIEW_DEGRADED_LABEL = "review-degraded";
 const UNUSABLE_REVIEW_CODES = { "review.unparseable": OUTCOME_CODES.REVIEW_NO_VERDICT, "review.incomplete": OUTCOME_CODES.REVIEW_INCOMPLETE, "review.inconsistent": OUTCOME_CODES.REVIEW_INCONSISTENT };
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
+/** #5734: the needs-human text when a recorded production failure blocks an already-fixed/invalid close. */
+const prodFailNote = (verdict, f) => `Builder reported "${verdict}", but a trusted comment records the fix failing in production (${f.why}${f.url ? `: ${f.url}` : ""}), so the issue is not closed automatically: a merged ancestor is no evidence for a production outcome.\n\n> ${f.excerpt}`;
 export const MAX_SUBISSUES = 8;
 /** #4266: required checks with no rollup entry this long into a CI wait on a MERGEABLE PR log CI_NOT_STARTED (once per wait). */
 export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
@@ -2437,6 +2439,8 @@ export async function runCore(o) {
         if (closes || result?.status === "blocked") await flushStages(result, ["investigation"]); // the evidence comment for invalid/already-fixed
         T.validate = [result?.status ? String(result.status === "fixed" ? "CONFIRMED" : result.status).toUpperCase() : "CONFIRMED", `${evidence.length} evidence item(s)`];
         if (closes && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
+        const prodFail = closes ? prodFailureSignal(trustedComments) : null; // #5734: a recorded prod failure overrides ancestry
+        if (prodFail) return await needsHuman(prodFailNote(result.status, prodFail), OUTCOME_CODES.BUILDER_NO_EVIDENCE);
         if (closes) {
           T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
           T.decisions.push(`Builder verdict: ${result.status}`);
@@ -3670,6 +3674,8 @@ export async function runCore(o) {
           T.anomalies.push("Remote validate failure: rerun on the host in a local recovery lane before it is terminal");
           return await needsHuman(`A frozen validate command failed in the remote sandbox (exit non-zero on the engine's rerun). The sandbox is a different environment from the host, so no builder resume was spent; the branch is pushed and a local recovery lane reruns the frozen command on the host (pass: the change stands; fail: conformance.unimplemented):\n${list}`, ENV_VALIDATE_PLACEMENT);
         }
+        const reproProdFail = outcome.state === "already-fixed" ? prodFailureSignal(trustedComments) : null; // #5734: a passing repro is no prod outcome
+        if (reproProdFail) return await needsHuman(prodFailNote("already-fixed (repro passes on the base)", reproProdFail), OUTCOME_CODES.BUILDER_NO_EVIDENCE);
         if (outcome.state === "already-fixed") { // #5080: close as delivered, citing the base commit
           const sha = String(await git(["rev-parse", base]).catch(() => "")).trim().slice(0, 12) || base;
           const note = `Already fixed on the base: the repro test passes on \`${base}\` (${sha}) without this change, and the diff changes no source file. Closing as delivered.\n\n${list}`;

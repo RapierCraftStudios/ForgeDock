@@ -79,6 +79,33 @@ export async function resolveOwnLogins(gh) {
   }
   return { logins: [...out], resolved };
 }
+// #5734: the markers whose comments may record a post-deploy outcome, and the wording that says the fix failed in production
+const PROD_MARKER_RE = /FORGE:(?:DECISION|VERIFIED|PROBE)\b/;
+const PROD_RE = /\b(?:prod(?:uction)?|live|deployed|deploy)\b/i;
+const PROD_FAIL_RE = /\b(?:fail(?:s|ed|ing|ures?)?|broken|not\s+fixed|ineffective|regress(?:ed|ion)?|did(?:\s+not|n['’]t)\s+(?:hold|work|fix)|does(?:\s+not|n['’]t)\s+work|still\s+(?:fail\w*|broken|happen\w*|reproduc\w*|occur\w*))\b|(?:^|[^\d.])(?:~\s*)?0(?:\.0+)?\s?%/i;
+const PROD_OK_RE = /\b(?:no\s+longer\s+(?:fail\w*|broken|reproduc\w*)|not\s+failing|(?:fix|issue)\s+(?:holds|held))\b/i;
+/**
+ * #5734: the latest trusted (or `own`) comment carrying a FORGE:DECISION, FORGE:VERIFIED or FORGE:PROBE marker that records
+ * the fix failing in production (a failed probe, or production wording plus failure wording), unless a later trusted
+ * FORGE:VERIFIED without failure wording or a passing probe cleared it. {why, url, excerpt} or null. Deterministic: no agent.
+ */
+export function prodFailureSignal(comments, own = [bareLogin(APP_SLUG)]) {
+  const mine = new Set((own ?? []).map(bareLogin));
+  let hit = null;
+  for (const c of comments ?? []) {
+    const body = String(c?.body ?? "");
+    if (!PROD_MARKER_RE.test(body) || !(trusted(c) || mine.has(bareLogin(loginOf(c))))) continue;
+    const probe = probeResultOf(body);
+    const text = noComments(body, " ");
+    const failed = probe ? probe.result === "fail" : PROD_RE.test(text) && PROD_FAIL_RE.test(text) && !PROD_OK_RE.test(text);
+    if (failed) {
+      const line = text.split("\n").map((l) => l.trim()).find((l) => PROD_FAIL_RE.test(l)) ?? text.trim();
+      const kind = probe ? "FORGE:PROBE" : /FORGE:VERIFIED/.test(body) ? "FORGE:VERIFIED" : "FORGE:DECISION";
+      hit = { why: `${kind} comment by ${loginOf(c) || "unknown"} records the fix failing in production`, url: c?.url ?? null, excerpt: line.replace(/\s+/g, " ").slice(0, 200) };
+    } else if (probe?.result === "pass" || (!probe && /FORGE:VERIFIED/.test(body))) hit = null;
+  }
+  return hit;
+}
 /**
  * #4305: why one green run is no proof for this issue, without an API call: flaky wording or a `flaky` label, or an
  * earlier pre-filter close by the pipeline (the issue is open again, so an operator reopened it). {reason, why} or null.
@@ -91,11 +118,14 @@ export function flakyReason(iss, own = [bareLogin(APP_SLUG)]) {
   // #4399: the latest pipeline FORGE:PROBE result is a fail: the fix did not hold in production, so no already-fixed close
   const probe = (iss.comments ?? []).filter((c) => probeResultOf(c?.body) && (trusted(c) || mine.has(bareLogin(loginOf(c))))).at(-1);
   if (probe && probeResultOf(probe.body).result === "fail") return { reason: "probe-failed", why: "acceptance probe failed after promotion" };
+  // #5734: a trusted decision/verification recording the fix failing in production: ancestry is no proof, so no already-fixed close
+  const prod = prodFailureSignal(iss.comments, own);
+  if (prod) return { reason: "prod-failed", why: prod.why };
   if ((iss.comments ?? []).some((c) => isMarked(c) && (trusted(c) || mine.has(bareLogin(loginOf(c)))))) return { reason: "reopened", why: "reopened after a pre-filter close" };
   return null;
 }
 /** The own logins, looked up only when an otherwise-untrusted marker comment needs them (no call for most issues). */
-const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => (isMarked(c) || probeResultOf(c?.body)) && !trusted(c)) ? resolve() : undefined);
+const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => (isMarked(c) || probeResultOf(c?.body) || PROD_MARKER_RE.test(String(c?.body ?? ""))) && !trusted(c)) ? resolve() : undefined);
 const selfResolver = (selfLogins, gh) => (typeof selfLogins === "function" ? selfLogins : selfLogins ? async () => selfLogins : () => ownLogins(gh));
 
 const PATH_RE = /(?:^|[\s`'"(\[])((?:\.{0,2}\/)?(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8})(?::\d+(?:-\d+)?)?(?=$|[\s`'"),.:;\]])/gm;
@@ -450,9 +480,11 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
     }
     if (gateOnly) return { ...out, detail: "not a gated follow-up" };
     // #4399: an issue reopened by a failed acceptance probe goes to a lane, never back to an already-fixed close
-    if ((iss.comments ?? []).some((c) => probeResultOf(c?.body)?.result === "fail")
-      && flakyReason({ comments: iss.comments }, await ownFor(iss, selfResolver(selfLogins, io.gh)))?.reason === "probe-failed") {
-      return { ...out, detail: "acceptance probe failed after promotion (FORGE:PROBE): no already-fixed close; lane" };
+    // #5734: so does one whose trusted FORGE:DECISION/FORGE:VERIFIED records the merged fix failing in production
+    if ((iss.comments ?? []).some((c) => probeResultOf(c?.body)?.result === "fail" || PROD_MARKER_RE.test(String(c?.body ?? "")))) {
+      const fr = flakyReason({ comments: iss.comments }, await ownFor(iss, selfResolver(selfLogins, io.gh)));
+      if (fr?.reason === "probe-failed") return { ...out, detail: "acceptance probe failed after promotion (FORGE:PROBE): no already-fixed close; lane" };
+      if (fr?.reason === "prod-failed") return { ...out, detail: `production failure recorded after the fix (${fr.why}): no already-fixed close; lane` };
     }
     const sig = await collectSignals({ iss, repo, lane, io, cwd, selfLogins });
     // #5152: `completed` for a delivered outcome (CI green again, ALREADY-FIXED); only an INVALID verdict is dropped scope
