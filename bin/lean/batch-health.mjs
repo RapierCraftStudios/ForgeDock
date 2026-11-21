@@ -293,6 +293,13 @@ export async function resolvedOnGithub(cands, gh, repo) {
   return out;
 }
 
+export const FIRST_HOUR_FILE = "first-hour.json";
+export const BATCH_LOG_FILE = "batch.log";
+export const FIRST_HOUR_MIN = 60;
+export const readFirstHour = (dir) => readJson(join(dir, FIRST_HOUR_FILE));
+/** Append one line to the batch's operator-readable log. Best effort. */
+export const appendBatchLog = (dir, text) => { try { appendFileSync(join(dir, BATCH_LOG_FILE), `${text}\n`, { mode: 0o600 }); } catch { /* advisory */ } };
+
 /** #5806: minutes without progress (setup reads or dispatch) before a stall is acted on; `FORGEDOCK_SCHEDD_STALL_MIN` overrides (was 10). */
 export const DEFAULT_STALL_MIN = 3;
 /** #5806: auto-recoveries one batch gets in total (one per distinct ready set); past it every stall alerts. */
@@ -344,13 +351,6 @@ export function recordStallRecovery(batch, stall, { action, sig = stall.ready.jo
   appendBatchLog(batch.dir, `${at} ${text}`);
   return text;
 }
-
-export const FIRST_HOUR_FILE = "first-hour.json";
-export const BATCH_LOG_FILE = "batch.log";
-export const FIRST_HOUR_MIN = 60;
-export const readFirstHour = (dir) => readJson(join(dir, FIRST_HOUR_FILE));
-/** Append one line to the batch's operator-readable log. Best effort. */
-export const appendBatchLog = (dir, text) => { try { appendFileSync(join(dir, BATCH_LOG_FILE), `${text}\n`, { mode: 0o600 }); } catch { /* advisory */ } };
 
 /** The first-hour report of one batch: dispatched / running / merged / stuck, and why. Pure. */
 export function firstHourReport(state, { batchId, now = Date.now(), held = [], stall = null, holdInfo = null } = {}) {
