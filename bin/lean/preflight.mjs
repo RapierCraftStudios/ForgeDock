@@ -326,12 +326,56 @@ export function testRunSummary({ contract, failures = [], repro = null } = {}) {
   return { declared: ids.length, ran: ids.length - skipped.length, redGreen, skipped };
 }
 
-/** #5447: tool names the contract's test plan declares in `env` (per row of the #5445 `test_plan` array, or `test_plan.env`); strings, comma lists or {tool}; [] when absent. Pure. */
-export function declaredEnv(contract) {
+/**
+ * #5447: tool names the contract's test plan declares in `env` (per row of the #5445 `test_plan` array, or `test_plan.env`);
+ * strings, comma lists or {tool}; [] when absent. #5753: a directory the repo tracks (`files`: tracked paths, e.g. `shared`)
+ * is never a host tool. Pure.
+ */
+export function declaredEnv(contract, files = []) {
   const plan = contract?.test_plan;
   const raw = Array.isArray(plan) ? plan.map((r) => r?.env) : [plan?.env];
   const names = raw.flatMap((e) => (Array.isArray(e) ? e : typeof e === "string" ? e.split(",") : [])).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim());
-  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t) && isExecutableName(t)))];
+  const dirs = trackedDirs(files);
+  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t) && isExecutableName(t) && !dirs.has(t)))];
+}
+/** #5753: every directory name a tracked path runs through (`shared/detection/x.py` -> shared, detection). */
+function trackedDirs(files) {
+  const out = new Set();
+  for (const f of Array.isArray(files) ? files : []) for (const seg of String(f).split("/").slice(0, -1)) if (seg) out.add(seg);
+  return out;
+}
+
+const PYTEST_CMD_RE = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:poetry|uv)\s+(?:-\S+\s+)*run(?:\s+--?[\w-]+(?:[ =][^\s-]\S*)?)*\s+)?(?:\S*\/)?(?:\.venv\/bin\/)?(?:(?:python3?(?:\.\d+)?\s+-m\s+)?pytest))(?=\s|$)/;
+/**
+ * #5753: the contract command with `--collect-only -q` after its first pytest invocation (bare, `.venv/bin/python -m`,
+ * `poetry run`, `uv run`): one cheap run imports the test modules, so an import error shows at freeze, not in the builder.
+ * null when the command runs no pytest. Pure.
+ */
+export function collectOnlyCommand(command) {
+  const parts = String(command ?? "").split(/(&&|\|\||;|\||\n)/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const m = PYTEST_CMD_RE.exec(parts[i]);
+    if (!m) continue;
+    if (/(?:^|\s)--collect-only\b/.test(parts[i])) return null;
+    parts[i] = `${m[1]} --collect-only -q${parts[i].slice(m[1].length)}`;
+    return parts.slice(0, i + 1).join(""); // later segments (`| tail`, `&& echo`) would hide the collect exit
+  }
+  return null;
+}
+const COLLECT_IMPORT_RE = /(?:ModuleNotFoundError|ImportError): No module named '?([\w.]+)'?/;
+/**
+ * #5753: why a collect-only run (collectOnlyCommand) shows the test module cannot import on this host: a module the repo does
+ * not track (`repoHas`) is {tool, kind: "python-module", line}. A passing or empty collection, a timeout, an import of a name
+ * the change adds (`cannot import name`) and a repo-owned module are no miss (RED on base is expected). Pure.
+ */
+export function collectImportMiss(r, { repoHas = () => false } = {}) {
+  const rc = r?.rc, out = String(r?.output ?? "");
+  if (!Number.isInteger(rc) || rc === 0 || rc === 5 || rc === TIMEOUT_RC) return null;
+  const m = COLLECT_IMPORT_RE.exec(out);
+  if (!m) return null;
+  const tool = m[1].split(".")[0];
+  if (!tool || repoHas(tool) || repoHas(m[1])) return null;
+  return { tool, kind: "python-module", line: (out.split("\n").find((l) => l.includes(m[0])) ?? "").trim().slice(0, 160) };
 }
 
 /** #5590: pytest's built-in fixtures, never host executables. */
