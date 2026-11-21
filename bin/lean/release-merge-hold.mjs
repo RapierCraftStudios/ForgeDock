@@ -24,6 +24,16 @@ export function holdEnabled(policy) {
 }
 
 /**
+ * #5776: a release-ledger io for lanes. `makeLeanIo` has no `api`, which the ledger reader needs, so the hold's read threw a
+ * TypeError that the fail-open catch swallowed (the manual hold never held). Read-only (GET): gh errors propagate unchanged
+ * (their `HTTP 404` text keeps the ledger's missing-file detection working).
+ * @param {(args: string[]) => Promise<string>} gh
+ */
+export function ledgerIoFromGh(gh) {
+  return { api: async (method, path) => JSON.parse(String(await gh(["api", "-X", method, path])) || "null") };
+}
+
+/**
  * @param {object} o
  * @param {(args: string[]) => Promise<string>} o.gh   gh runner
  * @param {string} o.repo
