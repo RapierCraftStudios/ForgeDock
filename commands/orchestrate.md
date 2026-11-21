@@ -109,7 +109,8 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   return to pending with it; a finished batch is reopened); `--add` on a `skipped` issue re-queues it (other ended issues still report `already in batch`). A dependency-skipped issue shows as `waiting on #X` while the batch runs (the blocker is re-checked each pass; merged or closed re-admits it, closed as not planned keeps it skipped) and ends `skipped` only if the blocker never resolved. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
   retry-in, uncapped, a usage limit holds admissions for that account (backend identity) until the reset, never capped, across every batch on
   the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; other
-  deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
+  deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once (not when the same signature, code plus normalised
+  message, already repeated on this engine version: the issue is then held `waiting on engine/env change`, see below), and stops admitting after
   `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Lanes are
   capped host-wide (`orchestration.global_parallel`, `forgedock sched cap N|show`), highest priority first; within a
   priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). Logical
@@ -174,7 +175,12 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   `contract.invalid` without a mid-run issue edit): the runner does not recover it and it is not an escalation. The
   batch report lists it as `unrecovered: #N (<code>: <detail>)`, like a recovery that did not merge. Mark its dependents
   skipped and leave the issue for a later run once its cause is fixed.
-- `engine-error`: relaunch it once.
+- `engine-error`: relaunch it once. A relaunch that fails with the same signature is held, not relaunched again.
+- `held` with `waiting on engine/env change` (#5805): an engine-error whose signature repeated, or an `env.tool_missing` /
+  `env.repro_unrunnable` the host still has (the tool is still missing, or a recovery repeated it). The runner keeps the
+  batch open and re-checks each pass: an engine version change (reinstall or upgrade), a `--set-env` on the batch, or the
+  missing tool appearing on the lanes' PATH re-admits the issue and its held dependents. Do not `--requeue` it; fix the
+  engine or host. After 24h without a change the row stays `held` and `--requeue` retries it.
 - `ci-pending` (PR not conflicting) or `deferred`: leave it. A later `/orchestrate` resumes it.
 
 **Operational decisions are yours.** Decide them without asking and keep going. Record each one as a

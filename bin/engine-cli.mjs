@@ -2159,6 +2159,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
+  const { hostMissingTools } = await import("./lean/toolplace.mjs");
+  const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
+    version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
+    envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
+    missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
+  };
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
     resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
@@ -2196,6 +2202,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, batchId: batch.id, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
+      // #5805: engine/env-caused failures that would repeat are held and re-admitted on an install version change, a --set-env, or the
+      // missing tool appearing on the lanes' PATH (the batch's pinned env over the daemon's); off under the test seams
+      ...(envHold ? { envHold } : {}),
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
