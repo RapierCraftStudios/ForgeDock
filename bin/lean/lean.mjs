@@ -11,6 +11,7 @@ import { resolveFindingLabel } from "./findinglabel.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
+import { isAbsPath } from "./winspawn.mjs";
 import { hostname as osHostname, tmpdir as osTmpdir } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { testAdequacyRows, testAdequacyFailures, testAdequacyTelemetry, adequacyCounts, regressionRan } from "./testadequacy.mjs";
@@ -851,7 +852,7 @@ export async function runCore(o) {
   async function installSignoffHook() {
     if (!runTmp || !io.fs?.list || !io.runCommand) return;
     try {
-      const orig = String(await git(["rev-parse", "--git-path", "hooks"])).trim(), abs = orig.startsWith("/") ? orig : `${wt}/${orig}`, dir = `${runTmp}/hooks`;
+      const orig = String(await git(["rev-parse", "--git-path", "hooks"])).trim(), abs = isAbsPath(orig) ? orig : `${wt}/${orig}`, dir = `${runTmp}/hooks`;
       const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`, own = ((await io.fs.list(abs)) ?? []).filter((n) => n && !n.endsWith(".sample"));
       for (const n of own.filter((x) => x !== "commit-msg")) await io.fs.write(`${dir}/${n}`, `#!/bin/sh\nexec ${q(`${abs}/${n}`)} "$@"\n`);
       await io.fs.write(`${dir}/commit-msg`, `${SIGNOFF_HOOK}${own.includes("commit-msg") ? `exec ${q(`${abs}/commit-msg`)} "$@"\n` : "exit 0\n"}`);
@@ -1156,7 +1157,7 @@ export async function runCore(o) {
   /** #5333: one writer per lane branch. A second session (a fix-up beside a recovery) waits for the holder, then defers `host.busy`. Fail-open when the shared git dir is unknown. */
   async function takeBranchLock() {
     let dir = null;
-    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt })).trim(); if (d.startsWith("/") && existsSync(d)) dir = d; } catch { dir = null; }
+    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt })).trim(); if (isAbsPath(d) && existsSync(d)) dir = d; } catch { dir = null; }
     if (!dir) return null;
     let lock;
     try { lock = await acquireBranchLock({ gitCommonDir: dir, branch, owner: agentId, waitMs: o.branchLockWaitMs ?? 600000, pollMs: o.branchLockPollMs ?? 15000, sleep: async (ms) => { await renew(); await sleep(ms); } }); } catch { return null; }
@@ -1595,7 +1596,7 @@ export async function runCore(o) {
     }
     await step("scratch_setup", async () => { // #5435: timed with the other startup steps
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
-    await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
+    await io.fs.append(isAbsPath(excl) ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     await installSignoffHook();
     if (!resumed && await clearLaneScratch({ git, fs: io.fs, cwd: wt })) ev({ event: "LANE_SCRATCH_CLEARED" }); // #4880: never read a previous lane's scratch
     });
@@ -1603,7 +1604,7 @@ export async function runCore(o) {
     const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
     if (laneProfile.name !== "full" && lanePath) {
       let why = null, text = "";
-      if (lanePath.startsWith("/") || lanePath.split(/[\\/]/).includes("..")) why = "not a repo-relative path";
+      if (isAbsPath(lanePath) || lanePath.split(/[\\/]/).includes("..")) why = "not a repo-relative path";
       else { try { text = String(await io.fs.read(`${wt}/${lanePath}`) ?? "").trim(); } catch { why = "not readable in the lane worktree"; } }
       if (!why && !text) why = "empty";
       if (!why && Buffer.byteLength(text, "utf8") > LANE_INSTRUCTIONS_MAX_BYTES) why = `over ${LANE_INSTRUCTIONS_MAX_BYTES} bytes`;
