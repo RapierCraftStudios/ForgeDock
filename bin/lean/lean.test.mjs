@@ -5857,7 +5857,7 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
   const gitIdx = (w, pred) => { let i = -1; w.calls.forEach((c, k) => { if (c[0] === "git" && pred(c.slice(1))) i = k; }); return i; };
   /** The exit teardown: the last two worktree calls are `remove --force <wt>` then `prune`; the ledger file is gone. */
   const tornDown = (w, label) => {
-    const wtCalls = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree");
+    const wtCalls = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree").map((c) => c.map(posix)); // Windows: path.resolve yields `\wt\lean-7`
     assert.deepEqual(wtCalls.at(-2), ["git", "worktree", "remove", "--force", WT], `${label}: worktree removed`);
     assert.deepEqual(wtCalls.at(-1), ["git", "worktree", "prune"], `${label}: then pruned`);
     assert.equal(existsSync(w.ledgerFile), false, `${label}: ledger cleared`);
