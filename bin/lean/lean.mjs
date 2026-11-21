@@ -330,6 +330,8 @@ const defaultCredExec = (args) => {
  * @param {object} [o.recover]       {code, attempt, final}: a batch recovery lane (#4267) for a mechanical needs-human; removes the label,
  *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note. `final`
  *                                   (default true) is false when the runner may launch another attempt: the lane then never relabels (#4302)
+ * @param {boolean} [o.mergeTrain]   #5823: the batch runs a merge train (mergetrain.mjs): a reviewed PR with pending checks ends
+ *                                   `pr-ready` ({pr, head, required, policy, lane}) instead of waiting for CI in the lane
  */
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
@@ -3988,6 +3990,30 @@ export async function runCore(o) {
       return null;
     }
 
+    // #5823: merge train (orchestration.merge_train: on, `o.mergeTrain` from the batch). A reviewed PR whose checks are pending
+    // goes to the batch's train, which merges it when green; the lane ends `pr-ready` and frees its slot. Only a plain merge
+    // is handed over: a split, an e2e gate, numbered sequence files or close-time records keep the lane waiting as before.
+    let trainOk = null;
+    const trainEligible = async () => {
+      if (trainOk !== null) return trainOk;
+      const why = [];
+      if (isSplit) why.push("refactor:split");
+      if (pendingRecord().length || pendingDecisions.length || supersededIds(effective, guardSel).length) why.push("post-merge records");
+      if (closing.checklist || closing.liveBlocked || closing.transferred || closing.reason === "partial" || closing.tracked.length) why.push("issue not closed as completed");
+      try { if (e2eWanted({ cfg: vcfg.e2e, files: await changedFiles(), contract: effective }).run) why.push("e2e gate"); } catch { why.push("e2e gate unreadable"); }
+      if (io.sequenceCheck && io.sequenceLease && ((await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? []).length) why.push("numbered sequence files");
+      trainOk = !why.length;
+      if (!trainOk) T.decisions.push(`Merge train: not handed over (${why.join(", ")}); the lane waits for CI itself`);
+      return trainOk;
+    };
+    const trainHandoff = async () => {
+      if (!o.mergeTrain || !(await trainEligible())) return null;
+      try { await recordStructure(pr); } catch (e) { ev({ event: "STRUCTURE_DELTA_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
+      T.merge = [policyText, `handed to the merge train at ${localHead.slice(0, 12)}`];
+      ev({ event: "MERGE_TRAIN_HANDOFF", pr, head: localHead });
+      return await finish("pr-ready", `PR #${pr} ready at ${localHead.slice(0, 12)}; handed to the merge train`, { pr, head: localHead, required, policy, defaults, ...(lane ? { lane } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}) });
+    };
+
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     let lastStates = null; // the last required-check poll, reused by the DCO gate (#4651)
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
@@ -4039,6 +4065,7 @@ export async function runCore(o) {
             }
             if (required.every((n) => st(n) === "success")) break;
           }
+          if (o.mergeTrain) { const h = await trainHandoff(); if (h) { sig?.stop(); return h; } } // #5823: pending checks: the train waits, not the lane
           // #4266: a PR that turns conflicting gets no merge ref, so its pull_request workflows never start: base-sync now.
           const ms = await waitMergeState();
           if (ms === "conflict") { conflicted = true; break; }

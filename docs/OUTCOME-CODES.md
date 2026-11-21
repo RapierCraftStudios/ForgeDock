@@ -107,7 +107,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `split.plan_invalid` | Core work-on `refactor:split` lane: no target or test command in the issue, an unparseable grouping reply, a failed baseline, or a plan `scripts/symbol-move.py` / `scripts/symbol-move.mjs` refuses; nothing written | lean | `bin/lean/refactor.mjs` parsers, `scripts/symbol-move.py` / `scripts/symbol-move.mjs` exit 3 |
 | `split.verify_failed` | Core work-on `refactor:split` lane: the move did not prove location-only (logic diff, missing symbol, changed pass/skip counts or a new import cycle); the branch is reset and nothing is pushed | lean | `scripts/refactor-verify.sh verify` exit 1 `failures[].kind` |
 | `completed` | Non-failure terminal (merged, phase-complete, investigation) | engine | Terminal reason |
-| `awaiting_merge` | Clean result held for a merge decision | remediate | Terminal reason `awaiting-merge` |
+| `awaiting_merge` | Clean result held for a merge decision | remediate | Terminal reasons `awaiting-merge`, `ci-pending` and `pr-ready` (#5823: a reviewed PR handed to the batch merge train, `orchestration.merge_train: on`) |
 | `unclassified` | Fallback for an absent or unknown code | engine | The raw reason is kept alongside |
 
 ## Needs-human classes (forge#4267)

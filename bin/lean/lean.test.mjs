@@ -2868,6 +2868,16 @@ describe("merge_wait policy", () => {
     const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
     assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
   });
+  it("#5823 merge train: pending required checks end pr-ready with the reviewed head, no merge; green still merges in the lane", async () => {
+    const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" });
+    const r = await run(w, { mergeTrain: true });
+    assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+    assert.equal(r.head, w.head); assert.deepEqual(r.required, ["build"]); assert.equal(r.policy, "required"); assert.ok(Number.isInteger(r.pr));
+    const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "success" });
+    assert.equal((await run(w2, { mergeTrain: true })).terminalReason, "merged");
+    const w3 = world(); w3.io.requiredChecks = async () => ["build"]; w3.io.checkStates = async () => states({ build: "pending" });
+    assert.equal((await run(w3, { ciMaxMinutes: 5 })).terminalReason, "ci-pending"); // off: the lane waits as before
+  });
   describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {
     const RUN = (n, attempt) => `https://github.com/o/r/actions/runs/${n}/job/${attempt}`;
     const NO_FIX = { ...parseVerify({}), maxRounds: 0 };

@@ -996,6 +996,7 @@ export async function runFromCli(argv, deps = {}) {
   // marks an attempt the runner may follow with another, so the lane leaves the needs-human relabel to the runner.
   const recoverCode = flag(argv, "--recover");
   const recoverAttempt = Number(flag(argv, "--recover-attempt"));
+  const mergeTrainLane = argv.includes("--merge-train"); // #5823: the batch runs a merge train: a reviewed PR with pending checks ends pr-ready
   const recover = recoverCode && !recoverCode.startsWith("--") ? { code: recoverCode, attempt: Number.isInteger(recoverAttempt) && recoverAttempt > 0 ? recoverAttempt : 1, final: !argv.includes("--recover-nonfinal") } : null;
   // #5697: a sandbox lane (result under /result/) ships its run log with the result; the host merges it and strips it.
   const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(resultFile.startsWith("/result/") ? attachRunLog(r, { dir: runDir(), issue, repo }) : r) + "\n"); return r; };
@@ -1085,7 +1086,7 @@ export async function runFromCli(argv, deps = {}) {
     try {
       lres = await runCore({ issue, repo: leanRepo, deferPostRun: true, ...(adopt ? { adopt: true } : {}), ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
-      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
+      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}), ...(mergeTrainLane ? { mergeTrain: true } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), hostFallback: readHostFallback(), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(readCiFailFast() ? { ci: { fail_fast: readCiFailFast() } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes"))) && Number(readLeanSetting("review_max_resumes")) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes")) } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
@@ -1921,6 +1922,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   }
   const { makePrefilter, formatPrefilterSummary, lazyDefaultBranch } = await import("./lean/prefilter.mjs");
   const branches = readBranches(cwd);
+  const trainOn = (deps.orchestration ?? readOrchestration(cwd)).mergeTrain === "on"; // #5823: lanes end pr-ready, the batch's train merges
   // #4389: the post-deploy gate's default branch is resolved and fetched once, only when a gated issue asks
   const prefilter = argv.includes("--no-prefilter") ? null
     : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd), minAge: await readPostDeployMinAge(cwd) });
@@ -1945,7 +1947,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
-      laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+      laneOverride, ...(trainOn ? { mergeTrain: true } : {}), ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), hostFallback: readHostFallback(cwd), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(readCiFailFast(cwd) ? { ci: { fail_fast: readCiFailFast(cwd) } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes", cwd))) && Number(readLeanSetting("review_max_resumes", cwd)) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes", cwd)) } : {}) }) };
   } else {
@@ -1965,7 +1967,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4267: a recovery lane (ctx.recover) reaches it as --recover/--recover-attempt.
     const placementOf = new Map(), recoverOf = new Map();
     const laneArgs = (n, ln) => { const pl = placementOf.get(n), rc = recoverOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
-      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1), ...(rc.final === false ? ["--recover-nonfinal"] : [])] : [])]; };
+      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1), ...(rc.final === false ? ["--recover-nonfinal"] : [])] : []), ...(trainOn ? ["--merge-train"] : [])]; };
     const withPlacement = (l) => ({ runOne: (n, ln, ctx = {}) => {
       if (ctx.placement) placementOf.set(n, ctx.placement); else placementOf.delete(n);
       if (ctx.recover) recoverOf.set(n, ctx.recover); else recoverOf.delete(n);
@@ -2048,6 +2050,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #5823 merge train (phase 1): merges PR-ready lanes' PRs one at a time when green; the release merge hold (#5709) applies
+  const trainMod = await import("./lean/mergetrain.mjs");
+  const mergeTrain = deps.mergeTrain !== undefined ? deps.mergeTrain : !trainOn ? null : trainMod.makeMergeTrain({ gh: (a) => leanIo.gh(a), repo, ...(deps.now ? { now: deps.now } : {}),
+    transitionLabel: leanIo.transitionLabel ? (i, st) => leanIo.transitionLabel(i, st) : null,
+    hold: async (e) => { const h = await import("./lean/release-merge-hold.mjs"); const { readActive } = await import("./lean/release-ledger.mjs");
+      return h.releaseMergeHold({ gh: (a) => leanIo.gh(a), repo, branch: e.lane, defaults: e.defaults ?? [], readActive: () => readActive({ io: h.ledgerIoFromGh((a) => leanIo.gh(a)), repo, credential: "driver" }) }); } });
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
   const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
   const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
@@ -2204,6 +2212,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
       ...(remote ? { remote } : {}),
+      ...(mergeTrain ? { mergeTrain } : {}), // #5823
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       decide: deps.decide ?? (async (d) => {
@@ -2279,6 +2288,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (turnLine) report.push(turnLine);
   const estLine = formatEstimateSummary(rows); // #4409
   if (estLine) report.push(estLine);
+  const trainLine = trainMod.formatTrainSummary(rows); // #5823
+  if (trainLine) report.push(trainLine);
   try { // #4402: $/merge, turns, context, retries by cause, no-action lanes, issue quality, acceptance; never fails a batch
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
@@ -2779,6 +2790,7 @@ export function readAutoChildren(cwd = process.cwd()) {
  * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
  * `orchestration.transient_retries` (#5161; default 4, 0 off): backoff retries of a transient (gateway 5xx) engine-error.
  * `orchestration.blocked_label` (#4773; default `blocked`, empty turns it off): an open issue carrying it is admitted but not dispatched.
+ * `orchestration.merge_train` (#5823; `off` default | `on`): lanes end `pr-ready` at PR-ready and the batch's merge train merges.
  */
 export function readOrchestration(cwd = process.cwd()) {
   let o = {};
@@ -2788,6 +2800,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+    mergeTrain: o.merge_train === true || String(o.merge_train ?? "").trim().toLowerCase() === "on" ? "on" : "off", // #5823
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
