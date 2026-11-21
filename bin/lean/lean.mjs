@@ -402,7 +402,6 @@ export async function runCore(o) {
     const e = v.evidence ?? {};
     confineRefusal = `Lane worktree ${wt} is not confined (${at}): ${v.why}; git toplevel ${e.toplevel ?? "(none)"}, git common dir ${e.common_dir ?? "(none)"}, repository common dir ${e.repo_common_dir ?? "(unknown)"}. Stopped before any git write (#5825).`;
     ev({ event: "WORKTREE_NOT_CONFINED", at, why: v.why, ...e });
-    T.anomalies.push(confineRefusal);
     throw confineError();
   }
   const git = async (args, o = {}) => {
