@@ -139,3 +139,14 @@ describe("sparse lane worktrees (#4221)", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe("sparse pattern file path on Windows (#5825)", () => {
+  it("a drive-letter path from `rev-parse --git-path` is written as is, never joined under the worktree", async () => {
+    const big = `100644 blob ${"a".repeat(40)} ${2 * MiB}\tbig.bin`;
+    const wrote = [];
+    const fake = async (args) => (args[0] === "ls-tree" ? big : args[0] === "rev-parse" ? "C:/r/.git/worktrees/lean-5/info/sparse-checkout\n" : "");
+    const r = await addLaneWorktree(fake, async (p) => { wrote.push(p); }, { cwd: "C:\r", wt: "C:\r\.claude\worktrees\lean-5", addArgs: ["worktree", "add", "C:\r\.claude\worktrees\lean-5", "main"], ref: "main" });
+    assert.equal(r.sparse, true);
+    assert.deepEqual(wrote, ["C:/r/.git/worktrees/lean-5/info/sparse-checkout"]);
+  });
+});
