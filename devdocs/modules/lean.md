@@ -120,6 +120,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    current one (legacy comments without it: no trusted human comment after it
    and every `deliver` quote still in the issue); otherwise `CONTRACT_STALE`,
    decision "frozen contract H is stale", and it re-plans and freezes a new one.
+   The summary also records `base B`, the lane it was planned on (#5811): a
+   recovery (`--recover`) reads the contract back even with no branch to resume
+   (a lane that ended before its first commit) and goes straight to
+   `BUILDER_ROUTE` (`CONTRACT_REUSED`) when scope and base both match; another
+   base, or no recorded scope/base without a branch, is `CONTRACT_STALE`.
    Conformance needs-human lines and the "Not conforming" decision append the
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
