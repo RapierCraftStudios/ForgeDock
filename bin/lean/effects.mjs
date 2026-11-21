@@ -6,6 +6,7 @@ import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsS
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { resolveSpawn } from "./winspawn.mjs";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
@@ -39,7 +40,8 @@ export function killTrackedChildren(signal = "SIGKILL") {
   return n;
 }
 export const trackedChildCount = () => liveChildren.size;
-const pexec = (bin, args, opts) => new Promise((res, rej) => {
+const pexec = (bin0, args0, opts) => new Promise((res, rej) => {
+  const { bin, args } = resolveSpawn(bin0, args0, { env: opts?.env ?? process.env }); // #5799: npm .cmd shims on Windows
   const child = execFile(bin, args, opts, (err, stdout, stderr) => {
     liveChildren.delete(child);
     if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res({ stdout, stderr });
