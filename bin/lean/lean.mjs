@@ -995,7 +995,9 @@ export async function runCore(o) {
       if (dirty) {
         await git(["add", "-A"]);
         // #5819: deletions of base-tracked files outside the deliverables are never committed: unstaged, restored, and the lane ends engine-error unpushed
-        const dg = await guardStagedDeletions({ git, base, keep: await keepPaths(), max: o.checkpointMaxDeletions ?? maxForeignDeletions(io.env ?? process.env) });
+        let keep = []; // the contract's deliverables (read here: keepPaths is declared further down)
+        try { keep = (JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`))?.deliverables ?? []).map((d) => d?.path).filter((x) => typeof x === "string"); } catch { /* no contract yet: nothing is a deliverable */ }
+        const dg = await guardStagedDeletions({ git, base, keep, max: o.checkpointMaxDeletions ?? maxForeignDeletions(io.env ?? process.env) });
         if (dg.refused) {
           deletionRefusal = deletionEvidence(dg, `checkpoint after ${reason}`);
           ev({ event: "CHECKPOINT_DELETIONS_REFUSED", reason, deleted: dg.deleted.length, foreign: dg.foreign.length, sample: dg.foreign.slice(0, 20), restored: Boolean(dg.restored), ...(dg.error ? { error: dg.error } : {}) });
