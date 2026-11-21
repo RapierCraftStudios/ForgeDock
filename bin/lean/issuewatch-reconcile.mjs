@@ -76,6 +76,25 @@ export function reconcileClaims({ state, results, now, fail, settle }) {
 
 const labelsOf = (v) => (v?.labels ?? []).map((l) => String(l?.name ?? l));
 
+/** #5704: the hand-off a remediation merge posts; `kind=remediation` tells the live reconcile it is not a deferral. */
+export const REMEDIATION_TRACKED_MARKER = "<!-- FORGE:TRACKED kind=remediation -->";
+
+/**
+ * #5704: a remediation lane that exited 0 merged without the normal lane close or hand-off (the AlterLab#40851 orphan): post one
+ * FORGE:TRACKED comment while the issue is still open, so it stays open until the live reconcile sees it promoted and verified.
+ * Idempotent by the marker; best effort (a gh failure leaves the claim state as is).
+ */
+export async function postRemediationTracked({ watch, repo, io, issue, code }) {
+  try {
+    const v = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "state,comments"])));
+    if (String(v?.state).toUpperCase() !== "OPEN" || (v.comments ?? []).some((c) => String(c?.body ?? "").includes(REMEDIATION_TRACKED_MARKER))) return false;
+    await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", `${REMEDIATION_TRACKED_MARKER}
+## Merged by remediation
+issue-watch ${watch.name} remediated this parked issue (\`${code}\`) and the lane merged. It stays open until the fix is promoted to the live release and verified there (\`forgedock close reconcile\`, also run by \`probe --due\`).`]);
+    return true;
+  } catch { return false; }
+}
+
 /**
  * One remediation lane per parked claim, at most `watch.max_remediations` per watch. A launched lane is polled each pass: exit 0 hands
  * the issue to verification, any other exit makes it `needs-human` with the reason in a comment. A restarted watch re-launches a
@@ -98,7 +117,7 @@ export async function remediateStep({ watch, repo, io, state, handles, lanes = {
     const res = h.poll();
     if (!res) continue;
     handles.delete(key(n));
-    if (res.code === 0) { r.status = "done"; settle(Number(n)); continue; }
+    if (res.code === 0) { r.status = "done"; settle(Number(n)); await postRemediationTracked({ watch, repo, io, issue: Number(n), code: r.code }); continue; }
     r.status = "failed";
     const reason = `remediation lane for \`${r.code}\` exited ${res.code}`;
     state.outcomes[n] = { kind: "needs-human", code: r.code, at: now, reason };

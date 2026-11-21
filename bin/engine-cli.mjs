@@ -3033,6 +3033,26 @@ export function readIntegration(cwd = process.cwd()) {
   return import("./lean/integration.mjs").then((m) => m.parseIntegration(ci));
 }
 
+/** #5704: run the live reconcile and print its rows and summary. */
+async function runLiveReconcile({ repo, io, dryRun, spawn }) {
+  const { reconcileLive, formatReconcileSummary } = await import("./lean/live-reconcile.mjs");
+  const res = await reconcileLive({ repo, io, cwd: process.cwd(), dryRun, ...(spawn ? { spawn } : {}) });
+  for (const r of res.rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
+  console.log(formatReconcileSummary(res) || "live reconcile: no merged issues open");
+  return res;
+}
+
+/** #5704: `forgedock close reconcile [--repo R] [--dry-run]`: reconcile merged issues against the live SHA (fail closed when unknown). */
+export async function closeReconcileFromCli(argv, deps = {}) {
+  const [sub] = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--repo");
+  if (sub !== "reconcile") throw new Error("usage: forgedock close reconcile [--repo owner/name] [--dry-run]");
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("close reconcile needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  return runLiveReconcile({ repo, io: leanIo, dryRun: argv.includes("--dry-run"), spawn: deps.spawn });
+}
+
 export async function probeFromCli(argv, deps = {}) {
   const valued = ["--repo", "--limit"];
   const issues = [];
@@ -3058,7 +3078,10 @@ export async function probeFromCli(argv, deps = {}) {
     console.log(formatParkedSweepSummary(parkedRows) || "parked: nothing released");
     const orphanRows = await sweepOrphanPrFollowups({ repo, io: leanIo, dryRun: argv.includes("--dry-run") }); // #5505
     console.log((await import("./lean/orphan-pr.mjs")).formatOrphanSummary(orphanRows) || "orphan PRs: none");
-    return { rows, parkedRows };
+    // #5704: the post-release pass: merged issues now in the live SHA are checked, then closed or reported
+    let live = null;
+    try { live = await runLiveReconcile({ repo, io: leanIo, dryRun: argv.includes("--dry-run"), spawn: deps.spawn }); } catch (e) { console.log(`live reconcile: error (${String(e?.message ?? e).split("\n")[0]})`); }
+    return { rows, parkedRows, live };
   }
   const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
   const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
