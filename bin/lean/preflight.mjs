@@ -165,6 +165,7 @@ export function preflightProblems(misses) {
   return (misses ?? []).map((m) => {
     const ids = m.ids.join(", ");
     if (m.kind === "env-var") return `${ids}: uses $${m.tool}, which is unset or empty in the lane environment, so the validate command cannot run as written; set it inside the command or ${FIX_HOW}`;
+    if (m.source === "collect") return `${ids}: importing its test modules on the base worktree (pytest --collect-only) failed: needs Python module '${m.tool}'${m.line ? ` (\`${m.line}\`)` : ""}, so the command does not run in the environment that has the test's dependencies; run it the way the repo's CI runs that test path (its working-directory and poetry run / uv run) or ${FIX_HOW}`; // #5753
     if (m.source === "run") return `${ids}: running it on the base worktree stopped before any test ran: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.line ? ` (\`${m.line}\`)` : ""}, so the validate command cannot run here; ${m.kind === "path" ? "point it at a path the repo or a deliverable has, or " : ""}${FIX_HOW}`;
     return `${ids}: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.interp ? ` (for ${m.interp})` : ""}, which this host lacks, so the validate command cannot run here; ${FIX_HOW}`;
   });

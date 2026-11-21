@@ -9485,3 +9485,37 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
   });
 });
+
+describe("#5753 frozen pytest commands run in the env CI runs them in", () => {
+  it("#5753 a shared/ pytest validate is rewritten at freeze to the services/worker CI env and the freeze records it", async () => {
+    const d = tmpDir("lean-5753a-"); const src = join(d, "ci.yml");
+    writeFileSync(src, "jobs:\n  worker:\n    steps:\n      - name: Test worker\n        working-directory: services/worker\n        run: poetry run pytest tests/ ../../shared -q\n");
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "python -m pytest shared/detection/test_x.py" }] };
+    const w = world({ contract }); w.io.probeCommand = async () => ({ rc: 0, output: "" });
+    await run(w, { dir: d, validateCatalogSources: [`../..${src.replace(/^[A-Za-z]:/, "").replace(/\\/g, "/")}`] });
+    assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("cd services/worker && poetry run pytest ../../shared/detection/test_x.py")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("python -m pytest shared/detection/test_x.py")));
+  });
+  it("#5753 a collect-only ImportError is a preflight miss corrected before the implement builder", async () => {
+    const V2 = "python3 -m pytest -q tests/test_corpus.py";
+    const c = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: V2 }] };
+    const fixed = { ...c, validate: [c.validate[0], { id: "V2", command: "uv run pytest -q tests/test_corpus.py" }] };
+    const dir = tmpDir("lean-5753b-");
+    const w = world({ contract: c, fixedContract: fixed, validation: fixed.validate.map((v) => ({ id: v.id, command: v.command, exit: 0 })) });
+    const collected = [];
+    w.io.probeCommand = async () => ({ rc: 0, output: "" });
+    w.io.preflightRun = async (a) => {
+      if (/--collect-only/.test(a.command)) collected.push([a.command, w.seq.length]);
+      return /--collect-only/.test(a.command) && !/uv run/.test(a.command) ? { rc: 2, output: "E   ModuleNotFoundError: No module named 'html2text'\n" } : { rc: 1, output: "AssertionError: expected RED on base" };
+    };
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3, "plan + one contract correction + implement");
+    assert.match(b[1][4], /V2: importing its test modules on the base worktree \(pytest --collect-only\) failed: needs Python module 'html2text'/);
+    assert.ok(collected.some(([cmd]) => cmd === "python3 -m pytest --collect-only -q -q tests/test_corpus.py"));
+    const firstImpl = w.seq.indexOf("builder-resume", w.seq.indexOf("builder-resume") + 1);
+    assert.ok(collected.every(([, at]) => at < firstImpl), "every collect-only run happens before the implement session");
+    const pf = readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT");
+    assert.deepEqual(pf.map((e) => [e.corrected, e.found.map((m) => [m.ids, m.tool, m.kind, m.source])]), [[true, [[["V2"], "html2text", "python-module", "collect"]]]]);
+  });
+});
