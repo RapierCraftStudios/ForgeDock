@@ -14,6 +14,7 @@ import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs"
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag } from "./lane-tools.mjs";
+import { hostDiskFree } from "./health.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -83,7 +84,7 @@ const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
  * Host agent: runs each sandbox as one docker container inside a fixed reservation (allow_cpus / allow_mem_gb).
  * A sandbox lives only while its lease is renewed; the reaper removes expired, over-age and orphaned containers.
  */
-export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom } = {}) {
+export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
@@ -133,9 +134,23 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     out.sandbox_disk_mb = diskCache.mb;
     return out;
   }
+  // #5733: free space on the Windows drive behind a WSL distro's vhdx (null off WSL or unreadable: no field, no gate).
+  let hostDiskCache = { at: -Infinity, v: null };
+  const readHostDisk = hostDisk ?? (() => {
+    if (now() - hostDiskCache.at > 60000) hostDiskCache = { at: now(), v: hostDiskFree({ path: cfg.host_disk_path ?? null }) };
+    return hostDiskCache.v;
+  });
+  /** Under the floor now, or once the running sandboxes plus the new one grow the vhdx by sandbox_disk_growth_gb each. */
+  const hostDiskLow = (free, active) => { const floor = cfg.min_host_disk_free_gb ?? 25; return free < floor || free - (cfg.sandbox_disk_growth_gb ?? 3.5) * (active + 1) < floor; };
+  function hostDiskView(active) {
+    let hd = null; try { hd = readHostDisk(); } catch { hd = null; }
+    if (!hd || !Number.isFinite(hd.gb)) return {};
+    return { host_disk_free_gb: hd.gb, host_disk_low: hostDiskLow(hd.gb, active) };
+  }
   function capacity() {
     const u = used();
-    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active: Object.values(sb()).filter((s) => s.state !== "exited").length, ...diskView(), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
+    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -162,6 +177,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     const h = live(cfg);
     if (!h.ok) return { status: 503, body: { error: `host busy: ${h.reason}`, live: h }, retryAfter: 60 };
+    if (c.host_disk_low) { // #5733: before any mkdir or docker run; the lane defers on the 503 (SANDBOX_CAPACITY)
+      const floor = cfg.min_host_disk_free_gb ?? 25;
+      return { status: 503, body: { error: `host disk low: ${c.host_disk_free_gb} GB free, floor ${floor} GB with ${c.active} running`, code: "pool.disk_low", host_disk_free_gb: c.host_disk_free_gb, floor_gb: floor }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
+    }
     if (spec.lane_tools?.length) { // #5650 follow-up: never build inside the launch request (router timeout); 503 + retry while it builds
       let st;
       try { st = await laneImageNow({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }); } catch (e) { return { status: 422, body: { error: e.message, code: e.code ?? "lane_tools.invalid" } }; }

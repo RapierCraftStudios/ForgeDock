@@ -523,6 +523,22 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the output head, so `amend()` passes it to `applyAmendments`, which refuses
    an add-deliverable on a matching path; `hotspotPlanNote`/`hotspotBuildRule`
    then name those globs in the prompts.
+   **Recurrence** (#5751, `recurrence.mjs`, `hotarea.mjs`): before the light
+   decision `recurrenceFacts` reads `subjectHistory` rows plus the file lists
+   of merged PRs and `Recurs #n` links (capped at `MAX_RECURRENCE_ROWS`);
+   `detectRecurrence` counts a fix only when it matches by symptom AND its
+   files overlap a named path. At `recurrence.threshold` (default 2, mode on)
+   the lane is a design lane: no light lane, `contextPackNote` whatever
+   `context.mode`, `designLaneNote` in the plan prompt, a `RECURRENCE` event,
+   a decision and a `FORGE:RECURRENCE` comment. Precheck then needs a contract
+   `design` block (`designContractFailures`, `recurrence.design_missing`); a
+   design lane decomposes through split-required. `takeHotAreas` takes
+   `acquireBranchLock` keyed `hot-area:<name>` for named paths and again for
+   the frozen deliverables, released at teardown (host-local only; a refusal
+   defers `host.busy`). `countCounters` runs `git grep -c -E` at the merge
+   base and HEAD in `gate()`; `counterGrowth` fails
+   `maintenance.counter_growth` without a `counter-ok: <name> <reason>`
+   decision. Both codes are in `SHADOW_PRE_BLOCKS`.
    **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
    `io.enumeratingTests` lists tests that enumerate the exports or directory
    siblings of the issue's named paths (`enumeratingPlanNote` /
@@ -760,7 +776,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389; opt-in `post_deploy.min_age` soak window parks `awaiting-min-age`, #4425),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; nor is one whose latest trusted/own `FORGE:DECISION`/`FORGE:VERIFIED`/`FORGE:PROBE` comment records the merged fix failing in production (`prodFailureSignal`, reason `prod-failed`, cleared by a later `FORGE:VERIFIED` or passing probe; the lane's builder invalid/already-fixed close and the repro already-fixed close go needs-human naming that comment instead, #5734); post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389; opt-in `post_deploy.min_age` soak window parks `awaiting-min-age`, #4425),
 `probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `postdeploy-monitor.mjs` (windowed post-deploy checks, #4627: `sweepDue` re-runs open `post-deploy-monitoring` follow-ups on cadence or a new release, files a regression issue on pass-then-fail (idempotent: an existing `FORGE:REGRESSION` issue for the follow-up and fix commit is reused, #4653); run by `forgedock probe --due` and the schedd timer; ADR `devdocs/decisions/4627-post-deploy-monitoring.md`),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
@@ -3485,3 +3501,7 @@ Checks-file entries gain an optional `expect`: a positive-evidence command (exit
 `probe.mjs`: a recorded probe fail now swaps `awaiting-promotion` for `post-deploy-failed` (`markPostDeployFailed`, label created on first use); a pass removes `awaiting-promotion` (`clearAwaitingPromotion`); both best effort, never in a dry run.
 
 `issuewatch-reconcile.mjs` `remediateStep`: a remediation lane that exits 0 settles the claim as before, then `postRemediationTracked` posts one `<!-- FORGE:TRACKED kind=remediation -->` note while the issue is open (idempotent by the marker). The live reconcile does not treat that note as a hand-off, so the issue closes once live and verified. Decision record: `devdocs/decisions/5704-live-reconcile.md`.
+
+## Entry 2026-11-21 — Recurrence routes to a design lane; hot areas and counters (#5751)
+
+forge.yaml `recurrence:` (`parseRecurrenceConfig`, read by `engine-cli.mjs` `readEnvConfig` as `recurrenceConfig`; absent: mode on, threshold 2, no hot areas or counters). An issue naming no path and no `Recurs #n` link skips detection, so the light lane, plan prompt and conformance output are unchanged for it. A recurrence (threshold or more merged fixes matching by symptom and touched-path overlap) forces the full lane, puts the prior-attempt pack and `designLaneNote` in the plan prompt, and records the reason (event, decision, issue comment). The contract must carry `design {why_failed, disposition delete|replace|extend, outcome {metric, target}}`. Hot areas (`recurrence.hot_areas`, block map `name: "glob, glob"`) admit one lane per host at a time through the branch lock; cross-host lanes are not excluded. Counters (`recurrence.counters`, `name: "pattern -- glob, glob"`) are measured at the merge base and HEAD; growth needs a `counter-ok:` decision. Cost: 0 LLM calls; up to 1 search and `MAX_RECURRENCE_ROWS` PR file reads per lane with a named path.

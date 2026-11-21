@@ -2,11 +2,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { runPoolCli } from "../pool/cli.mjs";
 import { restartCheck, lastExitReason } from "../pool/health.mjs";
 
-const root = new URL("../../", import.meta.url).pathname;
-const read = (p) => readFileSync(root + p, "utf8");
+// fileURLToPath, forward slashes: a URL pathname is /C:/... on win32; bash (Git Bash) and fs both take C:/...
+const root = fileURLToPath(new URL("../../", import.meta.url)).replace(/\\/g, "/");
+const read = (p) => readFileSync(root + p, "utf8").replace(/\r\n/g, "\n"); // a CRLF checkout (core.autocrlf) reads as LF
 
 describe("pool unit hardening (#4673)", () => {
   it("router sets a distinctive process title", async () => {
