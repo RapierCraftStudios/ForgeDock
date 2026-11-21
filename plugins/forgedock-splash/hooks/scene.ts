@@ -34,6 +34,9 @@ let EMBER = DARK.ember
 let WHITE = DARK.hot
 let BG = DARK.bg
 const CLAUDE = '#d97757'
+const HEART = '#ff6f91'
+const STEAM = '#d8d3cb'
+const FLAME_RED = '#c8200a'
 
 /** Pick the palette for the terminal's theme (Claude Code's `theme` setting). */
 export function setTheme(light: boolean) {
@@ -60,6 +63,12 @@ const P = {
   crouch: ['         ', ' ▐▛███▜▌ ', '▀▀█████▀▀'],
   jump: ['▗▐▀███▀▌▖', ' ▜█████▛ ', '  ▝▘ ▝▘  '],
   cheer: ['▗▐▛███▜▌▖', ' ▜█████▛ ', '  ▘▘ ▝▝  '],
+  // one claw up, swinging: a wave hello / goodbye
+  waveA: [' ▐▛███▜▌▗', '▝▜█████▛ ', '  ▘▘ ▝▝  '],
+  waveB: [' ▐▛███▜▌▝', '▝▜█████▛▖', '  ▘▘ ▝▝  '],
+  // dizzy wobble after the bonk
+  dizzyL: ['▐▀███▀▌  ', '▜█████▛▘ ', ' ▘▘ ▝▝   '],
+  dizzyR: ['  ▐▀███▀▌', ' ▝▜█████▛', '   ▘▘ ▝▝ '],
 }
 
 // Beats (frame numbers).
@@ -69,6 +78,7 @@ const LOOK_END = WALK_END + 5 // looks up at the bar
 const CROUCH_END = LOOK_END + 2
 const BONK = CROUCH_END + 3 // head meets the bar
 const LAND = BONK + 3
+const DIZZY_END = LAND + 8 // stars circle Clawd's head, then it shakes it off
 const SHINE_END = BONK + 18 // shine ring expands from the impact
 const TYPE_START = BONK + 6
 const TYPE_END = TYPE_START + WORD.length
@@ -91,9 +101,26 @@ const ramp = (stops: string[], t: number) => {
   return mix(stops[i] ?? WHITE, stops[i + 1] ?? WHITE, u - i)
 }
 const easeOut = (t: number) => 1 - (1 - t) * (1 - t)
+// Deterministic flicker noise in [0, 1).
+const noise = (a: number, b: number) => {
+  const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453
+  return x - Math.floor(x)
+}
+
+// Light comes from the upper left: faces open to the sky catch it, faces open to the floor fall into shade.
+const blank = (r: number, c: number) => (MARK[r]?.[c] ?? ' ') === ' '
+function lit(r: number, c: number, base: string): string {
+  const grain = (noise(c * 0.7, r * 3.1) - 0.5) * 0.08 // brushed steel: faint horizontal streaks
+  base = mix(base, CHROME[0] ?? WHITE, 0.3) // polished: lift the whole face toward the brightest stop
+  let col = grain > 0 ? mix(base, CHROME[0] ?? WHITE, grain) : mix(base, CHROME[3] ?? WHITE, -grain)
+  if (blank(r - 1, c)) col = mix(col, CHROME[0] ?? WHITE, 0.55) // top bevel highlight
+  else if (blank(r, c - 1)) col = mix(col, CHROME[0] ?? WHITE, 0.3) // left bevel
+  if (blank(r + 1, c)) col = mix(col, CHROME[3] ?? WHITE, 0.18) // underside in shade
+  return col
+}
 
 function markColor(r: number, c: number, f: number): string | null {
-  const chrome = ramp(CHROME, c / MW + r * 0.06)
+  const chrome = lit(r, c, ramp(CHROME, c / MW + r * 0.06))
   if (f < FORGE + 6) {
     const age = (f / FORGE) * (MW + 6) - r * 0.6 - c
     if (age < 0) return null
@@ -117,7 +144,72 @@ function markColor(r: number, c: number, f: number): string | null {
     if (d < 1.2) return WHITE
     if (d < 3) return mix(WHITE, chrome, (d - 1.2) / 1.8)
   }
-  return chrome
+  // Still warm: the underside keeps a faint, slowly breathing ember glow.
+  const warm = Math.max(0, (r - 3) / 5) * (0.24 + 0.1 * Math.sin(f / 4 + c / 3))
+  const settle = Math.min(1, (f - FORGE - 6) / 8)
+  return warm > 0 && settle > 0 ? mix(chrome, EMBER[0] ?? WHITE, warm * settle) : chrome
+}
+
+
+// Upward-facing edges of the F: the blank cell just above each top surface is where flames lick.
+const EDGES: Array<{ r: number; c: number; age0: number }> = []
+MARK.forEach((line, r) => [...line].forEach((ch, c) => {
+  if (ch !== ' ' && (r === 0 || (MARK[r - 1]?.[c] ?? ' ') === ' ')) EDGES.push({ r: r - 1, c, age0: r * 0.6 + c })
+}))
+
+// How hot the fire is along an edge cell at frame f (0 = none, 1 = roaring).
+function heat(e: { r: number; c: number; age0: number }, f: number): number {
+  let h = 0
+  if (f < FORGE + 10) {
+    const age = (f / FORGE) * (MW + 6) - e.age0 // same front that forges the mark
+    if (age > 0) h = age < 6 ? 1 : Math.max(0, 1 - (age - 6) / 10)
+  }
+  const t = f - BONK
+  if (t >= 0 && t < 6) h = Math.max(h, (1 - t / 6) * Math.max(0, 1 - Math.abs(e.c - IMPACT.c) / 7))
+  if (f >= FORGE + 10) h = Math.max(h, 0.26) // a low, living flame once settled
+  return h
+}
+
+function fire(f: number, put: (r: number, c: number, cell: Cell) => void) {
+  const LV = ['░', '░', '▒', '▒', '▓', '▄']
+  for (const e of EDGES) {
+    const h = heat(e, f) * (0.55 + 0.45 * noise(e.c, Math.floor(f / 2)))
+    if (h < 0.12) continue
+    const i = Math.min(LV.length - 1, Math.floor(h * LV.length))
+    // deep red at the base of the range, orange through the body, yellow only in the hottest core
+    const color = h > 0.95 ? (EMBER[2] ?? WHITE) : ramp([FLAME_RED, EMBER[0] ?? WHITE, EMBER[1] ?? WHITE, EMBER[2] ?? WHITE], h * 0.8)
+    put(e.r + TOP, e.c, { ch: LV[i] ?? '▁', color })
+  }
+}
+
+// Fresh off the anvil: a puff of quench steam as the metal cools.
+function steam(f: number, put: (r: number, c: number, cell: Cell) => void) {
+  const t = f - (FORGE + 3)
+  if (t < 0 || t > 12) return
+  for (let i = 0; i < 6; i++) {
+    const start = i * 1.5
+    const a = t - start
+    if (a < 0 || a > 7) continue
+    const c = 13 + i * 3 + Math.round(Math.sin(a / 1.3 + i) * 1.2)
+    const r = TOP - 1 + (a < 3 ? 1 : 0) // hugs the bar, then lifts into the headroom
+    put(r, c, { ch: a < 5 ? '~' : '·', color: mix(STEAM, BG, a / 8) })
+  }
+}
+
+// Embers drifting up off the mark.
+function embers(f: number, put: (r: number, c: number, cell: Cell) => void) {
+  if (f < FORGE + 4) return
+  for (let i = 0; i < 9; i++) {
+    const period = 16 + (i % 4) * 3
+    const a = (f + i * 7) % period
+    if (a > 9) continue
+    const e = EDGES[Math.floor(noise(i, Math.floor((f + i * 7) / period)) * EDGES.length)]
+    if (!e) continue
+    const r = e.r + TOP - Math.floor(a / 2)
+    const c = e.c + Math.round(Math.sin(a / 2 + i) * 1.4)
+    const color = mix(EMBER[1] ?? WHITE, FLAME_RED, a / 9)
+    put(r, c, { ch: a < 5 ? '•' : '·', color, bold: a < 5 })
+  }
 }
 
 function clawd(f: number): { x: number; lift: number; pose: string[] } | null {
@@ -125,7 +217,8 @@ function clawd(f: number): { x: number; lift: number; pose: string[] } | null {
   if (f < WALK_END) {
     const t = (f - FORGE) / (WALK_END - FORGE)
     const x = Math.round(START_X + (CLAWD_X - START_X) * easeOut(t))
-    return { x, lift: 0, pose: Math.floor(f / 2) % 2 ? P.stepA : P.stepB }
+    const step = Math.floor(f / 2) % 2
+    return { x, lift: step, pose: step ? P.stepA : P.stepB } // a bouncy trot
   }
   if (f < LOOK_END) return { x: CLAWD_X, lift: 0, pose: P.look }
   if (f < CROUCH_END) return { x: CLAWD_X, lift: 0, pose: P.crouch }
@@ -133,15 +226,18 @@ function clawd(f: number): { x: number; lift: number; pose: string[] } | null {
   if (f === BONK) return { x: CLAWD_X, lift: 2, pose: P.jump }
   if (f < LAND) return { x: CLAWD_X, lift: LAND - f, pose: P.jump }
   if (f === LAND) return { x: CLAWD_X, lift: 0, pose: P.crouch }
+  if (f < DIZZY_END) return { x: CLAWD_X, lift: 0, pose: Math.floor((f - LAND) / 2) % 2 ? P.dizzyL : P.dizzyR }
   if (f < HOLD_START) {
-    const k = (f - LAND) % 6
+    const k = (f - DIZZY_END) % 6
     return { x: CLAWD_X, lift: k === 2 || k === 3 ? 1 : 0, pose: P.cheer }
   }
-  // Idle: glance at the wordmark, a happy hop, then a blink.
+  if (f >= FADE_START) return { x: CLAWD_X, lift: 0, pose: Math.floor(f / 2) % 2 ? P.waveA : P.waveB } // bye!
+  // Idle: glance at the wordmark, wave hello, a happy hop, then a blink.
   const k = f - HOLD_START
-  if (k >= 4 && k < 14) return { x: CLAWD_X, lift: 0, pose: P.side }
-  if (k >= 16 && k < 20) return { x: CLAWD_X, lift: k === 17 || k === 18 ? 1 : 0, pose: P.cheer }
-  return { x: CLAWD_X, lift: 0, pose: k === 24 || k === 25 ? P.blink : P.stand }
+  if (k >= 2 && k < 9) return { x: CLAWD_X, lift: 0, pose: P.side }
+  if (k >= 10 && k < 20) return { x: CLAWD_X, lift: 0, pose: Math.floor(k / 2) % 2 ? P.waveA : P.waveB }
+  if (k >= 21 && k < 25) return { x: CLAWD_X, lift: k === 22 || k === 23 ? 1 : 0, pose: P.cheer }
+  return { x: CLAWD_X, lift: 0, pose: k === 27 || k === 28 ? P.blink : P.stand }
 }
 
 // Sparks thrown from the impact: analytic paths with a little gravity.
@@ -161,6 +257,29 @@ function sparks(f: number, put: (r: number, c: number, cell: Cell) => void) {
   }
 }
 
+// Little extras that make Clawd feel alive: a "!" when it spots the bar, dizzy stars, floating hearts.
+function cute(f: number, put: (r: number, c: number, cell: Cell, over?: boolean) => void) {
+  const head = H - 4 // the row just above Clawd's head when standing
+  if (f >= WALK_END && f < LOOK_END) put(head, CLAWD_X + 4, { ch: '!', color: EMBER[2] ?? WHITE, bold: true }, true)
+  if (f > LAND && f < DIZZY_END) {
+    const a = (f - LAND) * 1.1
+    for (const off of [0, Math.PI]) {
+      const c = Math.round(CLAWD_X + 4 + Math.cos(a + off) * 3.5)
+      put(head - (Math.sin(a + off) > 0.3 ? 1 : 0), c, { ch: '*', color: EMBER[2] ?? WHITE, bold: true }, true)
+    }
+  }
+  // hearts float up and wobble out from Clawd while it cheers and waves
+  for (let i = 0; i < 6; i++) {
+    const born = DIZZY_END + 1 + i * 5
+    const age = f - born
+    if (age < 0 || age > 7 || born >= FADE_START) continue
+    const r = head - Math.floor(age * 0.7)
+    const c = CLAWD_X + 7 + (i % 2) + Math.round(Math.sin(age / 1.4 + i))
+    const color = mix(HEART, BG, Math.max(0, (age - 4) / 4))
+    put(r, c, { ch: age < 6 ? '♥' : '·', color, bold: age < 3 })
+  }
+}
+
 export function scene(f: number): Run[][] {
   const grid: Cell[][] = Array.from({ length: H }, () => Array.from({ length: CW }, () => ({ ch: ' ' })))
   const put = (r: number, c: number, cell: Cell, over = false) => {
@@ -175,6 +294,17 @@ export function scene(f: number): Run[][] {
       if (ch === ' ') return
       const color = markColor(r, c, f)
       if (color) put(r + TOP, c, { ch, color })
+    }),
+  )
+
+  // 2.5D depth: each forged cell casts a solid face to its right and below (light from the upper left).
+  const depth = mix(CHROME[3] ?? WHITE, BG, 0.3)
+  MARK.forEach((line, r) =>
+    [...line].forEach((ch, c) => {
+      if (ch === ' ' || !markColor(r, c, f)) return
+      const face = f < FORGE + 6 ? mix(EMBER[0] ?? WHITE, BG, 0.5) : depth
+      if (blank(r, c + 1)) put(r + TOP, c + 1, { ch: '▌', color: face })
+      if (blank(r + 1, c) && (ch === '█' || ch === '▄')) put(r + TOP + 1, c + 1, { ch: '▀', color: face })
     }),
   )
 
@@ -202,7 +332,11 @@ export function scene(f: number): Run[][] {
       }),
     )
   }
+  fire(f, put)
+  steam(f, put)
   sparks(f, put)
+  embers(f, put)
+  cute(f, put)
 
   // Fade everything to the background over the last beat.
   const fade = f >= FADE_START ? (f - FADE_START + 1) / (LAST - FADE_START + 1) : 0
