@@ -198,6 +198,17 @@ export const MAX_SUBISSUES = 8;
 export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 /** 12-hex sha256 of the canonical contract JSON text (renderContract embeds the same text). */
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
+/**
+ * #5811: why a frozen contract read back from the issue cannot be reused, or null. A changed issue scope (#4265) or a
+ * different recorded base is stale. Without a branch to resume (a recovery that ended before its first commit) only a
+ * contract that records both the scope and the base it was planned on is reused; a legacy one re-plans as before.
+ */
+export function reuseStale({ fc, scopeHash, lane, resumed, gone = [] }) {
+  if (fc.base && fc.base !== lane) return `base ${fc.base} -> ${lane}`;
+  if (!resumed && !(fc.scope && fc.base)) return "no branch to resume and the contract records no issue scope or base";
+  if (fc.scope) return fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null;
+  return fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+}
 
 /**
  * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
@@ -2181,19 +2192,19 @@ export async function runCore(o) {
       frozen = split.contract; hash = contractHash(contractJson(frozen));
       files = await changedFiles();
     } else {
-      if (resumed) {
+      if (resumed || recover) { // #5811: a recovery with no branch to resume (it ended before its first commit) still reuses the frozen contract
         const fc = await readFrozenContract();
         if (fc) {
           // #4265: a contract planned from an older issue scope is stale: re-plan and freeze a new one instead of judging against it
           await refreshIssue("rerun contract check");
           const gone = (Array.isArray(fc.contract?.requirements) ? fc.contract.requirements : []).filter((r) => r?.disposition === "deliver" && !inIssue(r.quote, issueText)).map((r) => r.id);
-          const stale = fc.scope ? (fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null)
-            : fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+          const stale = reuseStale({ fc, scopeHash, lane, resumed: Boolean(resumed), gone });
           if (stale) {
-            ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
+            ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, base: fc.base, lane, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
           } else {
             frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`);
+            ev({ event: "CONTRACT_REUSED", hash, recover: recover?.code ?? null, resumed: Boolean(resumed) }); // #5811: no pre-contract session; routing is next
             const ad = applyRequirementDecisions(frozen, trustedComments); // #5547: a structured operator decision amends the frozen row
             if (ad.applied.length) { frozen = deferChecklessPostDeploy(ad.contract).contract; T.decisions.push(`FORGE:DECISION applied to the frozen contract: ${ad.applied.join(", ")} tracked post-deploy`); }
           }
@@ -2277,8 +2288,8 @@ export async function runCore(o) {
         stage = "plan"; liveKeys = ["investigation"]; result = (await readResult()) ?? result;
         if (!lr.upgrade) {
           lightDone = true; light = true; frozen = historyRows(lr.contract); hash = contractHash(contractJson(frozen));
-          let body = renderContract(frozen, hash, { scope: scopeHash });
-          if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
+          let body = renderContract(frozen, hash, { scope: scopeHash, base: lane });
+          if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash, base: lane });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
           await claimSurfaceSlots(frozen);
           ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
@@ -2407,15 +2418,15 @@ export async function runCore(o) {
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
         if (hRows.length) T.decisions.push(`Anchored decisions bind this lane: ${hRows.map((p) => `${p.id} (${p.decision})`).join(", ")}`);
         hash = contractHash(contractJson(frozen));
-        let body = renderContract(frozen, hash, { scope: scopeHash });
-        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash }); // the JSON must survive the comment cap
+        let body = renderContract(frozen, hash, { scope: scopeHash, base: lane });
+        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash, base: lane }); // the JSON must survive the comment cap
         await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
         const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
         ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
         await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
-        T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
+        T.validate = lightDone ? "light lane (no plan session)" : resumed ? "resumed (existing branch)" : "recovered (frozen contract)";
       }
       const dgFiles = (frozen?.deliverables ?? []).map((d) => d?.path).filter(Boolean);
       const designComments = (iss?.comments ?? []).filter(isTrustedIssueComment);

@@ -240,7 +240,7 @@ describe("core work-on", () => {
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");
     assert.match(w.comments[2], /\| R1 \| foo must handle a null argument without throwing\. \| deliver \|/);
-    assert.match(w.comments[2], /<summary>contract\.json \(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}\)<\/summary>/);
+    assert.match(w.comments[2], /<summary>contract\.json \(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}, base staging\)<\/summary>/); // #5811: the base it was planned on
     assert.match(w.comments[3], /## Implementation Complete\n\*\*Branch:\*\* `feat\/issue-7-lean`\n\*\*Files changed:\*\*\n- `src\/foo.js`\n- `test\/foo.test.js`/);
     assert.match(w.comments[4], /## Conformance Review\n\*\*Verdict:\*\* CONFORMS/);
     assert.match(w.comments[4], /\| R1 \| implemented \| src\/foo.js:3 \| V1 \|/);
@@ -5323,9 +5323,48 @@ describe("batch robustness (#4112-#4115)", () => {
       assert.equal((await run(w, { dir })).terminalReason, "merged");
       assert.match(builders(w)[0][4], /PLANNING ONLY[\s\S]*This is a rerun/);
       assert.match(traj(w)[0], reason);
-      assert.match(w.comments.find((x) => x.includes("<!-- FORGE:CONTRACT -->")), /\(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}\)/);
+      assert.match(w.comments.find((x) => x.includes("<!-- FORGE:CONTRACT -->")), /\(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}, base staging\)/);
     }
     assert.equal(readLog(dir, 7).filter((e) => e.event === "CONTRACT_STALE").length, 2);
+  });
+  // #5811: a recovery that ended before its first commit has no branch to resume; the frozen contract still skips the plan session
+  const withScopeBase = (scope, base) => frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scope}${base ? `, base ${base}` : ""})`));
+  it("#5811 a recovery without a branch reuses a frozen contract of the same issue scope and base: routing comes before any builder session", async () => {
+    const dir = tmpDir("reuse-5811-");
+    const w = world({ prList: [], issueComments: [withScopeBase(scoped(), "staging")] });
+    assert.equal((await run(w, { dir, recover: { code: "env.tool_missing", attempt: 1 } })).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 1, "no pre-contract session: only the implement session runs");
+    assert.doesNotMatch(b[0][4], /PLANNING ONLY/);
+    assert.match(b[0][4], /The engine froze[\s\S]*Recovery pass \(env\.tool_missing\)/);
+    assert.ok(!w.comments.some((c) => c.includes("<!-- FORGE:CONTRACT -->")), "the contract is not re-frozen");
+    const ev = readLog(dir, 7).map((e) => e.event);
+    assert.ok(ev.includes("CONTRACT_REUSED") && !ev.includes("CONTRACT_FROZEN") && !ev.includes("CONTRACT_STALE"));
+    const route = ev.indexOf("BUILDER_ROUTE"), first = ev.indexOf("FIRST_SESSION");
+    assert.ok(route >= 0 && (first < 0 || route < first), `BUILDER_ROUTE precedes the first session: ${ev.join(",")}`);
+  });
+  it("#5811 an edited issue, another base or a contract without a recorded base re-plans a recovery without a branch", async () => {
+    const dir = tmpDir("reuse-5811-stale-");
+    for (const [c, reason] of [[withScopeBase(scoped("foo crashes; old scope."), "staging"), /issue scope [0-9a-f]{12} -> [0-9a-f]{12}/],
+      [withScopeBase(scoped(), "milestone/other"), /base milestone\/other -> staging/], [withScopeBase(scoped(), null), /no branch to resume/]]) {
+      const w = world({ prList: [], issueComments: [c] });
+      assert.equal((await run(w, { dir, recover: { code: "env.tool_missing", attempt: 1 } })).terminalReason, "merged");
+      assert.match(builders(w)[0][4], /PLANNING ONLY/);
+      assert.match(traj(w)[0], reason);
+      assert.match(w.comments.find((x) => x.includes("<!-- FORGE:CONTRACT -->")), /\(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}, base staging\)/, "the new contract records its base");
+    }
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "CONTRACT_REUSED").length, 0);
+  });
+  it("#5811 a resumed branch rejects a contract frozen on another base; a legacy contract without a base still resumes", async () => {
+    const other = world({ prList: [], remote: "abc	refs/heads/feat/issue-7-lean", issueComments: [withScopeBase(scoped(), "milestone/other")] });
+    assert.equal((await run(other)).terminalReason, "merged");
+    assert.match(builders(other)[0][4], /PLANNING ONLY/);
+    const legacy = world({ prList: [], remote: "abc	refs/heads/feat/issue-7-lean", issueComments: [withScopeBase(scoped(), null)] });
+    assert.equal((await run(legacy, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, "merged");
+    assert.equal(builders(legacy).length, 1);
+    const round = parseContractComment(renderContract(CONTRACT, "0123456789ab", { scope: "ba5eba5eba5e", base: "milestone/m-1" }));
+    assert.equal(round.base, "milestone/m-1"); assert.equal(round.scope, "ba5eba5eba5e");
+    assert.equal(parseContractComment(renderContract(CONTRACT, "0123456789ab", { scope: "ba5eba5eba5e" })).base, null);
   });
   it("a tampered or untrusted contract comment is ignored: the rerun plans again", async () => {
     for (const c of [frozenComment(CONTRACT, (b) => b.replaceAll("guard null", "guard nothing")), frozenComment(CONTRACT, (b) => b, "NONE")]) {
