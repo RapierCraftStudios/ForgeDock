@@ -12,7 +12,7 @@ A lane merge into staging while a staging to main release PR's CI runs restarts 
 
 ## Decision
 
-- `releaseMergeHold` (bin/lean/release-merge-hold.mjs) answers held or not from facts: a manual hold (`mergeHold` in the `_active` record) or an open PR whose head is the lane's merge target, whose base is a default branch, and whose check rollup has an unfinished entry. No LLM, fail-open when GitHub cannot be read.
+- `releaseMergeHold` (bin/lean/release-merge-hold.mjs) answers held or not from facts: a manual hold (`mergeHold` in the `_active` record) or an open PR whose head is the lane's merge target, whose base is a default branch, and whose check rollup has an unfinished entry. Report-only gate entries (`forge/deploy-gate`, `forgedock/verify`, `Check for FORGE gate markers`, as `CI_EXCLUDED_CHECKS`) never count: the deploy gate stays pending for the whole review (#5777). No LLM, fail-open when GitHub cannot be read.
 - The lane merge step (bin/lean/lean.mjs) polls it every 30 s before `gh pr merge`, records `merge.held_release`, leaves the PR open and green, and merges once the release PR merges, closes or finishes its checks. The wait is bounded by `ciMaxMinutes` and ends `ci-pending` (resumable).
 - `forgedock release merge-hold|merge-release --reason ...` set and clear the manual hold through the audited control path; `release status` shows it (`merge_hold=yes (<reason>)`), or `merge_hold=release-ci (PR #N, k pending)` while the release PR's checks run.
 - Policy `release.hold_merges_during_release_ci` (default true; read by the lane from `.forge/release.yaml` on the default branch) set to false turns the hold off.

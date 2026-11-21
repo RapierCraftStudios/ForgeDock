@@ -4,9 +4,16 @@
  * Two sources: a manual hold (`release merge-hold`, state key `mergeHold` of `_active`) and a pending-checks release PR.
  */
 
-/** A rollup entry that has not finished (check run not COMPLETED, or a status context PENDING/EXPECTED). */
+/**
+ * #5777: report-only gate entries, never "release CI running" (mirrors CI_EXCLUDED_CHECKS of bin/review-staging.mjs).
+ * `forge/deploy-gate` stays pending until the staging review posts its marker, so counting it held every merge for the whole review.
+ */
+const REPORT_ONLY_CHECKS = new Set(["forgedock/verify", "forge/deploy-gate", "Check for FORGE gate markers"]);
+
+/** A rollup entry that has not finished (check run not COMPLETED, or a status context PENDING/EXPECTED); report-only gate entries never count. */
 export function rollupPending(entry) {
   if (!entry) return false;
+  if (REPORT_ONLY_CHECKS.has(String(entry.context ?? entry.name ?? ""))) return false;
   if (entry.__typename === "StatusContext" || (entry.state && !entry.status)) return /^(PENDING|EXPECTED)$/i.test(String(entry.state ?? ""));
   return String(entry.status ?? "").toUpperCase() !== "COMPLETED";
 }
