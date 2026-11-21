@@ -2243,3 +2243,31 @@ describe("#5773 operator decisions survive requeue and amendment replay", () => 
     }
   });
 });
+
+describe("recurrence counters and design lane precheck (#5751)", () => {
+  const result = { validation: [{ id: "V1", exit: 0 }], requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }] };
+  const run = (extra, contract = C) => precheck({ contract, result, changedFiles: files, ...extra });
+  const rec = { recurs: true, count: 2, threshold: 2, evidence: [], reason: "r" };
+  const design = { why_failed: "#1 and #2 patched the symptom", disposition: "replace", outcome: { metric: "retries per day", target: "0" } };
+
+  it("a counter that grew without a counter-ok decision fails with maintenance.counter_growth", () => {
+    const pc = run({ counters: { before: { exports: 3 }, after: { exports: 4 } } });
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["maintenance.counter_growth", "counter_growth"]]);
+    assert.match(pc.failures[0].detail, /counter exports grew from 3 to 4/);
+  });
+  it("a counter-ok decision, an unchanged or shrinking counter, and no counters all pass", () => {
+    const ok = { ...C, decisions: [{ id: "K1", choice: "counter-ok: exports the new parser needs one entry point", justification: "" }] };
+    assert.equal(run({ counters: { before: { exports: 3 }, after: { exports: 4 } } }, ok).ok, true);
+    assert.equal(run({ counters: { before: { exports: 3 }, after: { exports: 3 } } }).ok, true);
+    assert.equal(run({ counters: { before: { exports: 3 }, after: { exports: 1 } } }).ok, true);
+    assert.equal(run({}).ok, true);
+  });
+  it("a recurring issue's contract without a complete design block fails with recurrence.design_missing", () => {
+    const pc = run({ recurrence: rec });
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["recurrence.design_missing", "design_missing"]]);
+    const partial = run({ recurrence: rec }, { ...C, design: { ...design, disposition: "patch", outcome: { metric: "x" } } });
+    assert.match(partial.failures[0].detail, /disposition.*; design\.outcome needs a metric and a target/);
+    assert.equal(run({ recurrence: rec }, { ...C, design }).ok, true);
+    assert.equal(run({ recurrence: { ...rec, recurs: false } }).ok, true, "no recurrence: no design check");
+  });
+});

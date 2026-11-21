@@ -520,6 +520,38 @@ branches:
 #     - "web/public/openapi*.json"    #   never hotspot-checked, and add-deliverable amendments on them are refused
 
 # =============================================================================
+# RECURRENCE (forge#5751, on by default; this block is optional)
+# Before the plan call the lean engine counts earlier merged fixes that match the
+# new issue by symptom (subject recall or a `Recurs #n` line in the body) AND by
+# area (the fix touched a path the issue names). At `threshold` or more the lane
+# runs as a design lane: no light lane, the prior-attempt context pack in the
+# plan prompt whatever context.mode says, and a contract `design` block
+# {why_failed, disposition: delete|replace|extend, outcome: {metric, target}}
+# (missing: recurrence.design_missing in the precheck). The reason is logged
+# (RECURRENCE), recorded as a decision and posted on the issue (FORGE:RECURRENCE).
+# A design lane may decompose into ordinary lanes through split-required.
+# Detection makes no LLM calls. mode: off turns detection off.
+# hot_areas: a lane whose named or contract paths fall in an area holds the
+#   host-wide lock `hot-area:<name>` until it ends; a second lane waits, then
+#   defers host.busy. The lock is host-local: lanes on another host are not
+#   excluded.
+# counters: `git grep -c -E <pattern> -- <globs>` counted at the lane's merge
+#   base and its head; growth fails the precheck (maintenance.counter_growth)
+#   unless a contract decision says "counter-ok: <name> <reason>".
+# Block maps only: `name: "glob, glob"` and `name: "pattern -- glob, glob"`.
+# =============================================================================
+
+# recurrence:
+#   mode: on                          # on | off
+#   threshold: 2                      # earlier merged fixes on the same symptom and area that make a recurrence
+#   hot_areas:
+#     auth: "src/auth/**, src/session/**"
+#     billing: "src/billing/**"
+#   counters:
+#     retry_wrappers: "withRetry\\( -- src/**/*.ts"
+#     eslint_disables: "eslint-disable -- src, web"
+
+# =============================================================================
 # MILESTONE DRIFT (OPTIONAL, forge#4161)
 # `forgedock orchestrate` folds each merged milestone lane's structure delta into
 # a FORGE:DRIFT summary in the GitHub milestone description, with no LLM. Without

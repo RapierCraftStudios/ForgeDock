@@ -107,6 +107,7 @@ function world(o = {}) {
       if (a[0] === "api" && a.includes("PATCH") && a.some((x) => /\/comments\/9000$/.test(x))) { statusLogical(w, a[a.indexOf("-f") + 1].replace(/^body=/, "")); w.statusPatches.push(a); return "{}"; } // #5592: the one FORGE:STATUS comment
       if (a[0] === "api" && a.includes("PATCH")) { w.patches.push(a); return "{}"; }
       if (a[0] === "api" && o.activeJson && a.some((x) => /contents\/active\.json\?ref=/.test(x))) return JSON.stringify({ content: Buffer.from(JSON.stringify(o.activeJson)).toString("base64") }); // #5776: the _active ledger read
+      if (a[0] === "api" && o.ghApi) { const r = o.ghApi(a); if (r != null) return r; } // #5751: subject search and PR file lists
       if (a[0] === "api") return a.some((x) => /\/comments$/.test(x)) ? (w.issueComments ?? []).map((c) => JSON.stringify(c)).join("\n") : "";
       if (k === "pr list" && a.some((x) => /statusCheckRollup/.test(x))) return JSON.stringify(typeof o.releasePrs === "function" ? o.releasePrs(w) : (o.releasePrs ?? [])); // #5709: release PR lookup
       if (k === "pr list") return JSON.stringify(w.prList);
@@ -8503,6 +8504,38 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
   };
   const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
   const ON = { light: { mode: "on", source: "text" } };
+
+  it("#5751 recurrence: an issue matching two earlier merged fixes on its path skips the light lane, gets the design note and records the reason", async () => {
+    const DESIGN = { why_failed: "#10 and #11 guarded one caller each", disposition: "replace", outcome: { metric: "null-input crashes in foo tests", target: "0" } };
+    const ghApi = (a) => {
+      const j = a.join(" ");
+      if (j.includes("search/issues")) return [10, 11].map((n) => JSON.stringify({ number: n, title: `fix foo null ${n}`, pr: true, merged: true })).join("\n");
+      if (/pulls\/1[01]\/files/.test(j)) return "src/foo.js\n";
+      return null;
+    };
+    const w = lworld({ ghApi, body: `${BODY}\n\nRecurs #10`, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT, design: DESIGN } }), dir = tmpDir("light-");
+    await run(w, { dir, ...ON });
+    const rec = events(dir, "RECURRENCE");
+    assert.equal(rec.length, 1);
+    assert.deepEqual(rec[0].fixes.sort(), [10, 11]);
+    assert.match(rec[0].reason, /^recurrence: 2 earlier merged fix\(es\) on the same symptom and area/);
+    assert.equal(events(dir, "LIGHT_DONE").length, 0, "a recurrence never takes the light lane");
+    const plan = builders(w).find((c) => /PLANNING ONLY/.test(c[4]));
+    assert.ok(plan, "the full lane's plan session ran");
+    assert.match(plan[4], /DESIGN LANE \(#5751\)/);
+    assert.match(plan[4], /#10 fix foo null 10/);
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:RECURRENCE -->") && /Routed to a design lane: recurrence: 2/.test(c)), "the reason is posted on the issue");
+    assert.ok(!readLog(dir, 7).some((e) => JSON.stringify(e).includes("design_missing")), "a contract with a design block passes the design check");
+  });
+
+  it("#5751 recurrence: no matching history keeps the light lane and the plan prompt unchanged", async () => {
+    const w = lworld(), dir = tmpDir("light-");
+    await run(w, { dir, ...ON });
+    assert.equal(events(dir, "RECURRENCE").length, 0);
+    assert.equal(events(dir, "LIGHT_ELIGIBILITY")[0].verdict, "eligible");
+    assert.ok(builders(w).length >= 1 && !/PLANNING ONLY/.test(builders(w)[0][4]), "the light try ran (no plan call first)");
+    assert.ok(!builders(w).some((c) => /DESIGN LANE/.test(c[4])));
+  });
 
   it("nothing triggers: exactly one builder session (no plan) plus the review; the derived contract is frozen and posted", async () => {
     const w = lworld(), dir = tmpDir("light-");

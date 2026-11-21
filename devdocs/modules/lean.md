@@ -522,6 +522,22 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the output head, so `amend()` passes it to `applyAmendments`, which refuses
    an add-deliverable on a matching path; `hotspotPlanNote`/`hotspotBuildRule`
    then name those globs in the prompts.
+   **Recurrence** (#5751, `recurrence.mjs`, `hotarea.mjs`): before the light
+   decision `recurrenceFacts` reads `subjectHistory` rows plus the file lists
+   of merged PRs and `Recurs #n` links (capped at `MAX_RECURRENCE_ROWS`);
+   `detectRecurrence` counts a fix only when it matches by symptom AND its
+   files overlap a named path. At `recurrence.threshold` (default 2, mode on)
+   the lane is a design lane: no light lane, `contextPackNote` whatever
+   `context.mode`, `designLaneNote` in the plan prompt, a `RECURRENCE` event,
+   a decision and a `FORGE:RECURRENCE` comment. Precheck then needs a contract
+   `design` block (`designContractFailures`, `recurrence.design_missing`); a
+   design lane decomposes through split-required. `takeHotAreas` takes
+   `acquireBranchLock` keyed `hot-area:<name>` for named paths and again for
+   the frozen deliverables, released at teardown (host-local only; a refusal
+   defers `host.busy`). `countCounters` runs `git grep -c -E` at the merge
+   base and HEAD in `gate()`; `counterGrowth` fails
+   `maintenance.counter_growth` without a `counter-ok: <name> <reason>`
+   decision. Both codes are in `SHADOW_PRE_BLOCKS`.
    **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
    `io.enumeratingTests` lists tests that enumerate the exports or directory
    siblings of the issue's named paths (`enumeratingPlanNote` /
@@ -3474,3 +3490,7 @@ The gate is on without config; the caps apply only when set. `bin/engine-cli.mjs
 ## Entry 2026-11-21 — release fix lane spawns with the sandbox env (#5785)
 
 `realSeam().runLane` in `release-review.mjs` shadowed the sandbox env (`laneEnv(env, laneStrip)`) with its `lane` (name) parameter, so the fix lane was spawned with `env: "staging"`, an empty environment with no PATH, gh or claude auth. The env is now `sandboxEnv`; `--lane` still gets the lane name. `realSeam` takes an optional `spawn` (default `node:child_process` spawn) so a test can assert the child env (driver token stripped, PATH kept).
+
+## Entry 2026-11-21 — Recurrence routes to a design lane; hot areas and counters (#5751)
+
+forge.yaml `recurrence:` (`parseRecurrenceConfig`, read by `engine-cli.mjs` `readEnvConfig` as `recurrenceConfig`; absent: mode on, threshold 2, no hot areas or counters). An issue naming no path and no `Recurs #n` link skips detection, so the light lane, plan prompt and conformance output are unchanged for it. A recurrence (threshold or more merged fixes matching by symptom and touched-path overlap) forces the full lane, puts the prior-attempt pack and `designLaneNote` in the plan prompt, and records the reason (event, decision, issue comment). The contract must carry `design {why_failed, disposition delete|replace|extend, outcome {metric, target}}`. Hot areas (`recurrence.hot_areas`, block map `name: "glob, glob"`) admit one lane per host at a time through the branch lock; cross-host lanes are not excluded. Counters (`recurrence.counters`, `name: "pattern -- glob, glob"`) are measured at the merge base and HEAD; growth needs a `counter-ok:` decision. Cost: 0 LLM calls; up to 1 search and `MAX_RECURRENCE_ROWS` PR file reads per lane with a named path.
