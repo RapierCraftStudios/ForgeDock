@@ -289,6 +289,23 @@ export function depInstallFailures({ results = [], changedFiles = [] } = {}) {
 }
 
 /**
+ * #5804: the failed installs of `results` that could not start because the host lacks a tool (depcache's ENOENT
+ * `tool not found: ...` reason, or a row coded env.tool_missing, #5651). Each is {tool, label}: the binary named in
+ * `spawn <tool> ENOENT` when present, else the ecosystem. Knowable before any session; a retry on this host cannot fix it. Pure.
+ */
+export function toolMissingInstalls(results = []) {
+  const out = [];
+  for (const r of Array.isArray(results) ? results : []) {
+    if (r?.status !== "failed") continue;
+    const reason = String(r.reason ?? "");
+    if (!/^tool not found\b/i.test(reason) && r.code !== "env.tool_missing") continue;
+    const tool = /\bspawn\s+(\S+)\s+ENOENT\b/.exec(reason)?.[1] ?? r.eco ?? "python";
+    out.push({ tool, label: `${r.eco ?? "dependencies"}${r.dir && r.dir !== "." ? ` in ${r.dir}` : ""}: ${reason || "tool not found"}` });
+  }
+  return out;
+}
+
+/**
  * #5447: declared vs ran for the FORGE:TRAJECTORY Tests row. Declared: each validate plus the repro_test. Skipped: a
  * declared id named by an env/missing/timeout failure of `failures` (reason = its kind). redGreen: repro BASE=FAILED HEAD=RAN.
  */

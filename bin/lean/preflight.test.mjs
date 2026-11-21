@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
+import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -150,6 +150,17 @@ describe("#5447 unrunnable tests: install classification and the Tests summary",
     const r = depInstallFailures({ results: [{ status: "failed", eco: "poetry", dir: ".", code: "env.tool_missing", reason: "no python satisfying the declared range" }], changedFiles: ["README.md"] });
     assert.equal(r.block.length, 1);
     assert.equal(r.block[0].code, "env.tool_missing");
+  });
+  it("#5804 toolMissingInstalls picks tool-not-found and env.tool_missing rows only, naming the spawned binary", () => {
+    const r = toolMissingInstalls([
+      { status: "failed", eco: "pnpm", dir: ".", reason: "tool not found: spawn pnpm ENOENT" },
+      { status: "failed", eco: "poetry", dir: "svc", code: "env.tool_missing", reason: "poetry is not available under python3.12" },
+      { status: "failed", eco: "npm", dir: ".", reason: "install failed: ERESOLVE" },
+      { status: "hit", eco: "uv", reason: "tool not found: spawn uv ENOENT" },
+    ]);
+    assert.deepEqual(r.map((m) => m.tool), ["pnpm", "poetry"]);
+    assert.match(r[1].label, /^poetry in svc: /);
+    assert.deepEqual(toolMissingInstalls(null), []);
   });
   it("testRunSummary counts declared, ran, red->green and skipped(reason)", () => {
     const c = { validate: [{ id: "V1", command: "a" }, { id: "V2", command: "b" }], repro_test: { command: "c" } };

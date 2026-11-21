@@ -6170,6 +6170,59 @@ describe("shared dependency cache wiring (#4220)", () => {
       assert.ok(approxTokens(p) <= 2800, `builder prompt is ${approxTokens(p)} tokens`);
     }
   });
+
+  const nh5804 = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+  it("#5804 a dependency install that fails tool-not-found ends env.tool_missing before the first session, naming the tool", async () => {
+    for (const [row, tool] of [[{ status: "failed", eco: "pnpm", dir: ".", key: "k", ms: 3, reason: "tool not found: spawn pnpm ENOENT" }, "pnpm"],
+      [{ status: "failed", eco: "poetry", dir: ".", key: "k", ms: 3, reason: "no python satisfying the declared range \">=3.12\" was found", code: "env.tool_missing" }, "poetry"]]) {
+      const dir = tmpDir("deps-5804-");
+      const w = world(); depsIo(w, { results: [row] });
+      const r = await run(w, { dir });
+      assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, tool);
+      assert.equal(w.calls.filter((c) => c[0] === "runner").length, 0, "no builder session");
+      assert.equal(w.merges.length, 0);
+      const log = readLog(dir, 7);
+      assert.equal(log.filter((e) => e.event === "FIRST_SESSION").length, 0);
+      assert.deepEqual(log.find((e) => e.event === "PREFLIGHT_TOOL_MISSING")?.tools, [tool]);
+      assert.match(nh5804(w), new RegExp(`the host is missing ${tool}, so validate command\\(s\\) could not run`), "the validate-time evidence line orchestrate classifies");
+      assert.match(nh5804(w), /env\.tool_missing: dependency install stopped/);
+    }
+  });
+
+  it("#5804 a tool-not-found install that settles after the plan started still ends before implement", async () => {
+    const w = world(); depsIo(w);
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    w.io.deps.prepare = async () => { await gate; return [{ status: "failed", eco: "pnpm", key: "k", ms: 5, reason: "tool not found: spawn pnpm ENOENT" }]; };
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { release(); return inner(c); };
+    const r = await run(w, { dir: tmpDir("deps-5804-late-"), contextWaitSeconds: 0 });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING);
+    assert.equal(builders(w).length, 1, "the plan session only, no implement");
+    assert.match(nh5804(w), /ended before the builder implemented/);
+  });
+
+  it("#5804 an install failure that is not tool-not-found keeps the overlap: the builder runs and the gate judges it", async () => {
+    const dir = tmpDir("deps-5804-other-");
+    const w = world(); depsIo(w, { results: [{ status: "failed", eco: "npm", dir: ".", key: "k", ms: 3, reason: "install failed: ERESOLVE" }] });
+    await run(w, { dir });
+    assert.ok(builders(w).length >= 2, "plan and implement ran");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "PREFLIGHT_TOOL_MISSING").length, 0);
+  });
+
+  it("#5804 a resumed lane whose frozen contract declares an env tool the host lacks ends env.tool_missing before any session", async () => {
+    const contract = { ...CONTRACT, test_plan: [{ requirement: "R1", proof: "the pytest case no longer errors at collection", level: "unit", level_reason: "cheapest level that observes it", repro: "no-repro", reason: "env-only", command: "node --test test/foo.test.js", env: ["pytest"] }] };
+    const h = contractHash(contractJson(contract));
+    const fc = { body: `<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n${renderContract(contract, h)}`, author_association: "OWNER", user: { type: "User", login: "op" } };
+    const dir = tmpDir("deps-5804-env-");
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [fc] });
+    w.io.runCommand = async ({ command }) => (/pytest --version/.test(command) ? { rc: 1, output: "" } : { rc: 0, output: "" });
+    const r = await run(w, { dir });
+    assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING);
+    assert.equal(w.calls.filter((c) => c[0] === "runner").length, 0, "no builder session");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "FIRST_SESSION").length, 0);
+    assert.match(nh5804(w), /This host lacks pytest, which the contract's test plan declares in env/);
+  });
 });
 
 describe("local-mode CI fix rounds at merge and declared pre-PR check commands (#4240)", () => {
