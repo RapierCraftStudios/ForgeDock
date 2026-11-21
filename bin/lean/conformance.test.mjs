@@ -2243,3 +2243,32 @@ describe("#5773 operator decisions survive requeue and amendment replay", () => 
     }
   });
 });
+
+describe("#5752 mechanism supersedes", () => {
+  const K = { requirements: [], deliverables: [{ id: "D1", path: "src/triage.mjs" }], validate: [] };
+  const broken = (guard, test) => ({ code: "conformance.guard_broken", kind: "guard_broken", guard, test, detail: `guard ${guard} broken` });
+  it("validates {mechanism, why} and stores it as contract.mechanisms; per-guard supersedes keeps working", () => {
+    const a = applyAmendments(K, [{ kind: "supersedes", mechanism: "keyword triage", why: "replaced by the scorer" }, { kind: "supersedes", guard: "#12", why: "own" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.contract.mechanisms, [{ mechanism: "keyword triage", why: "replaced by the scorer" }]);
+    assert.deepEqual(a.contract.supersedes, [{ guard: "#12", why: "own" }]);
+    assert.deepEqual(a.applied.map((x) => x.target), ["mechanism keyword triage", "#12"]);
+    assert.match(applyAmendments(K, [{ kind: "supersedes", mechanism: "  ", why: "x" }]).problems[0], /needs guard: "#N".*or mechanism/);
+    assert.match(applyAmendments(K, [{ kind: "supersedes", mechanism: "m" }]).problems[0], /without why/);
+  });
+  it("one amendment retires every guard_broken whose test the lane deleted; a strong guard with a surviving test still fails", () => {
+    const contract = applyAmendments(K, [{ kind: "supersedes", mechanism: "keyword triage", why: "removed" }]).contract;
+    const guardFailures = [broken("#7", "src/kw.test.mjs"), broken("#8", "src/kw2.test.mjs"), broken("#9", "src/score.test.mjs")];
+    const pc = precheck({ contract, result: {}, changedFiles: ["src/triage.mjs"], guardFailures, removedPaths: ["src/kw.test.mjs", "src/kw2.test.mjs"] });
+    assert.deepEqual(pc.failures.filter((f) => f.kind === "guard_broken").map((f) => f.guard), ["#9"]);
+    const none = precheck({ contract: K, result: {}, changedFiles: ["src/triage.mjs"], guardFailures, removedPaths: ["src/kw.test.mjs", "src/kw2.test.mjs"] });
+    assert.deepEqual(none.failures.filter((f) => f.kind === "guard_broken").map((f) => f.guard), ["#7", "#8", "#9"], "deleting a guard's test without a mechanism amendment retires nothing");
+    const unread = precheck({ contract, result: {}, changedFiles: ["src/triage.mjs"], guardFailures, removedPaths: null });
+    assert.equal(unread.failures.filter((f) => f.kind === "guard_broken").length, 3, "unreadable removed paths fail closed");
+  });
+  it("precheck pushes outcome-evidence failures", () => {
+    const pc = precheck({ contract: K, result: {}, changedFiles: ["src/triage.mjs"], outcomeEvidenceFailures: [{ code: "conformance.unimplemented", kind: "outcome_evidence_missing", detail: "x" }] });
+    assert.equal(pc.ok, false);
+    assert.deepEqual(pc.failures.map((f) => f.kind), ["outcome_evidence_missing"]);
+  });
+});

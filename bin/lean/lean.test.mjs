@@ -5300,6 +5300,37 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(builders(w).length >= 2, "a failing guard still resumes the builder");
 
   });
+  it("#5752 a broken weak guard (literal-presence test) does not block the lane and is recorded as a review note", async () => {
+    const weakBody = `import assert from "node:assert/strict";\nimport { readFileSync } from "node:fs";\nconst src = readFileSync("src/x.js", "utf8");\nassert.match(src, /LEGACY_FLAG/);\n`;
+    const dir = tmpDir("guard-weak-");
+    const w = world({ prList: [] });
+    const g = w.io.git; w.io.git = async (a, o) => (a[0] === "show" && /:src\/foo\.js$/.test(a.at(-1)) ? weakBody : g(a, o));
+    w.io.runCommand = async (a) => ({ rc: String(a?.cwd).includes("guardbase-") ? 0 : 1, output: "guard test failed" });
+    const r = await run(w, { dir, loadGuards: async () => [{ v: 1, issue: 9, pr: 90, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: "guard 9" }] });
+    const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner")]);
+    assert.doesNotMatch(text, /conformance\.guard_broken/, "a weak guard is never a guard_broken failure");
+    assert.ok(r.terminalReason === "merged" || !/guard #9/.test(JSON.stringify(w.comments.filter((c) => /NEEDS_HUMAN/.test(c)))), "the guard is not why the lane stops");
+    const weakEv = readLog(dir, 7).filter((e) => e.event === "guard_weak");
+    assert.ok(weakEv.length >= 1 && weakEv.every((e) => e.guard === "#9" && e.test === "src/foo.js"));
+    assert.deepEqual([...new Set(readLog(dir, 7).filter((e) => e.event === "guard_run").map((e) => `${e.broken}/${e.weak}`))], ["0/1"]);
+    assert.match(traj(w).at(-1), /Weak guard #9 broken \(review note, not a park\)/);
+  });
+  it("#5752 a declared outcome-evidence area touched without a before/after result row blocks with a clear reason", async () => {
+    const w = world({ prList: [] });
+    await run(w, { outcomeEvidenceConfig: { paths: { core: ["src/**"] }, corpus: { core: ["corpus/**"] } } });
+    assert.ok(builders(w).length >= 2, "the missing evidence resumes the builder");
+    assert.match(JSON.stringify(w.calls.filter((c) => c[0] === "runner")), /outcome-evidence area 'core'.{0,200}src\/foo\.js.{0,200}no before\/after measurement/);
+    const off = world({ prList: [] });
+    await run(off);
+    assert.doesNotMatch(JSON.stringify([off.comments, off.calls.filter((c) => c[0] === "runner")]), /outcome_evidence_missing|outcome-evidence area/, "no outcome_evidence config: no new check");
+  });
+  it("#5752 the builder prompt carries the negative-examples rule and the mechanism supersedes amendment", async () => {
+    const w = world({ prList: [] });
+    await run(w);
+    const p = JSON.stringify(builders(w));
+    assert.match(p, /ships negative examples/);
+    assert.match(p, /"kind\\":\\"supersedes\\",\\"mechanism\\"/);
+  });
   it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
     const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
     assert.deepEqual(parseAmendmentsComment(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });

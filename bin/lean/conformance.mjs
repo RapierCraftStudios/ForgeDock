@@ -693,7 +693,7 @@ function splitRequirementRefs(ref) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
       : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
@@ -799,6 +799,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "supersedes" && blank(a.guard) && typeof a.mechanism === "string" && !blank(a.mechanism)) {
+      // #5752: one decision removes a named mechanism; precheck retires every guard_broken whose test file the lane deleted
+      const mechanism = a.mechanism.trim().slice(0, 120);
+      c.mechanisms = [...(c.mechanisms ?? []).filter((m) => m.mechanism !== mechanism), { mechanism, why: String(a.why).trim() }];
+      applied.push({ kind: a.kind, target: `mechanism ${mechanism}`, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
       // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
       const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
@@ -1120,7 +1126,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, outcomeEvidenceFailures = null }) {
   const failures = [], superseded = [], ciCovered = [], equivalent = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1196,11 +1202,14 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
-  for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
+  // #5752: a mechanism supersedes retires a guard whose test file the lane deleted; a surviving test still needs its own supersedes
+  const deleted = contract.mechanisms?.length && Array.isArray(removedPaths) ? new Set(removedPaths) : null;
+  for (const f of guardFailures ?? []) if (!retired.has(f.guard) && !(deleted && f.test && deleted.has(f.test))) failures.push(f);
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
   failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
+  failures.push(...(outcomeEvidenceFailures ?? [])); // #5752: forge.yaml outcome_evidence
   failures.push(...(ciBudgetFailures ?? [])); // #5760: CI additions need a FORGE:CI_BUDGET annotation or the shared job, scoped hygiene, max counts
   failures.push(...(pageFailures ?? [])); // #5428: forge.yaml pages
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
