@@ -3445,3 +3445,7 @@ The gate is on without config; the caps apply only when set. `bin/engine-cli.mjs
 ## Entry 2026-11-21 — manual release merge hold works in lanes (#5776)
 
 `release-merge-hold.mjs` exports `ledgerIoFromGh(gh)`, a read-only (GET) release-ledger io `{ api }` built on a gh runner; gh errors propagate unchanged so the ledger's `HTTP 404` missing-file detection still works. `makeLeanIo` has no `api`, so the lane merge gate's `readActive` threw a TypeError that the fail-open catch swallowed and the manual `_active.mergeHold` never held a lane merge. `lean.mjs` now passes `io.api ? io : ledgerIoFromGh(ghc)` to the ledger read. `releaseMergeHold`'s signature and fail-open contract are unchanged, and lanes still never write the ledger.
+
+## Entry 2026-11-21 — release fix lane spawns with the sandbox env (#5785)
+
+`realSeam().runLane` in `release-review.mjs` shadowed the sandbox env (`laneEnv(env, laneStrip)`) with its `lane` (name) parameter, so the fix lane was spawned with `env: "staging"`, an empty environment with no PATH, gh or claude auth. The env is now `sandboxEnv`; `--lane` still gets the lane name. `realSeam` takes an optional `spawn` (default `node:child_process` spawn) so a test can assert the child env (driver token stripped, PATH kept).
