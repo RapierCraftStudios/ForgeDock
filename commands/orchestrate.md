@@ -174,7 +174,7 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   `contract.invalid` without a mid-run issue edit): the runner does not recover it and it is not an escalation. The
   batch report lists it as `unrecovered: #N (<code>: <detail>)`, like a recovery that did not merge. Mark its dependents
   skipped and leave the issue for a later run once its cause is fixed.
-- `engine-error`: relaunch it once.
+- `engine-error`: relaunch it once. A repeat of the same error, or an `env.tool_missing` the host still has, ends `held` (waiting on engine/env change): an engine upgrade, `--set-env` or the tool appearing re-admits it. Do not `--requeue` it.
 - `ci-pending` (PR not conflicting) or `deferred`: leave it. A later `/orchestrate` resumes it.
 
 **Operational decisions are yours.** Decide them without asking and keep going. Record each one as a
