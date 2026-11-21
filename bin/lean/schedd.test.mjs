@@ -13,7 +13,8 @@ import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitSta
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
-import { orchestrateFromCli, scheddFromCli } from "../engine-cli.mjs";
+import { orchestrateFromCli, scheddFromCli, runBatch } from "../engine-cli.mjs";
+import { probeBatchEnv } from "./lanecheck.mjs";
 
 // #4503: this process, and the env its clients submit for their lanes, never resolve the host's `~/.forge/sched`.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("schedd-home-");
@@ -485,6 +486,45 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("#5806: a hosted runner wedged in setup restarts the daemon once (decision logged); the same stall again alerts and never loops", async () => {
+    const dir = tmpDir("schedd-stall-setup-"), root = join(dir, "batches"), id = "b20261121-000000-5806";
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", created: new Date().toISOString() });
+    b.store.save({ v: 1, phase: "setup", setup: { read: 0, total: 2 }, order: [1, 2], deps: {}, results: {}, running: {}, pending: [1, 2], parallel: 2 });
+    const old = new Date(Date.now() - 10 * 60000);
+    utimesSync(join(b.dir, "state.json"), old, old);
+    const runBatch = async ({ sink }) => { sink.batch({ id, dir: b.dir }); return await new Promise(() => {}); }; // wedged in setup
+    const restarts = [], lines = [];
+    const d = await startDaemon({ dir, root, runBatch, log: (m) => lines.push(m), stallCheckMs: 50, stallMin: 0.001, restartForStall: (bid) => restarts.push(bid) });
+    try {
+      await until(() => restarts.length === 1, 8000);
+      assert.deepEqual(restarts, [id]);
+      assert.ok(lines.some((l) => /FORGE:DECISION batch .+ stall-recovery: restart the hosting schedd/.test(l)), lines.join("\n"));
+      assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.action, "restart-daemon");
+      utimesSync(join(b.dir, "state.json"), old, old);
+      await until(() => readFileSync(join(b.dir, "health.json"), "utf8").includes("stalled again after auto-recovery"), 8000);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(restarts.length, 1, "recovered once, then alerted");
+      assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY .*\(stuck in setup, 0\/2 issues read\).*probed: stalled again after auto-recovery/);
+    } finally { await d.close(); }
+  });
+
+  it("#5806: an unhosted stalled batch whose pinned PATH lost gh/git/node is not resumed: it alerts with the probed cause", async () => {
+    const dir = tmpDir("schedd-stall-env-"), root = join(dir, "batches"), id = "b20261121-000001-5806";
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", created: new Date().toISOString(), env: { PATH: join(dir, "bogus") } });
+    b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], parallel: 1 });
+    const old = new Date(Date.now() - 10 * 60000);
+    utimesSync(join(b.dir, "state.json"), old, old);
+    const calls = [];
+    const d = await startDaemon({ dir, root, runBatch: async ({ argv }) => { calls.push(argv); return await new Promise(() => {}); }, log: () => {}, resumeOnStart: false, stallCheckMs: 50, stallMin: 0.001 });
+    try {
+      await until(() => existsSync(join(b.dir, "health.json")) && readFileSync(join(b.dir, "health.json"), "utf8").includes("probed: batch env"), 8000);
+      assert.deepEqual(calls, [], "a resume would stall the same way");
+      assert.match(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stall.cause, /gh, git, node not resolvable on the batch env PATH/);
+    } finally { await d.close(); }
+  });
+
   it("#4917: a resume that leaves the waiting issue unadmitted (breaker tripped, retry-at passed) is not re-hosted again", async () => {
     const dir = tmpDir("schedd-rehost-loop-"), root = join(dir, "batches"), id = "b20261031-000000-4918";
     const calls = [];
@@ -786,6 +826,26 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.equal(sanitizePath(`${session}:${keep}`, { tmpRoots: [work] }), keep);
     assert.equal(sanitizePath(`${session}:${keep}`, { tmpRoots: ["/nowhere"] }), `${session}:${keep}`, "an arg0 dir outside a temp root is not session-scoped");
     assert.deepEqual(redactEnv({ A: "1", GH_TOKEN: "x" }), { A: "1", GH_TOKEN: "<redacted>" });
+  });
+
+  it("#5806: sanitizePath splits a win32 PATH on `;` (splitting on `:` left one bogus entry pinned)", () => {
+    const win = "C:\\Windows\\system32;C:\\Program Files\\GitHub CLI;C:\\gone";
+    const exists = (d) => d !== "C:\\gone";
+    assert.equal(sanitizePath(win, { sep: ";", exists, tmpRoots: [] }), "C:\\Windows\\system32;C:\\Program Files\\GitHub CLI");
+    assert.equal(sanitizePath("/usr/bin:/gone", { sep: ":", exists: (d) => d !== "/gone", tmpRoots: [] }), "/usr/bin");
+  });
+
+  it("#5806: a create or resume whose pinned env PATH cannot resolve gh/git/node fails fast with that reason", async () => {
+    const root = tmpDir("schedd-probe-"), bogus = join(root, "bogus");
+    const deps = { allowTmpfs: true, batchRoot: root, probeEnv: probeBatchEnv, io: { gh: async () => "o/r\n" } };
+    const sink = { batch: () => {}, row: () => {}, line: () => {} };
+    await assert.rejects(runBatch({ argv: ["1", "--repo", "o/r"], cwd: root, env: { PATH: bogus }, sink, deps, daemon: true }),
+      /batch not started: gh, git, node not resolvable on the batch env PATH \(empty\)/, "the sanitised pin drops the missing dir");
+    assert.deepEqual(listBatches(root), [], "no batch dir is left behind");
+    const b = openBatch(root, "b-env");
+    b.writePlan({ v: 1, id: "b-env", argv: ["1", "--repo", "o/r"], repo: "o/r", cwd: root, created: new Date().toISOString(), daemon: true, env: { PATH: bogus } });
+    await assert.rejects(runBatch({ argv: ["--resume", "b-env"], cwd: root, sink, deps, daemon: true }),
+      /batch b-env cannot resume: gh, git, node not resolvable on the batch env PATH \(1 entry: .*bogus\); fix its pin with forgedock orchestrate --set-env b-env PATH=/);
   });
 
   it("#4691: plan.json holds none of the session token, temp PATH dir or excluded wrapper dir; --show/--set/--unset-env edit it", async () => {

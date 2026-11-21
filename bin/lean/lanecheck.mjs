@@ -9,6 +9,7 @@
  */
 import { readFileSync } from "node:fs";
 import { findShimLoops } from "./heavy.mjs";
+import { which } from "./toolchain.mjs";
 
 /** The running CLI's package version. */
 export const cliVersion = () => JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
@@ -93,6 +94,22 @@ export function checkPathLoop({ env = {}, loops = findShimLoops }) {
   const found = loops(env.PATH ?? "", { skip });
   if (!found.length) return pass(code, "no PATH wrapper loops back to the heavy shim", "all");
   return fail(code, found.map((l) => `${l.dir} wraps ${l.name} and resolves back to the heavy shim`).join("; "), "all");
+}
+
+/** #5806: the tools a batch's setup and lanes run; each must resolve on the batch env's PATH. */
+export const BATCH_ENV_TOOLS = Object.freeze(["gh", "git", "node"]);
+/**
+ * #5806: `which`-style probe (no shell) of the batch env: every tool of `tools` resolves on `env.PATH` (win32: `;` and PATHEXT).
+ * A batch whose pinned PATH lost them otherwise sits in setup with no lane and no error. @returns {{ok, missing, detail}}
+ */
+export function probeBatchEnv(env = {}, { tools = BATCH_ENV_TOOLS, platform = process.platform, find = which, access } = {}) {
+  const path = String(env?.PATH ?? env?.Path ?? "");
+  const pathext = env?.PATHEXT ?? (platform === process.platform ? process.env.PATHEXT : null) ?? ".COM;.EXE;.BAT;.CMD";
+  const missing = tools.filter((t) => !find(t, path, [], { platform, pathext, ...(access ? { access } : {}) }));
+  if (!missing.length) return { ok: true, missing, detail: `batch env PATH resolves ${tools.join(", ")}` };
+  const dirs = path.split(platform === "win32" ? ";" : ":").filter(Boolean);
+  const shown = dirs.slice(0, 4).join(platform === "win32" ? ";" : ":") + (dirs.length > 4 ? ` (+${dirs.length - 4} more)` : "");
+  return { ok: false, missing, detail: `${missing.join(", ")} not resolvable on the batch env PATH (${dirs.length ? `${dirs.length} entr${dirs.length === 1 ? "y" : "ies"}: ${shown}` : "empty"})` };
 }
 
 /** Parse the field names `gh <cmd> --json bogus` lists as available (null when the output has no list). */

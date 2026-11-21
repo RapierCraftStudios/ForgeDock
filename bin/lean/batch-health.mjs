@@ -293,7 +293,10 @@ export async function resolvedOnGithub(cands, gh, repo) {
   return out;
 }
 
-export const DEFAULT_STALL_MIN = 10;
+/** #5806: minutes without progress (setup reads or dispatch) before a stall is acted on; `FORGEDOCK_SCHEDD_STALL_MIN` overrides (was 10). */
+export const DEFAULT_STALL_MIN = 3;
+/** #5806: auto-recoveries one batch gets in total (one per distinct ready set); past it every stall alerts. */
+export const MAX_STALL_RECOVERIES = 3;
 /**
  * #5314: dispatch stall. A batch with ready pending issues, free capacity and no progress for `windowMin` minutes. Ready: pending,
  * not held, no retry-at in the future, every in-batch dependency ended well. Independent of the runner (it may be dead), so the
@@ -309,7 +312,37 @@ export function evaluateDispatchStall(state, { held = [], parallel = null, hoste
     && (state.deps?.[n] ?? []).every((d) => !order.has(Number(d)) || Number(d) === n || GOOD_END.has(results[d]?.outcome)));
   const idleMin = Math.floor((now - lastProgressMs) / 60000);
   if (!ready.length || running >= k || idleMin < windowMin) return null;
-  return { code: "dispatch-stalled", ready, idleMin, hosted, detail: `${ready.length} ready issue${ready.length === 1 ? "" : "s"} (${list(ready.slice(0, 8))}${ready.length > 8 ? ", …" : ""}) pending with ${k - running} free lane${k - running === 1 ? "" : "s"} and no dispatch for ${idleMin} min; ${hosted ? "the runner is alive but not dispatching" : "no runner hosts the batch"}` };
+  const setup = state.phase === "setup" ? ` (stuck in setup, ${Number(state.setup?.read) || 0}/${Number(state.setup?.total) || ready.length} issues read)` : "";
+  return { code: "dispatch-stalled", ready, idleMin, hosted, setup: !!setup, detail: `${ready.length} ready issue${ready.length === 1 ? "" : "s"} (${list(ready.slice(0, 8))}${ready.length > 8 ? ", …" : ""}) pending with ${k - running} free lane${k - running === 1 ? "" : "s"} and no ${setup ? "progress" : "dispatch"} for ${idleMin} min${setup}; ${hosted ? "the runner is alive but not dispatching" : "no runner hosts the batch"}` };
+}
+
+/**
+ * #5806: what the schedd does about a stall. `recovery` is `health.json` `stallRecovery` ({sig, at, action, count}), kept across
+ * daemon restarts so a restart never re-arms it; `probe` is the batch env probe (lanecheck `probeBatchEnv`), null when the
+ * batch pins no env. A broken env alerts at once (a resume would stall or fail the same way); the first stall of a ready set
+ * is recovered once (`resume` an unhosted batch, `restart-daemon` when its runner is alive but wedged); the same ready set
+ * stalling again, or a batch past `maxRecoveries`, alerts with the probed cause. Pure.
+ * @returns {{action: "resume"|"restart-daemon"|"alert", sig: string, cause: string|null}}
+ */
+export function decideStallAction(stall, { recovery = null, probe = null, hosted = false, maxRecoveries = MAX_STALL_RECOVERIES } = {}) {
+  const sig = stall.ready.join(",");
+  if (probe && !probe.ok) return { action: "alert", sig, cause: `batch env: ${probe.detail}; fix it with --set-env <id> PATH=<dirs holding the tools>, then --resume` };
+  const count = Number(recovery?.count) || 0;
+  if (recovery?.sig === sig || count >= maxRecoveries) {
+    const why = recovery?.sig === sig ? `stalled again after auto-recovery (${recovery.action} at ${recovery.at})` : `${count} auto-recoveries already spent`;
+    return { action: "alert", sig, cause: `${why}${probe ? `; ${probe.detail}` : ""}` };
+  }
+  return { action: hosted ? "restart-daemon" : "resume", sig, cause: null };
+}
+
+/** #5806: persist one auto-recovery (`health.json` `stallRecovery`) and its decision line in `batch.log`. @returns the decision text */
+export function recordStallRecovery(batch, stall, { action, sig = stall.ready.join(","), now = Date.now() } = {}) {
+  const prev = readHealth(batch.dir) ?? {}, at = new Date(now).toISOString();
+  const what = action === "restart-daemon" ? "restart the hosting schedd (its runner is alive but not progressing)" : "resume the batch (no runner hosts it)";
+  const text = `FORGE:DECISION batch ${batch.id} stall-recovery: ${what}; why: ${stall.detail}; alternative: alert only (a repeat of this stall alerts instead)`;
+  try { writeHealth(batch.dir, { ...prev, stallRecovery: { sig, at, action, count: (Number(prev.stallRecovery?.count) || 0) + 1, detail: stall.detail } }); } catch { /* advisory */ }
+  appendBatchLog(batch.dir, `${at} ${text}`);
+  return text;
 }
 
 export const FIRST_HOUR_FILE = "first-hour.json";
@@ -340,14 +373,17 @@ export function writeFirstHour(batch, report) {
   return true;
 }
 
-/** The one needs-you item of a stall: recorded in `health.json` (shown by status) per distinct ready set. @returns true when newly raised */
-export function recordStallAlert(batch, stall, { now = Date.now() } = {}) {
+/**
+ * The one needs-you item of a stall: recorded in `health.json` (shown by status) per distinct ready set. #5806: `cause` is the
+ * probed reason (a broken batch env, a repeat after auto-recovery), on its own `probed:` line. @returns true when newly raised
+ */
+export function recordStallAlert(batch, stall, { now = Date.now(), cause = null } = {}) {
   const sig = stall.ready.join(","), prev = readHealth(batch.dir) ?? {};
   if (prev.stall?.sig === sig) return false;
   const at = new Date(now).toISOString();
-  const text = `BATCH UNHEALTHY ${batch.id} (dispatch-stalled)\n  cause: dispatch-stalled: ${stall.detail}\n  recovery:\n    forgedock orchestrate --resume ${batch.id}\n    forgedock orchestrate --cancel ${batch.id}`;
-  try { writeHealth(batch.dir, { ...prev, stall: { at, sig, detail: stall.detail }, ...(prev.alertedAt ? {} : { alertedAt: at, alert: text }) }); } catch { return false; }
-  appendBatchLog(batch.dir, `${at} ${text.split("\n").slice(0, 2).join(" | ")}`);
+  const text = `BATCH UNHEALTHY ${batch.id} (dispatch-stalled)\n  cause: dispatch-stalled: ${stall.detail}${cause ? `\n  probed: ${cause}` : ""}\n  recovery:\n    forgedock orchestrate --resume ${batch.id}\n    forgedock orchestrate --cancel ${batch.id}`;
+  try { writeHealth(batch.dir, { ...prev, stall: { at, sig, detail: stall.detail, ...(cause ? { cause } : {}) }, ...(prev.alertedAt ? {} : { alertedAt: at, alert: text }) }); } catch { return false; }
+  appendBatchLog(batch.dir, `${at} ${text.split("\n").slice(0, cause ? 3 : 2).join(" | ")}`);
   return true;
 }
 
@@ -360,7 +396,7 @@ export function summaryLines(root, { now = Date.now() } = {}) {
       if (b.readReport() || b.readCancel()) continue;
       const fh = readFirstHour(b.dir), h = readHealth(b.dir);
       if (fh?.summary) out.push(`  batch ${id}: ${fh.summary}`);
-      if (h?.stall && now - Date.parse(h.stall.at) < 24 * 3600 * 1000) out.push(`  batch ${id}: DISPATCH STALLED since ${h.stall.at}: ${h.stall.detail}`);
+      if (h?.stall && now - Date.parse(h.stall.at) < 24 * 3600 * 1000) out.push(`  batch ${id}: DISPATCH STALLED since ${h.stall.at}: ${h.stall.detail}${h.stall.cause ? ` (${h.stall.cause})` : ""}`);
     } catch { /* an unreadable batch has no line */ }
   }
   return out;

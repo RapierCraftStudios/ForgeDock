@@ -1794,6 +1794,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const scheddMod = await import("./lean/schedd.mjs");
   const kept = plan?.env ?? (resumeId ? null : daemon || callerEnv !== process.env ? scheddMod.batchEnv(callerEnv, readPinnedEnvConfig(plan?.cwd ?? callerCwd)) : null);
   const env = kept ? scheddMod.mergeEnv(process.env, kept) : process.env;
+  // #5806: a pinned env whose PATH cannot resolve gh/git/node left the batch in `phase: setup` with no error; fail here instead
+  const probeEnv = deps.probeEnv !== undefined ? deps.probeEnv : (deps.leanIo || deps.leanModule || deps.laneScript) ? null : (await import("./lean/lanecheck.mjs")).probeBatchEnv;
+  const envProbe = kept && probeEnv ? probeEnv(env) : null;
+  if (envProbe && !envProbe.ok) {
+    throw new Error(resumeId ? `batch ${resumeId} cannot resume: ${envProbe.detail}; fix its pin with forgedock orchestrate --set-env ${resumeId} PATH=<dirs holding gh, git and node>, then --resume ${resumeId}`
+      : `batch not started: ${envProbe.detail}; run forgedock orchestrate from a shell where gh, git and node resolve (or adjust orchestration.path_exclude)`);
+  }
   const lane = flag(argv, "--lane");
   const laneOverride = argv.includes("--lane-override");
   const model = flag(argv, "--model");
@@ -2515,7 +2522,11 @@ export async function scheddFromCli(argv, deps = {}) {
     const health = await import("./lean/schedd-health.mjs");
     const i = argv.indexOf("--stall-sec"), sec = i >= 0 ? Number(argv[i + 1]) : NaN;
     if (i >= 0 && !(sec > 0)) throw new Error("usage: forgedock schedd watchdog [--stall-sec N]");
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}) });
+    // #5806: a down daemon with unfinished daemon batches (pending, no report/cancel, breaker not tripped) is started again (systemd unit when installed, else a detached daemon)
+    const bm = await import("./lean/batch.mjs");
+    const unfinished = () => { const root = bm.batchRoot(); return bm.listBatches(root).filter((id) => { try { const b = bm.openBatch(root, id); const br = b.store.peek()?.breaker; return !!b.readPlan()?.daemon && !b.isTerminal() && b.pendingIssues().length > 0 && !(br && !br.transport); } catch { return false; } }); };
+    const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
