@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, realSeam, withIntegrityMarker, TEST_GATE_SKIP_NO_TESTS, testGatePrompt, integrationTestCount, resolveSkillName } from "./release-review.mjs";
 import { readFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { reviewStagingJson } from "../review-staging.mjs";
 
 const H1 = "a".repeat(40), H2 = "b".repeat(40);
@@ -57,6 +58,18 @@ describe("reviewStep", () => {
   it("realSeam exposes every effect the steps use, matching the fake seam", () => {
     const real = Object.keys(realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp" })).sort();
     assert.deepEqual(real, Object.keys(fakeSeam()).filter((k) => !["log", "agents", "gateSaved", "agentCalls"].includes(k)).sort());
+  });
+
+  it("realSeam.runLane spawns the fix lane with the sandbox env, not the lane name (#5785)", async () => {
+    let seen = null;
+    const spawn = (cmd, args, opts) => { seen = { args, opts }; const c = new EventEmitter(); c.kill = () => {}; setImmediate(() => c.emit("exit", 0)); return c; };
+    const real = realSeam({ repo: "o/r", def: "main", env: { PATH: "/usr/bin", HOME: "/h", FORGE_DRIVER_TOKEN: "secret" }, cwd: "/tmp", spawn });
+    await real.runLane({ issue: 9, lane: "staging" });
+    assert.equal(seen.args[seen.args.indexOf("--lane") + 1], "staging");
+    assert.equal(typeof seen.opts.env, "object");
+    assert.equal(seen.opts.env.PATH, "/usr/bin");
+    assert.equal(seen.opts.env.HOME, "/h");
+    assert.ok(!("FORGE_DRIVER_TOKEN" in seen.opts.env));
   });
 
   it("runs the briefs and the spec panel in parallel, then test gate, finalize and summary in order", async () => {

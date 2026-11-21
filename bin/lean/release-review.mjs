@@ -303,11 +303,11 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
-export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = process.cwd(), makeRunner = null, gh: ghIn = null, io = null }) {
+export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = process.cwd(), makeRunner = null, gh: ghIn = null, io = null, spawn: spawnIn = spawn }) {
   const sleep = io?.sleep ?? ((ms) => new Promise((res) => setTimeout(res, ms))), now = io?.now ?? (() => Date.now());
   const say = io?.print ?? ((m) => process.stderr.write(`${m}\n`));
   const rs = { ...reviewStagingIo(), cwd, env };
-  const lane = laneEnv(env, laneStrip); // #5561: reviewer, fix and lane sandboxes never see the driver token
+  const sandboxEnv = laneEnv(env, laneStrip); // #5561: reviewer, fix and lane sandboxes never see the driver token
   const sd = env.FORGE_SCRATCHPAD || join(cwd, ".forge-scratch");
   let runner = null, shimEnv = null;
   // Reviewer briefs say `forgedock ...`: pin that name to this release job's own build, whatever is installed globally.
@@ -316,7 +316,7 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     const dir = mkdtempSync(join(tmpdir(), "release-forgedock-"));
     writeFileSync(join(dir, "forgedock"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "bin", "forgedock.mjs")}" "$@"\n`, { mode: 0o755 });
     process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
-    return (shimEnv = { ...lane, PATH: `${dir}${delimiter}${lane.PATH ?? ""}` });
+    return (shimEnv = { ...sandboxEnv, PATH: `${dir}${delimiter}${sandboxEnv.PATH ?? ""}` });
   };
   const gh = ghIn ?? ((args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env }));
   return {
@@ -403,7 +403,8 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     runLane: ({ issue, lane }) => new Promise((resolve) => {
       const dir = mkdtempSync(join(tmpdir(), "release-lane-"));
       const rf = join(dir, "result.json");
-      const child = spawn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: lane, stdio: "ignore" });
+      // #5785: `lane` is the lane name; the child gets the sandbox env (a string env leaves it without PATH or auth)
+      const child = spawnIn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: sandboxEnv, stdio: "ignore" });
       const timer = setTimeout(() => child.kill("SIGTERM"), LANE_MS);
       const done = () => { clearTimeout(timer); let r = null; try { r = JSON.parse(readFileSync(rf, "utf8")); } catch { /* no result */ } rmSync(dir, { recursive: true, force: true }); resolve(r); };
       child.on("error", done); child.on("exit", done);
