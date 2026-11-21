@@ -85,6 +85,7 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { applyEnumerating, renameDuplicates, verifyApplied } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
+import { ceilingEnv, listedWorktree } from "./laneconfine.mjs";
 import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { ciSignal, cancelDecision, eventLog } from "./ci-watch.mjs";
 import { classifyCiFailure } from "./ci-classify.mjs";
@@ -386,7 +387,27 @@ export async function runCore(o) {
   const sleepFn = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
   const ghw = (args) => retrying(() => ghc(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
-  const git = (args, o = {}) => io.git(args, { cwd: wt, ...o });
+  // #5825: every lane git call is confined to the lane worktree (discovery never walks up into the checkout around it),
+  // and a write first asserts the lane folder is this repo's worktree; a refusal ends the lane engine-error, nothing written.
+  const laneGitEnv = ceilingEnv(wt) ?? {};
+  let confineRefusal = null;
+  const GIT_WRITES = new Set(["add", "commit", "push", "rm", "mv", "reset", "checkout", "switch", "restore", "merge", "rebase", "cherry-pick", "revert", "am", "apply", "clean", "stash", "tag", "notes", "update-index"]);
+  const confineError = () => Object.assign(new Error(confineRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR, confined: false });
+  async function assertConfined(at) {
+    if (confineRefusal) throw confineError();
+    if (!io.confine?.verify) return;
+    if (io.fs?.exists && !(await io.fs.exists(wt))) throw new Error(`lane worktree ${wt} does not exist`); // no folder: git cannot run there at all
+    const v = await io.confine.verify({ wt, cwd });
+    if (v?.ok !== false) return;
+    const e = v.evidence ?? {};
+    confineRefusal = `Lane worktree ${wt} is not confined (${at}): ${v.why}; git toplevel ${e.toplevel ?? "(none)"}, git common dir ${e.common_dir ?? "(none)"}, repository common dir ${e.repo_common_dir ?? "(unknown)"}. Stopped before any git write (#5825).`;
+    ev({ event: "WORKTREE_NOT_CONFINED", at, why: v.why, ...e });
+    throw confineError();
+  }
+  const git = async (args, o = {}) => {
+    if ((o.cwd ?? wt) === wt && GIT_WRITES.has(args[0])) await assertConfined(`git ${args[0]}`);
+    return io.git(args, { cwd: wt, ...o, env: { ...laneGitEnv, ...o.env } });
+  };
   let pageVisual = null; // #5770: the engine's visual capture {sha, screenshots, errors, rows}, kept for the page gate and the PR body
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
@@ -612,7 +633,7 @@ export async function runCore(o) {
    */
   async function salvage(why) {
     if (!io.fs?.exists || !(await io.fs.exists(wt))) return null;
-    const g = (a) => io.git(a, { cwd: wt });
+    const g = (a) => io.git(a, { cwd: wt, env: laneGitEnv }); // #5825: a folder without its .git link fails here, never stages the checkout around it
     try {
       await g(["add", "-A"]);
       if (await io.fs.exists(join(wt, LEAN_DIR))) await g(["add", "-f", "--", LEAN_DIR]);
@@ -630,6 +651,21 @@ export async function runCore(o) {
       ev({ event: "WORKTREE_SALVAGE_FAILED", why, error: String(e?.message ?? e).slice(0, 300) });
       return null;
     }
+  }
+  /**
+   * #5825: move a lane folder that is not a registered worktree of this repo aside (`<root>/.quarantine/`), kept for
+   * inspection and never reused. A folder that cannot be moved stops the lane engine-error before any git write.
+   */
+  async function quarantine(why, evidence = {}) {
+    let to = null;
+    try { to = await io.confine?.quarantine?.({ wt }); } catch (e) {
+      ev({ event: "WORKTREE_QUARANTINE_FAILED", path: wt, why, error: String(e?.message ?? e).slice(0, 200), ...evidence });
+      throw Object.assign(new Error(`Lane folder ${wt} is not a registered worktree (${why}) and could not be moved aside: ${String(e?.message ?? e).slice(0, 200)}. Stopped before any git write (#5825); remove the folder and rerun.`), { engineCode: OUTCOME_CODES.ENGINE_ERROR });
+    }
+    if (!to) throw Object.assign(new Error(`Lane folder ${wt} is not a registered worktree (${why}); no quarantine is available. Stopped before any git write (#5825).`), { engineCode: OUTCOME_CODES.ENGINE_ERROR });
+    ev({ event: "WORKTREE_QUARANTINED", path: wt, to, why, ...evidence });
+    T.anomalies.push(`Lane folder ${wt} was not a registered worktree (${why}); moved to \`${to}\` and a fresh worktree was added (#5825)`);
+    return to;
   }
   /** #4162: stop processes still running inside the worktree (an orphaned runner from a dead run) before it is removed. */
   async function stopWorktreeProcs() {
@@ -665,6 +701,11 @@ export async function runCore(o) {
     if (!deferTail) {
       await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
       await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
+      if (confineRefusal && !String(detail).includes(confineRefusal)) { // #5825: an unconfined lane folder ends the lane engine-error, with the evidence
+        if (reason !== "engine-error") ev({ event: "TERMINAL_OVERRIDDEN", from: reason, to: "engine-error", why: "lane folder is not a confined worktree" });
+        detail = `${confineRefusal}${detail ? ` (lane was ending ${reason}: ${String(detail).split("\n")[0].slice(0, 200)})` : ""}`;
+        reason = "engine-error"; codeOverride = OUTCOME_CODES.ENGINE_ERROR;
+      }
       if (deletionRefusal && !String(detail).includes(deletionRefusal)) { // #5819: a refused checkpoint ends the lane engine-error, with the evidence
         if (reason !== "engine-error") ev({ event: "TERMINAL_OVERRIDDEN", from: reason, to: "engine-error", why: "checkpoint refused tracked-file deletions" });
         detail = `${deletionRefusal}${detail ? ` (lane was ending ${reason}: ${String(detail).split("\n")[0].slice(0, 200)})` : ` (lane was ending ${reason})`}`;
@@ -886,7 +927,7 @@ export async function runCore(o) {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
+    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...laneGitEnv, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set; #5825: git in a lane child never walks up out of the worktree
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator), ...cliDeferFacts(e, account),
@@ -972,6 +1013,7 @@ export async function runCore(o) {
   };
   const gitPush = async (args) => {
     if (deletionRefusal && !args.includes("--delete")) throw Object.assign(new Error(deletionRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR }); // #5819
+    await assertConfined(`git ${args.join(" ").slice(0, 80)}`); // #5825
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       await reconcileLaneBranch();
       try { await signOffUnpushed(); }
@@ -991,7 +1033,9 @@ export async function runCore(o) {
   /** After a timeout/idle kill: commit uncommitted work as a checkpoint and push the lane branch so a rerun resumes from it (#4112). */
   async function checkpoint(reason) {
     if (deletionRefusal) { ev({ event: "CHECKPOINT_SKIPPED", reason, why: "an earlier checkpoint refused tracked-file deletions (#5819): nothing is pushed" }); return false; }
+    if (confineRefusal) { ev({ event: "CHECKPOINT_SKIPPED", reason, why: "the lane folder is not a confined worktree (#5825): nothing is staged or pushed" }); return false; }
     try {
+      await assertConfined(`checkpoint after ${reason}`); // #5825: before `git status`/`add -A` touch any index
       const dirty = String(await git(["status", "--porcelain"])).trim();
       if (dirty) {
         await git(["add", "-A"]);
@@ -1015,7 +1059,7 @@ export async function runCore(o) {
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
   async function rescuePush(reason, rejected) {
-    if (deletionRefusal) return false; // #5819: never push past a refused checkpoint
+    if (deletionRefusal || confineRefusal) return false; // #5819: never push past a refused checkpoint; #5825: nor from an unconfined folder
     // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
     try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
     // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
@@ -1197,7 +1241,7 @@ export async function runCore(o) {
   /** #5333: one writer per lane branch. A second session (a fix-up beside a recovery) waits for the holder, then defers `host.busy`. Fail-open when the shared git dir is unknown. */
   async function takeBranchLock() {
     let dir = null;
-    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt })).trim(); if (isAbsPath(d) && existsSync(d)) dir = d; } catch { dir = null; }
+    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt, env: laneGitEnv })).trim(); if (isAbsPath(d) && existsSync(d)) dir = d; } catch { dir = null; }
     if (!dir) return null;
     let lock;
     try { lock = await acquireBranchLock({ gitCommonDir: dir, branch, owner: agentId, waitMs: o.branchLockWaitMs ?? 600000, pollMs: o.branchLockPollMs ?? 15000, sleep: async (ms) => { await renew(); await sleep(ms); } }); } catch { return null; }
@@ -1545,6 +1589,12 @@ export async function runCore(o) {
     // processes and save the work before the worktree is removed; the lease above makes this run the only one doing so.
     await step("salvage_cleanup", async () => {
     await stopWorktreeProcs();
+    // #5825: a leftover folder that is not this repo's worktree (no .git link, or git resolves it to another toplevel) is
+    // never salvaged with git (that would stage the checkout around it) and never reused: it is moved aside first.
+    if (io.confine?.verify && io.fs?.exists && (await io.fs.exists(wt))) {
+      const v = await io.confine.verify({ wt, cwd });
+      if (v?.ok === false) await quarantine(v.why, v.evidence);
+    }
     salvagedRef = await salvage("an earlier run");
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
@@ -1555,9 +1605,11 @@ export async function runCore(o) {
     const leftoverDir = async () => {
       if (!io.fs.exists || !io.fs.rmdir || dirname(wt) !== wtRoot || basename(wt) !== `lean-${issue}`) return false;
       if (!(await io.fs.exists(wt))) return false;
-      const listed = String(await io.git(["worktree", "list", "--porcelain"], { cwd }).catch(() => "")).split("\n").some((l) => l === `worktree ${wt}`);
+      // #5825: git prints `C:/...` on Windows; an exact string match never saw the lane listed and deleted a registered worktree's files
+      const listed = listedWorktree(await io.git(["worktree", "list", "--porcelain"], { cwd }).catch(() => ""), wt);
       if (listed) return false;
-      await io.fs.rmdir(wt);
+      try { await io.fs.rmdir(wt); } catch (e) { ev({ event: "WORKTREE_LEFTOVER_REMOVE_FAILED", path: wt, error: String(e?.message ?? e).slice(0, 200) }); }
+      if (await io.fs.exists(wt)) { await quarantine("an unregistered leftover folder could not be removed"); return true; } // a partial delete (locked file) is never reused
       ev({ event: "WORKTREE_LEFTOVER_REMOVED", path: wt });
       return true;
     };
@@ -1608,8 +1660,9 @@ export async function runCore(o) {
     } else if (resumed) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
       if (scratchOnly) { // from origin/<branch> so the later plain push stays fast-forward; the scratch goes out in a normal commit
-        await io.git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR], { cwd: wt }).catch(() => {});
-        if (String(await io.git(["diff", "--cached", "--name-only"], { cwd: wt }).catch(() => "")).trim()) await io.git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"], { cwd: wt }).catch(() => {});
+        await assertConfined("lane start"); // #5825: before the first write into the new worktree
+        await git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR]).catch(() => {});
+        if (String(await git(["diff", "--cached", "--name-only"]).catch(() => "")).trim()) await git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"]).catch(() => {});
         resumed = null;
         ev({ event: "SCRATCH_BRANCH_DROPPED", branch });
         T.decisions.push(`Lane branch ${branch} held only ${LEAN_DIR}/ scratch: its stale checkpoint was dropped and the issue is planned fresh`);
@@ -1624,6 +1677,7 @@ export async function runCore(o) {
       if (!wtInfo) wtInfo = await step("worktree_add", () => addWorktree(["worktree", "add", "-B", branch, wt, base], base));
       if (warmN) refillWarm({ git: io.git, cwd, root: wtRootDir, ref: base, n: warmN, maxBlobBytes: sparseMaxKb * 1024, write: io.fs?.write }).catch(() => {});
     }
+    await assertConfined("lane start"); // #5825: the new worktree is registered, its toplevel is the lane folder, its git dir the repo's
     wtCreated = true;
     if (fromSalvage) await dropSalvageTracking({ git, branch }); // #5047: the salvaged commits are unpublished: the sign-off range must include them
     if (wtInfo?.sparse) {
@@ -3597,7 +3651,7 @@ export async function runCore(o) {
         resumes++;
         T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")} (${explained.slice(0, 5).map((f) => String(f.detail).slice(0, 160)).join("; ")}); builder resumed (round ${resumes} of ${reviewMaxResumes})`);
         // A failed validate may only mean the base moved on: fetch the lane so the resume can merge it (never rebase).
-        if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt }); } catch { /* offline: the resume uses the local ref */ } }
+        if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt, env: laneGitEnv }); } catch { /* offline: the resume uses the local ref */ } }
         await fixRound("conformance", conformanceResumePrompt(outcome.failures, vcfg.mode, lane), outcome.failures, "conformance", failureLog(outcome.failures));
         await upsertStage("implementation"); // the published note follows the code after every resume
       }
@@ -4211,7 +4265,7 @@ export async function runCore(o) {
     for (const sp of supersededIds(effective, guardSel)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
       try { await ghw(["issue", "comment", sp.guard.slice(1), "-R", repo, "--body", supersessionComment({ guard: sp.guard, pr, why: sp.why })]); ev({ event: "supersedes_accepted", guard: sp.guard, pr }); T.decisions.push(`Guard ${sp.guard} superseded: ${sp.why}`); } catch (e) { T.anomalies.push(`supersession of ${sp.guard} not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
     }
-    postRun.add("guard", async () => { try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ } }); // #5437
+    postRun.add("guard", async () => { try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io: { ...io, git: (a, op) => io.git(a, { ...op, env: { ...laneGitEnv, ...op?.env } }) }, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ } }); // #5437
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
     let mergedTo = null; // #4711: FORGE:STATE records the lane and merge commit, so a dependent's check needs no PR search
