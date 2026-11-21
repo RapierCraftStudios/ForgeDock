@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB] | status | limit <agent> --lanes N|none | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -24,6 +24,7 @@ const VERB_FLAGS = {
   status: { value: ["--config"], bool: [] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
+  limit: { value: ["--config", "--lanes"], bool: [] },
   enroll: { value: ["--config", "--cpus", "--mem"], bool: [] },
   "install-command": { value: ["--config", "--cpus", "--mem"], bool: [] },
   resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
@@ -87,6 +88,22 @@ export async function runPoolCli(argv, deps = {}) {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
       console.log(JSON.stringify(r.data, null, 2));
+      // #5735: lane sandboxes used/ceiling per agent, and the lane total across all batches
+      for (const a of Array.isArray(r.data?.agents) ? r.data.agents : []) if (a?.lanes) console.log(`${a.name}: lanes ${a.lanes.used}/${a.lanes.ceiling ?? "-"}`);
+      if (Number.isInteger(r.data?.remote_lanes)) console.log(`remote lanes across batches: ${r.data.remote_lanes}`);
+      break;
+    }
+    case "limit": {
+      // #5735: forgedock pool limit <agent> --lanes N|none: the agent's lane sandbox ceiling across all batches.
+      const name = rest.find((x, i) => !x.startsWith("--") && !["--lanes", "--config"].includes(rest[i - 1]));
+      const v = flag("lanes");
+      if (!name || v === undefined) throw new Error("usage: forgedock pool limit <agent> --lanes N|none");
+      if (v !== "none" && !/^\d+$/.test(v)) throw new Error("usage: --lanes must be a non-negative integer or none");
+      const max_lanes = v === "none" ? null : parseInt(v, 10);
+      const cfg = routerConfig();
+      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", `/agents/${encodeURIComponent(name)}/limit`, { body: { max_lanes }, token: cfg.forgedock_token, timeoutMs: 30000 });
+      if (!r.ok) throw new Error(`${name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      console.log(`${name}: max_lanes ${max_lanes ?? "none"}`);
       break;
     }
     case "enroll":

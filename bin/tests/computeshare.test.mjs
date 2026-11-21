@@ -798,3 +798,114 @@ test("router /ci/events: ci token posts, only the fd token reads, long-poll answ
   assert.equal((await call("GET", `${q}&wait=61`, "fd")).status, 400);
   assert.equal((await call("GET", "/health")).status, 200);
 });
+
+// #5735: per-agent lane ceiling across all batches.
+const laneSpec = (batch, issue) => spec(`fdrsbx-${batch}-${issue}`, { issue, batch });
+const bodyCall = (target, method, url, body) => new Promise((resolve) => {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+  const req = { method, url, headers: { authorization: "Bearer fd", "content-type": "application/json" }, socket: {}, async *[Symbol.asyncIterator]() { yield* chunks; } };
+  let out = "";
+  target.handle(req, { writeHead(st) { this.s = st; }, setHeader() {}, write(x) { out += x; }, end(b) { out += b ?? ""; resolve({ status: this.s, body: out ? JSON.parse(out) : null }); } });
+});
+
+test("lane ceiling: two batches x 6 concurrent fdrsbx launches with max_lanes 2 place exactly 2; the rest are deferred 503 (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 2;
+  const specs = [];
+  for (let i = 1; i <= 6; i++) specs.push(laneSpec("b1", i), laneSpec("b2", 100 + i));
+  const res = await Promise.all(specs.map((s) => router.launch(s)));
+  assert.equal(res.filter((r) => r.status === 201).length, 2);
+  const refused = res.filter((r) => r.status === 503);
+  assert.equal(refused.length, 10);
+  for (const r of refused) {
+    assert.equal(r.body.code, "pool.host_lane_ceiling");
+    assert.equal(r.body.error, "pool.host_lane_ceiling");
+    assert.ok(r.retryAfter > 0);
+    assert.equal(r.body.agents[0].name, "legion");
+    assert.equal(r.body.agents[0].ceiling, 2);
+  }
+  assert.equal(Object.keys(router.store.data.sandboxes).length, 2);
+  // An already-placed id re-launches idempotently (not re-checked).
+  const placed = Object.keys(router.store.data.sandboxes)[0];
+  assert.equal((await router.launch(spec(placed, { issue: 1 }))).status, 201);
+  // A DELETE frees a slot; the next lane launch is placed.
+  assert.equal((await bodyCall(router, "DELETE", `/sandboxes/${placed}`)).status, 200);
+  assert.equal((await router.launch(laneSpec("b2", 999))).status, 201);
+  assert.equal((await router.launch(laneSpec("b1", 998))).status, 503);
+});
+
+test("lane ceiling: other tenants' sandboxes place on a capped agent and are not counted (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 1;
+  assert.equal((await router.launch(spec("tenant-a", { batch: null }))).status, 201);
+  assert.equal((await router.launch(laneSpec("b1", 1))).status, 201);
+  assert.equal((await router.launch(spec("tenant-b", { batch: null }))).status, 201);
+  assert.equal((await router.launch(laneSpec("b2", 2))).status, 503);
+  const j = (await bodyCall(router, "GET", "/agents")).body;
+  assert.deepEqual(j.agents[0].lanes, { used: 1, ceiling: 1 });
+  assert.equal(j.remote_lanes, 1);
+  assert.ok(j.sandboxes["tenant-a"], "sandboxes map kept (#5535)");
+});
+
+test("lane ceiling: an uncapped agent has no ceiling; a capped one sends lanes to the next host (#5735)", async () => {
+  const { router } = routerFixture({ big: { cpus_free: 32, mem_free_gb: 64 }, small: { cpus_free: 8, mem_free_gb: 16 } });
+  router.store.data.agents.big.max_lanes = 1;
+  const res = await Promise.all([1, 2, 3, 4].map((i) => router.launch(laneSpec("b1", i))));
+  assert.deepEqual(res.map((r) => r.status), [201, 201, 201, 201]);
+  assert.deepEqual(res.map((r) => r.body.agent).sort(), ["big", "small", "small", "small"]);
+  const j = (await bodyCall(router, "GET", "/agents")).body;
+  assert.deepEqual(Object.fromEntries(j.agents.map((a) => [a.name, a.lanes])), { big: { used: 1, ceiling: 1 }, small: { used: 3, ceiling: null } });
+  assert.equal(j.remote_lanes, 4);
+});
+
+test("lane ceiling: claim() skips an agent at its ceiling (#5735)", async () => {
+  const { router, calls } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 1;
+  router.store.data.sandboxes["fdrsbx-b1-1"] = { agent: "legion", issue: 1, batch: "b1" };
+  const r = await router.claim(laneSpec("b2", 2));
+  assert.equal(r.status, 404);
+  assert.ok(!calls.some((c) => c.endsWith("/warm/claim")), "no warm claim sent to a capped agent");
+});
+
+test("lane ceiling: POST /agents/:name/limit sets and clears; router.json agents.<name>.max_lanes is the fallback; enroll keeps it (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  assert.equal((await bodyCall(router, "POST", "/agents/legion/limit", { max_lanes: 0 })).status, 200);
+  assert.equal(router.store.data.agents.legion.max_lanes, 0);
+  assert.equal((await router.launch(laneSpec("b1", 1))).status, 503);
+  assert.equal((await bodyCall(router, "POST", "/agents/nope/limit", { max_lanes: 1 })).status, 404);
+  for (const bad of [-1, 1.5, "2"]) assert.equal((await bodyCall(router, "POST", "/agents/legion/limit", { max_lanes: bad })).status, 400);
+  const cleared = await bodyCall(router, "POST", "/agents/legion/limit", { max_lanes: null });
+  assert.equal(cleared.status, 200);
+  assert.equal("max_lanes" in router.store.data.agents.legion, false);
+  assert.equal((await router.launch(laneSpec("b1", 1))).status, 201);
+  // Static fallback from router.json, overridden by the state entry.
+  const fetchFn = async (url, init) => new Response(JSON.stringify(new URL(url).pathname === "/capacity" ? { cpus_free: 64, mem_free_gb: 128 } : { id: JSON.parse(init.body ?? "{}").spec?.id }), { status: new URL(url).pathname === "/sandboxes" ? 201 : 200, headers: { "content-type": "application/json" } });
+  const r2 = createRouter({ state_dir: tmpDir("cs-router-cap-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd", agents: { legion: { max_lanes: 1 } } }, { fetchFn, log: quiet });
+  r2.store.data.agents.legion = { url: "http://legion:7711", token: "t" };
+  assert.equal((await r2.launch(laneSpec("b1", 1))).status, 201);
+  assert.equal((await r2.launch(laneSpec("b2", 2))).status, 503);
+  r2.store.data.agents.legion.max_lanes = 2;
+  assert.equal((await r2.launch(laneSpec("b2", 2))).status, 201);
+  const en = r2.enroll({ token: "e", name: "legion", url: "http://legion:7711" });
+  assert.equal(en.status, 200);
+  assert.equal(r2.store.data.agents.legion.max_lanes, 2);
+});
+
+test("lane ceiling 503 through httpTransport is a retryable capacity error (deferred, not failed) (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 1;
+  const serve = (target) => (url, init) => new Promise((resolve) => {
+    const u = new URL(url), chunks = init.body ? [Buffer.from(init.body)] : [];
+    const req = { method: init.method, url: u.pathname + u.search, headers: Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])), socket: {}, async *[Symbol.asyncIterator]() { yield* chunks; } };
+    const hdr = {};
+    target.handle(req, { writeHead(st, h) { this.s = st; Object.assign(hdr, h ?? {}); }, setHeader(k, v) { hdr[k.toLowerCase()] = String(v); }, end(b) { resolve(new Response(b || "{}", { status: this.s, headers: { "content-type": "application/json", ...hdr } })); } });
+  });
+  const transport = httpTransport({ endpoint: "http://pool", token: "fd", fetchFn: serve(router) });
+  await transport.launch(laneSpec("b1", 1));
+  const e = await transport.launch(laneSpec("b2", 2)).then(() => null, (x) => x);
+  assert.ok(e, "the second lane launch must be refused");
+  assert.equal(e.status, 503);
+  assert.equal(e.retryable, true);
+  assert.ok(e.retryInSeconds > 0, `retryInSeconds: ${e.retryInSeconds}`);
+  assert.deepEqual(await transport.agentLanes(), { agents: [{ name: "legion", used: 1, ceiling: 1 }], total: 1 });
+});

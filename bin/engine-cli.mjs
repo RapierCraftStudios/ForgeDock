@@ -1623,6 +1623,7 @@ async function orchestrateClient(argv, deps = {}) {
     if (sock) execution = (await schedd.request(sock, { op: "set-execution", id, ...patch }, undefined, { timeoutMs: schedd.REQUEST_MS }))?.execution ?? null;
     else { const batchMod = await import("./lean/batch.mjs"); execution = liveExec.applySetExecution(batchMod.openBatch(batchMod.batchRoot(), id), patch); }
     console.log(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    if (patch.maxRemote !== undefined) { const note = await poolLaneNote(patch.maxRemote, liveExec); if (note) console.log(note); } // #5735
     return { ok: true, batch: id, execution };
   }
   // #4408: --add, and the extra issues of --resume <id> N..., go to the batch (through the daemon when one runs).
@@ -1759,6 +1760,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { id, patch } = liveExec.parseSetExecution(argv);
     const execution = liveExec.applySetExecution(batchMod.openBatch(root, id), patch);
     sink.line(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    if (patch.maxRemote !== undefined) { const note = await poolLaneNote(patch.maxRemote, liveExec); if (note) sink.line(note); } // #5735
     return { ok: true, batch: id, execution };
   }
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
@@ -3035,4 +3037,20 @@ export async function probeFromCli(argv, deps = {}) {
   for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
   console.log(formatProbeSummary(rows) || "probes: nothing to run");
   return { rows };
+}
+
+/**
+ * #5735: the `--set-max-remote` lane note (live-execution.mjs remoteLaneNote) from the pool router's `GET /agents`.
+ * Best effort: no router, an error or no answer within ~5 s gives null, so the set itself never fails because of it.
+ */
+async function poolLaneNote(n, liveExec, { env = process.env, timeoutMs = 5000 } = {}) {
+  let timer = null;
+  try {
+    const { poolRouterConfig, remoteTransportFor } = await import("./lean/execution.mjs");
+    const endpoint = poolRouterConfig({ env })?.endpoint;
+    if (!endpoint) return null;
+    const t = remoteTransportFor({ provider: "pool", endpoint }, { env });
+    const lanes = await Promise.race([t.agentLanes(), new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); })]);
+    return liveExec.remoteLaneNote(n, lanes);
+  } catch { return null; } finally { clearTimeout(timer); }
 }

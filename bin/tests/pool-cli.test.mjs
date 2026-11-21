@@ -13,7 +13,7 @@ function setup() {
   const config = join(dir, "router.json");
   writeFileSync(config, JSON.stringify({ listen: { host: "100.1.2.3", port: 7710 }, public_url: "http://100.1.2.3:7710", enroll_token_file: join(dir, "enroll.token") }));
   const calls = [];
-  const reply = (r) => async (base, method, path, o) => { calls.push({ base, method, path, token: o?.token }); return typeof r === "function" ? r(method, path) : r; };
+  const reply = (r) => async (base, method, path, o) => { calls.push({ base, method, path, token: o?.token, body: o?.body }); return typeof r === "function" ? r(method, path) : r; };
   return { config, calls, reply };
 }
 const run = async (argv, s, r) => {
@@ -65,6 +65,30 @@ describe("forgedock pool (#4544)", () => {
     const s = setup();
     await run(["resize", "a1", "--cpus", "2", "--mem", "4", "--drain"], s, { ok: true, status: 200, data: {} });
     assert.equal(s.calls[0].path, "/agents/a1/resize");
+  });
+  it("limit sets an agent's lane ceiling; none clears it; bad input sends no request (#5735)", async () => {
+    let s = setup();
+    const { out } = await run(["limit", "a1", "--lanes", "2"], s, { ok: true, status: 200, data: { name: "a1", max_lanes: 2 } });
+    assert.deepEqual([s.calls[0].method, s.calls[0].path, s.calls[0].body], ["POST", "/agents/a1/limit", { max_lanes: 2 }]);
+    assert.match(out, /a1: max_lanes 2/);
+    s = setup();
+    const r2 = await run(["limit", "a1", "--lanes", "none"], s, { ok: true, status: 200, data: {} });
+    assert.deepEqual(s.calls[0].body, { max_lanes: null });
+    assert.match(r2.out, /a1: max_lanes none/);
+    for (const argv of [["limit", "a1", "--lanes", "x"], ["limit", "a1", "--lanes", "1.5"], ["limit", "--lanes", "2"], ["limit", "a1"]]) {
+      s = setup();
+      await assert.rejects(run(argv, s, { ok: true, status: 200, data: {} }), /usage:/, argv.join(" "));
+      assert.equal(s.calls.length, 0, argv.join(" "));
+    }
+    await assert.rejects(run(["limit", "zz", "--lanes", "1"], setup(), { ok: false, status: 404, data: { error: "unknown agent" } }), /HTTP 404/);
+  });
+  it("status prints lanes used/ceiling per agent and the cross-batch lane total (#5735)", async () => {
+    const s = setup();
+    const { out } = await run(["status"], s, { ok: true, status: 200, data: { agents: [{ name: "a1", lanes: { used: 1, ceiling: 2 } }, { name: "a2", lanes: { used: 3, ceiling: null } }], sandboxes: {}, remote_lanes: 4 } });
+    assert.match(out, /"agents"/, "the /agents JSON is still printed");
+    assert.match(out, /^a1: lanes 1\/2$/m);
+    assert.match(out, /^a2: lanes 3\/-$/m);
+    assert.match(out, /^remote lanes across batches: 4$/m);
   });
   it("an unknown verb is a usage error", async () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);

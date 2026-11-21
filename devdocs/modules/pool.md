@@ -10,6 +10,15 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-21 — Per-host lane ceiling (#5735)
+
+- Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
+- `bin/pool/router.mjs`: a lane sandbox is one whose id starts with `fdrsbx-`. Ceiling = the agent state entry's `max_lanes`, else router.json `agents.<name>.max_lanes`; no valid value = no ceiling. Used = placed `fdrsbx-` sandboxes on the agent plus in-flight reservations, taken synchronously before the agent POST (launch and warm claim) and released in `finally`.
+- `launch()` skips agents at the ceiling for a new lane id. When none is left and one was skipped for the ceiling: 503 `{error, code: "pool.host_lane_ceiling", agents: [{name, used, ceiling}]}` with Retry-After (a capacity deferral in the dispatcher). Re-launch of a placed id is not re-checked. `claim()` skips capped agents (404, then a cold launch).
+- `GET /agents`: each agent gains `lanes {used, ceiling|null}`; the body gains `remote_lanes`. `POST /agents/:name/limit {max_lanes: N|null}` (fd token; 404 unknown agent, 400 bad value) sets or clears the ceiling; re-enrollment keeps it.
+- `bin/pool/cli.mjs`: `forgedock pool limit <agent> --lanes N|none`; `status` adds `<agent>: lanes used/ceiling` and `remote lanes across batches: N`. `bin/lean/sandbox-remote.mjs` `agentLanes()` feeds the `--set-max-remote` note.
+- Tests: `bin/tests/computeshare.test.mjs` (lane ceiling), `bin/tests/pool-cli.test.mjs`.
+
 ## Entry 2026-11-15 — Environment snapshots (#5714)
 
 - Design, failure modes and rejected options: `devdocs/decisions/5714-env-library.md`. User guide: `docs/ENV-LIBRARY.md`.

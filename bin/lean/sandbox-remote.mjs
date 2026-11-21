@@ -113,6 +113,16 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
       return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
     },
+    /** #5735: lane sandboxes per pool agent (`GET /agents` -> `agents[].lanes {used, ceiling}`) and across all batches (`remote_lanes`; else the `fdrsbx-` keys of `sandboxes`). A bad answer throws. */
+    async agentLanes() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("agent lanes", r);
+      if (!Array.isArray(r.data?.agents)) throw new Error("agent lanes: malformed router answer");
+      const int = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+      const agents = r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), used: int(a?.lanes?.used) ?? 0, ceiling: int(a?.lanes?.ceiling) }));
+      const sb = r.data.sandboxes && typeof r.data.sandboxes === "object" ? Object.keys(r.data.sandboxes) : [];
+      return { agents, total: int(r.data.remote_lanes) ?? sb.filter((id) => id.startsWith("fdrsbx-")).length };
+    },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
     async capacity() {
