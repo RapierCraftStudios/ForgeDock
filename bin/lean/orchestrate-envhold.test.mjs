@@ -4,9 +4,9 @@
 // engine version change, a batch env change (--set-env) or the missing tool appearing; issue-caused failures are unchanged.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, failureSignature, formatTable } from "./orchestrate.mjs";
 import { envFingerprint } from "./batch.mjs";
 import { hostMissingTools } from "./toolplace.mjs";
@@ -154,7 +154,7 @@ describe("#5805 issue-caused failures keep their behaviour", () => {
 
 describe("#5805 probes", () => {
   it("hostMissingTools finds executables on the PATH it is given", () => {
-    const dir = mkdtempSync(join(tmpdir(), "envhold-"));
+    const dir = tmpDir("envhold-");
     mkdirSync(join(dir, "sub"));
     if (process.platform === "win32") writeFileSync(join(dir, "mytool.cmd"), "");
     else writeFileSync(join(dir, "mytool"), "#!/bin/sh\n", { mode: 0o755 });
