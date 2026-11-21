@@ -212,3 +212,43 @@ describe("probe (#4399)", () => {
     assert.equal(slow.result, "fail"); assert.equal(slow.exit, null);
   });
 });
+
+describe("probe labels (#5704)", () => {
+  const labelled = (w, { missingLabel = false } = {}) => {
+    const inner = w.io.gh, edits = [];
+    let created = false;
+    w.io.gh = async (a) => {
+      if (a[0] === "label" && a[1] === "create") { created = true; edits.push(["create", a[2]]); return ""; }
+      if (a[0] === "issue" && a[1] === "edit") {
+        if (missingLabel && !created && a.includes("--add-label")) throw new Error("label not found");
+        edits.push(a.slice(3).filter((x) => x !== "-R" && x !== "o/r")); return "";
+      }
+      return inner(a);
+    };
+    return edits;
+  };
+
+  it("a fail removes awaiting-promotion and adds post-deploy-failed (created on first use)", async () => {
+    const w = world();
+    const edits = labelled(w, { missingLabel: true });
+    const r = await run(w, { code: 1, stdout: "boom" });
+    assert.equal(r.outcome, "fail");
+    assert.deepEqual(w.reopened, ["7"]);
+    assert.deepEqual(edits, [["--remove-label", "awaiting-promotion"], ["create", "post-deploy-failed"], ["--add-label", "post-deploy-failed"]]);
+  });
+
+  it("a pass removes awaiting-promotion only", async () => {
+    const w = world();
+    const edits = labelled(w);
+    const r = await run(w);
+    assert.equal(r.outcome, "pass");
+    assert.deepEqual(edits, [["--remove-label", "awaiting-promotion"]]);
+  });
+
+  it("a dry run touches no label", async () => {
+    const w = world();
+    const edits = labelled(w);
+    await run(w, { code: 1 }, { dryRun: true });
+    assert.deepEqual(edits, []);
+  });
+});

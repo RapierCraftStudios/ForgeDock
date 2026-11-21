@@ -25,8 +25,10 @@ const ITEM_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
 const CHECK_TOKEN_RE = /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:\s*\[check:\s*([^\]\s]*)\s*\]/;
 
 /**
- * The checks file's runnable entries `{id: {run, pass, timeoutS, forMs?, everyMs?}}`; malformed input or entries are dropped.
+ * The checks file's runnable entries `{id: {run, pass, timeoutS, forMs?, everyMs?, expect?}}`; malformed input or entries are dropped.
  * `for` (a window such as "7d") makes the check windowed (#4627); `every` (default 6h) is its cadence and needs a `for`.
+ * #5704: `expect` (optional) is a positive-evidence command that must also exit 0, so an "absence of alert" `run` also proves
+ * the new rule or config is loaded; a non-string or blank `expect` drops the entry.
  */
 export function parseChecks(text) {
   let j;
@@ -48,7 +50,8 @@ export function parseChecks(text) {
     const win = spec.for == null ? null : parseMinAge(spec.for);
     const cad = spec.every == null ? null : parseMinAge(spec.every);
     if ((spec.for != null && !win) || (spec.every != null && !cad) || (spec.every != null && spec.for == null)) continue;
-    out[id] = { run: spec.run.trim(), pass, timeoutS: t == null ? null : Math.min(Math.floor(t) || 1, MAX_TIMEOUT_S), ...(win ? { forMs: win, everyMs: cad ?? DEFAULT_EVERY_MS } : {}) };
+    if (spec.expect != null && (typeof spec.expect !== "string" || !spec.expect.trim())) continue;
+    out[id] = { run: spec.run.trim(), pass, timeoutS: t == null ? null : Math.min(Math.floor(t) || 1, MAX_TIMEOUT_S), ...(win ? { forMs: win, everyMs: cad ?? DEFAULT_EVERY_MS } : {}), ...(spec.expect != null ? { expect: spec.expect.trim() } : {}) };
   }
   return out;
 }
@@ -70,11 +73,22 @@ export async function checksAt(git, refs, cwd) {
 
 const fenced = (s) => { const f = "`".repeat(Math.max(3, ...[...String(s).matchAll(/`+/g)].map((m) => m[0].length + 1))); return `${f}\n${String(s).trim() || "(no output)"}\n${f}`; };
 
-/** Run each distinct check id with the probe runner (minimal env, timeout, masked output): `[{id, result, exit, ms, output}]`. */
+/**
+ * Run each distinct check id with the probe runner (minimal env, timeout, masked output): `[{id, result, exit, ms, output}]`.
+ * #5704: an entry with `expect` runs it after a passing `run` (exit 0 required); a failing `expect` fails the check with its output.
+ */
 export async function runNamedChecks({ ids, checks, cwd, config, env, spawn }) {
   const rows = [];
+  const opts = () => ({ cwd, env: probeEnv(config.env, env), mask: config.env.map((k) => env[k]), timeoutS: config.timeoutS, ...(spawn ? { spawn } : {}) });
   for (const id of [...new Set(ids)]) {
-    const r = await runProbe(checks[id], { cwd, env: probeEnv(config.env, env), mask: config.env.map((k) => env[k]), timeoutS: config.timeoutS, ...(spawn ? { spawn } : {}) });
+    const r = await runProbe(checks[id], opts());
+    if (r.result === "pass" && checks[id]?.expect) {
+      const e = await runProbe({ run: checks[id].expect, pass: { kind: "exit" }, timeoutS: checks[id].timeoutS }, opts());
+      if (e.result !== "pass") { rows.push({ id, result: "fail", exit: e.exit, ms: r.ms + e.ms, output: `expect (positive evidence) failed:
+${e.output}`.slice(-OUTPUT_TAIL) }); continue; }
+      rows.push({ id, ...r, ms: r.ms + e.ms });
+      continue;
+    }
     rows.push({ id, ...r });
   }
   return rows;
