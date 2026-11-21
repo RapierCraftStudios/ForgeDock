@@ -72,3 +72,52 @@ export function routeBuilder({ contract = null, riskPaths = [], cfg = {}, topMod
 export function shouldEscalate(route, escalated, trigger) {
   return route?.tier === "mid" && !escalated && ESCALATE_TRIGGERS.includes(trigger);
 }
+
+/** `size:L` / `size/L` labels mark a large issue before any contract exists (the same label budget.mjs laneSize reads). */
+const LARGE_LABEL_RE = /^size[:/]\s*L$/i;
+/** Risk words too common in issue prose to flag a title on their own (model sessions, context tokens); paths still count them. */
+const TITLE_NOISY = new Set(["session", "sessions", "token", "tokens"]);
+const titleRisk = (title) => String(title ?? "").split(/\s+/).map((w) => (TITLE_NOISY.has(w.toLowerCase().replace(/[^a-z]/g, "")) ? null : riskClassOf(w))).find(Boolean) ?? null;
+const labelNames = (labels) => (Array.isArray(labels) ? labels : []).map((l) => String(l?.name ?? l ?? "").trim()).filter(Boolean);
+
+/**
+ * #5810: the provisional route of the pre-contract sessions (investigation, plan, contract, light build), from the
+ * signals known before any contract: the issue title and labels, the file paths the issue names, and whether an earlier
+ * attempt exists. Same classes and tiers as routeBuilder plus `unscoped` (no named file, no risk or size signal: mid).
+ * Top tier: a risk word in the title (bar session/token), a label or a named path (or a declared review.risk_paths hit), a `size:L` label,
+ * more than SMALL_MAX_FILES named non-test code files, or a prior attempt (resume, salvage, recovery). `reason` says why.
+ */
+export function provisionalRoute({ title = "", labels = [], namedFiles = [], prior = false, riskPaths = [], cfg = {}, topModel = null } = {}) {
+  const c = parseBuilderRouting(cfg);
+  const paths = [...new Set((Array.isArray(namedFiles) ? namedFiles : []).map((p) => String(p ?? "").trim()).filter(Boolean))];
+  const names = labelNames(labels);
+  const declared = new Set(riskPathHits(paths, riskPaths));
+  const risk = [
+    ...(titleRisk(title) ? [`title:${titleRisk(title)}`] : []),
+    ...names.filter((l) => riskClassOf(l)).map((l) => `label:${l}`),
+    ...paths.filter((p) => riskClassOf(p) || declared.has(p)),
+  ];
+  const kinds = paths.map(classifyPath);
+  const [cls, reason] = risk.length ? ["risk", "risk signal in the issue"]
+    : names.some((l) => LARGE_LABEL_RE.test(l)) ? ["large", "size:L label"]
+      : kinds.filter((k) => k !== "test").length > SMALL_MAX_FILES && kinds.some((k) => k === "code") ? ["large", `${paths.length} named files`]
+        : prior ? ["large", "prior attempt"]
+          : !paths.length ? ["unscoped", "no named files, no risk or size signal"]
+            : kinds.every((k) => k !== "code") ? ["docs-config-test", "named files are docs, config or tests"] : ["small", "few named code files"];
+  const tier = c.mode === "on" && !["risk", "large"].includes(cls) ? "mid" : "top";
+  return { mode: c.mode, class: cls, tier, model: tier === "mid" ? c.midModel : topModel, risk, reason: c.mode === "on" ? reason : "routing off" };
+}
+
+/**
+ * #5810: the post-contract route, floored by the provisional one: a risk signal the issue carried keeps the build on the
+ * top tier even when the contract's paths look safe (never a silent downgrade below risk policy). Any other contract
+ * route stands; `change` records upgrade / downgrade / same against the provisional tier.
+ */
+export function floorRoute(route, pre, topModel = null) {
+  if (!route) return route;
+  const floored = pre?.class === "risk" && route.tier === "mid";
+  const r = floored ? { ...route, class: "risk", tier: "top", model: topModel, risk: [...new Set([...(route.risk ?? []), ...(pre.risk ?? [])])], floor: "pre_route_risk" } : route;
+  if (!pre) return r;
+  const change = pre.tier === r.tier ? "same" : r.tier === "top" ? "upgrade" : "downgrade";
+  return { ...r, pre: { class: pre.class, tier: pre.tier }, change };
+}

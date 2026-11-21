@@ -78,7 +78,7 @@ import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { startSpeculative } from "./overlap.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
-import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
+import { floorRoute, parseBuilderRouting, provisionalRoute, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
@@ -342,8 +342,9 @@ export async function runCore(o) {
   const verifierCfg = parseVerifierConfig(o.verifier ?? {});
   const routingCfg = parseBuilderRouting(o.builderRouting ?? {});
   // #4394: the build's model tier, routed from the frozen contract; a failed validate round on the mid tier escalates once
-  let route = null, escalated = false;
-  const laneModel = () => (route?.tier === "mid" && !escalated ? route.model : builderModel);
+  // #5810: before the contract, the pre-contract sessions run on a provisional route from the issue's own signals
+  let route = null, escalated = false, preRoute = null;
+  const laneModel = () => { const r = route ?? preRoute; return r?.tier === "mid" && !escalated ? r.model : builderModel; };
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
@@ -2205,6 +2206,12 @@ export async function runCore(o) {
       }
       decisionsNote = frozen && (resumed || salvagedRef || recover) ? decisionNote(trustedComments) : ""; // #4901
       if (decisionsNote) T.decisions.push("Trusted FORGE:DECISION comment(s) posted after the contract froze are binding notes for the builder");
+      if (!route) { // #5810: the provisional tier of the pre-contract sessions; BUILDER_ROUTE may upgrade it after the contract
+        preRoute = provisionalRoute({ title: iss.title, labels: iss.labels ?? [], namedFiles: namedPaths(iss.body ?? ""), prior: !!(resumed || salvagedRef || recover), riskPaths, cfg: routingCfg, topModel: builderModel });
+        const rec = { event: "BUILDER_PREROUTE", mode: preRoute.mode, class: preRoute.class, tier: preRoute.tier, model: preRoute.model ?? "default", reason: preRoute.reason, risk: preRoute.risk };
+        ev(rec); await emit(rec);
+        T.decisions.push(`Pre-contract sessions provisionally routed to the ${preRoute.tier} tier (${preRoute.class}: ${preRoute.reason})`);
+      }
       await label("building");
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
       const waitMs = Math.max(0, Number(contextWaitSeconds) || 0) * 1000, tHot = now();
@@ -2483,9 +2490,9 @@ export async function runCore(o) {
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       // #4364: what `forgedock check` needs from the operator's forge.yaml (gitignored, so not in the worktree)
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CHECK_PLAN_FILE}`, `${JSON.stringify({ v: 1, base, mode: vcfg.mode, learned: learnedCommands, invariants: vcfg.invariants ?? [], maxMinutes: Number(o.precheck?.maxMinutes) > 0 ? Number(o.precheck.maxMinutes) : null, precheckTotalSeconds: vcfg.precheckTotalSeconds, precheckTimeoutSeconds: vcfg.precheckTimeoutSeconds })}\n`); } catch { /* the CLI falls back to forge.yaml */ } }
-      route = routeBuilder({ contract: frozen, riskPaths, cfg: routingCfg, topModel: builderModel }); // #4394
+      route = floorRoute(routeBuilder({ contract: frozen, riskPaths, cfg: routingCfg, topModel: builderModel }), preRoute, builderModel); // #4394; #5810: an issue risk signal floors it at top
       {
-        const rec = { event: "BUILDER_ROUTE", mode: route.mode, class: route.class, tier: route.tier, model: route.model ?? "default", risk: route.risk };
+        const rec = { event: "BUILDER_ROUTE", mode: route.mode, class: route.class, tier: route.tier, model: route.model ?? "default", risk: route.risk, ...(route.pre ? { pre_tier: route.pre.tier, pre_class: route.pre.class, change: route.change } : {}), ...(route.floor ? { floor: route.floor } : {}) };
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
