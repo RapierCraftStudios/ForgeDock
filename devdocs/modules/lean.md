@@ -3441,3 +3441,7 @@ The gate is on without config; the caps apply only when set. `bin/engine-cli.mjs
 ## Entry 2026-11-21 — release merge hold ignores report-only gate checks (#5777)
 
 `release-merge-hold.mjs` `rollupPending` skips report-only gate entries (StatusContext `context` or CheckRun `name` in the module-local `REPORT_ONLY_CHECKS`: `forge/deploy-gate`, `forgedock/verify`, `Check for FORGE gate markers`, the same names as `CI_EXCLUDED_CHECKS` in `bin/review-staging.mjs`; the test asserts parity). `forge/deploy-gate` stays pending until the staging review posts its marker, so counting it held every lane merge into staging for the whole review (up to `ciMaxMinutes`, then `ci-pending`). Any other unfinished entry still holds (`release-ci`); the deploy gate itself still gates the release merge. Tests: `release-merge-hold.test.mjs` "#5777".
+
+## Entry 2026-11-21 — manual release merge hold works in lanes (#5776)
+
+`release-merge-hold.mjs` exports `ledgerIoFromGh(gh)`, a read-only (GET) release-ledger io `{ api }` built on a gh runner; gh errors propagate unchanged so the ledger's `HTTP 404` missing-file detection still works. `makeLeanIo` has no `api`, so the lane merge gate's `readActive` threw a TypeError that the fail-open catch swallowed and the manual `_active.mergeHold` never held a lane merge. `lean.mjs` now passes `io.api ? io : ledgerIoFromGh(ghc)` to the ledger read. `releaseMergeHold`'s signature and fail-open contract are unchanged, and lanes still never write the ledger.

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { releaseMergeHold, rollupPending, holdEnabled } from "./release-merge-hold.mjs";
+import { releaseMergeHold, rollupPending, holdEnabled, ledgerIoFromGh } from "./release-merge-hold.mjs";
 import { CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 
 const run = (rows) => async () => JSON.stringify(rows);
@@ -30,6 +30,16 @@ describe("release merge hold (#5709)", () => {
     assert.equal(m.held, true); assert.equal(m.kind, "manual");
     const f = await releaseMergeHold(O(async () => { throw new Error("gh down"); }, { readActive: async () => { throw new Error("x"); } }));
     assert.equal(f.held, false);
+  });
+  it("#5776 the manual hold is read through a gh-backed ledger io (no io.api needed)", async () => {
+    const { readActive } = await import("./release-ledger.mjs");
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
+    const mk = (gh) => ({ readActive: () => readActive({ io: ledgerIoFromGh(gh), repo: "o/r", credential: "driver" }) });
+    const ok = async (a) => { assert.equal(a[0], "api"); assert.match(a[3], /^repos\/o\/r\/contents\/.*active\.json\?ref=/); return JSON.stringify({ content: b64({ mergeHold: { reason: "r" } }) }); };
+    const m = await releaseMergeHold(O(run([]), mk(ok)));
+    assert.equal(m.held, true); assert.equal(m.kind, "manual");
+    const missing = async () => { throw new Error("gh api GET x failed: HTTP 404"); };
+    assert.equal((await releaseMergeHold(O(run([]), mk(missing)))).held, false);
   });
   it("rollupPending reads check runs and status contexts", () => {
     assert.equal(rollupPending({ __typename: "StatusContext", state: "PENDING" }), true);

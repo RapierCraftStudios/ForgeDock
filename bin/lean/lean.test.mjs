@@ -106,6 +106,7 @@ function world(o = {}) {
       if (k === "pr view" && a.at(-1) === "state" && a.at(-2) === "--json") return JSON.stringify({ state: o.prState ?? "OPEN" });
       if (a[0] === "api" && a.includes("PATCH") && a.some((x) => /\/comments\/9000$/.test(x))) { statusLogical(w, a[a.indexOf("-f") + 1].replace(/^body=/, "")); w.statusPatches.push(a); return "{}"; } // #5592: the one FORGE:STATUS comment
       if (a[0] === "api" && a.includes("PATCH")) { w.patches.push(a); return "{}"; }
+      if (a[0] === "api" && o.activeJson && a.some((x) => /contents\/active\.json\?ref=/.test(x))) return JSON.stringify({ content: Buffer.from(JSON.stringify(o.activeJson)).toString("base64") }); // #5776: the _active ledger read
       if (a[0] === "api") return a.some((x) => /\/comments$/.test(x)) ? (w.issueComments ?? []).map((c) => JSON.stringify(c)).join("\n") : "";
       if (k === "pr list" && a.some((x) => /statusCheckRollup/.test(x))) return JSON.stringify(typeof o.releasePrs === "function" ? o.releasePrs(w) : (o.releasePrs ?? [])); // #5709: release PR lookup
       if (k === "pr list") return JSON.stringify(w.prList);
@@ -3936,6 +3937,16 @@ describe("base-sync (#4100)", () => {
     assert.equal(mergesWhileHeld, 0, "no merge into staging while held");
     assert.equal(w.merges.length, 1);
     assert.ok(progress.some((p) => p.phase === "merge" && /merge\.held_release: release PR #40/.test(p.detail ?? "")), "merge.held_release recorded");
+  });
+  it("#5776 the manual merge hold holds a lane whose io has no api (gh-backed ledger read)", async () => {
+    const w = world({ releasePrs: [], activeJson: { mergeHold: { reason: "freeze" } } });
+    assert.equal(w.io.api, undefined);
+    const progress = [];
+    const r = await run(w, { ciMaxMinutes: 1, onProgress: (p) => progress.push(p) });
+    assert.equal(r.terminalReason, "ci-pending");
+    assert.equal(w.merges.length, 0, "no merge while the manual hold is set");
+    assert.ok(progress.some((p) => /manual merge hold \(freeze\)/.test(p.detail ?? "")));
+    assert.equal((await run(world({ releasePrs: [], activeJson: {} }))).terminalReason, "merged");
   });
   it("#5709 a persistent hold ends ci-pending without pushing to the base", async () => {
     const w = world({ releasePrs: RELEASE_PENDING });
