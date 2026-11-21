@@ -1708,7 +1708,9 @@ builder call, so the plan and contract-correction calls (made before the route e
 is added. `pickVerifierModel` also gets the routed mid model as a reported builder model, so the verifier never runs on it.
 `lean.builder_routing: off` (`readBuilderRouting` in `engine-cli.mjs`) keeps every call on `builderModel` and still records
 the class (tier `top`). Run log: `BUILDER_ROUTE {mode, class, tier, model, risk}` and `BUILDER_ESCALATED {from, to,
-trigger}`. `RUN_TERMINAL` and the telemetry `run_terminal` payload gain `builder_tier`, `builder_class`, `builder_model`
+trigger}`. #5810: `provisionalRoute` (routing.mjs) routes the pre-contract sessions from the issue title, labels and
+named paths (`BUILDER_PREROUTE {class, tier, model, reason, risk}`; `laneModel` reads `route ?? preRoute`); `floorRoute`
+keeps an issue risk signal on top after the contract and adds `pre_tier`, `pre_class`, `change` and `floor` to `BUILDER_ROUTE`. `RUN_TERMINAL` and the telemetry `run_terminal` payload gain `builder_tier`, `builder_class`, `builder_model`
 (id or `default`) and `builder_escalated` (0|1 in telemetry). The lane result gains `builderRoute`. Stats: `summariseLog`
 adds `builderRoute`, `conformanceRound`, `shadowWould`, `reachedReview` and `reworkedMerges` (earlier merged slices of the
 same issue log). `forgedock stats --tiers` (`builderTierReport` / `renderTiers`) groups finished routed runs by `mid`,

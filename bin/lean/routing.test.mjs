@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseBuilderRouting, classifyPath, routeBuilder, shouldEscalate, ESCALATE_TRIGGERS, DEFAULT_MID_MODEL } from "./routing.mjs";
+import { parseBuilderRouting, classifyPath, routeBuilder, shouldEscalate, provisionalRoute, floorRoute, ESCALATE_TRIGGERS, DEFAULT_MID_MODEL } from "./routing.mjs";
 
 const contract = (...paths) => ({ deliverables: paths.map((path, i) => ({ id: `D${i + 1}`, path, change: "x", requirements: ["R1"] })) });
 
@@ -63,5 +63,58 @@ describe("routeBuilder (#4394)", () => {
     assert.equal(shouldEscalate(mid, true, "precheck"), false);
     assert.equal(shouldEscalate({ tier: "top" }, false, "precheck"), false);
     assert.equal(shouldEscalate(null, false, "precheck"), false);
+  });
+});
+
+describe("provisionalRoute (#5810)", () => {
+  const pre = (o = {}) => provisionalRoute({ topModel: "opus-b", ...o });
+  it("no named files and no risk or size signal: unscoped, mid tier, with a reason", () => {
+    const r = pre({ title: "Refactor foo parsing", labels: [{ name: "bug" }] });
+    assert.deepEqual([r.class, r.tier, r.model], ["unscoped", "mid", DEFAULT_MID_MODEL]);
+    assert.match(r.reason, /no named files/);
+  });
+  it("named docs/tests and few code files route mid; many code files are large (top)", () => {
+    assert.deepEqual([pre({ namedFiles: ["docs/a.md", "test/a.test.js"] }).class, pre({ namedFiles: ["docs/a.md"] }).tier], ["docs-config-test", "mid"]);
+    assert.deepEqual([pre({ namedFiles: ["src/a.js", "src/a.test.js"] }).class, pre({ namedFiles: ["src/a.js"] }).tier], ["small", "mid"]);
+    const big = pre({ namedFiles: ["src/a.js", "src/b.js", "src/c.js"] });
+    assert.deepEqual([big.class, big.tier, big.model], ["large", "top", "opus-b"]);
+  });
+  it("risk domains start top: title word, label, named path, declared risk_paths glob", () => {
+    for (const o of [{ title: "Fix stripe checkout double charge" }, { labels: [{ name: "security" }] }, { namedFiles: ["src/auth/login.js"] }, { namedFiles: ["lib/x.js"], riskPaths: ["lib/**"] }]) {
+      const r = pre(o);
+      assert.deepEqual([r.class, r.tier, r.model], ["risk", "top", "opus-b"], JSON.stringify(o));
+      assert.ok(r.risk.length);
+    }
+  });
+  it("session/token in a title alone is not a risk signal (common prose); in a path it still is", () => {
+    assert.equal(pre({ title: "Route the builder before the first session; count tokens" }).tier, "mid");
+    assert.equal(pre({ namedFiles: ["src/session/store.js"] }).class, "risk");
+  });
+  it("a size:L label or a prior attempt starts top; routing off keeps top", () => {
+    assert.deepEqual([pre({ labels: ["size:L"] }).class, pre({ labels: ["size:L"] }).tier], ["large", "top"]);
+    assert.deepEqual([pre({ prior: true }).reason, pre({ prior: true }).tier], ["prior attempt", "top"]);
+    const off = pre({ cfg: { mode: "off" } });
+    assert.deepEqual([off.tier, off.model, off.reason], ["top", "opus-b", "routing off"]);
+  });
+});
+
+describe("floorRoute (#5810)", () => {
+  const top = "opus-b";
+  it("a contract route may upgrade the provisional tier", () => {
+    const r = floorRoute(routeBuilder({ contract: contract("src/a.js", "src/b.js", "src/c.js"), topModel: top }), provisionalRoute({ topModel: top }), top);
+    assert.deepEqual([r.tier, r.change, r.pre.tier], ["top", "upgrade", "mid"]);
+  });
+  it("an issue risk signal floors a mid contract route at top (never a silent downgrade below risk policy)", () => {
+    const r = floorRoute(routeBuilder({ contract: contract("docs/a.md"), topModel: top }), provisionalRoute({ title: "Billing docs", topModel: top }), top);
+    assert.deepEqual([r.class, r.tier, r.model, r.floor, r.change], ["risk", "top", top, "pre_route_risk", "same"]);
+    assert.ok(r.risk.includes("title:payments"));
+  });
+  it("a non-risk top provisional route (large, prior attempt) may still route the build mid, as before", () => {
+    const r = floorRoute(routeBuilder({ contract: contract("docs/a.md"), topModel: top }), provisionalRoute({ prior: true, topModel: top }), top);
+    assert.deepEqual([r.tier, r.change, r.floor], ["mid", "downgrade", undefined]);
+  });
+  it("no provisional route (resumed past the contract): the contract route unchanged", () => {
+    const base = routeBuilder({ contract: contract("docs/a.md"), topModel: top });
+    assert.deepEqual(floorRoute(base, null, top), base);
   });
 });

@@ -1043,7 +1043,7 @@ describe("core work-on", () => {
   });
 
   it("builder uses the CLI default model; reviewer is read-only Sonnet unless configured", async () => {
-    const w = world(); await run(w);
+    const w = world(); await run(w, { builderRouting: { mode: "off" } }); // #5810: routing on starts the plan on the provisional tier
     assert.equal(builders(w)[0][3], null);
     assert.equal(builders(w)[0][5], false);
     assert.equal(reviewers(w)[0][3], "claude-sonnet-5-5");
@@ -8005,11 +8005,13 @@ describe("#4394 builder model routing", () => {
   const isPlan = (b) => /PLANNING ONLY/.test(b[4]);
   const docsContract = { ...CONTRACT, deliverables: [{ id: "D1", path: "docs/foo.md", change: "document null", requirements: ["R1"] }, { id: "D2", path: "test/foo.test.js", change: "test", requirements: ["R1"] }] };
 
-  it("a docs/test-only contract builds on the mid model; the plan stays on builderModel; RUN_TERMINAL and the result carry the route", async () => {
+  it("a docs/test-only contract builds on the mid model; the plan runs on the provisional tier; RUN_TERMINAL and the result carry the route", async () => {
     const w = world({ contract: docsContract }); const dir = tmpDir("core-");
     const r = await run(w, { dir, builderModel: "opus-b" });
     const b = builders(w);
-    assert.ok(isPlan(b[0])); assert.equal(b[0][3], "opus-b", "the plan keeps the top model");
+    assert.ok(isPlan(b[0])); assert.equal(b[0][3], "claude-sonnet-5-5", "#5810: an unscoped, risk-free issue plans on the mid tier");
+    const [pre] = events(dir, "BUILDER_PREROUTE");
+    assert.deepEqual([pre.class, pre.tier, pre.model], ["unscoped", "mid", "claude-sonnet-5-5"]); assert.match(pre.reason, /no named files/);
     assert.equal(b[1][3], "claude-sonnet-5-5", "the build runs on the mid model");
     const [route] = events(dir, "BUILDER_ROUTE");
     assert.deepEqual({ mode: route.mode, class: route.class, tier: route.tier, model: route.model }, { mode: "on", class: "docs-config-test", tier: "mid", model: "claude-sonnet-5-5" });
@@ -8023,12 +8025,37 @@ describe("#4394 builder model routing", () => {
 
   it("lean.builder_mid_model picks the mid model; a declared risk path routes the build to the top model", async () => {
     const w1 = world(); await run(w1, { builderModel: "opus-b", builderRouting: { midModel: "haiku-mid" } });
-    assert.deepEqual(builders(w1).slice(0, 2).map((b) => b[3]), ["opus-b", "haiku-mid"]);
+    assert.deepEqual(builders(w1).slice(0, 2).map((b) => b[3]), ["haiku-mid", "haiku-mid"]);
     const w2 = world(); const dir = tmpDir("core-");
     await run(w2, { dir, builderModel: "opus-b", reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
-    assert.ok(builders(w2).every((b) => b[3] === "opus-b"), "every builder call on the top model");
+    const b2 = builders(w2);
+    assert.equal(b2.filter(isPlan).length, 1, "#5810: the upgrade does not rerun the pre-contract plan");
+    assert.equal(b2[0][3], "claude-sonnet-5-5", "the issue named no risk path: provisional mid");
+    assert.ok(b2.slice(1).every((b) => b[3] === "opus-b"), "the contract hit a risk path: every later builder call on the top model");
     const [route] = events(dir, "BUILDER_ROUTE");
     assert.equal(route.class, "risk"); assert.equal(route.tier, "top"); assert.deepEqual(route.risk, ["src/foo.js"]);
+    assert.deepEqual([route.pre_tier, route.pre_class, route.change], ["mid", "unscoped", "upgrade"]);
+  });
+
+  it("#5810: a risk-domain issue plans on the top tier and the risk floor keeps a docs-only contract's build there", async () => {
+    const w = world({ contract: docsContract, title: "foo breaks billing totals" }); const dir = tmpDir("core-");
+    const r = await run(w, { dir, builderModel: "opus-b" });
+    assert.ok(builders(w).every((b) => b[3] === "opus-b"), "plan and build on the top model");
+    const [pre] = events(dir, "BUILDER_PREROUTE");
+    assert.deepEqual([pre.class, pre.tier, pre.model, pre.risk], ["risk", "top", "opus-b", ["title:payments"]]);
+    const [route] = events(dir, "BUILDER_ROUTE");
+    assert.deepEqual([route.class, route.tier, route.floor, route.change], ["risk", "top", "pre_route_risk", "same"]);
+    assert.equal(r.builderRoute.tier, "top");
+    assert.match(traj(w)[0], /Pre-contract sessions provisionally routed to the top tier \(risk: risk signal in the issue\)/);
+  });
+
+  it("#5810: a size:L issue plans on the top tier; the contract route may still build mid", async () => {
+    const w = world({ contract: docsContract, labels: [{ name: "size:L" }] }); const dir = tmpDir("core-");
+    await run(w, { dir, builderModel: "opus-b" });
+    const b = builders(w);
+    assert.equal(b[0][3], "opus-b"); assert.equal(b[1][3], "claude-sonnet-5-5");
+    const [route] = events(dir, "BUILDER_ROUTE");
+    assert.deepEqual([route.pre_class, route.tier, route.change], ["large", "mid", "downgrade"]);
   });
 
   it("a failed precheck on the mid tier escalates: BUILDER_ESCALATED, the fix round runs on the top model, RUN_TERMINAL records it", async () => {
@@ -8052,7 +8079,7 @@ describe("#4394 builder model routing", () => {
     assert.deepEqual(events(dir, "BUILDER_ESCALATED"), []);
   });
 
-  it("builder_routing off: plan, build and the resume keep builderModel; the class is still recorded on the top tier", async () => {
+  it("builder_routing off: plan, build and the resume keep builderModel; the class is still recorded on the top tier", async () => { // #5810: the pre-route is top too
     const w = world({ reviews: [conf({ verdict: "NONCONFORMING", requirements: [{ id: "R1", status: "partial", evidence: "the foo module", validated_by: "V1", note: "x" }] }), ok()] }); const dir = tmpDir("core-");
     await run(w, { dir, builderModel: "opus-b", builderRouting: { mode: "off" } });
     assert.ok(builders(w).length >= 3);
