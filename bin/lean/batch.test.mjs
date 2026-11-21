@@ -12,6 +12,8 @@ import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLa
 import { makeLedger } from "./ledger.mjs";
 import { providerLanes } from "./execution.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
@@ -241,7 +243,7 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(rows.length, 7);
   });
 
-  it("batch files: atomic writes, live K via --set-parallel, tmpfs refused, pid reuse not adopted", async () => {
+  it("batch files: atomic writes, live K via --set-parallel, tmpfs refused, pid reuse not adopted", { skip: POSIX_ONLY }, async () => {
     const root = tmpDir("batch-files-");
     const b = openBatch(root, "b1");
     b.writePlan({ argv: ["1"] });
@@ -1454,7 +1456,7 @@ describe("#4592: forgedock orchestrate --hold / --release", () => {
 });
 
 describe("#4751: batch state is private", () => {
-  it("batch state files are private", () => {
+  it("batch state files are private", { skip: POSIX_ONLY }, () => {
     const root = tmpDir("batch-private");
     const old = process.umask(0o022);
     try {
@@ -1475,7 +1477,7 @@ describe("#4751: batch state is private", () => {
 });
 
 describe("batch plan secrets (#4787)", () => {
-  it("writePlan never writes secret env values and keeps the plan 0600", () => {
+  it("writePlan never writes secret env values and keeps the plan 0600", { skip: POSIX_ONLY }, () => {
     const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-1");
     b.writePlan({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123", AWS_ACCESS_KEY: "k-456" } });
     const raw = readFileSync(join(b.dir, "plan.json"), "utf8");
@@ -1484,7 +1486,7 @@ describe("batch plan secrets (#4787)", () => {
     assert.deepEqual(b.readPlan().envSecrets, ["AWS_ACCESS_KEY", "COMPUTESHARE_TOKEN"]);
     assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
   });
-  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", () => {
+  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", { skip: POSIX_ONLY }, () => {
     const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-2");
     mkdirSync(b.dir, { recursive: true });
     writeFileSync(join(b.dir, "plan.json"), JSON.stringify({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123" } }), { mode: 0o644 });

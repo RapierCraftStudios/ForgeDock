@@ -9,6 +9,8 @@ import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
 function fakeDocker() {
   const containers = new Map();
@@ -378,7 +380,7 @@ test("a teardown that fails and is retried records usage once", async () => {
   assert.equal(lines.length, 1);
 });
 
-test("credential relay hands out access tokens only; no refresh token leaves the router host", async () => {
+test("credential relay hands out access tokens only; no refresh token leaves the router host", { skip: POSIX_ONLY }, async () => {
   const dir = tmpDir("cs-cred-");
   const cfgDir = join(dir, ".claude");
   mkdirSync(cfgDir);
@@ -402,13 +404,13 @@ test("credential relay hands out access tokens only; no refresh token leaves the
 const installDir = new URL("../../pool/install/", import.meta.url).pathname;
 const linuxInstaller = join(installDir, "install-agent-linux.sh");
 
-test("linux installer scripts parse and install the systemd unit without WSL", () => {
+test("linux installer scripts parse and install the systemd unit without WSL", { skip: POSIX_ONLY }, () => {
   for (const f of ["install-agent-linux.sh", "install-agent.sh"]) assert.equal(spawnSync("bash", ["-n", join(installDir, f)]).status, 0, f);
   assert.ok(!/wsl/i.test(readFileSync(linuxInstaller, "utf8")));
   assert.match(readFileSync(join(installDir, "install-agent.sh"), "utf8"), /computeshare-agent\.service/);
 });
 
-test("linux installer --dry-run resolves settings and redacts the token", () => {
+test("linux installer --dry-run resolves settings and redacts the token", { skip: POSIX_ONLY }, () => {
   const r = spawnSync("bash", [linuxInstaller, "--dry-run", "--router", "http://100.1.1.1:7710", "--token", "sekret", "--name", "box", "--cpus", "6", "--mem", "9", "--port", "7712"],
     { encoding: "utf8", env: { ...process.env, AGENT_URL: "http://100.2.2.2:7712" } });
   assert.equal(r.status, 0, r.stderr);
