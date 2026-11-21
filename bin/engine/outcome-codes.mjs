@@ -73,6 +73,7 @@ export const OUTCOME_CODES = Object.freeze({
   DESIGN_INVALIDATED: "design.invalidated", // forge#5342: a lane found the plan wrong; one spike amendment filed, siblings held; the rework-share rollup counts it
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   DEPENDENCY_BLOCKED: "dependency.blocked",
+  STACK_PLANNED: "stack.planned", // forge#5831: a stacked plan lane froze its contract while its dependency was open and stopped before any build or branch write; the batch builds it after the dependency merges
   // Lane resolution refusals (#4125): before any lease, comment or worktree; terminal reason `lane-refused`.
   LANE_MISMATCH: "lane.mismatch",
   LANE_DEFAULT_BRANCH: "lane.default_branch",
@@ -197,6 +198,7 @@ export function codeForTerminalReason(reason) {
     case "dependency-open": return OUTCOME_CODES.DEPENDENCY_OPEN;
     case "dependency-unreadable": return OUTCOME_CODES.DEPENDENCY_UNREADABLE;
     case "dependency-blocked": return OUTCOME_CODES.DEPENDENCY_BLOCKED;
+    case "planned": return OUTCOME_CODES.STACK_PLANNED; // forge#5831
     case "budget-exceeded": return OUTCOME_CODES.BUDGET_EXCEEDED; // forge#4505: the non-human turn-overrun end
     default: return UNCLASSIFIED;
   }

@@ -5369,6 +5369,45 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(round.base, "milestone/m-1"); assert.equal(round.scope, "ba5eba5eba5e");
     assert.equal(parseContractComment(renderContract(CONTRACT, "0123456789ab", { scope: "ba5eba5eba5e" })).base, null);
   });
+  // #5831 stacked lanes phase 1: the plan lane and the build lane after it
+  it("#5831 a plan lane runs past an open Depends-on, freezes the contract and ends planned: no building label, no checkpoint, no push, no PR", async () => {
+    const dir = tmpDir("plan-5831-");
+    const w = world({ dirty: true });
+    const gh = w.io.gh;
+    w.io.gh = async (a) => {
+      if (a[0] === "api" && /issues\/7$/.test(a[1])) return JSON.stringify({ body: "**Depends on**: #3", user: { login: "x" }, author_association: "OWNER" });
+      if (a[0] === "api" && /issues\/3$/.test(a[1])) return JSON.stringify({ state: "open" });
+      return gh(a);
+    };
+    const r = await run(w, { dir, plan: true });
+    assert.equal(r.terminalReason, "planned", r.detail);
+    assert.match(r.contractHash, /^[0-9a-f]{12}$/);
+    assert.equal(w.pushes, 0, "a plan lane writes no branch");
+    assert.equal(w.prs.length, 0);
+    assert.ok(!w.labels.includes("building"));
+    assert.equal(builders(w).length, 1, "only the plan session");
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:CONTRACT -->")), "the contract is posted for the build lane");
+    const log = readLog(dir, 7), ev = log.map((e) => e.event);
+    assert.ok(ev.includes("STACK_PLAN_START") && ev.includes("STACK_PLANNED") && ev.includes("CONTRACT_FROZEN"));
+    assert.ok(!ev.includes("CHECKPOINT"), "teardown does not checkpoint a plan lane");
+    assert.equal(log.find((e) => e.event === "RUN_TERMINAL").code, "stack.planned");
+  });
+  it("#5831 the build lane after a plan lane reuses its contract; a deliverable the dependency changed, or an unknown plan base, re-plans", async () => {
+    const dir = tmpDir("planned-5831-");
+    const withMoved = (w, moved) => { const git = w.io.git; w.io.git = async (a, o) => (a[0] === "diff" && a[1] === "--name-only" && a[2] === "feedfacefeedface" ? moved.join("\n") : git(a, o)); return w; };
+    const same = withMoved(world({ prList: [], issueComments: [withScopeBase(scoped(), "staging")] }), []);
+    assert.equal((await run(same, { dir, planned: { hash: "0123456789ab", baseSha: "feedfacefeedface" } })).terminalReason, "merged");
+    assert.equal(builders(same).length, 1, "no plan session: only the implement session");
+    assert.doesNotMatch(builders(same)[0][4], /PLANNING ONLY/);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "CONTRACT_REUSED")?.planned, true);
+    for (const [w, reason] of [[withMoved(world({ prList: [], issueComments: [withScopeBase(scoped(), "staging")] }), ["src/foo.js"]), /dependency changed deliverable path\(s\) since the plan: src\/foo\.js/],
+      [world({ prList: [], issueComments: [withScopeBase(scoped(), "staging")] }), /could not be compared/]]) {
+      const extra = reason.source.includes("compared") ? { planned: { hash: "0123456789ab" } } : { planned: { hash: "0123456789ab", baseSha: "feedfacefeedface" } };
+      assert.equal((await run(w, { dir, ...extra })).terminalReason, "merged");
+      assert.match(builders(w)[0][4], /PLANNING ONLY/);
+      assert.match(traj(w)[0], reason);
+    }
+  });
   it("a tampered or untrusted contract comment is ignored: the rerun plans again", async () => {
     for (const c of [frozenComment(CONTRACT, (b) => b.replaceAll("guard null", "guard nothing")), frozenComment(CONTRACT, (b) => b, "NONE")]) {
       const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c] });

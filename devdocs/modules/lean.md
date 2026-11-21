@@ -3474,3 +3474,7 @@ The gate is on without config; the caps apply only when set. `bin/engine-cli.mjs
 ## Entry 2026-11-21 — release fix lane spawns with the sandbox env (#5785)
 
 `realSeam().runLane` in `release-review.mjs` shadowed the sandbox env (`laneEnv(env, laneStrip)`) with its `lane` (name) parameter, so the fix lane was spawned with `env: "staging"`, an empty environment with no PATH, gh or claude auth. The env is now `sandboxEnv`; `--lane` still gets the lane name. `realSeam` takes an optional `spawn` (default `node:child_process` spawn) so a test can assert the child env (driver token stripped, PATH kept).
+
+## Entry 2026-11-21 — Stacked plan lane and planned build lane (#5831)
+
+`runCore({plan: true})` (`run-issue --plan`; never with `recover`) skips the `dependency-open` refusal (`STACK_PLAN_START`), never takes the light or fast-forward build, does not label `workflow:building`, and ends `planned` (`stack.planned`) right after the contract is frozen, with `contractHash` and `baseSha` (`STACK_PLANNED`); teardown does not checkpoint it, so nothing is committed or pushed. `runCore({planned: {hash, baseSha}})` reuses the frozen contract like a recovery (`CONTRACT_REUSED` `planned: true`) unless `reuseStale` reports it stale; its new `moved` input lists deliverable paths changed between `baseSha` and the lane base (null when not comparable, also stale).
