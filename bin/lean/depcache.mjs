@@ -14,11 +14,15 @@
  * a missing tool, another filesystem (EXDEV) or a failed install leaves the lane as it was before. A snapshot that fails
  * to link or repair falls back to a fresh install in the lane (status materialize-fallback, #4522); failed only when that
  * install fails too.
+ * #5819: nothing here ever walks, chmods or removes through a link. pnpm links workspace packages into node_modules (a junction
+ * on Windows): every walk recreates a link instead of entering it, a recursive removal unlinks it, and a directory that resolves
+ * inside the worktree but outside every node_modules/.venv is never removed. A failed publish or materialize then checks out
+ * any tracked file that went missing (result `restore`), so a checkpoint can never commit the loss.
  */
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir, hostname } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename, relative, resolve, isAbsolute } from "node:path";
 import { safeSegment } from "./ledger.mjs";
 
 export const depcacheRoot = (env = process.env) => String(env.FORGE_DEPCACHE_ROOT ?? "").trim() || join(homedir(), ".forge", "depcache");
@@ -170,7 +174,7 @@ function commands(d, py = null) {
  */
 export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = () => Date.now(), alive = pidAlive, host = hostname(), pid = process.pid,
   env: procEnv = process.env, installTimeoutMs = DEPCACHE_INSTALL_TIMEOUT_MS, lockWaitMs = DEPCACHE_INSTALL_TIMEOUT_MS, pollMs = 1000,
-  sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)), platform = process.platform } = {}) {
   const disabled = () => String(procEnv.FORGE_DEPCACHE ?? "").trim() === "0";
   const api = {}; // filled at the end; the env-library hook in prepare() passes it on
   const store = (n) => join(root, STORES, n);
@@ -266,6 +270,68 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     try { return { locked: true, value: await fn() }; } finally { try { fs.rmSync(path, { force: true }); } catch { /* best effort */ } }
   }
 
+  // ---- containment (#5819): never through a link, never a worktree path outside a dependency tree ----
+  const win = platform === "win32";
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+  const same = (a, b) => (win ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const inside = (p, dir) => { const r = relative(dir, p); return r === "" || (r.split(/[\\/]/)[0] !== ".." && !isAbsolute(r)); };
+  /** A path inside a dependency tree (some segment is node_modules or .venv). */
+  const depRel = (rel) => String(rel).split(/[\\/]/).some((x) => x === "node_modules" || x === ".venv");
+  let realMemo = { dir: null, real: null }; // the last parent resolved: a walk asks for siblings in a row
+  /**
+   * A symlink or junction. The dirent/lstat type decides on POSIX; on Windows a directory also counts when its real path is
+   * not its parent's real path plus its name (a junction a filesystem or Node version reports as a plain directory).
+   */
+  function linkish(p, ent = null) {
+    let dir;
+    if (ent) { if (ent.isSymbolicLink()) return true; dir = ent.isDirectory(); }
+    else { try { const st = fs.lstatSync(p); if (st.isSymbolicLink()) return true; dir = st.isDirectory(); } catch { return false; } }
+    if (!win || !dir) return false;
+    const parent = dirname(p);
+    if (parent !== realMemo.dir) realMemo = { dir: parent, real: real(parent) };
+    const rp = real(p), rd = realMemo.real;
+    return !rp || !rd || !same(rp, join(rd, basename(p)));
+  }
+  /** Refuse a directory whose real path is inside `protect` (the worktree) but outside every dependency tree. */
+  function guardDep(p, protect, rw = protect ? real(protect) : null) {
+    const rp = real(p);
+    if (rp && rw && inside(rp, rw) && !depRel(relative(rw, rp))) {
+      throw Object.assign(new Error(`refusing to remove ${p}: it resolves to ${rp}, a worktree path outside every node_modules/.venv`), { code: "EFORGE_PROTECTED" });
+    }
+  }
+  /** Remove the link itself (a Windows junction may need rmdir), never its target. */
+  const dropLink = (p) => { try { fs.unlinkSync(p); } catch (e) { if (e?.code === "ENOENT") return; fs.rmdirSync(p); } };
+  const dropFile = (p) => {
+    try { fs.unlinkSync(p); } catch (e) {
+      if (e?.code === "ENOENT") return;
+      if (e?.code !== "EPERM" && e?.code !== "EACCES") throw e;
+      fs.chmodSync(p, 0o666); fs.unlinkSync(p); // a read-only snapshot file on Windows
+    }
+  };
+  /**
+   * Recursive removal that never follows a link (unlinks it) and never removes a directory resolving to a worktree path outside a
+   * dependency tree (`protect`: the worktree; checked at the root, and at every real directory on Windows).
+   */
+  function safeRm(p, protect = null) {
+    let st;
+    realMemo = { dir: null, real: null };
+    try { st = fs.lstatSync(p); } catch { return; }
+    if (st.isSymbolicLink() || (st.isDirectory() && linkish(p))) { dropLink(p); return; }
+    if (!st.isDirectory()) { dropFile(p); return; }
+    const rw = protect ? real(protect) : null;
+    guardDep(p, protect, rw);
+    const walk = (d) => {
+      for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+        const q = join(d, ent.name);
+        if (linkish(q, ent)) dropLink(q);
+        else if (ent.isDirectory()) { if (win) guardDep(q, protect, rw); walk(q); }
+        else dropFile(q);
+      }
+      fs.rmdirSync(d);
+    };
+    walk(p);
+  }
+
   // ---- trees ----
   const boundary = (p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=$|[/\\\\'\"\\s:;])", "g");
   /** Hardlink a file; across filesystems (EXDEV, #4909) copy it with its mode so the cache is reused instead of reinstalled. */
@@ -282,16 +348,33 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
    * shared inode, or the open-for-write fails with EACCES and the lane falls back to a full install.
    */
   const mutableState = (rel, name) => (rel === "" && /^\.(modules\.yaml|pnpm-workspace-state.*\.json|package-lock\.json|yarn-state\.yml)$/.test(name)) || (rel === ".pnpm" && name === "lock.yaml");
-  /** Hardlink `src` into `dst` (copy on EXDEV); symlinks recreated; files in bin dirs that name `from` are copied with `to` instead. */
-  function linkTree(src, dst, { from = null, to = null, binDir = () => false } = {}) {
+  /**
+   * Recreate the link `sp` -> `t` at `dp`. #5807/#5819: without the symlink privilege on Windows (EPERM) a directory target
+   * becomes a junction (absolute, resolved against `at`, where `dp` finally lives) and a file target a hardlink or copy of the
+   * file; the target itself is never entered, moved or copied as a tree.
+   */
+  function relink(sp, dp, t, at) {
+    try { fs.symlinkSync(t, dp); return; } catch (e) { if (!(win && e?.code === "EPERM")) throw e; }
+    const fileAt = isAbsolute(t) ? t : resolve(dirname(sp), t);
+    let st = null;
+    try { st = fs.statSync(fileAt); } catch { /* dangling: a junction to where it will be */ }
+    if (st?.isFile()) { linkOrCopy(fileAt, dp); return; }
+    fs.symlinkSync(isAbsolute(t) ? t : resolve(dirname(at), t), dp, "junction");
+  }
+  /**
+   * Hardlink `src` into `dst` (copy on EXDEV); links recreated (never entered, #5819); files in bin dirs that name `from` are copied
+   * with `to` instead. `at`: where `dst` finally lives (a publish builds in a tmp dir renamed into place), for junction targets.
+   */
+  function linkTree(src, dst, { from = null, to = null, binDir = () => false, at = dst } = {}) {
     const re = from && to && from !== to ? boundary(from) : null;
+    realMemo = { dir: null, real: null };
     const walk = (s, d, rel) => {
       fs.mkdirSync(d, { recursive: true });
       for (const ent of fs.readdirSync(s, { withFileTypes: true })) {
         const sp = join(s, ent.name), dp = join(d, ent.name), r = rel ? `${rel}/${ent.name}` : ent.name;
-        if (ent.isSymbolicLink()) {
+        if (linkish(sp, ent)) {
           const t = String(fs.readlinkSync(sp));
-          fs.symlinkSync(re ? t.replace(re, to) : t, dp);
+          relink(sp, dp, re ? t.replace(re, to) : t, join(at, r));
         } else if (ent.isDirectory()) walk(sp, dp, r);
         else if (ent.isFile()) {
           if (re && binDir(rel)) {
@@ -313,6 +396,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   function readOnly(dir) {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = join(dir, ent.name);
+      if (linkish(p, ent)) continue; // #5819: never chmod through a link
       if (ent.isDirectory()) readOnly(p);
       else if (ent.isFile()) fs.chmodSync(p, fs.statSync(p).mode & 0o7555);
     }
@@ -321,7 +405,8 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   const treesOf = (wt, d, pkgs) => (JS.has(d.eco) ? pkgs.map((p) => (dirname(p) === "." ? "node_modules" : `${dirname(p)}/node_modules`)) : [".venv"])
     .filter((t, i, a) => a.indexOf(t) === i && fs.existsSync(join(wt, t)));
   const binDirFor = (d) => (JS.has(d.eco) ? (rel) => rel.split("/").includes(".bin") : (rel) => rel === "bin");
-  const rmTrees = (wt, trees) => { for (const t of trees) { try { fs.rmSync(join(wt, t), { recursive: true, force: true }); } catch { /* best effort */ } } };
+  /** #5819: only dependency trees, never through a link, never a worktree path outside a dependency tree. */
+  const rmTrees = (wt, trees) => { for (const t of trees) { if (!depRel(t)) continue; try { safeRm(join(wt, t), wt); } catch { /* best effort */ } } };
 
   /** #5590: the existing trees an install did not finish (no marker, a declared dependency missing, a venv without a working python). */
   function brokenTrees(wt, d, trees) {
@@ -340,21 +425,40 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   function publish(wt, d, key, trees, snap) {
     const tmp = `${snap}.tmp-${pid}`;
     try {
-      fs.rmSync(tmp, { recursive: true, force: true });
-      for (const t of trees) linkTree(join(wt, t), join(tmp, t));
+      safeRm(tmp, wt);
+      for (const t of trees) linkTree(join(wt, t), join(tmp, t), { at: join(snap, t) });
       readOnly(tmp);
       fs.writeFileSync(join(tmp, "manifest.json"), JSON.stringify({ v: 1, eco: d.eco, key, prefix: wt, trees, created: now() }) + "\n");
       fs.writeFileSync(join(tmp, "last-used"), String(now()));
       try { fs.renameSync(tmp, snap); } catch (e) {
         if (!fs.existsSync(join(snap, "manifest.json"))) throw e;
-        fs.rmSync(tmp, { recursive: true, force: true }); // another lane published first: never write into its snapshot
+        safeRm(tmp, wt); // another lane published first: never write into its snapshot
       }
       return null;
     } catch (e) {
-      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { safeRm(tmp, wt); } catch { /* best effort */ }
       return e?.code === "EXDEV" ? "cache is on another filesystem than the worktree (EXDEV)" : `publish failed: ${msg(e)}`;
     }
   }
+
+  /**
+   * #5819: after a failed publish/materialize/install, check out every tracked file (outside node_modules/.venv) that is missing
+   * from the checkout `wt` belongs to. null: not a git checkout or nothing missing; else {restored, missing, sample} or {error}.
+   */
+  async function restoreTracked(wt) {
+    let top = "";
+    try { top = String(await exec("git", ["rev-parse", "--show-toplevel"], { cwd: wt, timeoutMs: 60000 })).trim().split("\n")[0]; } catch { return null; }
+    if (!top || !isAbsolute(top)) return null;
+    try {
+      const out = String(await exec("git", ["ls-files", "--deleted", "-z"], { cwd: top, timeoutMs: 60000 }));
+      const gone = [...new Set(out.split("\0").filter((p) => p && !/\n/.test(p) && !depRel(p)))].filter((p) => !present(join(top, p)));
+      if (!gone.length) return null;
+      for (let i = 0; i < gone.length; i += 200) await exec("git", ["checkout", "-q", "--", ...gone.slice(i, i + 200)], { cwd: top, timeoutMs: 120000 });
+      const left = gone.filter((p) => !present(join(top, p)));
+      return { restored: gone.length - left.length, missing: left.length, sample: gone.slice(0, 10) };
+    } catch (e) { return { error: msg(e) }; }
+  }
+  const failedRun = (r) => r.status === "failed" || r.status === "materialize-fallback" || (r.published === false && /^(publish failed|cache is on another filesystem)/.test(String(r.reason ?? "")));
 
   async function prepareOne(wt, keyRoot, d, laneEnv, publishSnap = true) {
     const t0 = now();
@@ -467,11 +571,15 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const keyRoot = join(root, safeSegment(repoKey ?? "repo"));
     const out = [];
     for (const d of found) {
+      const at = d.dir ? join(wt, d.dir) : wt;
+      let r;
       try {
-        const r = await prepareOne(d.dir ? join(wt, d.dir) : wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined, publishSnap);
+        r = await prepareOne(at, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined, publishSnap);
         const claimed = envHit && r.status === "skipped" && /already exists in the worktree$/.test(String(r.reason ?? ""));
-        out.push(claimed ? { ...r, status: "hit", key: envHit.key, ms: r.ms + (out.some((x) => x.env) ? 0 : envHit.ms), reason: `env snapshot (${envHit.mode})`, env: true, dir: d.dir ?? "." } : { ...r, dir: d.dir ?? "." });
-      } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e), dir: d.dir ?? "." }); }
+        r = claimed ? { ...r, status: "hit", key: envHit.key, ms: r.ms + (out.some((x) => x.env) ? 0 : envHit.ms), reason: `env snapshot (${envHit.mode})`, env: true, dir: d.dir ?? "." } : { ...r, dir: d.dir ?? "." };
+      } catch (e) { r = { status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e), dir: d.dir ?? "." }; }
+      if (failedRun(r)) { const restore = await restoreTracked(at); if (restore) r = { ...r, restore }; } // #5819
+      out.push(r);
     }
     return out;
   }
@@ -532,8 +640,8 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   async function remove(entry) {
     const p = String(entry?.path ?? "");
     if (!p.startsWith(root + "/") || p.slice(root.length + 1).split("/").length !== 2) return false;
-    if (entry.kind === "snapshot") return (await withLock(`${p}.lock`, async () => { fs.rmSync(p, { recursive: true, force: true }); return true; }, { wait: false })).locked;
-    fs.rmSync(p, { recursive: true, force: true });
+    if (entry.kind === "snapshot") return (await withLock(`${p}.lock`, async () => { safeRm(p); return true; }, { wait: false })).locked; // #5819: never through a link
+    safeRm(p);
     return true;
   }
 
@@ -544,6 +652,6 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return removed;
   }
 
-  return Object.assign(api, { env, prepare, describe, prune, scan, remove, root, linkTree, readOnly });
+  return Object.assign(api, { env, prepare, describe, prune, scan, remove, root, linkTree, readOnly, safeRm });
 }
 

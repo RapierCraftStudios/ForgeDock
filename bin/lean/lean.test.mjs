@@ -152,6 +152,9 @@ function world(o = {}) {
       if (a[0] === "rev-parse" && a[1] === "HEAD^{tree}") return "0".repeat(40);
       if (a.includes("commit-tree")) return "c".repeat(40);
       if (a[0] === "diff" && a.includes("--diff-filter=A")) return (w.added ?? []).join("\0"); // #4590: files the branch added vs the base
+      if (a[0] === "diff-index" && a.includes("--cached")) return (w.stagedDeletions ?? []).map((p) => `D\0${p}\0`).join(""); // #5819: the checkpoint's staged deletions
+      if (a[0] === "ls-tree" && w.stagedDeletions) return a.slice(a.indexOf("--") + 1).filter((p) => !(w.laneAdded ?? []).includes(p)).join("\0"); // #5819: on the base unless the lane added it
+      if (a[0] === "checkout" && a.includes("HEAD") && w.stagedDeletions) { w.restoredPaths = [...(w.restoredPaths ?? []), ...a.slice(a.indexOf("--") + 1)]; return ""; }
       if (a[0] === "rm" && a[1] === "--cached" && w.added) w.added = w.added.filter((f) => !a.includes(f));
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
@@ -5947,6 +5950,39 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
     const rm = gitIdx(w, (a) => a[0] === "worktree" && a[1] === "remove");
     assert.ok(commit > 0 && push > commit && rm > push, `commit ${commit} < push ${push} < remove ${rm}`);
     tornDown(w, "dirty needs-human");
+  });
+
+  it("#5819 a checkpoint whose staged diff deletes tracked files outside the deliverables is refused: restored, nothing pushed, engine-error with evidence", async () => {
+    const w = ledgered({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    const dir = tmpDir("core-5819-");
+    w.stagedDeletions = ["packages/adapters/src/index.ts", "packages/adapters/migrations/0001.sql", "src/foo.js"]; // src/foo.js is a deliverable
+    const r = await run(w, { mergeWait: "all", dir });
+    assert.equal(r.terminalReason, "engine-error");
+    const commit = gitIdx(w, (a) => a[0] === "commit" && a.some((x) => /checkpoint after exit \(needs-human\)/.test(x)));
+    assert.ok(commit > 0, "the remaining changes are committed locally");
+    const pushAfter = w.calls.slice(commit).filter((c) => c[0] === "git" && c[1] === "push" && !c.includes("--delete"));
+    assert.deepEqual(pushAfter, [], "nothing is pushed after the refused checkpoint");
+    assert.deepEqual(w.restoredPaths, ["packages/adapters/src/index.ts", "packages/adapters/migrations/0001.sql"], "only the non-deliverable deletions are checked out again");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "reset" && c.includes("packages/adapters/src/index.ts") && !c.includes("src/foo.js")), "and unstaged");
+    const ev = readLog(dir, 7);
+    const refused = ev.find((e) => e.event === "CHECKPOINT_DELETIONS_REFUSED");
+    assert.equal(refused.foreign, 2); assert.equal(refused.deleted, 3); assert.equal(refused.restored, true);
+    const term = ev.find((e) => e.event === "RUN_TERMINAL");
+    assert.equal(term.reason, "engine-error"); assert.equal(term.code, "engine.error");
+    assert.ok(ev.some((e) => e.event === "TERMINAL_OVERRIDDEN" && e.from === "needs-human"));
+    assert.ok(ev.some((e) => e.event === "TEARDOWN_KEPT"), "the worktree is kept for inspection");
+  });
+
+  it("#5819 deletions listed as deliverables (and files the lane added itself) still checkpoint and push", async () => {
+    const w = ledgered({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    w.stagedDeletions = ["src/foo.js", "src/lane-scratch.js"]; w.laneAdded = ["src/lane-scratch.js"];
+    const r = await run(w, { mergeWait: "all" });
+    assert.equal(r.terminalReason, "needs-human");
+    const commit = gitIdx(w, (a) => a[0] === "commit" && a.some((x) => /checkpoint after exit \(needs-human\)/.test(x)));
+    const push = gitIdx(w, (a) => a[0] === "push" && a.includes("feat/issue-7-lean") && !a.includes("--delete"));
+    assert.ok(commit > 0 && push > commit, `commit ${commit} < push ${push}`);
+    assert.equal(w.restoredPaths, undefined, "nothing restored");
+    tornDown(w, "deliverable deletion");
   });
 
   it("a checkpoint that cannot push keeps the worktree and leaves worktree + branch listed in the ledger", async () => {
