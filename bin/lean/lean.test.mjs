@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { parseStatus } from "./statuscomment.mjs";
 import { foldRegression } from "./baselines.mjs";
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
@@ -44,6 +44,7 @@ const approxTokens = (s) => rawTokens(String(s).replaceAll(INSTALL_ROOT, "<root>
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
 
 const WT = "/wt/lean-7";
+const fp = (p) => String(p).split("\\").join("/"); // #5753: the fake fs is keyed by posix paths; path.join yields backslashes on Windows
 /** #5333: the engine appends the stage-stamp rule to every builder prompt; strip it to compare against the bare template. */
 const unstamp = (s) => String(s).replace(/\n\nStage notes: make the first line[^\n]*/, "");
 const STAGE_MD = {
@@ -212,7 +213,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
+    fs: { ...(o.wtExists ? { exists: async (p) => fp(p).startsWith("/wt/lean-7") } : {}), stat: async (p) => (fp(p) in w.files ? { mtimeMs: w.mtimes[fp(p)] ?? 1 } : null), read: async (p) => { if (!(fp(p) in w.files)) throw new Error("ENOENT"); return w.files[fp(p)]; }, append: async (p, t) => { w.files[fp(p)] = (w.files[fp(p)] ?? "") + t; }, write: async (p, t) => { w.files[fp(p)] = t; }}, // #5753: fp keeps the fake fs keyed by posix paths when the engine joins with backslashes (Windows)
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
       if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
@@ -5099,7 +5100,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const d = tmpDir("lean-5653-"); const src = join(d, "ci.yml"); writeFileSync(src, "run: uv run --with-requirements r.txt pytest tests\n");
     const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "poetry run pytest t.py" }] };
     const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /poetry/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
-    const r = await run(w, { dir: d, validateCatalogSources: [`../..${src}`] });
+    const r = await run(w, { dir: d, validateCatalogSources: [`../..${src.replace(/^[A-Za-z]:/, "").split("\\").join("/")}`] }); // #5753: drive-less posix path on Windows
     assert.notEqual(r.code, "env.tool_missing");
     assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("uv run --with-requirements r.txt pytest t.py")));
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("poetry run pytest")));
@@ -9545,6 +9546,9 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
 });
 
 describe("#5753 frozen pytest commands run in the env CI runs them in", () => {
+  const saved = {}; // #5753: a host ~/.forge/guards/o_r.json (another run's leftovers) must not add H-rows to these runs
+  before(() => { for (const k of ["HOME", "USERPROFILE"]) saved[k] = process.env[k]; process.env.HOME = process.env.USERPROFILE = tmpDir("lean-5753-home-"); });
+  after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
   it("#5753 a shared/ pytest validate is rewritten at freeze to the services/worker CI env and the freeze records it", async () => {
     const d = tmpDir("lean-5753a-"); const src = join(d, "ci.yml");
     writeFileSync(src, "jobs:\n  worker:\n    steps:\n      - name: Test worker\n        working-directory: services/worker\n        run: poetry run pytest tests/ ../../shared -q\n");
