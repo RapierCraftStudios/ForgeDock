@@ -1,0 +1,278 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "A test that only asserts \"this literal exists\" is a weak guard.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R2",
+   "quote": "Breaking it is a review note, not a park.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R3",
+   "quote": "Behavioural tests (inputs → outputs) stay strong guards.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R4",
+   "quote": "One decision deletes a named mechanism together with its weak guards.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R5",
+   "quote": "A repo can declare areas whose changes must show a before/after measurement on recorded real inputs (a replay corpus, production samples), not only mocks.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R6",
+   "quote": "Post-deploy checks for those areas are metrics with a baseline, not string matches.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R7",
+   "quote": "New heuristics (keyword or regex classifiers) ship with negative examples, not only positive ones.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R8",
+   "quote": "The guard gate labels pure exact-text guards as weak and doesn't park on them.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R9",
+   "quote": "A removal lane deleting a mechanism and its weak guards needs one amendment.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R10",
+   "quote": "A lane touching a declared outcome-evidence area without a before/after result fails validation, with a clear reason.",
+   "disposition": "deliver"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/weakguard.mjs",
+   "change": "New pure isWeakGuardTest(source, path): weak only when the file reads file text, imports no local non-test module, has >=1 assertion and every assertion is a literal-presence form (JS/TS assert.match/doesNotMatch/ok(x.includes), expect().toContain/toMatch; py `assert \"lit\" in x`, re.search); any other assertion makes it strong.",
+   "requirements": [
+    "R1",
+    "R3",
+    "R8"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/weakguard.test.mjs",
+   "change": "Weak fixtures (string includes, regex match on readFileSync text), strong fixtures (calls an imported function, mixed file, equality on a computed value), py cases, negative examples for the classifier itself.",
+   "requirements": [
+    "R1",
+    "R3",
+    "R7",
+    "R8"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/guardgate.mjs",
+   "change": "materialize/runGuards tag each run with weak (classifier over the base body); guardFailures excludes weak runs; new exported weakGuardNotes(runs); supersededIds also returns guards retired by a mechanism amendment (lane deleted all their test files).",
+   "requirements": [
+    "R2",
+    "R4",
+    "R8",
+    "R9"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/guardgate.test.mjs",
+   "change": "Weak failing guard gives a note and zero failures; strong failing guard still guard_broken; mechanism-retired ids reach supersededIds.",
+   "requirements": [
+    "R2",
+    "R3",
+    "R8",
+    "R9"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/lean/conformance.mjs",
+   "change": "supersedes amendment with {mechanism, why} validated and stored as contract.mechanisms; precheck retires guard_broken rows whose test is in removedPaths when a mechanism row exists; precheck accepts outcomeEvidenceFailures and pushes them.",
+   "requirements": [
+    "R4",
+    "R9",
+    "R10"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/lean/conformance.test.mjs",
+   "change": "Mechanism amendment validation, retirement of deleted-test guards, a strong guard with a surviving test still fails, one amendment retires many.",
+   "requirements": [
+    "R4",
+    "R9"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/outcomeevidence.mjs",
+   "change": "New: parseOutcomeEvidenceConfig(forge.yaml outcome_evidence {paths:{area:globs}, corpus:{area:globs}}) (null when absent); outcomeEvidenceFailures({cfg, files, result, exists, checks, contract}) returning conformance.unimplemented rows of kind outcome_evidence_missing|invalid|regressed|baseline_missing, each with a clear reason naming the area, files and the required result shape.",
+   "requirements": [
+    "R5",
+    "R6",
+    "R10"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/lean/outcomeevidence.test.mjs",
+   "change": "Config parse; untouched area passes; touched area with no row, bad corpus, non-numeric values, worse after, or a post-deploy check lacking baseline each fail with a reason; a good row passes.",
+   "requirements": [
+    "R5",
+    "R6",
+    "R10"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "bin/lean/lean.mjs",
+   "change": "Accept outcomeEvidenceConfig option; call outcomeEvidenceFailures beside docsFailures and pass to precheck; in guardGate emit a guard_weak event and push weak notes to T.decisions; compute removedPaths when a mechanism amendment exists; extend the supersession comment loop to mechanism-retired guards.",
+   "requirements": [
+    "R2",
+    "R4",
+    "R9",
+    "R10"
+   ]
+  },
+  {
+   "id": "D10",
+   "path": "bin/engine-cli.mjs",
+   "change": "readEnvConfig parses forge.yaml outcome_evidence via parseOutcomeEvidenceConfig and returns outcomeEvidenceConfig, passed to the lean engine like docsConfig.",
+   "requirements": [
+    "R5"
+   ]
+  },
+  {
+   "id": "D11",
+   "path": "bin/lean/prompts.mjs",
+   "change": "Builder rule line: a new keyword or regex classifier ships negative examples (inputs it must not match); document the mechanism supersedes amendment and the result.outcome_evidence row shape beside the supersedes line (:268).",
+   "requirements": [
+    "R4",
+    "R5",
+    "R7"
+   ]
+  },
+  {
+   "id": "D12",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "Wiring tests: a weak failing guard does not block the lane and is noted; a declared outcome-evidence area without a result row blocks; the prompt carries the negative-examples rule.",
+   "requirements": [
+    "R2",
+    "R7",
+    "R10"
+   ]
+  },
+  {
+   "id": "D13",
+   "path": "docs/CONFIG.md",
+   "change": "Document outcome_evidence (paths, corpus), the result.outcome_evidence row, the post-deploy check baseline field, weak guards and the mechanism supersedes amendment.",
+   "requirements": [
+    "R1",
+    "R4",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D14",
+   "path": "devdocs/modules/lean.md",
+   "change": "Dated entry for #5752 and update the Guard gate section (weak/strong, mechanism supersedes, outcome evidence).",
+   "requirements": [
+    "R1",
+    "R4",
+    "R5"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "A strong (behavioural) failing guard still produces conformance.guard_broken and is retired only by a per-guard supersedes or a mechanism whose lane deleted its test (bin/lean/guardgate.mjs guardFailures, bin/lean/conformance.mjs:1197)."
+  },
+  {
+   "id": "P2",
+   "what": "Baseline comparison #4968, batching #5436 and the skip semantics of runGuards for non-weak guards (bin/lean/guardgate.mjs:141-236)."
+  },
+  {
+   "id": "P3",
+   "what": "Repos without forge.yaml outcome_evidence see no new check (off-by-default pattern of bin/lean/docsgate.mjs:23)."
+  },
+  {
+   "id": "P4",
+   "what": "Existing amendment kinds and the per-guard supersedes row with GUARD_ID_RE (bin/lean/conformance.mjs:651,802)."
+  },
+  {
+   "id": "P5",
+   "what": "The OUTCOME_CODES set and docs/OUTCOME-CODES.md parity: no new code (bin/engine/outcome-codes.mjs)."
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test --test-concurrency=2 bin/lean/weakguard.test.mjs bin/lean/outcomeevidence.test.mjs bin/lean/guardgate.test.mjs bin/lean/guards.test.mjs bin/lean/conformance.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=2 bin/lean/verify.test.mjs bin/lean/docsgate.test.mjs bin/lean/decision-engine.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-concurrency=2 --test-name-pattern=\"guard|supersede|outcome|negative\" bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "G1",
+   "command": "node --test --test-concurrency=2 bin/lean/basered.test.mjs bin/lean/delguard.test.mjs bin/lean/decisions.test.mjs",
+   "regression": true
+  }
+ ],
+ "regression": [
+  {
+   "id": "G1",
+   "command": "node --test --test-concurrency=2 bin/lean/basered.test.mjs bin/lean/delguard.test.mjs bin/lean/decisions.test.mjs",
+   "covers": "sibling guard and decision gates that share conformance.mjs precheck"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Reuse conformance.unimplemented for outcome-evidence failures instead of a new outcome code",
+   "justification": "bin/lean/docsgate.mjs:76 does the same; a new code needs docs/OUTCOME-CODES.md parity",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Weak classification is deterministic source analysis of the base test body, not an LLM call",
+   "justification": "NORTHSTAR non-negotiables 1 and 2; the body is already read at guardgate.mjs materialize (:213-218)",
+   "source": "doc"
+  },
+  {
+   "id": "K3",
+   "choice": "Mechanism supersedes retires only guards whose test files the lane deleted; surviving strong guards still need a per-guard supersedes",
+   "justification": "keeps behavioural guards strong (R3, P1) while one decision removes a mechanism; removedPaths exists at conformance.mjs:1123",
+   "source": "spec"
+  },
+  {
+   "id": "K4",
+   "choice": "forge.yaml outcome_evidence uses two 2-deep maps (paths, corpus) so the existing parseForgeYaml reader suffices",
+   "justification": "docs.surfaces precedent, bin/engine-cli.mjs:606",
+   "source": "precedent"
+  },
+  {
+   "id": "K5",
+   "choice": "Negative-examples rule is a builder prompt line only (layer 2), no deterministic check",
+   "justification": "NORTHSTAR: never put a reasoning problem in a grep; a new classifier is not exactly detectable by script",
+   "source": "doc"
+  }
+ ]
+}

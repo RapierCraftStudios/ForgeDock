@@ -1,0 +1,1471 @@
+'suite'
+  ...
+# Subtest: post-deploy check ids (\#4626)
+    # Subtest: validateContract: a post-deploy requirement needs a well-formed check id
+    ok 1 - validateContract: a post-deploy requirement needs a well-formed check id
+      ---
+      duration_ms: 225.5489
+      type: 'test'
+      ...
+    # Subtest: applyAmendments: a post-deploy amendment without a check id is deferred to the orchestrator (\#5020)
+    ok 2 - applyAmendments: a post-deploy amendment without a check id is deferred to the orchestrator (\#5020)
+      ---
+      duration_ms: 1.0879
+      type: 'test'
+      ...
+    # Subtest: precheck: a check id on neither branch is unimplemented; null checkIds skips the rule
+    ok 3 - precheck: a check id on neither branch is unimplemented; null checkIds skips the rule
+      ---
+      duration_ms: 1.2447
+      type: 'test'
+      ...
+    # Subtest: \#4664 followupItems carries the follow-up class; validateContract rejects an unknown class
+    ok 4 - \#4664 followupItems carries the follow-up class; validateContract rejects an unknown class
+      ---
+      duration_ms: 102.9908
+      type: 'test'
+      ...
+    # Subtest: followupItems names the check in a post-deploy item
+    ok 5 - followupItems names the check in a post-deploy item
+      ---
+      duration_ms: 0.4896
+      type: 'test'
+      ...
+    # Subtest: \#4724 a deferred row needs exactly one valid bucket; owner actions are never post-deploy; dates are absolute
+    ok 6 - \#4724 a deferred row needs exactly one valid bucket; owner actions are never post-deploy; dates are absolute
+      ---
+      duration_ms: 1316.6565
+      type: 'test'
+      ...
+    # Subtest: \#4724 the bucket decides the follow-up class and tags the item for the script and the gate
+    ok 7 - \#4724 the bucket decides the follow-up class and tags the item for the script and the gate
+      ---
+      duration_ms: 3.068
+      type: 'test'
+      ...
+    # Subtest: \#5078 owner is narrowed: post-promotion -> rollup, read-only prod -> host, credentials/spend -> external
+    ok 8 - \#5078 owner is narrowed: post-promotion -> rollup, read-only prod -> host, credentials/spend -> external
+      ---
+      duration_ms: 4.5065
+      type: 'test'
+      ...
+    # Subtest: \#4724 bucketTally counts deferred items per bucket kind; an amendment may carry the bucket
+    ok 9 - \#4724 bucketTally counts deferred items per bucket kind; an amendment may carry the bucket
+      ---
+      duration_ms: 1.2989
+      type: 'test'
+      ...
+    1..9
+ok 16 - post-deploy check ids (\#4626)
+  ---
+  duration_ms: 1658.3061
+  type: 'suite'
+  ...
+# Subtest: \#4726 a [type:e2e] requirement needs a real end-to-end validate
+    # Subtest: e2e requirement verified only by a unit test fails conformance (the \#36414 shape)
+    ok 1 - e2e requirement verified only by a unit test fails conformance (the \#36414 shape)
+      ---
+      duration_ms: 3.1397
+      type: 'test'
+      ...
+    # Subtest: a Playwright, configured e2e check or e2e spec file validate passes
+    ok 2 - a Playwright, configured e2e check or e2e spec file validate passes
+      ---
+      duration_ms: 2.7729
+      type: 'test'
+      ...
+    # Subtest: isE2eCommand and e2eVerified resolve a V-ref to its contract command
+    ok 3 - isE2eCommand and e2eVerified resolve a V-ref to its contract command
+      ---
+      duration_ms: 1.0378
+      type: 'test'
+      ...
+    # Subtest: [type:unit] and [type:api] requirements keep their evidence rules; not-applicable is untouched
+    ok 4 - [type:unit] and [type:api] requirements keep their evidence rules; not-applicable is untouched
+      ---
+      duration_ms: 1.488
+      type: 'test'
+      ...
+    1..4
+ok 17 - \#4726 a [type:e2e] requirement needs a real end-to-end validate
+  ---
+  duration_ms: 9.2781
+  type: 'suite'
+  ...
+# Subtest: decision amendments (\#4695)
+    # Subtest: applies a decision whose anchors exist on the base and returns the record
+    ok 1 - applies a decision whose anchors exist on the base and returns the record
+      ---
+      duration_ms: 2.2035
+      type: 'test'
+      ...
+    # Subtest: rejects an anchor that matches no base file
+    ok 2 - rejects an anchor that matches no base file
+      ---
+      duration_ms: 0.9744
+      type: 'test'
+      ...
+    # Subtest: an anchor on a lane-added file conforms and the unlisted file becomes a deliverable; an anchor matching neither base nor an added file is rejected
+    ok 3 - an anchor on a lane-added file conforms and the unlisted file becomes a deliverable; an anchor matching neither base nor an added file is rejected
+      ---
+      duration_ms: 2.2789
+      type: 'test'
+      ...
+    # Subtest: a blank-why amendment takes the engine's defaultWhy; without one it is still rejected
+    ok 4 - a blank-why amendment takes the engine's defaultWhy; without one it is still rejected
+      ---
+      duration_ms: 0.8678
+      type: 'test'
+      ...
+    # Subtest: supersedes drops the engine-authored preserve row; without it the row stays
+    ok 5 - supersedes drops the engine-authored preserve row; without it the row stays
+      ---
+      duration_ms: 1.3675
+      type: 'test'
+      ...
+    # Subtest: a decision without choice or anchors is an incomplete amendment
+    ok 6 - a decision without choice or anchors is an incomplete amendment
+      ---
+      duration_ms: 0.5515
+      type: 'test'
+      ...
+    1..6
+ok 18 - decision amendments (\#4695)
+  ---
+  duration_ms: 9.1494
+  type: 'suite'
+  ...
+# Subtest: implied docs-freshness deliverable
+    # Subtest: a doc path newly added by a freshness fix round becomes an add-deliverable amendment, a code file does not
+    ok 1 - a doc path newly added by a freshness fix round becomes an add-deliverable amendment, a code file does not
+      ---
+      duration_ms: 1.7951
+      type: 'test'
+      ...
+    # Subtest: applied, the doc passes conformance and an unrelated out-of-contract file in the same round is still scope_creep
+    ok 2 - applied, the doc passes conformance and an unrelated out-of-contract file in the same round is still scope_creep
+      ---
+      duration_ms: 1.051
+      type: 'test'
+      ...
+    # Subtest: only prose files under a docs directory are implied: build, dependency, agent-instruction and spec files stay scope_creep
+    ok 3 - only prose files under a docs directory are implied: build, dependency, agent-instruction and spec files stay scope_creep
+      ---
+      duration_ms: 0.8778
+      type: 'test'
+      ...
+    # Subtest: nothing is implied unless the rule failed before the round and passes after, or when the doc was already changed or covered
+    ok 4 - nothing is implied unless the rule failed before the round and passes after, or when the doc was already changed or covered
+      ---
+      duration_ms: 0.6062
+      type: 'test'
+      ...
+    1..4
+ok 19 - implied docs-freshness deliverable
+  ---
+  duration_ms: 4.9212
+  type: 'suite'
+  ...
+# Subtest: per-kind modes and requirement evidence
+    # Subtest: normalizeKindModes keeps valid entries from a map or the flat forge.yaml string
+    ok 1 - normalizeKindModes keeps valid entries from a map or the flat forge.yaml string
+      ---
+      duration_ms: 1.1612
+      type: 'test'
+      ...
+    # Subtest: a shadow kind is recorded and an enforce kind blocks, in either lane mode
+    ok 2 - a shadow kind is recorded and an enforce kind blocks, in either lane mode
+      ---
+      duration_ms: 0.943
+      type: 'test'
+      ...
+    # Subtest: kinds without their own mode follow the lane: enforce blocks all, shadow only the allowlist
+    ok 3 - kinds without their own mode follow the lane: enforce blocks all, shadow only the allowlist
+      ---
+      duration_ms: 0.6238
+      type: 'test'
+      ...
+    # Subtest: a deliver requirement with no executed evidence test is unverified, with its id
+    ok 4 - a deliver requirement with no executed evidence test is unverified, with its id
+      ---
+      duration_ms: 3.0438
+      type: 'test'
+      ...
+    # Subtest: formatShadowSummary adds per-kind shares only when rows carry kinds
+    ok 5 - formatShadowSummary adds per-kind shares only when rows carry kinds
+      ---
+      duration_ms: 2.2865
+      type: 'test'
+      ...
+    1..5
+ok 20 - per-kind modes and requirement evidence
+  ---
+  duration_ms: 9.3671
+  type: 'suite'
+  ...
+# Subtest: mutation check (\#4913)
+    # Subtest: targets only deliver requirements whose evidence test ran green
+    ok 1 - targets only deliver requirements whose evidence test ran green
+      ---
+      duration_ms: 3.3634
+      type: 'test'
+      ...
+    # Subtest: only a survivor fails; killed and skipped never do
+    ok 2 - only a survivor fails; killed and skipped never do
+      ---
+      duration_ms: 1.3807
+      type: 'test'
+      ...
+    # Subtest: reverts only non-test files, reruns, then restores from HEAD (reset + clean of those paths)
+    ok 3 - reverts only non-test files, reruns, then restores from HEAD (reset + clean of those paths)
+      ---
+      duration_ms: 4.0055
+      type: 'test'
+      ...
+    # Subtest: a failing rerun is killed; the tree is restored even when the command throws
+    ok 4 - a failing rerun is killed; the tree is restored even when the command throws
+      ---
+      duration_ms: 2.9978
+      type: 'test'
+      ...
+    # Subtest: a dirty tree or a failed revert skips without running anything or restoring
+    ok 5 - a dirty tree or a failed revert skips without running anything or restoring
+      ---
+      duration_ms: 2.3915
+      type: 'test'
+      ...
+    # Subtest: \#4931: a tree still dirty after the restore throws instead of returning (never push the reverted change)
+    ok 6 - \#4931: a tree still dirty after the restore throws instead of returning (never push the reverted change)
+      ---
+      duration_ms: 2.9242
+      type: 'test'
+      ...
+    # Subtest: \#4931: a real repo whose change deleted a non-test file is fully restored
+    not ok 7 - \#4931: a real repo whose change deleted a non-test file is fully restored
+      ---
+      duration_ms: 2637.4813
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\conformance.test.mjs:1473:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        
+        'a2\r\n' !== 'a2\n'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: |-
+        a2
+        
+      actual: |-
+        a2
+        
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/conformance.test.mjs:1485:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..7
+not ok 21 - mutation check (\#4913)
+  ---
+  duration_ms: 2656.1677
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\conformance.test.mjs:1433:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: builder amendment slips (\#5036)
+    # Subtest: deferral-shaped kinds naming a requirement apply as a tracked defer
+    ok 1 - deferral-shaped kinds naming a requirement apply as a tracked defer
+      ---
+      duration_ms: 1.896
+      type: 'test'
+      ...
+    # Subtest: verification_substitution applies as substitute-validate with the same checks
+    ok 2 - verification_substitution applies as substitute-validate with the same checks
+      ---
+      duration_ms: 549.5224
+      type: 'test'
+      ...
+    # Subtest: out_of_band_verification marks a deliver requirement out_of_band with its evidence
+    ok 3 - out_of_band_verification marks a deliver requirement out_of_band with its evidence
+      ---
+      duration_ms: 1.2436
+      type: 'test'
+      ...
+    # Subtest: annotation-only kinds are informational: recorded, no problem, no contract change
+    ok 4 - annotation-only kinds are informational: recorded, no problem, no contract change
+      ---
+      duration_ms: 1.1318
+      type: 'test'
+      ...
+    # Subtest: a truly unknown kind is still rejected with the valid kinds
+    ok 5 - a truly unknown kind is still rejected with the valid kinds
+      ---
+      duration_ms: 0.8913
+      type: 'test'
+      ...
+    1..5
+ok 22 - builder amendment slips (\#5036)
+  ---
+  duration_ms: 555.455
+  type: 'suite'
+  ...
+# Subtest: \#5020 freeze-time environment defects
+    # Subtest: applyValidateRecipes rewrites matching validate and repro commands and leaves the rest
+    ok 1 - applyValidateRecipes rewrites matching validate and repro commands and leaves the rest
+      ---
+      duration_ms: 1.7269
+      type: 'test'
+      ...
+    # Subtest: applyValidateRecipes ignores no recipes and invalid regexes
+    ok 2 - applyValidateRecipes ignores no recipes and invalid regexes
+      ---
+      duration_ms: 0.4674
+      type: 'test'
+      ...
+    # Subtest: Poetry's missing-env output is env.tool_missing material, and a repro head that dies on it is an env miss
+    ok 3 - Poetry's missing-env output is env.tool_missing material, and a repro head that dies on it is an env miss
+      ---
+      duration_ms: 0.746
+      type: 'test'
+      ...
+    # Subtest: a post-deploy requirement with no check id is deferred to the orchestrator; one with a check is untouched
+    ok 4 - a post-deploy requirement with no check id is deferred to the orchestrator; one with a check is untouched
+      ---
+      duration_ms: 0.795
+      type: 'test'
+      ...
+    # Subtest: \#5448: a check-less prod-only claim is not converted and freeze rejects it; local_infeasible_why is required
+    ok 5 - \#5448: a check-less prod-only claim is not converted and freeze rejects it; local_infeasible_why is required
+      ---
+      duration_ms: 144.242
+      type: 'test'
+      ...
+    # Subtest: \#5448 replay of \#40539: development work cannot be deferred as prod-only
+    ok 6 - \#5448 replay of \#40539: development work cannot be deferred as prod-only
+      ---
+      duration_ms: 72.8292
+      type: 'test'
+      ...
+    # Subtest: \#5448: a malformed regression set is a contract problem
+    ok 7 - \#5448: a malformed regression set is a contract problem
+      ---
+      duration_ms: 81.4499
+      type: 'test'
+      ...
+    # Subtest: a post-deploy amendment with no check becomes a tracked defer instead of a problem
+    ok 8 - a post-deploy amendment with no check becomes a tracked defer instead of a problem
+      ---
+      duration_ms: 0.5377
+      type: 'test'
+      ...
+    # Subtest: a substitute-validate that is not valid shell is rejected
+    ok 9 - a substitute-validate that is not valid shell is rejected
+      ---
+      duration_ms: 385.0094
+      type: 'test'
+      ...
+    1..9
+ok 23 - \#5020 freeze-time environment defects
+  ---
+  duration_ms: 689.2049
+  type: 'suite'
+  ...
+# Subtest: \#5087 a plan decision may not weaken an e2e/integration criterion to mocked tests
+    # Subtest: rejects the K2 wording of AlterLab\#38180 at contract validation
+    ok 1 - rejects the K2 wording of AlterLab\#38180 at contract validation
+      ---
+      duration_ms: 89.6354
+      type: 'test'
+      ...
+    # Subtest: accepts it when an acceptance probe is declared, in the decision or elsewhere in the contract
+    ok 2 - accepts it when an acceptance probe is declared, in the decision or elsewhere in the contract
+      ---
+      duration_ms: 1.6732
+      type: 'test'
+      ...
+    # Subtest: \#5116 negated or strengthening wording is not a weakening; real weakenings still are
+    ok 3 - \#5116 negated or strengthening wording is not a weakening; real weakenings still are
+      ---
+      duration_ms: 237.6014
+      type: 'test'
+      ...
+    # Subtest: \#5130 double negatives and word prefixes are not weakenings; trailing negations and distant weakeners are
+    ok 4 - \#5130 double negatives and word prefixes are not weakenings; trailing negations and distant weakeners are
+      ---
+      duration_ms: 1.2251
+      type: 'test'
+      ...
+    # Subtest: \#5145 unittest/unittests and substitute units are mocks; a negator across a preposition is not a weakener
+    ok 5 - \#5145 unittest/unittests and substitute units are mocks; a negator across a preposition is not a weakener
+      ---
+      duration_ms: 0.769
+      type: 'test'
+      ...
+    # Subtest: \#5157 negated verbs and bare negators before a preposition still weaken e2e
+    ok 6 - \#5157 negated verbs and bare negators before a preposition still weaken e2e
+      ---
+      duration_ms: 0.5412
+      type: 'test'
+      ...
+    # Subtest: \#5184 a negated omission verb keeps e2e and is not flagged
+    ok 7 - \#5184 a negated omission verb keeps e2e and is not flagged
+      ---
+      duration_ms: 0.5191
+      type: 'test'
+      ...
+    # Subtest: leaves unrelated decisions and contracts without decisions alone
+    ok 8 - leaves unrelated decisions and contracts without decisions alone
+      ---
+      duration_ms: 88.5191
+      type: 'test'
+      ...
+    # Subtest: precheck appends routeFailures as blocking failures; absent keeps today's behaviour
+    ok 9 - precheck appends routeFailures as blocking failures; absent keeps today's behaviour
+      ---
+      duration_ms: 1.4984
+      type: 'test'
+      ...
+    # Subtest: \#4726 [type:e2e] behaviour is unchanged
+    ok 10 - \#4726 [type:e2e] behaviour is unchanged
+      ---
+      duration_ms: 0.4655
+      type: 'test'
+      ...
+    1..10
+ok 24 - \#5087 a plan decision may not weaken an e2e/integration criterion to mocked tests
+  ---
+  duration_ms: 423.8874
+  type: 'suite'
+  ...
+# Subtest: amendmentKindProblems (\#5089)
+    # Subtest: flags the invented deliverable_change kind and names the valid kinds
+    ok 1 - flags the invented deliverable_change kind and names the valid kinds
+      ---
+      duration_ms: 1.1318
+      type: 'test'
+      ...
+    # Subtest: accepts valid kinds, normalised slips and informational kinds
+    ok 2 - accepts valid kinds, normalised slips and informational kinds
+      ---
+      duration_ms: 0.5251
+      type: 'test'
+      ...
+    # Subtest: flags a missing path or requirement
+    ok 3 - flags a missing path or requirement
+      ---
+      duration_ms: 0.6227
+      type: 'test'
+      ...
+    1..3
+ok 25 - amendmentKindProblems (\#5089)
+  ---
+  duration_ms: 2.6388
+  type: 'suite'
+  ...
+# Subtest: release review \#5103
+    # Subtest: a lane that changed css/json/yaml/sql/vue/tf is never closed as already fixed on base
+    ok 1 - a lane that changed css/json/yaml/sql/vue/tf is never closed as already fixed on base
+      ---
+      duration_ms: 0.5301
+      type: 'test'
+      ...
+    # Subtest: tests and docs only still close as already fixed
+    ok 2 - tests and docs only still close as already fixed
+      ---
+      duration_ms: 0.2521
+      type: 'test'
+      ...
+    # Subtest: read-only production telemetry, captures and queries route to host
+    ok 3 - read-only production telemetry, captures and queries route to host
+      ---
+      duration_ms: 0.3478
+      type: 'test'
+      ...
+    # Subtest: owner asks, writes, credentials and product wording stay external
+    ok 4 - owner asks, writes, credentials and product wording stay external
+      ---
+      duration_ms: 0.4395
+      type: 'test'
+      ...
+    # Subtest: \#5115: production-mutating verbs naming a prod monitor stay external, never host
+    ok 5 - \#5115: production-mutating verbs naming a prod monitor stay external, never host
+      ---
+      duration_ms: 0.5054
+      type: 'test'
+      ...
+    1..5
+ok 26 - release review \#5103
+  ---
+  duration_ms: 2.4959
+  type: 'suite'
+  ...
+# Subtest: \#5197 hostRoute is exported as the single host-route source
+    # Subtest: post-promotion text joins the rollup; pre-promotion and external needs stay host
+    ok 1 - post-promotion text joins the rollup; pre-promotion and external needs stay host
+      ---
+      duration_ms: 0.2975
+      type: 'test'
+      ...
+    1..1
+ok 27 - \#5197 hostRoute is exported as the single host-route source
+  ---
+  duration_ms: 0.4536
+  type: 'suite'
+  ...
+# Subtest: \#5250 intakeHostWork
+    # Subtest: matches when every criterion needs live production measurement or a real-browser capture
+    ok 1 - matches when every criterion needs live production measurement or a real-browser capture
+      ---
+      duration_ms: 2.7602
+      type: 'test'
+      ...
+    # Subtest: one code-shaped criterion keeps a code lane
+    ok 2 - one code-shaped criterion keeps a code lane
+      ---
+      duration_ms: 0.5727
+      type: 'test'
+      ...
+    # Subtest: code-only, credential-needing, checklist-less and empty bodies do not match
+    ok 3 - code-only, credential-needing, checklist-less and empty bodies do not match
+      ---
+      duration_ms: 0.4506
+      type: 'test'
+      ...
+    # Subtest: a backlog aggregate that merely quotes such text is not host work
+    ok 4 - a backlog aggregate that merely quotes such text is not host work
+      ---
+      duration_ms: 0.3609
+      type: 'test'
+      ...
+    1..4
+ok 28 - \#5250 intakeHostWork
+  ---
+  duration_ms: 4.551
+  type: 'suite'
+  ...
+# Subtest: contract quote snapping (\#5244)
+    # Subtest: markdown inline code spans, elision and spaced identifiers all match
+    ok 1 - markdown inline code spans, elision and spaced identifiers all match
+      ---
+      duration_ms: 1.8637
+      type: 'test'
+      ...
+    # Subtest: a near-verbatim quote snaps to the one issue line and records the original
+    ok 2 - a near-verbatim quote snaps to the one issue line and records the original
+      ---
+      duration_ms: 2.8209
+      type: 'test'
+      ...
+    # Subtest: an ambiguous or dissimilar quote does not snap
+    ok 3 - an ambiguous or dissimilar quote does not snap
+      ---
+      duration_ms: 1.5264
+      type: 'test'
+      ...
+    1..3
+ok 29 - contract quote snapping (\#5244)
+  ---
+  duration_ms: 6.7743
+  type: 'suite'
+  ...
+# Subtest: \#5345 an incomplete reviewer reply is repaired in place
+    # Subtest: every row-level gap is re-askable and the repaired rows merge into the first reply (no new review round)
+    ok 1 - every row-level gap is re-askable and the repaired rows merge into the first reply (no new review round)
+      ---
+      duration_ms: 1.1496
+      type: 'test'
+      ...
+    1..1
+ok 30 - \#5345 an incomplete reviewer reply is repaired in place
+  ---
+  duration_ms: 1.3718
+  type: 'suite'
+  ...
+# Subtest: \#5339 a faked or deferred e2e/manual requirement is not met
+    # Subtest: a validate that names a faked test is not an e2e run, even with e2e in its name (spectracut \#63 replay)
+    ok 1 - a validate that names a faked test is not an e2e run, even with e2e in its name (spectracut \#63 replay)
+      ---
+      duration_ms: 2.7655
+      type: 'test'
+      ...
+    # Subtest: [type:manual] is judged like [type:e2e]; a deferred e2e row fails, a post-deploy one is transferred
+    ok 2 - [type:manual] is judged like [type:e2e]; a deferred e2e row fails, a post-deploy one is transferred
+      ---
+      duration_ms: 1.9847
+      type: 'test'
+      ...
+    # Subtest: e2e_unverified of the e2e row blocks by default; forge.yaml conformance_kinds overrides; other kinds follow the lane
+    ok 3 - e2e_unverified of the e2e row blocks by default; forge.yaml conformance_kinds overrides; other kinds follow the lane
+      ---
+      duration_ms: 0.5136
+      type: 'test'
+      ...
+    # Subtest: closePlan: a transferred e2e/manual requirement closes partial, never completed
+    ok 4 - closePlan: a transferred e2e/manual requirement closes partial, never completed
+      ---
+      duration_ms: 0.4293
+      type: 'test'
+      ...
+    # Subtest: \#5365 add-requirement id collision is renumbered to the next free R<n> and recorded, never a problem
+    ok 5 - \#5365 add-requirement id collision is renumbered to the next free R<n> and recorded, never a problem
+      ---
+      duration_ms: 1.1862
+      type: 'test'
+      ...
+    # Subtest: \#5365 a file coupled to a deliverable (outcome-codes.mjs <-> docs/OUTCOME-CODES.md) is not scope creep; an unrelated doc still is
+    ok 6 - \#5365 a file coupled to a deliverable (outcome-codes.mjs <-> docs/OUTCOME-CODES.md) is not scope creep; an unrelated doc still is
+      ---
+      duration_ms: 1.1717
+      type: 'test'
+      ...
+    # Subtest: \#5365 a defer row the review finds implemented converts to deliver instead of unjustified_deferral; an undelivered one still fails
+    ok 7 - \#5365 a defer row the review finds implemented converts to deliver instead of unjustified_deferral; an undelivered one still fails
+      ---
+      duration_ms: 2.4023
+      type: 'test'
+      ...
+    1..7
+ok 31 - \#5339 a faked or deferred e2e/manual requirement is not met
+  ---
+  duration_ms: 11.287
+  type: 'suite'
+  ...
+# Subtest: page gate wiring (\#5428)
+    # Subtest: validateContract reports missing page_gate briefs and precheck carries pageFailures
+    ok 1 - validateContract reports missing page_gate briefs and precheck carries pageFailures
+      ---
+      duration_ms: 4.5931
+      type: 'test'
+      ...
+    1..1
+ok 32 - page gate wiring (\#5428)
+  ---
+  duration_ms: 5.6633
+  type: 'suite'
+  ...
+# Subtest: test plan frozen with the contract (\#5445)
+    # Subtest: a complete plan is valid; without the option an old contract stays valid
+    ok 1 - a complete plan is valid; without the option an old contract stays valid
+      ---
+      duration_ms: 310.0882
+      type: 'test'
+      ...
+    # Subtest: a bug requirement without a row, or without a repro, is rejected
+    ok 2 - a bug requirement without a row, or without a repro, is rejected
+      ---
+      duration_ms: 961.5563
+      type: 'test'
+      ...
+    # Subtest: a proof that echoes a deliverable is rejected; one about the 403 is accepted
+    ok 3 - a proof that echoes a deliverable is rejected; one about the 403 is accepted
+      ---
+      duration_ms: 210.3001
+      type: 'test'
+      ...
+    # Subtest: \#5592: naming the function under test does not make a proof an echo; a blank repro gets a literal test id example
+    ok 4 - \#5592: naming the function under test does not make a proof an echo; a blank repro gets a literal test id example
+      ---
+      duration_ms: 63.6772
+      type: 'test'
+      ...
+    # Subtest: level, its reason and the command are checked; mocking the bug's component is rejected
+    ok 5 - level, its reason and the command are checked; mocking the bug's component is rejected
+      ---
+      duration_ms: 613.8186
+      type: 'test'
+      ...
+    # Subtest: \#5587: rule ids are counted, the corrections carry the allowed level and the worked example, and only test-plan problems earn a second round
+    ok 6 - \#5587: rule ids are counted, the corrections carry the allowed level and the worked example, and only test-plan problems earn a second round
+      ---
+      duration_ms: 213.106
+      type: 'test'
+      ...
+    # Subtest: applyValidateRecipes rewrites test_plan commands
+    ok 7 - applyValidateRecipes rewrites test_plan commands
+      ---
+      duration_ms: 0.583
+      type: 'test'
+      ...
+    1..7
+ok 33 - test plan frozen with the contract (\#5445)
+  ---
+  duration_ms: 2374.473
+  type: 'suite'
+  ...
+# Subtest: \#5440 pathCovers: directory without slash, renumbered sequence file
+    # Subtest: \#5440 directory deliverable without slash covers files beneath it
+    ok 1 - \#5440 directory deliverable without slash covers files beneath it
+      ---
+      duration_ms: 0.3627
+      type: 'test'
+      ...
+    # Subtest: \#5440 a sibling directory sharing the prefix is not covered
+    ok 2 - \#5440 a sibling directory sharing the prefix is not covered
+      ---
+      duration_ms: 0.3145
+      type: 'test'
+      ...
+    # Subtest: \#5440 a renumbered migration is covered (exact and glob); other dirs and names are not
+    ok 3 - \#5440 a renumbered migration is covered (exact and glob); other dirs and names are not
+      ---
+      duration_ms: 0.4983
+      type: 'test'
+      ...
+    1..3
+ok 34 - \#5440 pathCovers: directory without slash, renumbered sequence file
+  ---
+  duration_ms: 1.5964
+  type: 'suite'
+  ...
+# Subtest: \#5449 test adequacy kinds are enforced by default
+    # Subtest: test_missing and test_weak block in a shadow lane; other kinds still follow the lane
+    ok 1 - test_missing and test_weak block in a shadow lane; other kinds still follow the lane
+      ---
+      duration_ms: 0.9145
+      type: 'test'
+      ...
+    1..1
+ok 35 - \#5449 test adequacy kinds are enforced by default
+  ---
+  duration_ms: 1.1342
+  type: 'suite'
+  ...
+# Subtest: \#5468 production-only e2e/manual criteria become post-deploy checks
+    # Subtest: classifies production-only versus pre-merge-runnable quotes
+    ok 1 - classifies production-only versus pre-merge-runnable quotes
+      ---
+      duration_ms: 6.2948
+      type: 'test'
+      ...
+    # Subtest: freeze converts a prod-only row to post-deploy with a generated check that parses
+    ok 2 - freeze converts a prod-only row to post-deploy with a generated check that parses
+      ---
+      duration_ms: 4.288
+      type: 'test'
+      ...
+    # Subtest: prod-only e2e_unverified converts instead of blocking
+    ok 3 - prod-only e2e_unverified converts instead of blocking
+      ---
+      duration_ms: 2.0488
+      type: 'test'
+      ...
+    # Subtest: mixed failures, rows without a probeable URL and pre-merge rows still block
+    ok 4 - mixed failures, rows without a probeable URL and pre-merge rows still block
+      ---
+      duration_ms: 1.5295
+      type: 'test'
+      ...
+    # Subtest: a pre-merge e2e row is verified by a validate declaring a configured test sandbox, never deferred (\#5450 route)
+    ok 5 - a pre-merge e2e row is verified by a validate declaring a configured test sandbox, never deferred (\#5450 route)
+      ---
+      duration_ms: 2.1292
+      type: 'test'
+      ...
+    # Subtest: mergeCheckEntries keeps existing entries
+    ok 6 - mergeCheckEntries keeps existing entries
+      ---
+      duration_ms: 0.3387
+      type: 'test'
+      ...
+    1..6
+ok 36 - \#5468 production-only e2e/manual criteria become post-deploy checks
+  ---
+  duration_ms: 17.646
+  type: 'suite'
+  ...
+# Subtest: interface decisions at precheck (\#5338)
+    # Subtest: flags a changed anchored file without an intact preserve report
+    ok 1 - flags a changed anchored file without an intact preserve report
+      ---
+      duration_ms: 1.701
+      type: 'test'
+      ...
+    # Subtest: passes when acknowledged, superseded (row removed), or no anchored file changed
+    ok 2 - passes when acknowledged, superseded (row removed), or no anchored file changed
+      ---
+      duration_ms: 0.7375
+      type: 'test'
+      ...
+    # Subtest: precheck surfaces it and stays ok without interface rows
+    ok 3 - precheck surfaces it and stays ok without interface rows
+      ---
+      duration_ms: 0.7521
+      type: 'test'
+      ...
+    1..3
+ok 37 - interface decisions at precheck (\#5338)
+  ---
+  duration_ms: 3.5641
+  type: 'suite'
+  ...
+# Subtest: \#5524 URL-less production-only e2e/manual rows
+    # Subtest: \#5524 prodOnlyE2e recognises observation windows
+    ok 1 - \#5524 prodOnlyE2e recognises observation windows
+      ---
+      duration_ms: 3.6169
+      type: 'test'
+      ...
+    # Subtest: \#5524 URL-less production-only rows convert to checkless post-deploy
+    ok 2 - \#5524 URL-less production-only rows convert to checkless post-deploy
+      ---
+      duration_ms: 1.2122
+      type: 'test'
+      ...
+    # Subtest: \#5524 replay: URL rows keep a check id and a local-only quote stays deliver
+    ok 3 - \#5524 replay: URL rows keep a check id and a local-only quote stays deliver
+      ---
+      duration_ms: 0.8735
+      type: 'test'
+      ...
+    # Subtest: \#5524 review converts URL-less lone e2e_unverified
+    ok 4 - \#5524 review converts URL-less lone e2e_unverified
+      ---
+      duration_ms: 1.4463
+      type: 'test'
+      ...
+    1..4
+ok 38 - \#5524 URL-less production-only e2e/manual rows
+  ---
+  duration_ms: 8.1587
+  type: 'suite'
+  ...
+# Subtest: \#5547 live-infra, paid and host-load e2e rows
+    # Subtest: \#5547 prodOnlyE2e recognises live-infra shapes, not local rows
+    ok 1 - \#5547 prodOnlyE2e recognises live-infra shapes, not local rows
+      ---
+      duration_ms: 1.946
+      type: 'test'
+      ...
+    # Subtest: \#5547 live-infra rows convert to a post-deploy defer owned by the orchestrator
+    ok 2 - \#5547 live-infra rows convert to a post-deploy defer owned by the orchestrator
+      ---
+      duration_ms: 1.2538
+      type: 'test'
+      ...
+    # Subtest: \#5547 the classifier keys on shape, not on host or repo names
+    ok 3 - \#5547 the classifier keys on shape, not on host or repo names
+      ---
+      duration_ms: 0.308
+      type: 'test'
+      ...
+    # Subtest: \#5547 replay: \#5531 R2 unchanged converts at review and the lane conforms
+    ok 4 - \#5547 replay: \#5531 R2 unchanged converts at review and the lane conforms
+      ---
+      duration_ms: 3.2066
+      type: 'test'
+      ...
+    # Subtest: \#5547 a quote that only mentions the tag in a mid-sentence code span is not an e2e row; a trailing backticked tag still is
+    ok 5 - \#5547 a quote that only mentions the tag in a mid-sentence code span is not an e2e row; a trailing backticked tag still is
+      ---
+      duration_ms: 3.991
+      type: 'test'
+      ...
+    # Subtest: \#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched
+    ok 6 - \#5547 a structured operator decision amends the frozen row; prose, untargeted and delivered-elsewhere rows are untouched
+      ---
+      duration_ms: 5.1395
+      type: 'test'
+      ...
+    1..6
+ok 39 - \#5547 live-infra, paid and host-load e2e rows
+  ---
+  duration_ms: 16.8729
+  type: 'suite'
+  ...
+# Subtest: \#5623: builder-correctable contract problems
+    # Subtest: contractSelfCorrectable: shape problems are builder-correctable; a quote-only mismatch is not
+    ok 1 - contractSelfCorrectable: shape problems are builder-correctable; a quote-only mismatch is not
+      ---
+      duration_ms: 389.263
+      type: 'test'
+      ...
+    # Subtest: classifyNeedsHuman: contract.invalid is recoverable (one fresh-plan requeue), with or without an issue edit
+    ok 2 - classifyNeedsHuman: contract.invalid is recoverable (one fresh-plan requeue), with or without an issue edit
+      ---
+      duration_ms: 2.666
+      type: 'test'
+      ...
+    1..2
+ok 40 - \#5623: builder-correctable contract problems
+  ---
+  duration_ms: 392.553
+  type: 'suite'
+  ...
+# Subtest: first-pass: an unregistered post-deploy check id fails at freeze, not after the build
+    # Subtest: an id absent from the checks file and not delivered is a freeze problem naming the fix
+    ok 1 - an id absent from the checks file and not delivered is a freeze problem naming the fix
+      ---
+      duration_ms: 1.7455
+      type: 'test'
+      ...
+    # Subtest: a registered id, or a deliverable that adds the checks file, passes this rule
+    ok 2 - a registered id, or a deliverable that adds the checks file, passes this rule
+      ---
+      duration_ms: 1.1884
+      type: 'test'
+      ...
+    # Subtest: without checkIds (not resolved) the rule is skipped
+    ok 3 - without checkIds (not resolved) the rule is skipped
+      ---
+      duration_ms: 0.3962
+      type: 'test'
+      ...
+    1..3
+ok 41 - first-pass: an unregistered post-deploy check id fails at freeze, not after the build
+  ---
+  duration_ms: 3.7185
+  type: 'suite'
+  ...
+# Subtest: \#5732 repro commands and failures
+    # Subtest: \#5732 validateContract rejects a repro command that provisions its environment
+    ok 1 - \#5732 validateContract rejects a repro command that provisions its environment
+      ---
+      duration_ms: 1035.9746
+      type: 'test'
+      ...
+    # Subtest: \#5732 a bare test invocation, a validate row or a recipe-rewritten repro command is accepted
+    ok 2 - \#5732 a bare test invocation, a validate row or a recipe-rewritten repro command is accepted
+      ---
+      duration_ms: 754.5927
+      type: 'test'
+      ...
+    # Subtest: \#5732 envProvisioningCommand and assertionFailure
+    ok 3 - \#5732 envProvisioningCommand and assertionFailure
+      ---
+      duration_ms: 0.8843
+      type: 'test'
+      ...
+    # Subtest: \#5732 a repro_red_green row says whether head's output had assertion text; the interpreter signature is an env miss for validates too
+    ok 4 - \#5732 a repro_red_green row says whether head's output had assertion text; the interpreter signature is an env miss for validates too
+      ---
+      duration_ms: 0.5511
+      type: 'test'
+      ...
+    1..4
+ok 42 - \#5732 repro commands and failures
+  ---
+  duration_ms: 1792.4519
+  type: 'suite'
+  ...
+# Subtest: \#5773 operator decisions survive requeue and amendment replay
+    # Subtest: \#5773 a structured decision comment does not change the issue scope (the frozen contract is not stale)
+    ok 1 - \#5773 a structured decision comment does not change the issue scope (the frozen contract is not stale)
+      ---
+      duration_ms: 0.5182
+      type: 'test'
+      ...
+    # Subtest: \#5773 a decision matches by quote over a stale id, and the decided row is checkless
+    ok 2 - \#5773 a decision matches by quote over a stale id, and the decided row is checkless
+      ---
+      duration_ms: 2.1189
+      type: 'test'
+      ...
+    # Subtest: \#5773 dedupeAddRequirements keeps the last add per quote and drops one that repeats a frozen row
+    ok 3 - \#5773 dedupeAddRequirements keeps the last add per quote and drops one that repeats a frozen row
+      ---
+      duration_ms: 1.6583
+      type: 'test'
+      ...
+    # Subtest: \#5773 the \#41245 replay: decision -> requeue -> rows keep their ids, stay tracked post-deploy and pass the check-id gate
+    ok 4 - \#5773 the \#41245 replay: decision -> requeue -> rows keep their ids, stay tracked post-deploy and pass the check-id gate
+      ---
+      duration_ms: 10.9375
+      type: 'test'
+      ...
+    1..4
+ok 43 - \#5773 operator decisions survive requeue and amendment replay
+  ---
+  duration_ms: 15.7258
+  type: 'suite'
+  ...
+# Subtest: \#5752 mechanism supersedes
+    # Subtest: validates {mechanism, why} and stores it as contract.mechanisms; per-guard supersedes keeps working
+    ok 1 - validates {mechanism, why} and stores it as contract.mechanisms; per-guard supersedes keeps working
+      ---
+      duration_ms: 1.0908
+      type: 'test'
+      ...
+    # Subtest: one amendment retires every guard_broken whose test the lane deleted; a strong guard with a surviving test still fails
+    ok 2 - one amendment retires every guard_broken whose test the lane deleted; a strong guard with a surviving test still fails
+      ---
+      duration_ms: 0.8925
+      type: 'test'
+      ...
+    # Subtest: precheck pushes outcome-evidence failures
+    ok 3 - precheck pushes outcome-evidence failures
+      ---
+      duration_ms: 0.366
+      type: 'test'
+      ...
+    1..3
+ok 44 - \#5752 mechanism supersedes
+  ---
+  duration_ms: 2.676
+  type: 'suite'
+  ...
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 1ca7661)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 4460305)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD a539093)
+# warning: in the working copy of 'src/codes.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/codes.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/codes.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/codes.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 268f405)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 5e7f9a2)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 2a33cd2)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 084c641)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD d16f2b2)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 5569c1a)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# fatal: 'C:\\Users\\ItsMr\\.forge\\tmp\\runs\\5752-1795264683229\\guardbase-LIfOWX' is not a working tree
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 07a61af)
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.test.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/other.mjs', LF will be replaced by CRLF the next time Git touches it
+# warning: in the working copy of 'src/a.mjs', LF will be replaced by CRLF the next time Git touches it
+# Preparing worktree (detached HEAD 1527dfb)
+# Subtest: a lane that reverts a guarded fix fails guard_broken even when it also edits the guard's test to pass
+ok 45 - a lane that reverts a guarded fix fails guard_broken even when it also edits the guard's test to pass
+  ---
+  duration_ms: 7320.6792
+  type: 'test'
+  ...
+# Subtest: an accepted supersedes amendment passes the precheck and names the superseded guard for the issue comment
+ok 46 - an accepted supersedes amendment passes the precheck and names the superseded guard for the issue comment
+  ---
+  duration_ms: 6124.8997
+  type: 'test'
+  ...
+# Subtest: a supersedes amendment without a guard id is rejected
+ok 47 - a supersedes amendment without a guard id is rejected
+  ---
+  duration_ms: 1.0078
+  type: 'test'
+  ...
+# Subtest: a lane touching no guarded hunk selects nothing and runs no git or test
+ok 48 - a lane touching no guarded hunk selects nothing and runs no git or test
+  ---
+  duration_ms: 3604.4868
+  type: 'test'
+  ...
+# Subtest: deleting or editing a guard's test selects it even when no guarded line changed
+ok 49 - deleting or editing a guard's test selects it even when no guarded line changed
+  ---
+  duration_ms: 4209.8426
+  type: 'test'
+  ...
+# Subtest: a base test that cannot run in the cap, or has no known runner, is skipped and never blocks
+ok 50 - a base test that cannot run in the cap, or has no known runner, is skipped and never blocks
+  ---
+  duration_ms: 4505.3877
+  type: 'test'
+  ...
+# Subtest: a verify.guard_command template wins over the contract and the fallbacks (\#4792)
+ok 51 - a verify.guard_command template wins over the contract and the fallbacks (\#4792)
+  ---
+  duration_ms: 5121.6937
+  type: 'test'
+  ...
+# Subtest: pytest-style guards run through the contract's own validate command with the path substituted
+ok 52 - pytest-style guards run through the contract's own validate command with the path substituted
+  ---
+  duration_ms: 2.4111
+  type: 'test'
+  ...
+# Subtest: oldRanges reads old-side lines of non-test files and skips pure insertions
+ok 53 - oldRanges reads old-side lines of non-test files and skips pure insertions
+  ---
+  duration_ms: 1.2698
+  type: 'test'
+  ...
+# Subtest: guardFailures keeps only failing runs and loadGuards falls back to a stale index when GitHub is down
+ok 54 - guardFailures keeps only failing runs and loadGuards falls back to a stale index when GitHub is down
+  ---
+  duration_ms: 14.4939
+  type: 'test'
+  ...
+# Subtest: guard_broken detail names the supersedes override and survives the resume prompt
+ok 55 - guard_broken detail names the supersedes override and survives the resume prompt
+  ---
+  duration_ms: 8562.3476
+  type: 'test'
+  ...
+# Subtest: an additive enum change that updates its coverage test fails the guard without supersedes and passes with it
+ok 56 - an additive enum change that updates its coverage test fails the guard without supersedes and passes with it
+  ---
+  duration_ms: 5767.1169
+  type: 'test'
+  ...
+# Subtest: a guard test that already fails on base is skipped (fails on base), not guard_broken
+ok 57 - a guard test that already fails on base is skipped (fails on base), not guard_broken
+  ---
+  duration_ms: 8817.0109
+  type: 'test'
+  ...
+# Subtest: a test that passes on base and fails on the lane is blocked, with no skip
+ok 58 - a test that passes on base and fails on the lane is blocked, with no skip
+  ---
+  duration_ms: 5732.6446
+  type: 'test'
+  ...
+# Subtest: a new failure in a file that already had one is blocked and its name leads the detail
+ok 59 - a new failure in a file that already had one is blocked and its name leads the detail
+  ---
+  duration_ms: 4528.0957
+  type: 'test'
+  ...
+# Subtest: a passing guard adds no baseline worktree, and a failing one removes its worktree
+ok 60 - a passing guard adds no baseline worktree, and a failing one removes its worktree
+  ---
+  duration_ms: 8630.6625
+  type: 'test'
+  ...
+# Subtest: the baseline rerun uses the verify.guard_command runner, so a real break still blocks
+ok 61 - the baseline rerun uses the verify.guard_command runner, so a real break still blocks
+  ---
+  duration_ms: 3375.6605
+  type: 'test'
+  ...
+# Subtest: a baseline that cannot run is skipped, never blocking
+ok 62 - a baseline that cannot run is skipped, never blocking
+  ---
+  duration_ms: 4645.923
+  type: 'test'
+  ...
+# Subtest: failingNames reads TAP, spec and pytest output and ignores skips
+ok 63 - failingNames reads TAP, spec and pytest output and ignores skips
+  ---
+  duration_ms: 0.9718
+  type: 'test'
+  ...
+# Subtest: guards sharing one runner run as one invocation over the union of base copies; a red batch falls back per file (\#5436)
+ok 64 - guards sharing one runner run as one invocation over the union of base copies; a red batch falls back per file (\#5436)
+  ---
+  duration_ms: 11.5586
+  type: 'test'
+  ...
+# Subtest: a template that does not end in the path is never batched
+ok 65 - a template that does not end in the path is never batched
+  ---
+  duration_ms: 1.5231
+  type: 'test'
+  ...
+# Subtest: a template that repeats the path is never batched
+ok 66 - a template that repeats the path is never batched
+  ---
+  duration_ms: 1.7705
+  type: 'test'
+  ...
+# Subtest: \#5752: a broken weak guard (literal-presence test) is a review note, never guard_broken
+ok 67 - \#5752: a broken weak guard (literal-presence test) is a review note, never guard_broken
+  ---
+  duration_ms: 5661.1233
+  type: 'test'
+  ...
+# Subtest: \#5752: a broken behavioural guard stays strong: guard_broken and no weak note
+ok 68 - \#5752: a broken behavioural guard stays strong: guard_broken and no weak note
+  ---
+  duration_ms: 6625.6034
+  type: 'test'
+  ...
+# Subtest: \#5752: a mechanism amendment reaches supersededIds only for guards whose test files the lane deleted
+ok 69 - \#5752: a mechanism amendment reaches supersededIds only for guards whose test files the lane deleted
+  ---
+  duration_ms: 1.5149
+  type: 'test'
+  ...
+# Subtest: node --test fixture: file and id, hunks exclude test files with symbol and deletion anchor
+ok 70 - node --test fixture: file and id, hunks exclude test files with symbol and deletion anchor
+  ---
+  duration_ms: 9.1664
+  type: 'test'
+  ...
+# Subtest: pytest fixture: ::ids and -k, every test file named
+ok 71 - pytest fixture: ::ids and -k, every test file named
+  ---
+  duration_ms: 1.4202
+  type: 'test'
+  ...
+# Subtest: a contract without a test yields no guard and says why
+ok 72 - a contract without a test yields no guard and says why
+  ---
+  duration_ms: 1.1634
+  type: 'test'
+  ...
+# Subtest: render/parse round trip survives '-->', '--!>' and '<x>' in a field
+ok 73 - render/parse round trip survives '-->', '--!>' and '<x>' in a field
+  ---
+  duration_ms: 2.1048
+  type: 'test'
+  ...
+# Subtest: guardIssue posts exactly one FORGE:GUARD and is idempotent on rerun
+ok 74 - guardIssue posts exactly one FORGE:GUARD and is idempotent on rerun
+  ---
+  duration_ms: 6.7523
+  type: 'test'
+  ...
+# Subtest: guardIssue ignores a planted FORGE:GUARD from an untrusted author and still posts the real one
+ok 75 - guardIssue ignores a planted FORGE:GUARD from an untrusted author and still posts the real one
+  ---
+  duration_ms: 3.4089
+  type: 'test'
+  ...
+# Subtest: collectGuards ignores a FORGE:GUARD comment from an untrusted author
+ok 76 - collectGuards ignores a FORGE:GUARD comment from an untrusted author
+  ---
+  duration_ms: 39.8744
+  type: 'test'
+  ...
+# Subtest: guardIssue: no test posts nothing; unavailable merge commit is a logged skip
+ok 77 - guardIssue: no test posts nothing; unavailable merge commit is a logged skip
+  ---
+  duration_ms: 2.151
+  type: 'test'
+  ...
+# Subtest: listGuards filters by hunk file, test file or directory
+ok 78 - listGuards filters by hunk file, test file or directory
+  ---
+  duration_ms: 1.7884
+  type: 'test'
+  ...
+# Subtest: backfill guards merged lanes and logs why a lane without a test yields none
+ok 79 - backfill guards merged lanes and logs why a lane without a test yields none
+  ---
+  duration_ms: 5.3829
+  type: 'test'
+  ...
+# Subtest: guards list prints guards for a path and caches the index; falls back to it offline
+ok 80 - guards list prints guards for a path and caches the index; falls back to it offline
+  ---
+  duration_ms: 26.0416
+  type: 'test'
+  ...
+# Subtest: parseHunks ignores deleted files
+ok 81 - parseHunks ignores deleted files
+  ---
+  duration_ms: 0.3792
+  type: 'test'
+  ...
+# Subtest: guardAfterMerge fetches the bare branch (not origin/<lane>) and the merge sha when absent locally
+ok 82 - guardAfterMerge fetches the bare branch (not origin/<lane>) and the merge sha when absent locally
+  ---
+  duration_ms: 7.2974
+  type: 'test'
+  ...
+# Subtest: historyPreserve: guarded deliverable yields rows, unguarded none, own issue skipped
+ok 83 - historyPreserve: guarded deliverable yields rows, unguarded none, own issue skipped
+  ---
+  duration_ms: 3.6789
+  type: 'test'
+  ...
+# Subtest: historyPreserve: deterministic under input order, capped at 5, proximity then recency
+ok 84 - historyPreserve: deterministic under input order, capped at 5, proximity then recency
+  ---
+  duration_ms: 4.0686
+  type: 'test'
+  ...
+# Subtest: withHistoryRows reads the local index; no index or no match returns the same contract
+ok 85 - withHistoryRows reads the local index; no index or no match returns the same contract
+  ---
+  duration_ms: 18.2094
+  type: 'test'
+  ...
+# Subtest: guardAfterMerge adds the posted guard to an existing local index only
+ok 86 - guardAfterMerge adds the posted guard to an existing local index only
+  ---
+  duration_ms: 13.6365
+  type: 'test'
+  ...
+# Subtest: config: absent, empty or path-less sections are off; globs parse from strings and arrays
+ok 87 - config: absent, empty or path-less sections are off; globs parse from strings and arrays
+  ---
+  duration_ms: 5.1873
+  type: 'test'
+  ...
+# Subtest: an untouched area, a test-only or corpus-only change passes
+ok 88 - an untouched area, a test-only or corpus-only change passes
+  ---
+  duration_ms: 11.7937
+  type: 'test'
+  ...
+# Subtest: a touched area with no result row fails with the area, files and required shape
+ok 89 - a touched area with no result row fails with the area, files and required shape
+  ---
+  duration_ms: 1.3094
+  type: 'test'
+  ...
+# Subtest: bad rows fail as invalid: no metric, undeclared or absent corpus, non-numeric values, unknown better
+ok 90 - bad rows fail as invalid: no metric, undeclared or absent corpus, non-numeric values, unknown better
+  ---
+  duration_ms: 7.0988
+  type: 'test'
+  ...
+# Subtest: a worse after fails as regressed; lower-is-better is honoured
+ok 91 - a worse after fails as regressed; lower-is-better is honoured
+  ---
+  duration_ms: 1.8223
+  type: 'test'
+  ...
+# Subtest: a good row passes
+ok 92 - a good row passes
+  ---
+  duration_ms: 2.1386
+  type: 'test'
+  ...
+# Subtest: a post-deploy check for a touched area needs a metric baseline, not a string match
+ok 93 - a post-deploy check for a touched area needs a metric baseline, not a string match
+  ---
+  duration_ms: 2.7016
+  type: 'test'
+  ...
+# Subtest: rawChecksAt keeps the baseline field and lets later refs win
+ok 94 - rawChecksAt keeps the baseline field and lets later refs win
+  ---
+  duration_ms: 1.7805
+  type: 'test'
+  ...
+# Subtest: weak: literal-presence assertions over file text (includes, regex match, toContain)
+ok 95 - weak: literal-presence assertions over file text (includes, regex match, toContain)
+  ---
+  duration_ms: 9.0716
+  type: 'test'
+  ...
+# Subtest: strong: a test that calls an imported local function is behavioural
+ok 96 - strong: a test that calls an imported local function is behavioural
+  ---
+  duration_ms: 1.1831
+  type: 'test'
+  ...
+# Subtest: strong: a mixed file (one literal check plus an equality on a computed value)
+ok 97 - strong: a mixed file (one literal check plus an equality on a computed value)
+  ---
+  duration_ms: 0.9041
+  type: 'test'
+  ...
+# Subtest: negative examples: inputs the classifier must not call weak
+ok 98 - negative examples: inputs the classifier must not call weak
+  ---
+  duration_ms: 1.0534
+  type: 'test'
+  ...
+# Subtest: python: literal-in-text and re.search over read_text are weak; calling project code is strong
+ok 99 - python: literal-in-text and re.search over read_text are weak; calling project code is strong
+  ---
+  duration_ms: 3.373
+  type: 'test'
+  ...
+1..99
+# tests 322
+# suites 44
+# pass 321
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 95439.4095

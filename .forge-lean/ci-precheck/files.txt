@@ -1,0 +1,14 @@
+bin/engine-cli.mjs
+bin/lean/conformance.mjs
+bin/lean/conformance.test.mjs
+bin/lean/guardgate.mjs
+bin/lean/guardgate.test.mjs
+bin/lean/lean.mjs
+bin/lean/lean.test.mjs
+bin/lean/outcomeevidence.mjs
+bin/lean/outcomeevidence.test.mjs
+bin/lean/prompts.mjs
+bin/lean/weakguard.mjs
+bin/lean/weakguard.test.mjs
+devdocs/modules/lean.md
+docs/CONFIG.md

@@ -1,0 +1,253 @@
+{
+  "status": "fixed",
+  "summary": "Broken weak guards (literal-presence tests) are review notes, not parks; one mechanism supersedes retires deleted-test guards; opt-in forge.yaml outcome_evidence gate needs before/after on real inputs and metric baselines; classifier negative-examples builder rule",
+  "requirements": [
+    {
+      "id": "R1",
+      "status": "implemented",
+      "evidence": "bin/lean/weakguard.mjs:91"
+    },
+    {
+      "id": "R2",
+      "status": "implemented",
+      "evidence": "bin/lean/guardgate.mjs:252,259; bin/lean/lean.mjs:3277"
+    },
+    {
+      "id": "R3",
+      "status": "implemented",
+      "evidence": "bin/lean/weakguard.mjs:91; bin/lean/guardgate.test.mjs:356"
+    },
+    {
+      "id": "R4",
+      "status": "implemented",
+      "evidence": "bin/lean/conformance.mjs:803,1205; bin/lean/guardgate.mjs:273"
+    },
+    {
+      "id": "R5",
+      "status": "implemented",
+      "evidence": "bin/lean/outcomeevidence.mjs:28,80; bin/engine-cli.mjs:608; bin/lean/lean.mjs:3360"
+    },
+    {
+      "id": "R6",
+      "status": "implemented",
+      "evidence": "bin/lean/outcomeevidence.mjs:101"
+    },
+    {
+      "id": "R7",
+      "status": "implemented",
+      "evidence": "bin/lean/prompts.mjs:275; bin/lean/weakguard.test.mjs:26"
+    },
+    {
+      "id": "R8",
+      "status": "implemented",
+      "evidence": "bin/lean/guardgate.mjs:182,252"
+    },
+    {
+      "id": "R9",
+      "status": "implemented",
+      "evidence": "bin/lean/conformance.mjs:1205; bin/lean/conformance.test.mjs:2250"
+    },
+    {
+      "id": "R10",
+      "status": "implemented",
+      "evidence": "bin/lean/outcomeevidence.mjs:80; bin/lean/conformance.mjs:1212"
+    }
+  ],
+  "validation": [
+    {
+      "id": "V1",
+      "command": "node --test --test-concurrency=2 bin/lean/weakguard.test.mjs bin/lean/outcomeevidence.test.mjs bin/lean/guardgate.test.mjs bin/lean/guards.test.mjs bin/lean/conformance.test.mjs",
+      "exit": 1,
+      "note": "host environment: the only failure is the existing #4931 restore test (CRLF from core.autocrlf=true); exit 0 with GIT_CONFIG core.autocrlf=false"
+    },
+    {
+      "id": "V2",
+      "command": "node --test --test-concurrency=2 bin/lean/verify.test.mjs bin/lean/docsgate.test.mjs bin/lean/decision-engine.test.mjs",
+      "exit": 0
+    },
+    {
+      "id": "V3",
+      "command": "node --test --test-concurrency=2 --test-name-pattern=\"guard|supersede|outcome|negative\" bin/lean/lean.test.mjs",
+      "exit": 1,
+      "note": "host environment: the runCore test harness uses POSIX /wt paths while path.join on Windows gives backslashes; the untouched #5436 test fails identically at base 3b977a9a; with a path.posix join preload all three #5752 tests pass"
+    },
+    {
+      "id": "G1",
+      "command": "node --test --test-concurrency=2 bin/lean/basered.test.mjs bin/lean/delguard.test.mjs bin/lean/decisions.test.mjs",
+      "exit": 0
+    }
+  ],
+  "tests": [
+    {
+      "command": "node --test bin/lean/weakguard.test.mjs",
+      "result": "pass",
+      "fails_without_fix": true
+    },
+    {
+      "command": "node --test bin/lean/outcomeevidence.test.mjs",
+      "result": "pass",
+      "fails_without_fix": true
+    },
+    {
+      "command": "node --test bin/lean/guardgate.test.mjs",
+      "result": "pass",
+      "fails_without_fix": true
+    },
+    {
+      "command": "node --test bin/lean/conformance.test.mjs (GIT_CONFIG core.autocrlf=false)",
+      "result": "pass",
+      "fails_without_fix": true
+    },
+    {
+      "command": "node --import <posix-join preload> --test --test-name-pattern=#5752 bin/lean/lean.test.mjs",
+      "result": "pass",
+      "fails_without_fix": true
+    },
+    {
+      "command": "npx eslint <12 changed .mjs files>",
+      "result": "pass",
+      "fails_without_fix": "unknown"
+    }
+  ],
+  "self_review": [
+    {
+      "question": "1",
+      "answer": "yes",
+      "evidence": "R1-R10 each map to a diff line (requirements[].evidence). No requirement is [type:e2e], so none needs an end-to-end validate."
+    },
+    {
+      "question": "2",
+      "answer": "yes",
+      "evidence": "Strong guards keep guard_broken (bin/lean/guardgate.mjs:252, test guardgate.test.mjs:356). Per-guard supersedes is unchanged (conformance.mjs:1204). Outcome evidence is off without config (lean.mjs:3360; the lean.test off-world case passes). V2 and G1 pass, and eslint is clean."
+    },
+    {
+      "question": "3",
+      "answer": "yes",
+      "evidence": "P1-P5 are intact: no new outcome code, the per-guard supersedes path and GUARD_ID_RE are untouched, and runGuards baseline and batching are unchanged apart from the weak tag. V2 and G1 exit 0. V1 and V3 exit 1 on this Windows host only for pre-existing environment reasons: V1 passes with autocrlf off, and in V3 #5436 fails identically at base 3b977a9a."
+    },
+    {
+      "question": "4",
+      "answer": "yes",
+      "evidence": "git diff --name-only 3b977a9a...HEAD lists only the 14 contract deliverables."
+    }
+  ],
+  "amendments": [],
+  "facts": {
+    "decisions": [],
+    "rejected": [
+      {
+        "approach": "Run checks.mjs' widened full test suite",
+        "why": "It widened to the full suite (fan-out cap: 1382 files reference the change), which the host rules forbid; the contract validates and eslint on the changed files were run instead."
+      }
+    ],
+    "hotspots": [
+      {
+        "at": "bin/lean/lean.test.mjs:222",
+        "why": "On Windows the runCore harness fake worktree (/wt/lean-7) does not match path.join output, so every full-lane test fails on this host before reaching the code under test."
+      }
+    ],
+    "conventions": []
+  },
+  "not_members": [
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/batch.test.mjs",
+      "why": "line 32 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); batch.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/checks.test.mjs",
+      "why": "line 215 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); checks.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/conformance.test.mjs",
+      "why": "line 846 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); conformance.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/context.test.mjs",
+      "why": "line 385 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); context.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/execution.e2e.test.mjs",
+      "why": "line 28 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); execution.e2e.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/execution.test.mjs",
+      "why": "line 326 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); execution.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/fixround.test.mjs",
+      "why": "line 10 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); fixround.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/guardgate.test.mjs",
+      "why": "line 35 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); guardgate.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/ledger.test.mjs",
+      "why": "line 14 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); ledger.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "outcomeevidence",
+      "test": "bin/lean/release-mergeback.test.mjs",
+      "why": "line 56 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); release-mergeback.test.mjs does not enumerate bin/lean siblings, so outcomeevidence has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/batch.test.mjs",
+      "why": "line 32 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); batch.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/checks.test.mjs",
+      "why": "line 215 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); checks.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/conformance.test.mjs",
+      "why": "line 846 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); conformance.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/context.test.mjs",
+      "why": "line 385 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); context.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/execution.e2e.test.mjs",
+      "why": "line 28 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); execution.e2e.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/execution.test.mjs",
+      "why": "line 326 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); execution.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/fixround.test.mjs",
+      "why": "line 10 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); fixround.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/guardgate.test.mjs",
+      "why": "line 35 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); guardgate.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/ledger.test.mjs",
+      "why": "line 14 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); ledger.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    },
+    {
+      "symbol": "weakguard",
+      "test": "bin/lean/release-mergeback.test.mjs",
+      "why": "line 56 is not a list of lean modules or guard/gate symbols (it is stub, fixture or assertion code for another feature); release-mergeback.test.mjs does not enumerate bin/lean siblings, so weakguard has no list to join"
+    }
+  ]
+}

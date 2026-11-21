@@ -1,0 +1,551 @@
+ code, never unclassified
+      ---
+      duration_ms: 725.1981
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:980:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'contract.invalid'
+        - 'builder.blocked'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'builder.blocked'
+      actual: 'contract.invalid'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:989:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 57)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+      ...
+    1..1
+not ok 1 - core work-on
+  ---
+  duration_ms: 731.0507
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:234:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: conformance shadow mode (the default)
+    # Subtest: \#5338 a merged supersedes decision on an interface reopens its closed consumers, notifies open ones and files one issue per named consumer
+    not ok 1 - \#5338 a merged supersedes decision on an interface reopens its closed consumers, notifies open ones and files one issue per named consumer
+      ---
+      duration_ms: 367.9454
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:1988:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'needs-human'
+        - 'merged'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'merged'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:2004:14)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 33)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..1
+not ok 2 - conformance shadow mode (the default)
+  ---
+  duration_ms: 370.7058
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:1574:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: structure delta and decision provenance at merge (forge\#4165)
+    # Subtest: \#4694 a guarded deliverable freezes H preserve rows listed under Decision sources; an unguarded lane gets none
+    not ok 1 - \#4694 a guarded deliverable freezes H preserve rows listed under Decision sources; an unguarded lane gets none
+      ---
+      duration_ms: 379.4874
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:2543:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'needs-human'
+        - 'merged'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'merged'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:2548:14)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 0)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..1
+not ok 3 - structure delta and decision provenance at merge (forge\#4165)
+  ---
+  duration_ms: 380.3534
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:2529:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: orchestrate
+    # Subtest: formatTable prints issue, outcome, PR, cost, minutes
+    ok 1 - formatTable prints issue, outcome, PR, cost, minutes
+      ---
+      duration_ms: 3.3639
+      type: 'test'
+      ...
+    1..1
+ok 4 - orchestrate
+  ---
+  duration_ms: 4.7846
+  type: 'suite'
+  ...
+# Subtest: host admission (\#4105)
+    # Subtest: the outcome code is registered
+    ok 1 - the outcome code is registered
+      ---
+      duration_ms: 11.9445
+      type: 'test'
+      ...
+    1..1
+ok 5 - host admission (\#4105)
+  ---
+  duration_ms: 14.5919
+  type: 'suite'
+  ...
+# Subtest: batch robustness (\#4112-\#4115)
+    # Subtest: recovery lane replays accepted supersedes amendment (\#4899)
+    not ok 1 - recovery lane replays accepted supersedes amendment (\#4899)
+      ---
+      duration_ms: 8450.664
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:5246:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'needs-human'
+        - 'merged'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'merged'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:5251:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 66)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#4899 recovery lane keeps enforcing a guard that was not superseded
+    ok 2 - \#4899 recovery lane keeps enforcing a guard that was not superseded
+      ---
+      duration_ms: 9556.019
+      type: 'test'
+      ...
+    # Subtest: \#5436 the review starts beside guard+precheck: a green gate adopts it once, a red guard resumes the builder and the review is not applied
+    not ok 3 - \#5436 the review starts beside guard+precheck: a green gate adopts it once, a red guard resumes the builder and the review is not applied
+      ---
+      duration_ms: 168.441
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:5291:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'needs-human'
+        - 'merged'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'merged'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:5293:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#5752 a broken weak guard (literal-presence test) does not block the lane and is recorded as a review note
+    not ok 4 - \#5752 a broken weak guard (literal-presence test) does not block the lane and is recorded as a review note
+      ---
+      duration_ms: 1264.833
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:5303:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        The expression evaluated to a falsy value:
+        
+          assert.ok(weakEv.length >= 1 && weakEv.every((e) => e.guard === "#9" && e.test === "src/foo.js"))
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: true
+      actual: false
+      operator: '=='
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:5314:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#5752 a declared outcome-evidence area touched without a before/after result row blocks with a clear reason
+    not ok 5 - \#5752 a declared outcome-evidence area touched without a before/after result row blocks with a clear reason
+      ---
+      duration_ms: 827.6767
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:5318:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        The input did not match the regular expression /outcome-evidence area 'core'.{0,200}src\/foo\.js.{0,200}no before\/after measurement/. Input:
+        
+        '[["runner","builder",null,"claude-sonnet-5-5","Resolve issue #7 (read it with gh issue view 7 --comments). This first step is PLANNING ONLY: do not edit code, do not commit.\\n\\nHost rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run `node C:\\\\Users\\\\ItsMr\\\\Documents\\\\Projects\\\\ForgeDock-orch\\\\.claude\\\\worktrees\\\\lean-5752\\\\bin\\\\lean\\\\checks.mjs --base origin/<base>` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.\\nQuiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read `tail -40` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file\'s ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don\'t re-read it.\\nNever use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane\'s files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.\\nOne turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.\\n\\nStage notes: make the first line of every `.forge-lean/*.md` file you write exactly `forge-stamp: issue=7 contract=-` (the engine refuses to post a note stamped for another issue or contract).\\n\\n1. Write .forge-lean/investigation.md as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):\\n**Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED\\n**Confidence**: high|medium|low\\n**Severity**: ...\\n**Task Type**: bug|feature|chore|docs\\n### What Was Claimed\\n### What We Found   (bullets with file:line, verified against the base ref)\\n### Root Cause\\n### Affected Files\\n### Sibling Sweep   (same defect class elsewhere)\\n### History   (introducing commit, prior fixes)\\n### Recommendation\\n### Related Issues\\n### Test plan   (bug issues: per deliver requirement, see the contract test_plan)\\n.forge-lean/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}\\n\\nIf the issue is already fixed or invalid, write .forge-lean/result.json {\\"status\\":\\"already-fixed|invalid\\",\\"summary\\":\\"one line\\",\\"evidence\\":[\\"file:line ...\\"]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {\\"status\\":\\"blocked\\",\\"summary\\":\\"\\",...} with a typed \\"block\\" (rules below) and stop.\\n\\n2. Otherwise write .forge-lean/contract.json, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.\\n{\\"requirements\\":[{\\"id\\":\\"R1\\",\\"quote\\":\\"<verbatim sentence or checklist item from the issue>\\",\\"disposition\\":\\"deliver|defer|post-deploy|not-applicable\\",\\"why\\":\\"<defer, post-deploy>\\",\\"bucket\\":\\"<defer, post-deploy: post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|host>\\",\\"check\\":\\"<post-deploy: id in .forge/post-deploy-checks.json>\\",\\"evidence\\":\\"<file:line, required for not-applicable>\\",\\"verify\\":\\"<optional: in_lane|out_of_band>\\"}],\\n \\"deliverables\\":[{\\"id\\":\\"D1\\",\\"path\\":\\"<file to change>\\",\\"change\\":\\"<what>\\",\\"requirements\\":[\\"R1\\"]}],\\n \\"preserve\\":[{\\"id\\":\\"P1\\",\\"what\\":\\"<caller, contract or behaviour that must not change, with its path>\\"}],\\n \\"validate\\":[{\\"id\\":\\"V1\\",\\"command\\":\\"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>\\"}],\\n \\"decisions\\":[{\\"id\\":\\"K1\\",\\"choice\\":\\"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>\\",\\"justification\\":\\"<why, with file:line>\\",\\"source\\":\\"doc|lint|precedent|spec\\"}]}\\nEvery requirement and acceptance criterion in the issue and its maintainers\' comments is one requirement, quoted verbatim (others\' comments are context, not requirements). Never drop or narrow one silently: \\"defer\\" (separate work) and \\"post-deploy\\" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one \\"bucket\\": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is \\"deliver\\". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is \\"verify\\":\\"out_of_band\\" with \\"evidence\\" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set \\"verify\\":\\"in_lane\\" when this change can check it. List every file you will change as a deliverable; tests are always allowed.\\nFirst reviews most often find defects in:\\n- requirements: One requirement per sentence or clause, each with a deliverable and a validate (omission is the top finding).\\n- deliverables: List every changed file, tests included (scope_creep flags unnamed ones).\\n- preserve: Give each preserve row a file path; it cannot be checked without one.\\nA new default-off flag or rollout key needs an activation row: defer, bucket `owner:promote:<flag>`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).\\nA [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.\\nA validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.\\nScope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.\\nA new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; \\"the lint allows it\\" or \\"there is a precedent\\" is not a reason on its own. Record each non-obvious choice in \\"decisions\\" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with \\"Build reads:\\", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.\\n\\nBlast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add `\\"regression\\":[{\\"id\\":\\"G1\\",\\"command\\":\\"\\",\\"covers\\":\\"\\"}]` (engine runs it as validate). A post-deploy row needs `local_infeasible_why` and a `check` id from .forge/post-deploy-checks.json on the base, or a deliverable adding it there. Never narrow a requirement that needs another open issue\'s code: block {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}. developing or fixing the signal is never post-deploy.\\n\\nAn added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in .forge-lean/investigation.md. No decision may swap e2e for mocked tests without a forge-probe.\\n\\n\\"blocked\\" needs a typed \\"block\\" in .forge-lean/result.json, one of:\\n- {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.\\n- {\\"kind\\":\\"split-required\\",\\"subissues\\":[{\\"title\\":\\"\\",\\"body\\":\\"\\",\\"depends_on\\":[0],\\"files\\":[\\"<path>\\"]}],\\"size\\":{\\"files\\":N,\\"lines\\":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as \\"paths\\") only when every sub-issue\'s files are disjoint from the others\' or the whole change\'s size estimate exceeds 25 files or 1500 lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, siblings editing the same hub (barrel or index export list, union type, shared fixture, index doc) get its slots pre-staged in the earliest sub-issue, which the others depend on, or their own per-feature files; the engine serialises sub-issues still sharing a file.\\n- {\\"kind\\":\\"design-invalidated\\",\\"decision\\":\\"<what no longer holds>\\",'... 2686 more characters
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected:
+      actual: '[["runner","builder",null,"claude-sonnet-5-5","Resolve issue #7 (read it with gh issue view 7 --comments). This first step is PLANNING ONLY: do not edit code, do not commit.\\n\\nHost rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run `node C:\\\\Users\\\\ItsMr\\\\Documents\\\\Projects\\\\ForgeDock-orch\\\\.claude\\\\worktrees\\\\lean-5752\\\\bin\\\\lean\\\\checks.mjs --base origin/<base>` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.\\nQuiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read `tail -40` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file\'s ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don\'t re-read it.\\nNever use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane\'s files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.\\nOne turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.\\n\\nStage notes: make the first line of every `.forge-lean/*.md` file you write exactly `forge-stamp: issue=7 contract=-` (the engine refuses to post a note stamped for another issue or contract).\\n\\n1. Write .forge-lean/investigation.md as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):\\n**Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED\\n**Confidence**: high|medium|low\\n**Severity**: ...\\n**Task Type**: bug|feature|chore|docs\\n### What Was Claimed\\n### What We Found   (bullets with file:line, verified against the base ref)\\n### Root Cause\\n### Affected Files\\n### Sibling Sweep   (same defect class elsewhere)\\n### History   (introducing commit, prior fixes)\\n### Recommendation\\n### Related Issues\\n### Test plan   (bug issues: per deliver requirement, see the contract test_plan)\\n.forge-lean/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}\\n\\nIf the issue is already fixed or invalid, write .forge-lean/result.json {\\"status\\":\\"already-fixed|invalid\\",\\"summary\\":\\"one line\\",\\"evidence\\":[\\"file:line ...\\"]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {\\"status\\":\\"blocked\\",\\"summary\\":\\"\\",...} with a typed \\"block\\" (rules below) and stop.\\n\\n2. Otherwise write .forge-lean/contract.json, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.\\n{\\"requirements\\":[{\\"id\\":\\"R1\\",\\"quote\\":\\"<verbatim sentence or checklist item from the issue>\\",\\"disposition\\":\\"deliver|defer|post-deploy|not-applicable\\",\\"why\\":\\"<defer, post-deploy>\\",\\"bucket\\":\\"<defer, post-deploy: post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|host>\\",\\"check\\":\\"<post-deploy: id in .forge/post-deploy-checks.json>\\",\\"evidence\\":\\"<file:line, required for not-applicable>\\",\\"verify\\":\\"<optional: in_lane|out_of_band>\\"}],\\n \\"deliverables\\":[{\\"id\\":\\"D1\\",\\"path\\":\\"<file to change>\\",\\"change\\":\\"<what>\\",\\"requirements\\":[\\"R1\\"]}],\\n \\"preserve\\":[{\\"id\\":\\"P1\\",\\"what\\":\\"<caller, contract or behaviour that must not change, with its path>\\"}],\\n \\"validate\\":[{\\"id\\":\\"V1\\",\\"command\\":\\"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>\\"}],\\n \\"decisions\\":[{\\"id\\":\\"K1\\",\\"choice\\":\\"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>\\",\\"justification\\":\\"<why, with file:line>\\",\\"source\\":\\"doc|lint|precedent|spec\\"}]}\\nEvery requirement and acceptance criterion in the issue and its maintainers\' comments is one requirement, quoted verbatim (others\' comments are context, not requirements). Never drop or narrow one silently: \\"defer\\" (separate work) and \\"post-deploy\\" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one \\"bucket\\": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is \\"deliver\\". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is \\"verify\\":\\"out_of_band\\" with \\"evidence\\" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set \\"verify\\":\\"in_lane\\" when this change can check it. List every file you will change as a deliverable; tests are always allowed.\\nFirst reviews most often find defects in:\\n- requirements: One requirement per sentence or clause, each with a deliverable and a validate (omission is the top finding).\\n- deliverables: List every changed file, tests included (scope_creep flags unnamed ones).\\n- preserve: Give each preserve row a file path; it cannot be checked without one.\\nA new default-off flag or rollout key needs an activation row: defer, bucket `owner:promote:<flag>`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).\\nA [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.\\nA validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.\\nScope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.\\nA new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; \\"the lint allows it\\" or \\"there is a precedent\\" is not a reason on its own. Record each non-obvious choice in \\"decisions\\" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with \\"Build reads:\\", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.\\n\\nBlast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add `\\"regression\\":[{\\"id\\":\\"G1\\",\\"command\\":\\"\\",\\"covers\\":\\"\\"}]` (engine runs it as validate). A post-deploy row needs `local_infeasible_why` and a `check` id from .forge/post-deploy-checks.json on the base, or a deliverable adding it there. Never narrow a requirement that needs another open issue\'s code: block {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}. developing or fixing the signal is never post-deploy.\\n\\nAn added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in .forge-lean/investigation.md. No decision may swap e2e for mocked tests without a forge-probe.\\n\\n\\"blocked\\" needs a typed \\"block\\" in .forge-lean/result.json, one of:\\n- {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.\\n- {\\"kind\\":\\"split-required\\",\\"subissues\\":[{\\"title\\":\\"\\",\\"body\\":\\"\\",\\"depends_on\\":[0],\\"files\\":[\\"<path>\\"]}],\\"size\\":{\\"files\\":N,\\"lines\\":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as \\"paths\\") only when every sub-issue\'s files are disjoint from the others\' or the whole change\'s size estimate exceeds 25 files or 1500 lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, siblings editing the same hub (barrel or index export list, union type, shared fixture, index doc) get its slots pre-staged in the earliest sub-issue, which the others depend on, or their own per-feature files; the engine serialises sub-issues still sharing a file.\\n- {\\"kind\\":\\"design-invalidated\\",\\"decision\\":\\"<what no longer holds>\\",'... 2686 more characters
+      operator: 'match'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:5322:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#5752 the builder prompt carries the negative-examples rule and the mechanism supersedes amendment
+    not ok 6 - \#5752 the builder prompt carries the negative-examples rule and the mechanism supersedes amendment
+      ---
+      duration_ms: 768.2184
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:5327:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        The input did not match the regular expression /ships negative examples/. Input:
+        
+        '[["runner","builder",null,"claude-sonnet-5-5","Resolve issue #7 (read it with gh issue view 7 --comments). This first step is PLANNING ONLY: do not edit code, do not commit.\\n\\nHost rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run `node C:\\\\Users\\\\ItsMr\\\\Documents\\\\Projects\\\\ForgeDock-orch\\\\.claude\\\\worktrees\\\\lean-5752\\\\bin\\\\lean\\\\checks.mjs --base origin/<base>` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.\\nQuiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read `tail -40` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file\'s ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don\'t re-read it.\\nNever use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane\'s files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.\\nOne turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.\\n\\nStage notes: make the first line of every `.forge-lean/*.md` file you write exactly `forge-stamp: issue=7 contract=-` (the engine refuses to post a note stamped for another issue or contract).\\n\\n1. Write .forge-lean/investigation.md as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):\\n**Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED\\n**Confidence**: high|medium|low\\n**Severity**: ...\\n**Task Type**: bug|feature|chore|docs\\n### What Was Claimed\\n### What We Found   (bullets with file:line, verified against the base ref)\\n### Root Cause\\n### Affected Files\\n### Sibling Sweep   (same defect class elsewhere)\\n### History   (introducing commit, prior fixes)\\n### Recommendation\\n### Related Issues\\n### Test plan   (bug issues: per deliver requirement, see the contract test_plan)\\n.forge-lean/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}\\n\\nIf the issue is already fixed or invalid, write .forge-lean/result.json {\\"status\\":\\"already-fixed|invalid\\",\\"summary\\":\\"one line\\",\\"evidence\\":[\\"file:line ...\\"]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {\\"status\\":\\"blocked\\",\\"summary\\":\\"\\",...} with a typed \\"block\\" (rules below) and stop.\\n\\n2. Otherwise write .forge-lean/contract.json, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.\\n{\\"requirements\\":[{\\"id\\":\\"R1\\",\\"quote\\":\\"<verbatim sentence or checklist item from the issue>\\",\\"disposition\\":\\"deliver|defer|post-deploy|not-applicable\\",\\"why\\":\\"<defer, post-deploy>\\",\\"bucket\\":\\"<defer, post-deploy: post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|host>\\",\\"check\\":\\"<post-deploy: id in .forge/post-deploy-checks.json>\\",\\"evidence\\":\\"<file:line, required for not-applicable>\\",\\"verify\\":\\"<optional: in_lane|out_of_band>\\"}],\\n \\"deliverables\\":[{\\"id\\":\\"D1\\",\\"path\\":\\"<file to change>\\",\\"change\\":\\"<what>\\",\\"requirements\\":[\\"R1\\"]}],\\n \\"preserve\\":[{\\"id\\":\\"P1\\",\\"what\\":\\"<caller, contract or behaviour that must not change, with its path>\\"}],\\n \\"validate\\":[{\\"id\\":\\"V1\\",\\"command\\":\\"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>\\"}],\\n \\"decisions\\":[{\\"id\\":\\"K1\\",\\"choice\\":\\"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>\\",\\"justification\\":\\"<why, with file:line>\\",\\"source\\":\\"doc|lint|precedent|spec\\"}]}\\nEvery requirement and acceptance criterion in the issue and its maintainers\' comments is one requirement, quoted verbatim (others\' comments are context, not requirements). Never drop or narrow one silently: \\"defer\\" (separate work) and \\"post-deploy\\" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one \\"bucket\\": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is \\"deliver\\". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is \\"verify\\":\\"out_of_band\\" with \\"evidence\\" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set \\"verify\\":\\"in_lane\\" when this change can check it. List every file you will change as a deliverable; tests are always allowed.\\nFirst reviews most often find defects in:\\n- requirements: One requirement per sentence or clause, each with a deliverable and a validate (omission is the top finding).\\n- deliverables: List every changed file, tests included (scope_creep flags unnamed ones).\\n- preserve: Give each preserve row a file path; it cannot be checked without one.\\nA new default-off flag or rollout key needs an activation row: defer, bucket `owner:promote:<flag>`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).\\nA [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.\\nA validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.\\nScope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.\\nA new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; \\"the lint allows it\\" or \\"there is a precedent\\" is not a reason on its own. Record each non-obvious choice in \\"decisions\\" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with \\"Build reads:\\", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.\\n\\nBlast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add `\\"regression\\":[{\\"id\\":\\"G1\\",\\"command\\":\\"\\",\\"covers\\":\\"\\"}]` (engine runs it as validate). A post-deploy row needs `local_infeasible_why` and a `check` id from .forge/post-deploy-checks.json on the base, or a deliverable adding it there. Never narrow a requirement that needs another open issue\'s code: block {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}. developing or fixing the signal is never post-deploy.\\n\\nAn added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in .forge-lean/investigation.md. No decision may swap e2e for mocked tests without a forge-probe.\\n\\n\\"blocked\\" needs a typed \\"block\\" in .forge-lean/result.json, one of:\\n- {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.\\n- {\\"kind\\":\\"split-required\\",\\"subissues\\":[{\\"title\\":\\"\\",\\"body\\":\\"\\",\\"depends_on\\":[0],\\"files\\":[\\"<path>\\"]}],\\"size\\":{\\"files\\":N,\\"lines\\":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as \\"paths\\") only when every sub-issue\'s files are disjoint from the others\' or the whole change\'s size estimate exceeds 25 files or 1500 lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, siblings editing the same hub (barrel or index export list, union type, shared fixture, index doc) get its slots pre-staged in the earliest sub-issue, which the others depend on, or their own per-feature files; the engine serialises sub-issues still sharing a file.\\n- {\\"kind\\":\\"design-invalidated\\",\\"decision\\":\\"<what no longer holds>\\",'... 2686 more characters
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected:
+      actual: '[["runner","builder",null,"claude-sonnet-5-5","Resolve issue #7 (read it with gh issue view 7 --comments). This first step is PLANNING ONLY: do not edit code, do not commit.\\n\\nHost rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run `node C:\\\\Users\\\\ItsMr\\\\Documents\\\\Projects\\\\ForgeDock-orch\\\\.claude\\\\worktrees\\\\lean-5752\\\\bin\\\\lean\\\\checks.mjs --base origin/<base>` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.\\nQuiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read `tail -40` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file\'s ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don\'t re-read it.\\nNever use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane\'s files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.\\nOne turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.\\n\\nStage notes: make the first line of every `.forge-lean/*.md` file you write exactly `forge-stamp: issue=7 contract=-` (the engine refuses to post a note stamped for another issue or contract).\\n\\n1. Write .forge-lean/investigation.md as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):\\n**Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED\\n**Confidence**: high|medium|low\\n**Severity**: ...\\n**Task Type**: bug|feature|chore|docs\\n### What Was Claimed\\n### What We Found   (bullets with file:line, verified against the base ref)\\n### Root Cause\\n### Affected Files\\n### Sibling Sweep   (same defect class elsewhere)\\n### History   (introducing commit, prior fixes)\\n### Recommendation\\n### Related Issues\\n### Test plan   (bug issues: per deliver requirement, see the contract test_plan)\\n.forge-lean/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}\\n\\nIf the issue is already fixed or invalid, write .forge-lean/result.json {\\"status\\":\\"already-fixed|invalid\\",\\"summary\\":\\"one line\\",\\"evidence\\":[\\"file:line ...\\"]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {\\"status\\":\\"blocked\\",\\"summary\\":\\"\\",...} with a typed \\"block\\" (rules below) and stop.\\n\\n2. Otherwise write .forge-lean/contract.json, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.\\n{\\"requirements\\":[{\\"id\\":\\"R1\\",\\"quote\\":\\"<verbatim sentence or checklist item from the issue>\\",\\"disposition\\":\\"deliver|defer|post-deploy|not-applicable\\",\\"why\\":\\"<defer, post-deploy>\\",\\"bucket\\":\\"<defer, post-deploy: post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|host>\\",\\"check\\":\\"<post-deploy: id in .forge/post-deploy-checks.json>\\",\\"evidence\\":\\"<file:line, required for not-applicable>\\",\\"verify\\":\\"<optional: in_lane|out_of_band>\\"}],\\n \\"deliverables\\":[{\\"id\\":\\"D1\\",\\"path\\":\\"<file to change>\\",\\"change\\":\\"<what>\\",\\"requirements\\":[\\"R1\\"]}],\\n \\"preserve\\":[{\\"id\\":\\"P1\\",\\"what\\":\\"<caller, contract or behaviour that must not change, with its path>\\"}],\\n \\"validate\\":[{\\"id\\":\\"V1\\",\\"command\\":\\"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>\\"}],\\n \\"decisions\\":[{\\"id\\":\\"K1\\",\\"choice\\":\\"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>\\",\\"justification\\":\\"<why, with file:line>\\",\\"source\\":\\"doc|lint|precedent|spec\\"}]}\\nEvery requirement and acceptance criterion in the issue and its maintainers\' comments is one requirement, quoted verbatim (others\' comments are context, not requirements). Never drop or narrow one silently: \\"defer\\" (separate work) and \\"post-deploy\\" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine into an aggregate. Every defer or post-deploy row has one \\"bucket\\": post-deploy (needs a release), verify-now (parent already on the default branch), date:YYYY-MM-DD (absolute, never a relative wait), owner:<action> (only credentials, spend, an account, a third party, a customer; defer, never post-deploy) or host (read-only prod data: obs-psql, *-monitor). In-repo work: deliver or block split-required. A post-promotion check without a check id is post-deploy. One sentence is one row. An outcome criterion this change can ship as a test, metric or alert is \\"deliver\\". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is \\"verify\\":\\"out_of_band\\" with \\"evidence\\" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set \\"verify\\":\\"in_lane\\" when this change can check it. List every file you will change as a deliverable; tests are always allowed.\\nFirst reviews most often find defects in:\\n- requirements: One requirement per sentence or clause, each with a deliverable and a validate (omission is the top finding).\\n- deliverables: List every changed file, tests included (scope_creep flags unnamed ones).\\n- preserve: Give each preserve row a file path; it cannot be checked without one.\\nA new default-off flag or rollout key needs an activation row: defer, bucket `owner:promote:<flag>`, why = first cohort, guard metrics, shadow evidence (an AC naming shadow/cohort/treated fails if it ships off).\\nA [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.\\nA validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.\\nScope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.\\nA new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; \\"the lint allows it\\" or \\"there is a precedent\\" is not a reason on its own. Record each non-obvious choice in \\"decisions\\" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop. Finish your reply with \\"Build reads:\\", the files (with line ranges) and searches the build needs; the build opens by issuing them all in one turn.\\n\\nBlast radius: list neighbours (callers, shared modules, sibling configs) from the code graph; add `\\"regression\\":[{\\"id\\":\\"G1\\",\\"command\\":\\"\\",\\"covers\\":\\"\\"}]` (engine runs it as validate). A post-deploy row needs `local_infeasible_why` and a `check` id from .forge/post-deploy-checks.json on the base, or a deliverable adding it there. Never narrow a requirement that needs another open issue\'s code: block {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}. developing or fixing the signal is never post-deploy.\\n\\nAn added route needs its production ingress rule, and a touched topology.prod_parity surface its check or parity entry, cited in .forge-lean/investigation.md. No decision may swap e2e for mocked tests without a forge-probe.\\n\\n\\"blocked\\" needs a typed \\"block\\" in .forge-lean/result.json, one of:\\n- {\\"kind\\":\\"dependency\\",\\"issues\\":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.\\n- {\\"kind\\":\\"split-required\\",\\"subissues\\":[{\\"title\\":\\"\\",\\"body\\":\\"\\",\\"depends_on\\":[0],\\"files\\":[\\"<path>\\"]}],\\"size\\":{\\"files\\":N,\\"lines\\":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as \\"paths\\") only when every sub-issue\'s files are disjoint from the others\' or the whole change\'s size estimate exceeds 25 files or 1500 lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, siblings editing the same hub (barrel or index export list, union type, shared fixture, index doc) get its slots pre-staged in the earliest sub-issue, which the others depend on, or their own per-feature files; the engine serialises sub-issues still sharing a file.\\n- {\\"kind\\":\\"design-invalidated\\",\\"decision\\":\\"<what no longer holds>\\",'... 2686 more characters
+      operator: 'match'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:5331:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#4899 amendment state round-trips; precheck still enforces a guard that was not superseded
+    ok 7 - \#4899 amendment state round-trips; precheck still enforces a guard that was not superseded
+      ---
+      duration_ms: 4.897
+      type: 'test'
+      ...
+    1..7
+not ok 6 - batch robustness (\#4112-\#4115)
+  ---
+  duration_ms: 21045.9972
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:4431:1'
+  failureType: 'subtestsFailed'
+  error: '5 subtests failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: verify-by-CI (\#4167): ci mode runs the heavy checks on CI and feeds failures to the builder
+    # Subtest: without the fix, a validate id left to CI is missing under enforce (the regression this guards)
+    ok 1 - without the fix, a validate id left to CI is missing under enforce (the regression this guards)
+      ---
+      duration_ms: 1119.0267
+      type: 'test'
+      ...
+    1..1
+ok 7 - verify-by-CI (\#4167): ci mode runs the heavy checks on CI and feeds failures to the builder
+  ---
+  duration_ms: 1119.857
+  type: 'suite'
+  ...
+# Subtest: shared dependency cache wiring (\#4220)
+    # Subtest: \#4220 a prepare that throws or fails, or an env() that throws, never changes the outcome; no io.deps is the old behaviour
+    not ok 1 - \#4220 a prepare that throws or fails, or an env() that throws, never changes the outcome; no io.deps is the old behaviour
+      ---
+      duration_ms: 1255.5282
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6240:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        {"prepareThrows":true}
+        + actual - expected
+        
+        + 'needs-human'
+        - 'merged'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'merged'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:6244:14)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 4)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..1
+not ok 8 - shared dependency cache wiring (\#4220)
+  ---
+  duration_ms: 1256.2974
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6173:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: local-mode CI fix rounds at merge and declared pre-PR check commands (\#4240)
+    # Subtest: \#5239 a guard failing only on the lane tree blocks the merge (ci.red), never merges
+    not ok 1 - \#5239 a guard failing only on the lane tree blocks the merge (ci.red), never merges
+      ---
+      duration_ms: 649.2497
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6483:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'contract.invalid'
+        - 'ci.red'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'ci.red'
+      actual: 'contract.invalid'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:6487:59)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 12)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#5239 a guard that also fails on the base defers the lane (base.red), comments on the introducing issue, no needs-human
+    not ok 2 - \#5239 a guard that also fails on the base defers the lane (base.red), comments on the introducing issue, no needs-human
+      ---
+      duration_ms: 557.5185
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6492:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'needs-human'
+        - 'deferred'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'deferred'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:6502:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: \#5239 verify.guard_block false keeps a failing invariant advisory
+    ok 3 - \#5239 verify.guard_block false keeps a failing invariant advisory
+      ---
+      duration_ms: 360.8355
+      type: 'test'
+      ...
+    1..3
+not ok 9 - local-mode CI fix rounds at merge and declared pre-PR check commands (\#4240)
+  ---
+  duration_ms: 1568.7664
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6348:1'
+  failureType: 'subtestsFailed'
+  error: '2 subtests failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: verify.check_run: forgedock/verify check run (\#4270)
+    # Subtest: reports failure iff an existing gate failed (shadow scope creep), without changing the lane outcome
+    not ok 1 - reports failure iff an existing gate failed (shadow scope creep), without changing the lane outcome
+      ---
+      duration_ms: 1065.3219
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6926:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        
+        0 !== 1
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 1
+      actual: 0
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:6931:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 1)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..1
+not ok 10 - verify.check_run: forgedock/verify check run (\#4270)
+  ---
+  duration_ms: 1066.0517
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6896:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: context pack modes (forge\#4275)
+    # Subtest: write-back: the terminal FORGE:STATE carries the typed outcome code and failure classes the compiler reads
+    not ok 1 - write-back: the terminal FORGE:STATE carries the typed outcome code and failure classes the compiler reads
+      ---
+      duration_ms: 453.9593
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:7069:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly deep-equal:
+        + actual - expected
+        
+          [
+            true,
+            'needs-human',
+        +   'contract.invalid',
+        +   []
+        -   'conformance.unimplemented',
+        -   [
+        -     'conformance.unimplemented'
+        -   ]
+          ]
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected:
+        0: true
+        1: 'needs-human'
+        2: 'conformance.unimplemented'
+        3:
+          0: 'conformance.unimplemented'
+      actual:
+        0: true
+        1: 'needs-human'
+        2: 'contract.invalid'
+        3:
+      operator: 'deepStrictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:7075:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 6)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..1
+not ok 11 - context pack modes (forge\#4275)
+  ---
+  duration_ms: 454.7269
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:6993:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: \#5237 relaxation gate
+    # Subtest: relaxation without a negative test blocks (relaxation_untested) in a risk path
+    not ok 1 - relaxation without a negative test blocks (relaxation_untested) in a risk path
+      ---
+      duration_ms: 977.5108
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:8875:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'contract.invalid'
+        - 'conformance.unimplemented'
+              ^
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'conformance.unimplemented'
+      actual: 'contract.invalid'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:8878:46)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Promise.all (index 0)
+        async Suite.run (node:internal/test_runner/test:1442:7)
+        async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    # Subtest: a negative test lets it through, and the verifier runs even with review.verifier off, fed the hunk
+    not ok 2 - a negative test lets it through, and the verifier runs even with review.verifier off, fed the hunk
+      ---
+      duration_ms: 1257.7872
+      type: 'test'
+      location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:8880:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + 'needs-human'
+        - 'merged'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'merged'
+      actual: 'needs-human'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (file:///C:/Users/ItsMr/Documents/Projects/ForgeDock-orch/.claude/worktrees/lean-5752/bin/lean/lean.test.mjs:8884:12)
+        async Test.run (node:internal/test_runner/test:1054:7)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..2
+not ok 12 - \#5237 relaxation gate
+  ---
+  duration_ms: 2236.0663
+  type: 'suite'
+  location: 'C:\\Users\\ItsMr\\Documents\\Projects\\ForgeDock-orch\\.claude\\worktrees\\lean-5752\\bin\\lean\\lean.test.mjs:8863:1'
+  failureType: 'subtestsFailed'
+  error: '2 subtests failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+1..12
+# tests 21
+# suites 12
+# pass 6
+# fail 15
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 32250.9466
