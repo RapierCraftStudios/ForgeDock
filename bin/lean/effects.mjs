@@ -30,6 +30,7 @@ import { parseVersioned } from "./seqversioned.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
+import { verifyLaneWorktree, quarantineDir } from "./laneconfine.mjs";
 
 /** #5531: children started by this process's gh/script helpers still running; the schedd kills them on close so none outlives the daemon. */
 const liveChildren = new Set();
@@ -664,6 +665,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
       }
     },
+    /** #5825: is the lane folder a worktree of this repo (toplevel + common dir), and moving aside a folder that is not. */
+    confine: { verify: ({ wt, cwd }) => verifyLaneWorktree({ git: run("git"), exists: async (p) => existsSync(p), wt, cwd }), quarantine: async ({ wt }) => quarantineDir(wt) },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */
     proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },
     fs: {
