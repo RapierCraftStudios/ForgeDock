@@ -1,6 +1,6 @@
 # forgedock-splash
 
-A startup splash for ForgeDock users in Claude Code. When an interactive terminal session starts, the row above the prompt plays a short (about 6.5 s) scene: the ForgeDock "F" mark is forged white-hot and cools to chrome, Clawd walks in under the top bar, jumps and bonks it, sparks fly and a shine ring crosses the mark, the `F O R G E D O C K` wordmark types in, and it settles on `» supercharged` before the row clears.
+A startup splash for ForgeDock users in Claude Code. When an interactive terminal session starts, the row above the prompt plays a short (about 6.5 s) scene: the ForgeDock "F" mark is forged white-hot with flames licking up its edges, steam puffs off as it cools to beveled, brushed chrome with a faint ember glow, Clawd trots in, spots the bar (`!`), jumps and bonks it, sparks fly and a shine ring crosses the mark, Clawd wobbles dizzy, cheers with floating hearts, the `F O R G E D O C K` wordmark types in, and it settles on `» supercharged` with Clawd waving before the row clears. `npx forgedock` opens with the same scene.
 
 It changes nothing else: no commands, prompts, tools or settings.
 
