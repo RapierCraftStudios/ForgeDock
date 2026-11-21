@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { orchestrate, failureSignature } from "./orchestrate.mjs";
+import { orchestrate, failureSignature, formatTable } from "./orchestrate.mjs";
 import { envFingerprint } from "./batch.mjs";
 import { hostMissingTools } from "./toolplace.mjs";
 
@@ -54,8 +54,9 @@ describe("#5805 engine-error signatures", () => {
       assert.equal(r.byIssue[n].envHold.kind, "engine");
       assert.equal(r.byIssue[n].envHold.version, "1.0.0");
       assert.match(r.byIssue[n].detail, /^waiting on engine\/env change: .*re-admitted on an engine upgrade/);
-      assert.match(r.byIssue[n].detail, /no engine\/env change within/, "the hold window ended the batch, the row stays held (resumable)");
+      assert.match(r.byIssue[n].detail.split("\n")[0], /no engine\/env change within/, "the hold window ended the batch, the row stays held (resumable)");
     }
+    assert.match(formatTable(r.rows).split("\n")[2], /^#1 +held \(waiting on engine\/env change: .*\) +- /, "one report line per row");
     assert.ok(r.decisions.some((d) => d.issue === 1 && /^held: waiting on engine\/env change/.test(d.what)));
   });
 

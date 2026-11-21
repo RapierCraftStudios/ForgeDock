@@ -1507,7 +1507,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (why) { engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
       if (now() - (Number(h.since) || 0) >= ehMaxMs && !/no engine\/env change within/.test(r.detail ?? "")) { // the wait is over: the row stays held (resumable, --requeue), the batch may end
         const { waiting, ...rest } = r;
-        results.set(n, { ...rest, detail: `${rest.detail}\nno engine/env change within ${Math.round(ehMaxMs / 3600_000 * 10) / 10}h; forgedock orchestrate --requeue retries it` });
+        const [head, ...tail] = String(rest.detail ?? "").split("\n");
+        results.set(n, { ...rest, detail: [`${head}; no engine/env change within ${Math.round(ehMaxMs / 3600_000 * 10) / 10}h (forgedock orchestrate --requeue retries it)`, ...tail].join("\n") });
         save(); update(results.get(n));
       }
     }
@@ -1856,7 +1857,7 @@ export function formatTable(rows) {
   // #4255: sandbox minutes and cost next to the token cost, only when some lane ran in a sandbox.
   const sbx = rows.some((r) => r?.sandbox);
   const head = ["issue", "outcome", "PR", "cost", ...(sbx ? ["sbx-min", "sbx-$"] : []), "min"];
-  const body = rows.map((r) => [`#${r.issue}`, r.quota?.resumeAt && ["held", "paused"].includes(r.outcome) ? `paused (quota) until ${r.quota.resumeAt}` : (r.waiting && /^dependency #(\d+) /.test(r.detail ?? "") ? `waiting on #${/^dependency #(\d+) /.exec(r.detail)[1]}` : r.outcome) + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
+  const body = rows.map((r) => [`#${r.issue}`, r.quota?.resumeAt && ["held", "paused"].includes(r.outcome) ? `paused (quota) until ${r.quota.resumeAt}` : (r.waiting && /^dependency #(\d+) /.test(r.detail ?? "") ? `waiting on #${/^dependency #(\d+) /.exec(r.detail)[1]}` : r.outcome) + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${String(r.detail).split("\n")[0]})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
     ...(sbx ? (r.sandbox ? [(Number(r.sandbox.minutes) || 0).toFixed(1), `$${(Number(r.sandbox.cost_usd) || 0).toFixed(2)}`] : ["-", "-"]) : []), String(r.minutes ?? 0)]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();
