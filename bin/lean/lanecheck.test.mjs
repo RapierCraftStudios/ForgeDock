@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availableFields, runLaneChecks, formatLaneChecks, UPGRADE_COMMAND } from "./lanecheck.mjs";
+import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availableFields, runLaneChecks, formatLaneChecks, UPGRADE_COMMAND, probeBatchEnv } from "./lanecheck.mjs";
+import { which } from "./toolchain.mjs";
 import { findShimLoops, heavyShimScript } from "./heavy.mjs";
 import { orchestrate, deferPolicy } from "./orchestrate.mjs";
 import { providerLanes, isCloneFailure } from "./execution.mjs";
@@ -101,6 +102,34 @@ describe("gh_fields", () => {
   it("parses the available list and passes on unparseable output", async () => {
     assert.deepEqual(availableFields("Available fields:\n  a\n  b\n"), ["a", "b"]);
     assert.equal((await checkGhFields({ exec: async () => ({ stdout: "gh version 2.1.0\n", stderr: "boom" }) })).ok, true);
+  });
+});
+
+describe("#5806 batch env probe", () => {
+  const exe = (dir, name) => { mkdirSync(dir, { recursive: true }); const p = join(dir, name); writeFileSync(p, "#!/bin/sh\n"); chmodSync(p, 0o755); return p; };
+
+  it("resolves gh, git and node on the env's own PATH (no shell); a PATH reduced to one bogus entry names every missing tool", () => {
+    const d = tmpDir("envprobe-"), bin = join(d, "bin");
+    const names = process.platform === "win32" ? ["gh.exe", "git.exe", "node.cmd"] : ["gh", "git", "node"];
+    for (const n of names) exe(bin, n);
+    const ok = probeBatchEnv({ PATH: bin, PATHEXT: ".EXE;.CMD" });
+    assert.deepEqual([ok.ok, ok.missing], [true, []]);
+    const bad = probeBatchEnv({ PATH: join(d, "bogus") });
+    assert.deepEqual([bad.ok, bad.missing], [false, ["gh", "git", "node"]]);
+    assert.match(bad.detail, /^gh, git, node not resolvable on the batch env PATH \(1 entry: /);
+    assert.match(probeBatchEnv({}).detail, /\(empty\)$/);
+  });
+
+  it("win32: `;`-separated PATH and PATHEXT extensions (.exe/.cmd); an extensionless file does not count", () => {
+    const files = new Set(["C:\\tools\\gh.exe", "D:\\git\\cmd\\git.cmd", "D:\\node\\node"]);
+    const access = (p) => { if (!files.has(p)) throw new Error("ENOENT"); };
+    const path = "C:\\tools;D:\\git\\cmd;D:\\node";
+    assert.equal(which("gh", path, [], { platform: "win32", pathext: ".COM;.EXE;.BAT;.CMD", access }), "C:\\tools\\gh.exe");
+    assert.equal(which("git", path, [], { platform: "win32", pathext: ".COM;.EXE;.BAT;.CMD", access }), "D:\\git\\cmd\\git.cmd");
+    const r = probeBatchEnv({ PATH: path, PATHEXT: ".EXE;.CMD" }, { platform: "win32", access });
+    assert.deepEqual(r.missing, ["node"], "D:\\node\\node has no PATHEXT extension");
+    assert.match(r.detail, /3 entries: C:\\tools;D:\\git\\cmd;D:\\node/);
+    assert.equal(probeBatchEnv({ Path: path }, { platform: "win32", access, tools: ["gh"] }).ok, true, "Windows' `Path` spelling");
   });
 });
 

@@ -3039,9 +3039,15 @@ forge.yaml `topology.prod_parity` (block map `{path glob: command | "note: how t
 
 The schedd (`bin/lean/schedd.mjs`, `watchBatches`, every `FORGEDOCK_SCHEDD_STALL_CHECK_MS`, default 60s) polls every
 daemon batch with `evaluateDispatchStall` (`batch-health.mjs`): ready pending issues (not held, no future retry-at,
-in-batch dependencies ended well), a free lane and no progress for `FORGEDOCK_SCHEDD_STALL_MIN` (default 10) minutes.
-An unhosted batch is re-hosted (`--resume`, once per ready set); a hosted-but-silent one, or a re-host that did not
-help, records one needs-you item in `health.json` (`stall`, `alertedAt`; shown by `forgedock status` and `sched show`).
+in-batch dependencies ended well), a free lane and no progress for `FORGEDOCK_SCHEDD_STALL_MIN` (default 3, #5806)
+minutes; a batch stuck in `phase: setup` counts too. `decideStallAction` (#5806) first probes the batch's pinned env
+(`lanecheck.mjs` `probeBatchEnv`: `gh`, `git`, `node` on its PATH, win32 PATHEXT aware): a broken env alerts at once.
+Otherwise the first stall of a ready set is recovered once: an unhosted batch is re-hosted (`--resume`), a hosted one
+whose runner is wedged restarts the daemon through the #5204 handover; both write `health.json` `stallRecovery` and a
+`FORGE:DECISION ... stall-recovery` line in `batch.log`. The same stall again (or a 4th recovery) records one needs-you
+item in `health.json` (`stall`, `alertedAt`, `probed:` cause; shown by `forgedock status` and `sched show`).
+`runBatch` refuses a create or resume whose pinned PATH fails the same probe, and `forgedock schedd watchdog` starts a
+down daemon while daemon batches are unfinished.
 Cancelled, reported and tripped-breaker batches are skipped. Every daemon batch also gets `first-hour.json` and a line in
 `batch.log` once (at T+60 or when it ends): dispatched / running / merged / stuck and why; `sched show` prints the summary.
 `--add` / `--requeue` exit non-zero (`batch.not-hosted`) when no schedd hosts the batch after queueing; `--resume <id> N...`

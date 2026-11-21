@@ -9,7 +9,7 @@
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, delimiter, resolve, dirname, isAbsolute } from "node:path";
+import { join, delimiter, resolve, dirname, isAbsolute, extname, posix, win32 } from "node:path";
 
 const PMS = ["pnpm", "yarn", "npm"];
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -131,13 +131,23 @@ export function nodeWarning(pin, hostVersion = process.version) {
   return `host node ${hostVersion} does not satisfy the ${pin.source} pin "${pin.spec}"; installs, builds and tests may behave differently from the repo's CI`;
 }
 
-/** First executable `name` on `pathStr`, skipping `exclude` dirs (the shim dir itself, so a shim never calls itself). */
-export function which(name, pathStr = process.env.PATH ?? "", exclude = []) {
+/**
+ * First executable `name` on `pathStr`, skipping `exclude` dirs (the shim dir itself, so a shim never calls itself). No shell.
+ * #5806: `platform` picks the PATH separator (`;` on win32); with `pathext` (a `PATHEXT` value) on win32, a name without an
+ * extension matches only `name` + one of its extensions (`.exe`, `.cmd`, ...), as Windows resolves a command. Without
+ * `pathext` the lookup is the exact name, as before.
+ */
+export function which(name, pathStr = process.env.PATH ?? "", exclude = [], { platform = process.platform, pathext = null, access = (p) => accessSync(p, constants.X_OK) } = {}) {
+  const win = platform === "win32", native = platform === process.platform;
+  const sep = win ? ";" : native ? delimiter : ":", pj = win ? win32.join : native ? join : posix.join;
   const skip = new Set(exclude.map((d) => resolve(d)));
-  for (const d of String(pathStr).split(delimiter)) {
+  const exts = win && pathext != null && !extname(name) ? String(pathext || ".COM;.EXE;.BAT;.CMD").split(";").map((e) => e.trim().toLowerCase()).filter(Boolean) : [""];
+  for (const d of String(pathStr).split(sep)) {
     if (!d || skip.has(resolve(d))) continue;
-    const p = join(d, name);
-    try { accessSync(p, constants.X_OK); return p; } catch { /* next */ }
+    for (const e of exts) {
+      const p = pj(d, name + e);
+      try { access(p); return p; } catch { /* next */ }
+    }
   }
   return null;
 }

@@ -44,6 +44,19 @@ describe("schedd heartbeat and watchdog (#4780)", () => {
     assert.deepEqual(sent, [[42, "SIGTERM"], [42, "SIGKILL"]]);
   });
 
+  it("#5806: a down daemon with unfinished daemon batches is started once per watchdog run; with none it is left down", async () => {
+    const dir = tmpDir("hb-"), lines = [];
+    let starts = 0;
+    const run = (unfinished, start = async () => { starts++; }) => watchdog({ dir, now: () => 0, alive: () => false, unfinished, start, log: (m) => lines.push(m) });
+    assert.equal((await run(() => [])).started, undefined);
+    assert.equal(starts, 0);
+    const r = await run(() => ["b1", "b2"]);
+    assert.deepEqual([r.status, r.started, starts], ["down", true, 1]);
+    assert.match(lines.join("\n"), /FORGE:DECISION daemon down with 2 unfinished batch\(es\) \(b1 b2\); starting it/);
+    assert.equal((await run(() => ["b1"], async () => { throw new Error("no unit"); })).started, false);
+    assert.match(lines.at(-1), /start failed: no unit/);
+  });
+
   it("bestEffortRenice never throws", () => {
     assert.equal(bestEffortRenice(() => { throw new Error("EACCES"); }), false);
     assert.equal(bestEffortRenice(() => {}), true);
