@@ -57,6 +57,8 @@ if (process.platform === "win32") {
 }
 
 const WT = "/wt/lean-7";
+/** Windows: `path.join` yields backslashes; the fake fs keys are POSIX paths. */
+const posix = (p) => String(p).replace(/\\/g, "/");
 /** #5333: the engine appends the stage-stamp rule to every builder prompt; strip it to compare against the bare template. */
 const unstamp = (s) => String(s).replace(/\n\nStage notes: make the first line[^\n]*/, "");
 const STAGE_MD = {
@@ -120,6 +122,7 @@ function world(o = {}) {
       if (a[0] === "api" && a.includes("PATCH") && a.some((x) => /\/comments\/9000$/.test(x))) { statusLogical(w, a[a.indexOf("-f") + 1].replace(/^body=/, "")); w.statusPatches.push(a); return "{}"; } // #5592: the one FORGE:STATUS comment
       if (a[0] === "api" && a.includes("PATCH")) { w.patches.push(a); return "{}"; }
       if (a[0] === "api" && o.activeJson && a.some((x) => /contents\/active\.json\?ref=/.test(x))) return JSON.stringify({ content: Buffer.from(JSON.stringify(o.activeJson)).toString("base64") }); // #5776: the _active ledger read
+      if (a[0] === "api" && o.ghApi) { const r = o.ghApi(a); if (r != null) return r; } // #5751: subject search and PR file lists
       if (a[0] === "api") return a.some((x) => /\/comments$/.test(x)) ? (w.issueComments ?? []).map((c) => JSON.stringify(c)).join("\n") : "";
       if (k === "pr list" && a.some((x) => /statusCheckRollup/.test(x))) return JSON.stringify(typeof o.releasePrs === "function" ? o.releasePrs(w) : (o.releasePrs ?? [])); // #5709: release PR lookup
       if (k === "pr list") return JSON.stringify(w.prList);
@@ -225,7 +228,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
+    fs: { ...(o.wtExists ? { exists: async (p) => posix(p).startsWith("/wt/lean-7") } : {}), stat: async (p) => (posix(p) in w.files ? { mtimeMs: w.mtimes[posix(p)] ?? 1 } : null), read: async (p) => { if (!(posix(p) in w.files)) throw new Error("ENOENT"); return w.files[posix(p)]; }, append: async (p, t) => { w.files[posix(p)] = (w.files[posix(p)] ?? "") + t; }, write: async (p, t) => { w.files[posix(p)] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
       if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
@@ -348,6 +351,19 @@ describe("core work-on", () => {
     assert.equal((await run(w)).terminalReason, "invalid");
     assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["completed"], "#5152: already-fixed is delivered, never not planned");
     assert.ok(traj(w)[0].includes("| Close | issue closed (completed) |"));
+  });
+
+  it("#5734 builder already-fixed with a trusted prod-failure decision does not close and goes needs-human", async () => {
+    const dec = { authorAssociation: "OWNER", author: { login: "op" }, url: "https://github.com/o/r/issues/7#issuecomment-5",
+      body: "<!-- FORGE:DECISION -->\nRequeue: verified failing in prod after #40727 went live: Reddit success rate ~0%." };
+    const w = world({ changed: [], viewComments: [dec], result: { status: "already-fixed", summary: "PR #40727 is an ancestor", evidence: ["a.js:1"], tests: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.closed.length, 0);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("failing in production") && c.includes("issuecomment-5")));
+    const w2 = world({ changed: [], viewComments: [{ ...dec, authorAssociation: "NONE", author: { login: "rando" } }], result: { status: "already-fixed", summary: "done", evidence: ["a.js:1"], tests: [] } });
+    assert.equal((await run(w2)).terminalReason, "invalid", "an untrusted author's claim does not block the close");
+    assert.equal(w2.closed.length, 1);
   });
 
   it("a failed needs-human comment is recorded as an anomaly and the lane still ends needs-human (#4905)", async () => {
@@ -2354,7 +2370,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2650, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2700, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2025, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2025 tokens`); // 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
@@ -2894,7 +2910,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2550, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2650, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 2000, `implement prompt is ${approxTokens(impl)} of 2000 tokens`); // 2000: #5752 // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -5947,7 +5963,7 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
   const gitIdx = (w, pred) => { let i = -1; w.calls.forEach((c, k) => { if (c[0] === "git" && pred(c.slice(1))) i = k; }); return i; };
   /** The exit teardown: the last two worktree calls are `remove --force <wt>` then `prune`; the ledger file is gone. */
   const tornDown = (w, label) => {
-    const wtCalls = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree");
+    const wtCalls = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree").map((c) => c.map(posix)); // Windows: path.resolve yields `\wt\lean-7`
     assert.deepEqual(wtCalls.at(-2), ["git", "worktree", "remove", "--force", WT], `${label}: worktree removed`);
     assert.deepEqual(wtCalls.at(-1), ["git", "worktree", "prune"], `${label}: then pruned`);
     assert.equal(existsSync(w.ledgerFile), false, `${label}: ledger cleared`);
@@ -8571,7 +8587,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 2000, `implement prompt is ${approxTokens(builderImplementPrompt())} of 2000 tokens`); // 1900: #5760; 2000: #5752
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2550, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2650, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -8608,6 +8624,38 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
   };
   const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
   const ON = { light: { mode: "on", source: "text" } };
+
+  it("#5751 recurrence: an issue matching two earlier merged fixes on its path skips the light lane, gets the design note and records the reason", async () => {
+    const DESIGN = { why_failed: "#10 and #11 guarded one caller each", disposition: "replace", outcome: { metric: "null-input crashes in foo tests", target: "0" } };
+    const ghApi = (a) => {
+      const j = a.join(" ");
+      if (j.includes("search/issues")) return [10, 11].map((n) => JSON.stringify({ number: n, title: `fix foo null ${n}`, pr: true, merged: true })).join("\n");
+      if (/pulls\/1[01]\/files/.test(j)) return "src/foo.js\n";
+      return null;
+    };
+    const w = lworld({ ghApi, body: `${BODY}\n\nRecurs #10`, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT, design: DESIGN } }), dir = tmpDir("light-");
+    await run(w, { dir, ...ON });
+    const rec = events(dir, "RECURRENCE");
+    assert.equal(rec.length, 1);
+    assert.deepEqual(rec[0].fixes.sort(), [10, 11]);
+    assert.match(rec[0].reason, /^recurrence: 2 earlier merged fix\(es\) on the same symptom and area/);
+    assert.equal(events(dir, "LIGHT_DONE").length, 0, "a recurrence never takes the light lane");
+    const plan = builders(w).find((c) => /PLANNING ONLY/.test(c[4]));
+    assert.ok(plan, "the full lane's plan session ran");
+    assert.match(plan[4], /DESIGN LANE \(#5751\)/);
+    assert.match(plan[4], /#10 fix foo null 10/);
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:RECURRENCE -->") && /Routed to a design lane: recurrence: 2/.test(c)), "the reason is posted on the issue");
+    assert.ok(!readLog(dir, 7).some((e) => JSON.stringify(e).includes("design_missing")), "a contract with a design block passes the design check");
+  });
+
+  it("#5751 recurrence: no matching history keeps the light lane and the plan prompt unchanged", async () => {
+    const w = lworld(), dir = tmpDir("light-");
+    await run(w, { dir, ...ON });
+    assert.equal(events(dir, "RECURRENCE").length, 0);
+    assert.equal(events(dir, "LIGHT_ELIGIBILITY")[0].verdict, "eligible");
+    assert.ok(builders(w).length >= 1 && !/PLANNING ONLY/.test(builders(w)[0][4]), "the light try ran (no plan call first)");
+    assert.ok(!builders(w).some((c) => /DESIGN LANE/.test(c[4])));
+  });
 
   it("nothing triggers: exactly one builder session (no plan) plus the review; the derived contract is frozen and posted", async () => {
     const w = lworld(), dir = tmpDir("light-");

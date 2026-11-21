@@ -37,6 +37,8 @@ import { CHECK_ID_RE, e2eCheckFor } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches, parseRequirementDecision } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
+import { counterGrowth } from "./hotarea.mjs"; // #5751
+import { designContractFailures } from "./recurrence.mjs"; // #5751
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -1126,7 +1128,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, outcomeEvidenceFailures = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, counters = null, recurrence = null, outcomeEvidenceFailures = null }) {
   const failures = [], superseded = [], ciCovered = [], equivalent = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1198,6 +1200,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   for (const f of baselineFailures ?? []) failures.push({ code: C.CONFORMANCE_REGRESSION, ...f }); // #5448
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
+  failures.push(...counterGrowth({ before: counters?.before, after: counters?.after, contract, result })); // #5751: forge.yaml recurrence.counters, measured at base and lane head
+  failures.push(...designContractFailures(contract, recurrence)); // #5751: a recurring issue's design lane contract
   if (repro) failures.push(...reproFailures(contract, repro), ...reproQualityFailures(repro));
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
