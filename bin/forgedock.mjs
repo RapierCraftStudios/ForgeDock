@@ -95,6 +95,7 @@ import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import { runConfigCommand } from "./config-history.mjs";
 import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
+import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome, readUserForgeHomeWin, clearUserForgeHomeWin } from "./forge-home-check.mjs";
 import { applyAuthEnv, startAuthRefresh, doctorAppAuth, AUTH_REFRESH_COMMANDS } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
@@ -1434,6 +1435,17 @@ async function uninstall() {
       console.log(
         `  ${YELLOW}⚠${RESET}  Could not update ~/${profileName} — remove the FORGE_HOME export manually.`,
       );
+    }
+  }
+  // Windows keeps FORGE_HOME in the user environment, which the profile cleanup above never sees (#5796).
+  if (process.platform === "win32") {
+    const userValue = readUserForgeHomeWin();
+    if (!userValue) {
+      console.log(`  ✔  No FORGE_HOME in the Windows user environment — nothing to remove`);
+    } else if (clearUserForgeHomeWin()) {
+      console.log(`  ${GREEN}✔${RESET}  Removed FORGE_HOME (${CYAN}${userValue}${RESET}) from the Windows user environment`);
+    } else {
+      console.log(`  ${YELLOW}⚠${RESET}  Could not remove FORGE_HOME from the Windows user environment — run: [Environment]::SetEnvironmentVariable('FORGE_HOME', $null, 'User')`);
     }
   }
   console.log("");
@@ -3181,8 +3193,19 @@ async function doctor(fix = false, verbose = false) {
   // value is a warning, not a failure.
   {
     const envForgeHome = process.env.FORGE_HOME;
-    if (envForgeHome) {
-      pass("FORGE_HOME env var", `set to "${envForgeHome}"`);
+    const fh = assessForgeHome({ value: envForgeHome, sourceDir: FORGE_HOME, sourceVersion: getVersion(), persistedHome: join(HOME, ".forge") });
+    if (forgeHomeIsProblem(fh)) {
+      // A stale value is never "informational": forge-resolve.sh ranks FORGE_HOME above ~/.forge (#5796).
+      const userValue = process.platform === "win32" ? readUserForgeHomeWin() : null;
+      if (fix && userValue && clearUserForgeHomeWin()) {
+        fixed("Stale FORGE_HOME", `cleared from the Windows user environment (was "${userValue}") — open a new terminal`);
+      } else {
+        warn("Stale FORGE_HOME", `${describeForgeHome(fh, envForgeHome, getVersion())}. ${
+          userValue ? "Fix: npx forgedock doctor --fix (clears it from the Windows user environment)"
+            : "Fix: remove the FORGE_HOME export from your shell profile / environment"}`);
+      }
+    } else if (envForgeHome) {
+      pass("FORGE_HOME env var", fh.state === "current" ? `set to "${envForgeHome}" (this install)` : `set to "${envForgeHome}" (v${fh.version}, matches)`);
     } else {
       warn(
         "FORGE_HOME env var",

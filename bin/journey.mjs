@@ -12,6 +12,7 @@
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
+import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome } from "./forge-home-check.mjs";
 import { backupToHistory } from "./config-history.mjs";
 
 // ---------------------------------------------------------------------------
@@ -2192,6 +2193,17 @@ function renderForgeReceipt(ctx, results) {
     w.write(fixCard([`Fix the JSON in ${settingsPath}, then re-run: npx forgedock install`], ctx.mode) + "\n");
   } else {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
+  }
+
+  // Stale FORGE_HOME (#5796): a leftover value from an old checkout outranks ~/.forge in forge-resolve.sh.
+  if (process.env.FORGE_HOME) {
+    let ver = ctx.persistHomeResult?.version || "";
+    if (!ver) { try { ver = JSON.parse(readFileSync(join(ctx.forgeHome, "package.json"), "utf8")).version || ""; } catch { /* unknown */ } }
+    const fh = assessForgeHome({ value: process.env.FORGE_HOME, sourceDir: ctx.forgeHome, sourceVersion: ver, persistedHome: join(os.homedir(), ".forge") });
+    if (forgeHomeIsProblem(fh)) {
+      w.write(`  ${glyph(false)} stale FORGE_HOME ${dimLine(ctx, `${describeForgeHome(fh, process.env.FORGE_HOME, ver)} — run: npx forgedock doctor --fix`)}
+`);
+    }
   }
 
   // Persisted-home / ephemeral-cache advisory (forge#1895, extended #1943):
