@@ -32,7 +32,7 @@ import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mj
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { hasRecipe, installLaneTools, RECIPES } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
@@ -1628,6 +1628,8 @@ export async function runCore(o) {
     // #5434: deps, heavy shims and env.setup overlap the plan session (read-only); gateSetup() awaits them before anything that builds or runs commands.
     let setupSettled = false;
     const setupStep = (step, t) => ev({ event: "LANE_SETUP_TIMING", step, ms: now() - t });
+    let depsSettled = () => {};
+    const depsP = new Promise((res) => { depsSettled = res; }); // #5804: the install result alone, read before the first session
     const setupP = (async () => {
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
     // After 2b (#4347): installs run with the toolchain env, so a pm only its shim provides resolves; no env is the host PATH.
@@ -1642,6 +1644,7 @@ export async function runCore(o) {
         if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
       }
     }
+    depsSettled();
     // ---- 2c. heavy-step shims (#4169): after the toolchain, so a heavy shim's real binary is the pinned toolchain shim ----
     const tH = now();
     if (heavyOn) {
@@ -1675,8 +1678,9 @@ export async function runCore(o) {
       T.decisions.push("forge.yaml env.setup ran once in the fresh worktree");
     }
       return null;
-    })().finally(() => { setupSettled = true; });
+    })().finally(() => { setupSettled = true; depsSettled(); });
     setupWait = setupP;
+    let depsDone = false; depsP.then(() => { depsDone = true; });
     const TIMED_OUT = Symbol("timed-out");
     /** #5434: `p` or TIMED_OUT after `ms` (0 = no bound); a rejection is null. The work keeps running. */
     const within = (p, ms) => new Promise((res) => { const t = ms > 0 ? setTimeout(() => res(TIMED_OUT), ms) : null; Promise.resolve(p).then((v) => { clearTimeout(t); res(v); }, () => { clearTimeout(t); res(null); }); });
@@ -1686,6 +1690,21 @@ export async function runCore(o) {
       if (setupFail === undefined) { const r = setupSettled ? await setupP : await phaseLedger.during("deps_install", () => setupP); setupFail = typeof r === "function" ? await r() : null; }
       return setupFail;
     };
+    /** #5804: an install that could not start for a missing tool ends the lane env.tool_missing before any (further) builder session.
+     * Same evidence line as the validate-time stop, so orchestrate's recovery (same tools, same host) classifies it alike. */
+    let toolStopped = null;
+    const toolStop = async (files = []) => {
+      if (toolStopped) return toolStopped;
+      const miss = toolMissingInstalls(depResults, { files });
+      if (!miss.length) return null;
+      const tools = [...new Set(miss.map((m) => m.tool))].join(", ");
+      ev({ event: "PREFLIGHT_TOOL_MISSING", tools: miss.map((m) => m.tool), before_first_session: !firstSession });
+      T.anomalies.push(`Dependency install could not start (${miss.map((m) => m.label).join("; ")}); the lane ended before ${firstSession ? "implementing" : "any builder session"}`);
+      toolStopped = await needsHuman(`Environment error (not a conformance failure): the host is missing ${tools}, so validate command(s) could not run; the dependency install stopped, and the lane ended before ${firstSession ? "the builder implemented" : "any builder session"}; nothing merged:\n${miss.map((m) => `- env.tool_missing: dependency install stopped (${m.label}) (environment, not the change)`).join("\n")}\n\nInstall it on the host or run the check through the repo's own toolchain, then rerun.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+      return toolStopped;
+    };
+    /** #5804: gateSetup() plus the missing-tool stop (root install, or a sub-project `files` fall under), before a session that builds. */
+    const gateBuild = async (files = []) => (await gateSetup()) ?? (await toolStop(files));
     const names = (out) => String(out).split("\n").map((s) => s.trim()).filter(Boolean);
     // #4160: files the branch touched (three-dot) whose content still differs from the base tip (two-dot); a file merged
     // in from the base by a base-sync equals the base and drops out of the scope check.
@@ -2056,6 +2075,8 @@ export async function runCore(o) {
     /** #4694: the engine appends guard-derived H preserve rows from the local index (one file read; the same contract when none apply). */
     const historyRows = (c) => { const w = withHistoryRows(c, { repo, issue }); const n = (w.preserve ?? []).length - (c.preserve ?? []).length; if (w !== c && n > 0) T.decisions.push(`History preserve rows: ${w.preserve.filter((p) => p.source === "guard").map((p) => p.id).join(", ")} from guards (#4694)`); return w; };
     let frozen = null, hash = null, planned = false, files = [], split = null, planMisses = null; // planMisses (#5331): validate preflight misses from this run
+    /** #5804: paths that place the change: the issue's named paths, then the frozen deliverables once they exist */
+    const toolFiles = () => [...namedPaths(iss?.body ?? ""), ...(frozen?.deliverables ?? []).map((d) => d?.path)].filter(Boolean);
     const impliedDocs = []; // add-deliverable amendments for doc edits the docs-freshness rule demanded (docs round, CI fix round)
     /** Doc files a fix round added to satisfy the freshness rule: recorded only when the rule failed before and passes after. */
     async function noteFreshnessDocs(before, wasFailing) {
@@ -2207,6 +2228,11 @@ export async function runCore(o) {
         const tPack = now(); packP = contextPackStep(); ctxPack = await within(packP, waitMs); setupStep("context_pack", tPack);
         if (ctxPack === TIMED_OUT) { ctxPack = null; T.decisions.push(`Context pack not ready in ${waitMs / 1000}s: the plan starts without it`); }
       }
+      if (!frozen) { // #5804: an install that cannot start (tool not found) fails in seconds: read it inside the same waitMs bound (from tHot) before the first session; a longer install keeps overlapping the plan and gateBuild() stops it before implement
+        const left = waitMs - (now() - tHot);
+        if (!depsDone && left > 0) await within(depsP, left);
+        const f = await toolStop(toolFiles()); if (f) return f;
+      }
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + uiBuildRule(uiOn = uiOn || uiIssue(iss ?? {}), designConfig) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
       let ffPlan = "full", ffGo = false, lightElig = elig, lightPred = null, ffTriage = null; // #5426: how the plan call runs; ffGo = fast-forward to the light step
@@ -2226,7 +2252,7 @@ export async function runCore(o) {
         }
       }
       if (lightTry || ffGo) {
-        { const f = await gateSetup(); if (f) return f; } // #5434: the light build is an implement-class session
+        { const f = await gateBuild(toolFiles()); if (f) return f; } // #5434, #5804: the light build is an implement-class session
         liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
         const lightBase = pagesConfig ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null; // #5648: pages already on the base are modified, not new
@@ -2285,7 +2311,7 @@ export async function runCore(o) {
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
         if (ffFresh && elig.mode === "shadow") { const tri = await ffTriageOf(null); ev(fastForwardEvent(fastForwardEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], triage: tri, textFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: (hotFacts?.files ?? []).filter((f) => tri.files.includes(f?.path ?? f)), cfg: o.light ?? {} }), tri, { shadow: true })); } // #5426: zero extra cost, no extra runner call
-        { const f = await gateSetup(); if (f) return f; } // #5434: the contract checks below run commands with the lane env
+        { const f = await gateBuild(toolFiles()); if (f) return f; } // #5434, #5804: the contract checks below run commands with the lane env
         // #4353: the engine's scope gate is the only scope authority; a pure file-scope validate is dropped before it is checked or frozen
         const dropScope = (c) => {
           const d = dropScopeValidates(c);
@@ -2475,7 +2501,7 @@ export async function runCore(o) {
       const openMap = io.runCommand ? await readTestMapAtRef(git, base).catch(() => null) : null;
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + uiBuildRule(uiOn = uiOn || uiChanged(dgFiles).length > 0, designConfig) + designGateNote(designRoute) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
-      { const f = await gateSetup(); if (f) return f; } // #5434: resumed or frozen lanes skip the plan
+      { const f = await gateBuild(toolFiles()); if (f) return f; } // #5434, #5804: resumed or frozen lanes skip the plan
       stage = "implement"; phaseLedger.enter("implement");
       let buildPrompt = implementPrompt, noCeiling = false;
       if (!lightDone) { // #5346: a session certain to restart is narrowed (or, when the named files alone exceed the ceiling, left uncapped) before it starts
