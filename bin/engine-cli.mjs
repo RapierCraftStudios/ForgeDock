@@ -44,6 +44,7 @@ import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lea
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { parseCiBudget } from "./lean/ci-gate.mjs";
+import { parseCiPrecheckConfig } from "./lean/ci-precheck.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
@@ -573,10 +574,17 @@ export function readPrecheckBudget(cwd = process.cwd()) {
     return raw !== "" && Number.isFinite(n) && n >= 1 && n <= 120 ? n : undefined;
   } catch { return undefined; }
 }
-/** runCore `precheck` option: {commands, maxMinutes} from learned.test_commands and lean.precheck.max_minutes; {} when neither is set. */
+/** #5820: forge.yaml `lean.ci_precheck*` (flat keys) -> {mode, include, exclude, maxJobs}; null when none is set or unreadable. */
+export function readCiPrecheck(cwd = process.cwd()) {
+  try {
+    const l = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {};
+    return Object.keys(l).some((k) => k.startsWith("ci_precheck")) ? parseCiPrecheckConfig(l) : null;
+  } catch { return null; }
+}
+/** runCore `precheck` option: {commands, maxMinutes, ci} from learned.test_commands, lean.precheck.max_minutes and lean.ci_precheck*; {} when none is set. */
 function readPrecheckOptions(cwd = process.cwd()) {
-  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd);
-  return commands || maxMinutes ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}) } } : {};
+  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd), ci = readCiPrecheck(cwd);
+  return commands || maxMinutes || ci ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}), ...(ci ? { ci } : {}) } } : {};
 }
 /**
  * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
