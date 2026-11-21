@@ -191,6 +191,45 @@ describe("fixStep", () => {
     assert.equal(calls.length, 1);
   });
 
+  // #5779: a stale run stuck in_progress on the release head sha made failedJobs sleep 60x60s silently after BLOCK DEPLOY
+  const stuckGh = (calls = []) => (args) => {
+    calls.push(args);
+    if (args[0] === "run" && args[1] === "list") return JSON.stringify([{ databaseId: 1, name: "Shell Compatibility", status: "in_progress", conclusion: "" }, { databaseId: 2, name: "CI", status: "completed", conclusion: "failure" }]);
+    if (args[0] === "run" && args[1] === "view") return "boom";
+    throw new Error(`unexpected gh ${args.join(" ")}`);
+  };
+  const within = (p, ms = 3000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`still waiting after ${ms}ms`)), ms).unref())]);
+
+  it("realSeam.failedJobs with a run that never completes: bounded wait, progress lines, pending reported (#5779)", async () => {
+    let t = 0;
+    const sleeps = [], printed = [];
+    const io = { now: () => t, sleep: async (ms) => { sleeps.push(ms); t += ms; }, print: (m) => printed.push(m) };
+    const seam = realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", gh: stuckGh(), io });
+    const jobs = await within(seam.failedJobs({ pr: 7, head: H1 }));
+    assert.deepEqual(jobs.map((j) => j.name), ["CI"]);
+    assert.deepEqual(jobs.pending, ["Shell Compatibility"]);
+    assert.ok(sleeps.length > 0 && sleeps.length <= 15, `sleeps ${sleeps.length}`);
+    assert.ok(printed.some((m) => /waiting on 1 CI run.*Shell Compatibility/.test(m)), printed.join("\n"));
+  });
+
+  it("review -> BLOCK DEPLOY -> fixes: a stuck CI run does not stop the fix issue and lane (#5779)", async () => {
+    const printed = [], sleeps = [];
+    const seam = realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", gh: stuckGh(), io: { now: () => 0, sleep: async (ms) => { sleeps.push(ms); }, print: (m) => printed.push(m) } });
+    const s = fakeSeam({ heads: [H2] });
+    const c = ctx({ ...s, failedJobs: seam.failedJobs }, { review: { result: { ...failed, ciFailing: 1 } } });
+    await within(fixStep(c));
+    assert.deepEqual(s.log.filter((e) => e[0] === "fix-issue" || e[0] === "lane").map((e) => e[0]), ["fix-issue", "lane"]);
+    assert.equal(sleeps.length, 0); // blocking findings: no wait at all, the completed runs go into the brief
+  });
+
+  it("no finding and only a still-running CI run: blocks with a typed pending reason, no lane (#5779)", async () => {
+    const s = fakeSeam();
+    s.failedJobs = async () => Object.assign([], { pending: ["Shell Compatibility"] });
+    const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 1 } } }));
+    assert.match(r.reason, /still running.*Shell Compatibility/);
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 0);
+  });
+
   it("a blocking finding and red CI together get ONE lane on one consolidated issue", async () => {
     const s = fakeSeam({ heads: [H2] });
     await fixStep(ctx(s, { review: { result: { ...failed, ciFailing: 1 } } }));
