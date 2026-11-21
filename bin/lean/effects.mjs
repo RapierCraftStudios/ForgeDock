@@ -30,6 +30,7 @@ import { parseVersioned } from "./seqversioned.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
+import { withApiRoles, readReviewBackend } from "./apiroles.mjs";
 
 /** #5531: children started by this process's gh/script helpers still running; the schedd kills them on close so none outlives the daemon. */
 const liveChildren = new Set();
@@ -444,7 +445,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   };
   return {
     ghCache: (root) => makeGhCache({ root }),
-    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: guardHeavyDisk(makeHeavyIo({ host: makeHostProbe() }), { host: makeHostProbe(), minFreeGb: async () => (await import("../gc.mjs")).readHygiene(process.cwd()).min_free_gb, gc: async () => { const g = await import("../gc.mjs"); return g.runOwnedGc({ probes: g.makeGcProbes({ cwd: process.cwd() }), hygiene: g.readHygiene(process.cwd()), budgetMs: 60000 }); } }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: guardHeavyDisk(makeHeavyIo({ host: makeHostProbe() }), { host: makeHostProbe(), minFreeGb: async () => (await import("../gc.mjs")).readHygiene(process.cwd()).min_free_gb, gc: async () => { const g = await import("../gc.mjs"); return g.runOwnedGc({ probes: g.makeGcProbes({ cwd: process.cwd() }), hygiene: g.readHygiene(process.cwd()), budgetMs: 60000 }); } }), projector: makeProjector({ gh: base.gh }, { repo }), runner: withApiRoles(makeLeanRunner({ subagentModel }), readReviewBackend()) /* #5821: reviewer/verifier on the API when opted in */, waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */

@@ -402,7 +402,8 @@ export async function runCore(o) {
     if (killed && !r?.usage) usageUnknown = true;
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: est ?? num(r?.costUsd), cost_usd_delta: c.delta, ...(est != null ? { cost_estimated: true } : {}), ...(killed && !r?.usage ? { usage_unknown: true } : {}), cost_usd_session: c.session, model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
-      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: r?.laneProfile ?? laneProfile.name, ...expTag }; // #4410, #4629
+      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), ...(r?.backend ? { backend: r.backend } : {}), lane_profile: r?.laneProfile ?? laneProfile.name, ...expTag }; // #4410, #4629
+    if (r?.apiFallback) ev({ event: "API_ROLE_FALLBACK", phase, attempt: n, ...r.apiFallback }); // #5821: the API role call fell back to the CLI session
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time

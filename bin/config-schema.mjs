@@ -66,6 +66,7 @@ export const TYPES = {
   "ci.budget.monthly_minutes": "number",
   "ci.budget.shared_regression_job": "scalar",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
+  "engine.review_backend": { enum: ["cli", "api", "auto"] }, // #5821, read by bin/lean/apiroles.mjs
   "deploy.engine.enabled": "bool",
   "deploy.engine.stage_timeout_s": "number",
   "deploy.engine.stages": "list",
