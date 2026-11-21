@@ -2243,3 +2243,47 @@ describe("#5773 operator decisions survive requeue and amendment replay", () => 
     }
   });
 });
+
+describe("#5750 outcome rows bind, proposed-change rows are guidance", () => {
+  const GI = `${ISSUE}\n\n## Proposed fix\nWrap the limiter call in try/catch and return an empty result.`;
+  const GQ = "Wrap the limiter call in try/catch and return an empty result.";
+  const G = { ...C, requirements: [...C.requirements, { id: "R3", quote: GQ, disposition: "guidance", why: "adapt: release the reservation and re-throw; an empty result hides the 429" }] };
+  const gctx = { ...ctx, contract: G, issueText: GI };
+  it("guidance freezes with a stance and a reason, needs no deliverable, and is rejected without one", () => {
+    assert.deepEqual(validateContract(G, GI), { ok: true, problems: [] });
+    for (const why of [undefined, "", "because", "adapt"]) assert.ok(validateContract({ ...G, requirements: [...C.requirements, { ...G.requirements[2], why }] }, GI).problems.some((p) => /R3: guidance needs a why/.test(p)), String(why));
+    assert.ok(!validateContract({ ...G, requirements: [...C.requirements, { ...G.requirements[2], quote: "return an empty list from the limiter forever" }] }, GI).ok, "the verbatim quote check applies to guidance");
+  });
+  it("a contract of guidance rows only is rejected; derived_outcome rides only on a deliver row", () => {
+    assert.ok(validateContract({ ...G, requirements: [G.requirements[2]] }, GI).problems.some((p) => /no binding outcome row/.test(p)));
+    const derived = { ...G, requirements: [{ ...C.requirements[0], derived_outcome: "Outstanding reservations return to 0 after a 429." }, G.requirements[2]] };
+    assert.equal(validateContract(derived, GI).ok, true);
+    assert.ok(validateContract({ ...derived, requirements: [{ ...C.requirements[0], disposition: "defer", why: "w", bucket: "host", derived_outcome: "x" }, G.requirements[2]] }, GI).problems.some((p) => /derived_outcome must be/.test(p)));
+  });
+  it("decide passes when the outcome is implemented and the guidance row was not followed", () => {
+    for (const status of ["missing", "partial", "not-applicable", undefined]) {
+      const rv = { ...good, issue_coverage: [...good.issue_coverage, { quote: GQ, status: "missing" }], requirements: [...good.requirements, ...(status ? [{ id: "R3", status }] : [])] };
+      assert.equal(decide(rv, gctx).state, "conforms", String(status));
+    }
+  });
+  it("decide fails when the prescription was followed but the outcome row is missing", () => {
+    const rv = { ...row("R1", { status: "missing", evidence: "" }), requirements: [{ id: "R1", status: "missing" }, good.requirements[1], { id: "R3", status: "implemented", evidence: "src/scrape.js:7" }] };
+    assert.ok(codes(decide(rv, gctx)).includes("conformance.unimplemented"));
+    assert.ok(codes(precheck({ contract: G, result: { requirements: [{ id: "R1", status: "missing" }, { id: "R2", status: "implemented" }, { id: "R3", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] }, changedFiles: files })).includes("conformance.unimplemented"));
+  });
+  it("a guidance quote the reviewer flags misclassified is judged as a binding omission", () => {
+    const d = decide({ ...good, issue_coverage: [...good.issue_coverage, { quote: GQ, contract_ids: ["R3"], status: "covered", misclassified: true }] }, gctx);
+    assert.ok(codes(d).includes("conformance.omission")); assert.match(d.failures.map((f) => f.detail).join(), /misclassified/);
+  });
+  it("reviewSkeleton pre-fills guidance rows and precheck skips them", () => {
+    const sk = reviewSkeleton(G, files);
+    assert.deepEqual([sk.issue_coverage[2].status, sk.requirements[2].status, sk.requirements[2].stance], ["covered", "not-applicable", "adapt"]);
+    assert.equal(sk.issue_coverage[0].status, "");
+    assert.equal(precheck({ contract: G, result: { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] }, changedFiles: files }).ok, true);
+  });
+  it("add-requirement accepts guidance with a stance and rejects it without one", () => {
+    const ok = applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: GQ, disposition: "guidance" }, why: "reject: the route must surface the 429" }], GI);
+    assert.equal(ok.contract.requirements.find((r) => r.id === "R9")?.disposition, "guidance");
+    assert.match(applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: GQ, disposition: "guidance" }, why: "seems off" }], GI).problems.join(), /guidance needs a why/);
+  });
+});

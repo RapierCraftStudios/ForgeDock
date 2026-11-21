@@ -2823,7 +2823,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2550, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2625, `plan prompt is ${approxTokens(plan)} tokens`); // 2625: #5750 (outcome vs guidance split); 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 1900, `implement prompt is ${approxTokens(impl)} of 1700 tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -8466,7 +8466,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 1900, `implement prompt is ${approxTokens(builderImplementPrompt())} of 1700 tokens`); // 1900: #5760
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2550, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2625, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
