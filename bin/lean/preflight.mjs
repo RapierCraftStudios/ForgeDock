@@ -11,7 +11,7 @@
  */
 import { builtinModules } from "node:module";
 import { existsSync } from "node:fs";
-import { join, dirname, delimiter, relative } from "node:path";
+import { join, dirname, delimiter, posix } from "node:path";
 import { missingTool } from "./conformance.mjs";
 
 export const PREFLIGHT_CAP = 20;
@@ -435,15 +435,15 @@ export function manifestDepOwner(name, files = [], readFile = () => "") {
     const parts = String(f).split("/"), base = parts[parts.length - 1];
     if (parts.includes("node_modules") || !(base === "package.json" || base === "pyproject.toml" || /^requirements[\w.-]*\.txt$/.test(base))) continue;
     let text = ""; try { text = String(readFile(f) ?? ""); } catch { continue; }
-    if (manifestDeclares(base.startsWith("requirements") ? "requirements.txt" : base, text, name)) return dirname(f);
+    if (manifestDeclares(base.startsWith("requirements") ? "requirements.txt" : base, text, name)) return posix.dirname(f);
   }
   return null;
 }
 
 /** nearest ancestor dir (of `dir`, up to the root ".") holding a tracked Python manifest, or null. */
 function nearestPyProject(dir, files) {
-  const have = new Set(files.filter((f) => PY_MANIFESTS.has(String(f).split("/").pop()) || /(^|\/)requirements[\w.-]*\.txt$/.test(f)).map((f) => dirname(f)));
-  for (let d = dir; ; d = dirname(d)) { if (have.has(d)) return d; if (d === "." || d === "/") return null; }
+  const have = new Set(files.filter((f) => PY_MANIFESTS.has(String(f).split("/").pop()) || /(^|\/)requirements[\w.-]*\.txt$/.test(f)).map((f) => posix.dirname(f)));
+  for (let d = dir; ; d = posix.dirname(d)) { if (have.has(d)) return d; if (d === "." || d === "/") return null; }
 }
 const PYTEST_SEG = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*)(?:python3?(?:\.\d+)?\s+-m\s+pytest|pytest)\b/;
 /**
@@ -457,17 +457,17 @@ export function venvPythonRewrite(command, files = [], exists = () => false) {
   const out = parts.map((seg, i) => {
     if (i % 2) return seg;
     const cd = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/.exec(seg);
-    if (cd) { const t = (cd[1] ?? cd[2] ?? cd[3]).replace(/^\.\//, "").replace(/\/+$/, ""); cwd = t.startsWith("/") || t.startsWith("$") || t.startsWith("..") ? "?" : join(cwd === "?" ? "." : cwd, t) || "."; return seg; }
+    if (cd) { const t = (cd[1] ?? cd[2] ?? cd[3]).replace(/^\.\//, "").replace(/\/+$/, ""); cwd = t.startsWith("/") || t.startsWith("$") || t.startsWith("..") ? "?" : posix.join(cwd === "?" ? "." : cwd, t) || "."; return seg; }
     const m = PYTEST_SEG.exec(seg);
     if (!m || cwd === "?") return seg;
     const rest = seg.slice(m[0].length);
     const tp = rest.split(/\s+/).map((x) => x.replace(/::.*$/, "").replace(/^\.\//, "")).find((x) => x && !x.startsWith("-") && /[\w-]\/|\.py$/.test(x) && !x.startsWith("/"));
-    const origin = cwd !== "." ? cwd : tp ? dirname(tp) : ".";
+    const origin = cwd !== "." ? cwd : tp ? posix.dirname(tp) : ".";
     const proj = nearestPyProject(origin, files);
     if (proj === null) return seg;
-    const venv = join(proj, ".venv/bin/python");
+    const venv = posix.join(proj, ".venv/bin/python");
     if (!exists(venv)) return seg;
-    const rel = cwd === "." ? venv : relative(cwd, venv);
+    const rel = cwd === "." ? venv : posix.relative(cwd, venv);
     changed = true;
     return `${m[1]}${rel} -m pytest${rest}`;
   });

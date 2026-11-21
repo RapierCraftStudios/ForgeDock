@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, delimiter } from "node:path";
 import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, collectOnlyCommand, collectImportMiss, declaredEnv } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
@@ -54,7 +54,7 @@ describe("#4328 validate preflight: what a command needs", () => {
     assert.equal(rc["command:node"], 0); assert.equal(rc["node-module:here"], 0, "found in an ancestor node_modules");
     assert.notEqual(rc["node-module:absent-pkg-4328"], 0);
     const py = preflightProbes(C(`python3 -c "import json, no_such_mod_4328"`)).probes.filter((p) => p.kind === "python-module");
-    if ((await runCheckCommand({ command: "command -v python3", cwd: dir })).rc === 0) {
+    if ((await runCheckCommand({ command: "python3 -c pass", cwd: dir })).rc === 0) { // #5753: a Windows Store python3 stub is on PATH but runs nothing
       assert.deepEqual(await Promise.all(py.map(async (p) => (await runCheckCommand({ command: p.probe, cwd: dir })).rc !== 0)), [false, true]);
     }
   });
@@ -209,7 +209,7 @@ describe("project-local executables (#5592 3d/9)", () => {
     assert.equal((await runCheckCommand({ command: probes[0].probe, cwd: wt, env: { PATH: withLocalBins(base, local) } })).rc, 0);
   });
   it("local bins go after the lane PATH, never ahead, and are not duplicated", () => {
-    assert.equal(withLocalBins("/a:/b", ["/c", "/a"]), "/a:/b:/c");
+    assert.equal(withLocalBins(["/a", "/b"].join(delimiter), ["/c", "/a"]), ["/a", "/b", "/c"].join(delimiter)); // #5753: the host PATH delimiter (; on Windows)
   });
 });
 
