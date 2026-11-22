@@ -2956,6 +2956,32 @@ describe("merge_wait policy", () => {
     const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
     assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
   });
+  describe("#5836 merge train: pr-ready exit", () => {
+    it("on, pending required checks end pr-ready with the hand-over payload and no merge", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" });
+      const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "pr-ready");
+      assert.deepEqual({ pr: r.pr, head: r.head, required: r.required, policy: r.policy, lane: r.lane }, { pr: 77, head: w.head, required: ["build"], policy: "required", lane: "staging" });
+      assert.equal(w.merges.length, 0);
+    });
+    it("off (default) keeps waiting: pending checks end ci-pending at the budget, never pr-ready", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" });
+      assert.equal((await run(w, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
+      const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
+      assert.equal((await run(w2, { ciMaxMinutes: 5, mergeTrain: "off" })).terminalReason, "ci-pending");
+    });
+    it("on, already-green checks merge in the lane", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
+      const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "merged");
+      assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    });
+    it("on, a red check still gets the lane's own outcome (never pr-ready)", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "failure" });
+      assert.notEqual((await run(w, { mergeTrain: "on" })).terminalReason, "pr-ready");
+      assert.equal(w.merges.length, 0);
+    });
+  });
   describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {
     const RUN = (n, attempt) => `https://github.com/o/r/actions/runs/${n}/job/${attempt}`;
     const NO_FIX = { ...parseVerify({}), maxRounds: 0 };

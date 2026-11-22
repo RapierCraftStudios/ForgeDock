@@ -142,6 +142,9 @@ import { openPrerequisites } from "./prereq.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+const DEFAULT_TRAIN_EVERY_MS = 30000; // #5836: merge-train poll period
+// #5836: a lane that ended pr-ready is waiting on the merge train, not failed: its dependents wait
+const WAITING_ON_TRAIN = (row) => row?.outcome === "pr-ready";
 // #5162: a dependent of a root that ended like this is held (resumable), not skipped. #5805: also behind a root held on an engine/env change.
 const HOLD_ROOT = new Set(["needs-human", "engine-error", "deferred", "budget-exceeded", "held"]);
 /** #5162: members of a real dependency cycle (a nontrivial SCC or a self-loop) among `nodes`; `edgesOf(n)` lists n's dependencies. */
@@ -329,8 +332,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, logicalDeps = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, logicalDeps = null,
+  train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS }) {
   const saved = store?.load?.() ?? null;
+  if (train && saved?.train) train.restore(saved.train); // #5836: the merge train resumes with the batch
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
   const deps = toMap(saved?.deps); // issue -> declared dependencies (any issue); only those in `set` are edges
@@ -470,7 +475,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
-      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
+      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
       ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}) });
   };
@@ -813,6 +818,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); };
+    if (train && row.outcome === "pr-ready" && Number.isInteger(r?.pr) && r?.head) { // #5836: the slot frees now; the train merges the PR
+      const p = recovering.get(n);
+      if (p) { recovering.delete(n); row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(p.cost_usd) || 0)) * 1e6) / 1e6; row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(p.minutes) || 0)) * 10) / 10; }
+      train.add({ issue: n, pr: r.pr, head: r.head, required: Array.isArray(r.required) ? r.required : [], policy: r.policy, lane: r.lane ?? rec?.lane ?? null, milestone: r.milestone });
+      results.set(n, row); done(); save(); update(row);
+      return;
+    }
     // #5805: an engine/env-caused end that would repeat as-is: held with its signature, re-admitted by watchEnvHolds, never terminal.
     const holdEnv = ({ kind, sig, tools = null, why }) => {
       const p = recovering.get(n);
@@ -1292,6 +1304,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         continue;
       }
       if (!row || !REQUEUABLE(row.outcome) || running.has(e.issue)) continue;
+      train?.drop(e.issue); // #5836: a requeued pr-ready row leaves the train
       const moved = [e.issue], priors = new Map([[e.issue, row]]);
       results.delete(e.issue);
       for (let i = 0; i < moved.length; i++) { // dependents skipped behind a requeued issue (fixpoint)
@@ -1585,6 +1598,36 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (back.size) save();
   };
   const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
+  // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
+  // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
+  let lastTrainTick = -Infinity;
+  const runTrain = async () => {
+    if (!train?.size() || signal?.aborted || now() - lastTrainTick < trainEveryMs) return;
+    lastTrainTick = now();
+    let evs = [];
+    try { evs = await train.tick(); } catch { evs = []; }
+    for (const e of evs) {
+      const n = e.issue, prev = results.get(n) ?? { issue: n };
+      if (e.kind === "merged") {
+        const { waiting, ...rest } = prev;
+        const row = { ...rest, outcome: "merged", detail: e.detail };
+        results.set(n, row);
+        if (lifecycle && e.entry.milestone) lifecycleTitles.add(String(e.entry.milestone));
+        if (integration?.onMerged && String(e.entry.lane ?? "").startsWith("milestone/")) {
+          try { await integration.onMerged(n, { ...row, lane: e.entry.lane }, { milestone: e.entry.milestone }); } catch (err) { update({ issue: n, outcome: "integration", detail: `integration check failed: ${String(err?.message ?? err).slice(0, 300)}` }); }
+        }
+        save(); update(row);
+      } else {
+        results.delete(n);
+        await settleLane(n, { terminalReason: "needs-human", code: e.code, detail: e.detail, pr: e.pr, cost_usd: prev.cost_usd ?? 0, lane: e.entry.lane }, { startedAt: now() - Math.round((Number(prev.minutes) || 0) * 60000), lane: e.entry.lane }, null);
+        if (results.get(n)?.outcome === "needs-human" && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function") {
+          everRelabelled.add(n);
+          try { await relabelNeedsHuman({ issue: n, evidence: e.detail }); } catch { /* best effort */ }
+        }
+      }
+    }
+    save();
+  };
   let firstPass = true; // #5805: a resume (e.g. after an upgrade) re-checks the engine/env holds at once
   try {
     for (;;) {
@@ -1592,10 +1635,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       await drainAdds();
       await drainRequeues();
       checkCancel();
+      await runTrain();
       await watchBlockers(!pending.length && !running.size);
       await watchEnvHolds(firstPass || (!pending.length && !running.size)); // #5805
       firstPass = false;
-      if (!pending.length && !running.size) {
+      if (!pending.length && !running.size && !train?.size()) {
         if (envWaiting() && !signal?.aborted) { await nap(ehWatchMs); continue; } // #5805: only engine/env holds remain: keep re-checking them
         break;
       }
@@ -1605,7 +1649,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         for (let i = pending.length - 1; i >= 0; i--) {
           const n = pending[i];
           if (results.has(n)) { pending.splice(i, 1); continue; }
-          const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
+          const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome) && !WAITING_ON_TRAIN(results.get(d)));
           if (bad !== undefined) {
             pending.splice(i, 1); again = true;
             const br = results.get(bad), root = br.root ?? bad, ro = results.get(root)?.outcome ?? br.outcome;
@@ -1732,12 +1776,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
       if (running.size && envWaiting()) wake = Math.min(wake ?? ehWatchMs, ehWatchMs); // #5805: re-check engine/env holds while lanes run
+      if (train?.size()) wake = Math.min(wake ?? trainEveryMs, Math.max(0, trainEveryMs - (now() - lastTrainTick))); // #5836
       if (tripped) wake = null;
       if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());
         else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
+      else if (train?.size()) await nap(wake ?? trainEveryMs); // #5836: only train-held PRs are left: poll the train
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
       else if (pending.length && (pfAll || pfRemote)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
       else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal

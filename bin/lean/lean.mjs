@@ -340,7 +340,7 @@ const defaultCredExec = (args) => {
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, mergeTrain = "off", holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -4101,6 +4101,14 @@ export async function runCore(o) {
       return null;
     }
 
+    // #5836: only a plain merge is handed to the merge train: a split, an e2e gate, numbered sequence files or close-time records keep the lane waiting.
+    async function trainPlain() {
+      if (isSplit || seqLease || pendingRecord().length || closing.checklist || closing.liveBlocked || closing.transferred || closing.reason === "partial") return false;
+      if (e2eWanted({ cfg: vcfg.e2e, files: await changedFiles(), contract: effective }).run) return false;
+      if (io.sequenceCheck && io.sequenceLease && ((await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? []).length) return false;
+      return true;
+    }
+
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     let lastStates = null; // the last required-check poll, reused by the DCO gate (#4651)
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
@@ -4151,6 +4159,12 @@ export async function runCore(o) {
               continue;
             }
             if (required.every((n) => st(n) === "success")) break;
+            // #5836: with the merge train on, a plain merge whose required checks are still pending leaves the slot; the train merges it
+            if (mergeTrain === "on" && required.length && await trainPlain()) {
+              ev({ event: "PR_READY", pr, head: localHead, required, policy });
+              T.merge = [policyText, `pr-ready: required checks pending, merge handed to the train at ${localHead.slice(0, 12)}`];
+              return await finish("pr-ready", `PR #${pr} reviewed at ${localHead.slice(0, 12)}; required checks pending, merge handed to the merge train`, { pr, head: localHead, required, policy, lane: resumed?.base ?? lane, ...(milestone ? { milestone } : {}) });
+            }
           }
           // #4266: a PR that turns conflicting gets no merge ref, so its pull_request workflows never start: base-sync now.
           const ms = await waitMergeState();

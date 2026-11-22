@@ -93,4 +93,9 @@ describe("list-not-array warning (#5504)", () => {
     assert.deepEqual(f.map((x) => `${x.level}:${x.code}:${x.key}`), ["warn:list-not-array:gate"]);
     assert.ok(validateForgeYaml(BASE + "gate:\n  required_checks: CI\n").some((x) => x.code === "list-not-array"));
   });
+  it("types orchestration.merge_train as off|on (#5836)", () => {
+    assert.deepEqual(validateForgeYaml(BASE + "orchestration:\n  merge_train: on\n"), []);
+    assert.deepEqual(validateForgeYaml(BASE + "orchestration:\n  merge_train: off\n"), []);
+    assert.deepEqual(codes(BASE + "orchestration:\n  merge_train: maybe\n"), ["wrong-type:orchestration.merge_train"]);
+  });
 });
