@@ -39,6 +39,8 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
  * stream leads, then the last lines of stderr and stdout; the message only when both streams are empty.
  */
 /** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
+/** #5731: an install failure that means "these pins do not build under this interpreter" (retried under the next candidate). */
+const PY_BUILD_RE = /build requirements are incompatible|incompatible with your operating system|_finalize_license_expression|Failed building wheel|No matching distribution|no matching wheel|Could not find a version that satisfies/i;
 const NO_ROOT_RE = /--no-root|current project could not be installed|No file\/folder found for package|does not contain any element/i;
 const msg = (e) => {
   const lines = (s) => String(s ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
@@ -142,7 +144,6 @@ function clauseOk(clause, v) {
     default: { const up = (op === "~=" ? n.length === 2 : n.length === 1) ? [n[0] + 1] : [n[0], (n[1] ?? 0) + 1]; return cmpVer(v, n) >= 0 && cmpVer(v, up) < 0; } // ~ / ~=
   }
 }
-/** #5590: does version `v` ([major, minor, patch]) satisfy the PEP 440 / poetry range `spec` ("||" alternatives, comma or space joined clauses)? */
 /** #5731: [major, minor] the repo pins for its Python: `.python-version`, else the first CI `python-version`; null when none. */
 function pyHint(fs, wt) {
   const minor = (t) => { const m = /^\s*(?:cpython-)?(\d+)\.(\d+)/.exec(t); return m ? [Number(m[1]), Number(m[2])] : null; };
@@ -158,6 +159,7 @@ function pyHint(fs, wt) {
   return null;
 }
 
+/** #5590: does version `v` ([major, minor, patch]) satisfy the PEP 440 / poetry range `spec` ("||" alternatives, comma or space joined clauses)? */
 export function pySatisfies(spec, v) {
   return String(spec).split("||").some((grp) => grp.replace(/(\^|~=|~|==|!=|>=|<=|>|<)\s+/g, "$1").split(/[,\s]+/).filter(Boolean).every((c) => clauseOk(c, v)));
 }
@@ -232,12 +234,15 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
    * {py: {cmd, version}} (the interpreter that satisfies it: pythonX.Y on PATH, then `uv python find`) or {missing: {range, probed}}
    * (nothing in range: the caller stops, the out-of-range default is never used).
    */
-  async function pythonFor(wt, d) {
+  async function pythonFor(wt, d, tried = []) {
     if (!PY.has(d.eco)) return { py: null };
     let range = null;
     try { range = pyRange(String(fs.readFileSync(join(wt, "pyproject.toml"))), d.eco); } catch { /* no pyproject */ }
-    if (!range) return { py: null };
+    const hint = pyHint(fs, wt);
+    if (!range && !hint) return { py: null };
     const probed = [];
+    const skip = (c) => tried.includes(`${c.v[0]}.${c.v[1]}`); // #5731: minors whose install already failed
+    const fits = (c) => c && !skip(c) && (!range || pySatisfies(range, c.v));
     const probe = async (cmd) => {
       try {
         const version = String(await exec(cmd, ["--version"], { timeoutMs: 30000 })).trim();
@@ -249,17 +254,17 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     };
     const def = await probe("python3");
     // #5731: the repo's own pin (.python-version, then CI setup-python) wins over a default python3 that merely satisfies the range.
-    const hint = pyHint(fs, wt);
-    const hinted = hint && (!def || def.v[0] !== hint[0] || def.v[1] !== hint[1]) ? await hintedPython(hint, probe) : null;
-    if (hinted && pySatisfies(range, hinted.v)) return { py: hinted };
-    if (def && pySatisfies(range, def.v)) return { py: null };
+    const hinted = hint && !(hint && tried.includes(`${hint[0]}.${hint[1]}`)) && (!def || def.v[0] !== hint[0] || def.v[1] !== hint[1]) ? await hintedPython(hint, probe) : null;
+    if (fits(hinted)) return { py: hinted };
+    if (!range) return tried.length ? { missing: { range: "(none declared)", probed } } : fits(def) ? { py: null, minor: `${def.v[0]}.${def.v[1]}` } : { py: null };
+    if (fits(def)) return { py: null, minor: `${def.v[0]}.${def.v[1]}` };
     const minors = [14, 13, 12, 11, 10, 9, 8];
-    for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return { py: c }; }
+    for (const x of minors) { const c = await probe(`python3.${x}`); if (fits(c)) return { py: c }; }
     for (const x of minors) {
       let path = "";
       try { path = String(await exec("uv", ["python", "find", `3.${x}`], { timeoutMs: 30000 })).trim().split("\n")[0]; } catch { probed.push("uv python find (unavailable)"); break; } // no uv
       const c = path ? await probe(path) : null;
-      if (c && pySatisfies(range, c.v)) return { py: c };
+      if (fits(c)) return { py: c };
     }
     return { missing: { range, probed } };
   }
@@ -492,13 +497,27 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   }
   const failedRun = (r) => r.status === "failed" || r.status === "materialize-fallback" || (r.published === false && /^(publish failed|cache is on another filesystem)/.test(String(r.reason ?? "")));
 
+  /** #5731: an install that fails with a build/wheel incompatibility is retried once per remaining in-range interpreter; the last failure names every one tried. */
   async function prepareOne(wt, keyRoot, d, laneEnv, publishSnap = true) {
+    const tried = [];
+    let last = null;
+    for (;;) {
+      const r = await prepareWith(wt, keyRoot, d, laneEnv, publishSnap, tried);
+      if (last && r.status === "failed" && r.code === "env.tool_missing") return { ...last, reason: `${last.reason}; no further in-range interpreter to retry (tried ${tried.join(", ")})` };
+      const { retryMinor, ...rest } = r;
+      if (!retryMinor || tried.length >= 3) return last && rest.status === "failed" ? { ...rest, reason: `${rest.reason} (interpreters tried: ${[...tried, retryMinor].filter(Boolean).join(", ")})` } : rest;
+      tried.push(retryMinor);
+      last = rest;
+    }
+  }
+
+  async function prepareWith(wt, keyRoot, d, laneEnv, publishSnap, tried) {
     const t0 = now();
     let repaired = null;
     const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? repaired, ...(extra.published === undefined ? {} : { published: extra.published }) });
     if (d.skip) return done("skipped", { reason: d.skip });
     const pkgs = JS.has(d.eco) ? await manifests(wt) : [];
-    const found = await pythonFor(wt, d);
+    const found = await pythonFor(wt, d, tried);
     if (found.missing) {
       // #5651: never resolve under an out-of-range default interpreter (poetry dies in _finalize_license_expression on python 3.14).
       const { range, probed } = found.missing;
@@ -554,7 +573,10 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const install = async () => {
       try { await runList(cmds.install); } catch (e) {
         rmTrees(wt, expected);
-        return { failed: done("failed", { key, reason: `${e?.code === "ENOENT" ? "tool not found" : "install failed"}: ${msg(e)}` }) };
+        const f = done("failed", { key, reason: `${e?.code === "ENOENT" ? "tool not found" : "install failed"}: ${msg(e)}${py ? ` (under ${py.cmd} ${py.version})` : ""}` });
+        const minor = py ? `${py.v[0]}.${py.v[1]}` : found.minor;
+        if (PY.has(d.eco) && minor && PY_BUILD_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) f.retryMinor = minor; // #5731
+        return { failed: f };
       }
       return { trees: treesOf(wt, d, pkgs) };
     };

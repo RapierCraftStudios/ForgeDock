@@ -731,6 +731,38 @@ describe("depcache (#5731): the repo's python pin beats an in-range default pyth
   });
 });
 
+describe("depcache (#5731): hint without a range, and retry under the next interpreter", () => {
+  const project = (range, hint) => { const base = scratch(), wt = join(base, "wt"); mkdirSync(wt, { recursive: true }); FIXTURES.poetry(wt); if (range) put(join(wt, "pyproject.toml"), `[tool.poetry.dependencies]\npython = "${range}"\n`); if (hint) put(join(wt, ".python-version"), `${hint}\n`); return { base, wt }; };
+  const BUILD = { stderr: "build requirements are incompatible with your operating system or Python version" };
+  const wrap = (f, failMinors) => async (cmd, args, o) => {
+    if (cmd === "poetry" || (/^python/.test(cmd) && args[1] === "poetry" && args[2] === "install")) { /* fallthrough */ }
+    if (failMinors.includes(cmd) && args[1] === "poetry" && args[2] === "install" && !args.includes("--no-root")) throw Object.assign(new Error("install failed"), BUILD);
+    return f.exec(cmd, args, o);
+  };
+  it("#5731 the pin is used when pyproject declares no python range", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8" } });
+    const { base, wt } = project(null, "3.11");
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec: f.exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5731e" });
+    assert.notEqual(r.status, "failed", JSON.stringify(r));
+    assert.ok(f.calls.filter((c) => c.cmd === "poetry").every((c) => c.via === "python3.11"), JSON.stringify(f.calls.map((c) => c.via)));
+  });
+  it("#5731 a build-incompatibility failure under the pin is retried under the next in-range interpreter", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8", "python3.12": "3.12.3" } });
+    const { base, wt } = project("^3.11", "3.11");
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec: wrap(f, ["python3.11"]), env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5731f" });
+    assert.notEqual(r.status, "failed", JSON.stringify(r));
+    assert.ok(f.calls.some((c) => c.cmd === "poetry" && c.via === "python3.14" || c.via === "python3.12"), JSON.stringify(f.calls.map((c) => c.via)));
+  });
+  it("#5731 when every candidate fails the reason names the interpreters tried", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8" } });
+    const { base, wt } = project("^3.11", "3.11");
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec: wrap(f, ["python3.11", "python3.14", "python3"]), env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5731g" });
+    assert.equal(r.status, "failed", JSON.stringify(r));
+    assert.match(r.reason, /3\.11/);
+    assert.match(r.reason, /tried/);
+  });
+});
+
 describe("depcache (#5819): a failed publish or materialize never touches workspace package sources", () => {
   const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8" });
   const SRC = Array.from({ length: 6 }, (_, i) => `packages/adapters/src/f${i}.ts`);
