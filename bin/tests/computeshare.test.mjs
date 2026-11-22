@@ -938,3 +938,48 @@ test("#5856 lanes launch with priority borrow", async () => {
   await t.launch({ id: "x", priority: "borrow" });
   assert.equal(sent[0].priority, "borrow");
 });
+
+test("#5856 throttle sets a low cpu weight and a halved soft memory limit, restored afterwards", async () => {
+  const { agent, docker } = resFixture();
+  const updates = [];
+  docker.update = async (name, o) => { updates.push(o); };
+  await agent.launch({ spec: prio("b1", "borrow"), cpus: 2, mem_gb: 4 });
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 10, mem_gb: 20 });
+  docker.containers.set(safeName("r1"), { running: false, exitCode: 0, finishedAt: new Date().toISOString() });
+  await agent.reap();
+  assert.deepEqual(updates, [{ cpuShares: 2, memoryReservationMb: 2048 }, { cpuShares: 128, memoryReservationMb: 4096 }]);
+});
+
+test("#5856 a drained lane is reported to the dispatcher as deferred sandbox.capacity and relaunches fresh under the same id", async () => {
+  const { agent, docker } = resFixture();
+  for (let i = 0; i < 6; i++) await agent.launch({ spec: prio(`b${i}`, "borrow"), cpus: 2, mem_gb: 4 });
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 4, mem_gb: 8 });
+  const drained = Object.values(agent.store.data.sandboxes).find((s) => s.drained);
+  assert.ok(drained);
+  const get = (url) => new Promise((resolve) => agent.handle({ method: "GET", url, headers: { authorization: "Bearer agent-token" }, socket: {} }, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ s: this.s, b: JSON.parse(String(b || "{}")) }); } }));
+  const res = await get(`/sandboxes/${drained.id}/result`);
+  assert.equal(res.s, 200);
+  assert.equal(res.b.drained, true);
+  // the dispatcher maps it to a retryable deferral
+  const t = httpTransport({ url: "http://r", token: "t", fetchFn: async () => ({ status: 200, ok: true, headers: { get: () => null }, json: async () => res.b, text: async () => JSON.stringify(res.b) }) });
+  const mapped = await t.result(drained.id);
+  assert.equal(mapped.terminalReason, "deferred");
+  assert.equal(mapped.code, "sandbox.capacity");
+  // free the reserved capacity, then the same id launches again as a new container
+  docker.containers.set(safeName("r1"), { running: false, exitCode: 0, finishedAt: new Date().toISOString() });
+  const runs = docker.runs.length;
+  assert.equal((await agent.launch({ spec: prio(drained.id, "borrow"), cpus: 2, mem_gb: 4 })).status, 201);
+  assert.ok(docker.runs.length > runs);
+  assert.equal(agent.store.data.sandboxes[drained.id].drained, undefined);
+});
+
+test("#5856 router places a borrow lane on another host when its previous host is now full", async () => {
+  const caps = { a: { cpus_free: 8, mem_free_gb: 16 }, b: { cpus_free: 4, mem_free_gb: 8 } };
+  const { router } = routerFixture(caps);
+  assert.equal((await router.launch(spec("rs1", { priority: "borrow" }))).body.agent, "a");
+  caps.a.building = true; // stands in for an agent 503 (reserved work took the host)
+  const again = await router.launch(spec("rs1", { priority: "borrow" }));
+  assert.equal(again.status, 201);
+  assert.equal(again.body.agent, "b");
+  assert.equal(router.store.data.sandboxes.rs1.agent, "b");
+});

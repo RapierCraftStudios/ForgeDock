@@ -22,6 +22,7 @@ import { dirname, join } from "node:path";
 import { mergeRemoteLog } from "../engine/runlog.mjs";
 import { safeSegment } from "./ledger.mjs";
 import { scopedEnv } from "./execution.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { laneEnvFor, readEnvSnapshots } from "../env/env.mjs";
 import { resolveCredential } from "./credentials.mjs";
 import { relayCommandNames, runRelayed, servicePending } from "./relay.mjs";
@@ -94,7 +95,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       return s === "running" || s === "pending" || s === "starting" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
-    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
+    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },

@@ -186,7 +186,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (Number.isFinite(h?.mem_available_gb) && h.mem_available_gb < minMem) return `only ${h.mem_available_gb} GB available (< ${minMem})`;
     return null;
   }
-  const throttle = async (r, shares) => { for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.update?.(n, { cpuShares: shares }); } catch (e) { log.warn?.(`throttle ${n}: ${String(e.stderr || e.message).slice(0, 160)}`); } } r.throttled = shares === SHARES().throttled; };
+  // Throttle = low cpu weight + a halved soft memory limit (`--memory-reservation`: under host memory pressure the kernel reclaims from containers over it first; the docker CLI has no memory.high).
+  const throttle = async (r, shares) => { const memMb = Math.round(r.mem_gb * (shares === SHARES().throttled ? 512 : 1024)); for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.update?.(n, { cpuShares: shares, memoryReservationMb: memMb }); } catch (e) { log.warn?.(`throttle ${n}: ${String(e.stderr || e.message).slice(0, 160)}`); } } r.throttled = shares === SHARES().throttled; };
   /** SIGTERM (the lane checkpoints and reports run.interrupted), wait out the grace, then SIGKILL; the router/dispatcher reschedules the lane. */
   async function drainOne(r, why) {
     for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.kill(n, "TERM"); } catch { /* gone */ } }
@@ -250,7 +251,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   async function launch({ spec, cpus, mem_gb, limit = null }) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
-    const existing = own(spec.id);
+    let existing = own(spec.id);
+    if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
     if (Number.isInteger(spec.warm)) warm.configure({ spec, cpus, mem_gb, limit, n: spec.warm }); // #4912: the lane's execution.warm_sandboxes sizes the repo's pool
     const prio = spec.priority ?? "normal";
@@ -667,7 +669,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("POST", "/warm/claim"), async (_p, body) => warm.claim(body ?? {})],
     [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
     [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
-    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
+    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); if (!x && r?.drained) return { status: 200, body: { drained: true, reason: r.drained } }; return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }], // #5856: a drained lane without its own result is reported so the dispatcher reschedules it
     [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
     [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
     // #5274: SIGTERM the lane (PID 1) so its teardown checkpoints and reports deferred run.interrupted; the sandbox is kept, never destroyed.

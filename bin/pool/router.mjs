@@ -217,7 +217,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (known && own(agents(), known.agent)) {
       known.touched = now(); store.save();
       const r = await agentCall(own(agents(), known.agent), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...sizeFor(spec) });
-      return { status: r.status, body: agentBody(r, known.agent), retryAfter: r.retryAfter };
+      // #5856: a drained borrow lane whose host is now full (reserved work took it) is placed on another host, not refused.
+      if (!(r.status === 503 && spec.priority === "borrow")) return { status: r.status, body: agentBody(r, known.agent), retryAfter: r.retryAfter };
+      delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
     const sized = (await capacities()).filter((c) => c.ok && !c.paused && fitsPriority(c, spec, size));
