@@ -234,4 +234,11 @@ describe("#5755 one env issue per signature", () => {
     assert.match(byIssue[1].detail, /Security issue escalated/);
     assert.equal(relabels.some((a) => a.parked), false, "no parked/remediation-queue relabel");
   });
+
+  it("when the env issue cannot be filed the env.* failure is still held, never needs-human", async () => {
+    const e = { ensure: async () => { throw new Error("gh down"); }, isClosed: async () => false };
+    const { byIssue } = await harness({ script: { 1: [miss("html2text")] }, envHold: null, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "held");
+    assert.equal(byIssue[1].envHold.envIssue, undefined);
+  });
 });
