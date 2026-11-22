@@ -241,3 +241,20 @@ describe("#5683 sub-project manifest deps and venv python", () => {
     assert.equal(venvPythonRewrite("cd web && pytest", files, exists), "cd web && pytest");
   });
 });
+
+describe("#5749 host-only and busy-loop validates", () => {
+  const V = (...commands) => ({ deliverables: [], validate: commands.map((command, i) => ({ id: `V${i + 1}`, command })) });
+  it("#5749 hostOnlyProblems rejects host-only and busy-loop validates", async () => {
+    const { hostOnlyProblems } = await import("./preflight.mjs");
+    const bad = [`legion-run bash -lc 'for i in $(seq $(nproc)); do (timeout 300 sh -c "while :; do :; done") & done; npx vitest run'`, "ssh build-host make test", "bash /home/u/x/check.sh", "yes > /dev/null & npx vitest run"];
+    for (const c of bad) assert.equal(hostOnlyProblems(V(c)).length, 1, c);
+    assert.match(hostOnlyProblems(V(bad[0]))[0], /^V1: /);
+    assert.deepEqual(hostOnlyProblems(V("npx vitest run", "python -m pytest tests/x.py", "while read l; do echo $l; done < f", "git diff origin/staging...HEAD --stat")), []);
+    assert.equal(hostOnlyProblems({ ...V("npx vitest run"), repro_test: { path: "t.py", id: "t", command: "ssh h pytest t.py" } }).length, 1);
+  });
+  it("#5749 repro_test python -m pytest is probed at freeze", () => {
+    const c = { ...V("npx vitest run"), repro_test: { path: "tests/x.py", id: "t", command: "python -m pytest tests/x.py::t" } };
+    const got = preflightProbes(c).probes.map((p) => [p.kind, p.tool, p.ids.join(",")]);
+    assert.deepEqual(got.filter((x) => x[2] === "repro_test"), [["command", "python", "repro_test"], ["python-module", "pytest", "repro_test"]]);
+  });
+});

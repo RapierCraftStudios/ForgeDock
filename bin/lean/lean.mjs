@@ -34,7 +34,7 @@ import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mj
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { hasRecipe, installLaneTools, RECIPES } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
+import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, predictRestart, handoffFacts, routeHandoff, buildReadsOf, NARROW_NOTE } from "./ceiling.mjs";
@@ -2517,8 +2517,9 @@ export async function runCore(o) {
           contract = snapContract(contract);
           vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds, reproRecipe });
         };
-        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
-          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
+        const hostOnly = () => hostOnlyProblems(contract); // #5749: a host-only wrapper or busy loop in a frozen command is corrected at freeze
+        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length || hostOnly().length) && sessionId) {
+          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners), ...hostOnly()], "resumed once");
           if (missed.length) misses = await preflightValidates(contract);
         }
         // #5623: builder-correctable contract problems get up to contractMaxCorrections rounds (default 3), each with only the
@@ -2541,6 +2542,7 @@ export async function runCore(o) {
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after ${rounds} correction(s):\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
+        { const ho = hostOnly(); if (ho.length) return await needsHuman(`The builder's contract still has host-only or busy-loop commands after correction (#5749); nothing was built:\n${ho.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}) }); }
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         await takeHotAreas((frozen.deliverables ?? []).map((d) => d?.path)); // #5751: the contract's paths before building
@@ -2777,10 +2779,11 @@ export async function runCore(o) {
         if (!failed.length && timedOut.length && (vcfg.precheckBlock || guardFailing(timedOut))) return await needsHuman(`Environment error (not a check failure): pre-PR check command(s) timed out even after one longer retry, which is host load rather than a failing check; no builder resume was spent, the branch is pushed and nothing merged: ${timedNames}`, ENV_VALIDATE_TIMEOUT);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); await gatePassed("precheck"); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
+        const failTail = (fs) => fs.map((f) => `\n\n\`${f.command}\` output tail:\n${quietFailure(f.output, { maxChars: 2000 })}`).join(""); // #5749: the recovery lane starts from the failing check's output, not only its name
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
         checkCommandsFailing = true;
         { const red = await guardRed(failed); if (red) return red; } // #5239: a guard that also fails on the base defers the lane
-        if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
+        if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
         const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
@@ -2795,7 +2798,7 @@ export async function runCore(o) {
         await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
-        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) failing and the builder made no new commit for them (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
+        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) failing and the builder made no new commit for them (verify.precheck_block); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
         files = await changedFiles();
       }
     }

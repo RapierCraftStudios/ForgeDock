@@ -9737,3 +9737,39 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
   });
 });
+
+describe("#5749 freeze-time runnability: host-only commands, recipes, check tails", () => {
+  const remote = { placement: { where: "remote", reason: "mode remote" } };
+  const V2 = (command) => ({ ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command }] });
+  it("#5749 host-only validate is rejected at freeze", async () => {
+    const w = world({ contract: V2(`legion-run bash -lc 'for i in $(seq $(nproc)); do (timeout 300 sh -c "while :; do :; done") & done; npx vitest run'`) });
+    const r = await run(w, { dir: tmpDir("lean-5749a-"), ...remote });
+    assert.equal(r.code, "contract.invalid"); assert.equal(w.merges.length, 0);
+    assert.ok(builders(w).some((b) => /legion-run/.test(b[4])), "the correction prompt names the host-only wrapper");
+    assert.equal((await run(world({ contract: V2("npx vitest run a.test.ts") }), { dir: tmpDir("lean-5749a2-"), ...remote })).terminalReason, "merged");
+  });
+  it("#5749 remote probe installs a recipe tool or re-places before the builder", async () => {
+    const installed = []; let ok = false;
+    const w = world({ contract: V2("shellcheck scripts/x.sh") });
+    w.io.runCommand = async ({ command }) => { if (/apt-get/.test(command)) { installed.push(command); ok = true; } return { rc: 0, output: "" }; };
+    w.io.probeCommand = async (a) => ({ rc: /shellcheck/.test(JSON.stringify(a)) && !ok ? 127 : 0, output: "" });
+    assert.notEqual((await run(w, { dir: tmpDir("lean-5749b-"), ...remote })).code, "env.tool_missing");
+    assert.equal(installed.length, 1);
+    const n = world({ contract: V2("nopetool-5749 x") }); n.io.probeCommand = async (a) => ({ rc: /nopetool-5749/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(n, { dir: tmpDir("lean-5749b2-"), ...remote });
+    assert.equal(r.code, "env.tool_missing");
+  });
+  it("#5749 remote lane with every tool keeps remote placement", async () => {
+    const w = world({ contract: V2("shellcheck scripts/x.sh") }); w.io.probeCommand = async () => ({ rc: 0, output: "" });
+    const installs = []; w.io.runCommand = async ({ command }) => { installs.push(command); return { rc: 0, output: "" }; };
+    const r = await run(w, { dir: tmpDir("lean-5749c-"), ...remote });
+    assert.equal(r.terminalReason, "merged"); assert.ok(!installs.some((c) => /apt-get/.test(c)));
+  });
+  it("#5749 precheck_block detail carries the failing check tail", async () => {
+    const w = world();
+    w.io.runCommand = async () => ({ rc: 1, output: `${"noise\n".repeat(60)}FAILED lane-check shellcheck scripts/x.sh` });
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["make lanecheck"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r.code, "ci.red");
+    assert.match((w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? ""), /`make lanecheck`[\s\S]*FAILED lane-check shellcheck scripts\/x\.sh/);
+  });
+});

@@ -159,6 +159,25 @@ export function testRunnerProblems(contract, runners) {
   return out;
 }
 
+/**
+ * #5749: validate/repro commands that cannot run in a lane sandbox whatever is installed: a host-only wrapper or path
+ * (`legion-run`, `ssh <host>`, `/home/<user>/...`) or an unbounded CPU busy loop (`while :`/`while true` with no sleep or
+ * read, `yes > /dev/null`, `seq $(nproc)` fan-out). One problem per command id. Pure.
+ */
+export function hostOnlyProblems(contract) {
+  const out = [];
+  for (const v of contractCommands(contract)) {
+    const cmd = v.command, why = [];
+    const exes = shellSegments(cmd).map((seg) => { let i = 0; while (i < seg.length && (/^[A-Za-z_]\w*=/.test(seg[i]) || ["!", "time", "exec", "command", "env"].includes(seg[i]))) i++; return seg[i]; });
+    if (cmd.split(/[\s'"`(;&|]+/).includes("legion-run") || exes.includes("legion-run")) why.push("the host-only wrapper `legion-run`");
+    if (exes.includes("ssh")) why.push("`ssh <host>`");
+    if (/(^|[\s='"`:(])\/home\/[\w.-]+\//.test(cmd)) why.push("an absolute `/home/<user>/` path");
+    if (/\bwhile\s+(:|true)\s*;\s*do\s*(:\s*;\s*)?done\b/.test(cmd) || /\byes\b[^|;&]*>\s*\/dev\/null/.test(cmd) || /\bseq\s+\$\(\s*nproc\s*\)/.test(cmd)) why.push("an unbounded CPU busy loop");
+    if (why.length) out.push(`${v.id}: uses ${why.join(" and ")}, which no lane sandbox provides or tolerates, so the command cannot run as written; use a bounded check through the repo's own toolchain, not a host wrapper, host path or CPU stress loop`);
+  }
+  return out;
+}
+
 const FIX_HOW = "run the check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts) or use a check that does not need it, never a global install";
 /** One contract problem per miss: names the validate ids and the tool (or path, or env var), and how to fix the plan (never a global install). */
 export function preflightProblems(misses) {

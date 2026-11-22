@@ -35,3 +35,11 @@ describe("#5652 in-sandbox lane tool install", () => {
     assert.match(installCommands("python@3.12")[0], /python3\.12 python3\.12-venv/);
   });
 });
+
+describe("#5749 yaml recipe", () => {
+  it("#5749 yaml has a lane_tools recipe", () => {
+    assert.ok(hasRecipe("yaml"));
+    assert.match(installCommands("yaml")[0], /apt-get install .*python3-yaml/);
+    assert.ok(!hasRecipe("vite") && !hasRecipe("forgedock"), "vite and forgedock are project deps, not recipes");
+  });
+});
