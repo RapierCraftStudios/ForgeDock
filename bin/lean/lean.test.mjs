@@ -9644,7 +9644,7 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
   it("#5764 forgedock (the engine CLI that runs the lane in the sandbox) is never a remote tool miss", async () => {
     const remote = { placement: { where: "remote", reason: "mode remote" } };
     const w = world({ contract: { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "forgedock check" }] } });
-    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(a.command) ? 127 : 0, output: /forgedock/.test(a.command) ? "sh: 1: forgedock: not found" : "" });
     const r = await run(w, { dir: tmpDir("lean-5764d-"), ...remote });
     assert.notEqual(r.code, "env.tool_missing");
     assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /Remote sandbox lacks/);
