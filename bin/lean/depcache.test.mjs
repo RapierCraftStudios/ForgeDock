@@ -735,8 +735,8 @@ describe("depcache (#5731): hint without a range, and retry under the next inter
   const project = (range, hint) => { const base = scratch(), wt = join(base, "wt"); mkdirSync(wt, { recursive: true }); FIXTURES.poetry(wt); if (range) put(join(wt, "pyproject.toml"), `[tool.poetry.dependencies]\npython = "${range}"\n`); if (hint) put(join(wt, ".python-version"), `${hint}\n`); return { base, wt }; };
   const BUILD = { stderr: "build requirements are incompatible with your operating system or Python version" };
   const wrap = (f, failMinors) => async (cmd, args, o) => {
-    if (cmd === "poetry" || (/^python/.test(cmd) && args[1] === "poetry" && args[2] === "install")) { /* fallthrough */ }
-    if (failMinors.includes(cmd) && args[1] === "poetry" && args[2] === "install" && !args.includes("--no-root")) throw Object.assign(new Error("install failed"), BUILD);
+    const under = cmd === "poetry" ? "python3" : cmd, rest = cmd === "poetry" ? args : args.slice(2);
+    if (failMinors.includes(under) && rest[0] === "install" && !args.includes("--no-root")) throw Object.assign(new Error("install failed"), BUILD);
     return f.exec(cmd, args, o);
   };
   it("#5731 the pin is used when pyproject declares no python range", async () => {
@@ -751,7 +751,7 @@ describe("depcache (#5731): hint without a range, and retry under the next inter
     const { base, wt } = project("^3.11", "3.11");
     const [r] = await makeDepCache({ root: join(base, "cache"), exec: wrap(f, ["python3.11"]), env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5731f" });
     assert.notEqual(r.status, "failed", JSON.stringify(r));
-    assert.ok(f.calls.some((c) => c.cmd === "poetry" && c.via === "python3.14" || c.via === "python3.12"), JSON.stringify(f.calls.map((c) => c.via)));
+    assert.ok(f.calls.some((c) => c.cmd === "poetry" && c.args[0] === "install" && c.via !== "python3.11"), JSON.stringify(f.calls.map((c) => c.via)));
   });
   it("#5731 when every candidate fails the reason names the interpreters tried", async () => {
     const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8" } });
