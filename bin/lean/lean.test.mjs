@@ -4045,6 +4045,16 @@ describe("base-sync (#4100)", () => {
     assert.equal(r.terminalReason, "ci-pending");
     assert.equal(w.merges.length, 0);
   });
+  it("#5794 the release fix lane (FORGE_RELEASE_FIX_LANE=1) merges past a pending release PR; other lanes stay held", async () => {
+    const w = world({ releasePrs: RELEASE_PENDING });
+    w.io.env = { ...process.env, FORGE_RELEASE_FIX_LANE: "1" };
+    assert.equal((await run(w, { ciMaxMinutes: 1 })).terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
+    const h = world({ releasePrs: RELEASE_PENDING });
+    h.io.env = { ...process.env, FORGE_RELEASE_FIX_LANE: "" };
+    assert.equal((await run(h, { ciMaxMinutes: 1 })).terminalReason, "ci-pending");
+    assert.equal(h.merges.length, 0);
+  });
   it("#5709 no release PR, or the hold disabled, leaves merge behaviour unchanged", async () => {
     assert.equal((await run(world({ releasePrs: [] }))).terminalReason, "merged");
     const w = world({ releasePrs: RELEASE_PENDING });
