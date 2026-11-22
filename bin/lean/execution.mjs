@@ -439,7 +439,8 @@ export function hostHeadroom({ cfg = {}, heavyCfg = {}, host = { memAvailableMb,
   if (c.enabled === false) return { ok: true, detail: "" };
   const reasons = [];
   const need = c.min_free_mem_mb + h.step_mem_mb, mem = probe(host?.memAvailableMb);
-  if (mem !== null && mem < need) reasons.push(`mem ${mem} MB < ${need} MB`);
+  const ramping = mem === null ? 0 : Math.max(0, probe(() => host?.rampingMb?.(c.ramp_s)) ?? 0); // #5845: lanes admitted within the ramp window have not grown yet
+  if (mem !== null && mem - ramping < need) reasons.push(ramping > 0 ? `mem ${mem} MB − ramping ${ramping} MB < ${need} MB` : `mem ${mem} MB < ${need} MB`);
   const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null;
   if (maxLoad !== null) {
     const load = probe(host?.loadAvg1), cores = probe(host?.cores);

@@ -27,6 +27,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 
 1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp; load
    average only when `max_load_per_core` is configured, #4169);
+   #5845: lanes admitted within `ramp_s` (60) have not grown yet. `checkAdmission` refuses when free mem − Σ ramping footprint < learned lane footprint + `min_free_mem_mb` (`projected mem X (free Y − ramping Z) < need N`, still `deferred host.busy`) or when `max_new_per_ramp` (4; 0 = off) lanes started in the window. State is one stamp file per lane in `schedDir()/lane-ramp/` plus `peaks.json` (`effects.mjs` `makeRampStore`); `localLaneCap`, `nearCeiling` and `hostHeadroom` subtract the same ramping memory. Probes missing or failing fail open.
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
    #5421: free disk is the third GC trigger. `diskLow` (`admission.mjs`) compares `host.freeMb` of the worktree root and `~/.forge`
    (`host.hygienePaths`) with forge.yaml `hygiene.min_free_gb` (default 5, 0 = off); `nearCeiling({minFreeGb})` counts it, so the
