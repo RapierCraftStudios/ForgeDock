@@ -38,9 +38,9 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
  * Error text for a reason: pnpm prints its ERR_PNPM_* errors on stdout (#4522), so the first such line from either
  * stream leads, then the last lines of stderr and stdout; the message only when both streams are empty.
  */
-/** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
 /** #5731: an install failure that means "these pins do not build under this interpreter" (retried under the next candidate). */
 const PY_BUILD_RE = /build requirements are incompatible|incompatible with your operating system|_finalize_license_expression|Failed building wheel|No matching distribution|no matching wheel|Could not find a version that satisfies/i;
+/** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
 const NO_ROOT_RE = /--no-root|current project could not be installed|No file\/folder found for package|does not contain any element/i;
 const msg = (e) => {
   const lines = (s) => String(s ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
