@@ -3543,3 +3543,8 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 Default placement is a product default, not a forge.yaml setting: `engine-cli.mjs` `withPublicDefault` + `execution.mjs` `resolveDefaultExecution` give a **public** repo with no `execution.mode` in forge.yaml `mode: remote, provider: actions`. A private repo, an unreadable visibility (`repoIsPublic` fails closed) and any explicit `execution.mode` (even `local`) keep today's placement; host-capability lanes still go local.
 
 Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `permissions` are contents/issues/pull-requests write, the Claude credential is the `CLAUDE_CODE_OAUTH_TOKEN` secret of the `forgedock-lane` environment, a pre-push hook limits pushes to `feat/*`, inputs reach shell only through env vars, and run-issue output goes to /dev/null (logs are public). Dispatch carries no secrets (inputs are visible); `execution.dispatcher` restricts the dispatching identity. Owner setup per repo (not automated): create the `forgedock-lane` environment with its secret and a deployment-branch rule.
+
+## Entry 2026-11-22 — Lane sandboxes request `borrow` priority (#5856)
+
+- `bin/lean/sandbox-remote.mjs` `remoteProvider` now sends `spec.priority: "borrow"` on every lane sandbox spec. A pool agent without `reservations`/`idle_only` ignores it (flat admission as before); with them, lanes run on leftover capacity at a low `cpu.shares` weight and are throttled, then drained, when a reserved workload arrives.
+- A drained lane reports `run.interrupted` and is rescheduled, not lost. Reclaim order and config: `devdocs/modules/pool.md` (#5856).
