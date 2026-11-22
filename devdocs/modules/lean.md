@@ -3524,3 +3524,7 @@ forge.yaml `recurrence:` (`parseRecurrenceConfig`, read by `engine-cli.mjs` `rea
 ## Entry 2026-11-22 — Transient lane read defers in runCore (#5846)
 
 In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a failed milestone/default-branch/`git ls-remote` read) now returns `deferred` / `lane.unresolved` with `retryInSeconds` `GH_AUTH_RETRY_SECONDS` (120), after the `gh.auth` deferral and before `lane-refused`, so a host hiccup no longer ends the lane terminal. The orchestrator requeues it as an uncapped deferral. Genuine refusals (`lane.branch_missing`, `lane.default_branch`, `lane.mismatch`) stay `lane-refused` with their codes.
+
+## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
+
+`parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
