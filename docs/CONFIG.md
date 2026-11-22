@@ -2925,3 +2925,25 @@ There is no CLI subcommand to read it yet — `doctor()` reading the receipt to 
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
+
+---
+
+## Router config: `ci_autoscale` (#5695)
+
+Keys of the pool router's own config file (not `forge.yaml`). The CI runner autoscaler is off by default.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ci_autoscale.enabled` | `false` | Turns on `POST /ci/workflow-job` tracking and the reconcile at the end of each router tick. |
+| `ci_autoscale.dry_run` | `false` | Log every scale decision with its inputs but start or stop nothing. |
+| `ci_autoscale.repo` | unset | `owner/name` for `generate-jitconfig` and the jobs-API poll fallback. Uses the router host's `gh auth token`. |
+| `ci_autoscale.poll_s` | `300` | Seconds between jobs-API polls. |
+| `ci_autoscale.runner_group_id` | `1` | Runner group for JIT runners. |
+| `ci_autoscale.labels.<label>` | none | One entry per runner label: `min` (warm runners), `max` (hard cap), `size` `{cpus, mem_gb}` (default 1 / 2). Only jobs carrying a configured label are counted. |
+| `ci_autoscale.floors.mem_available_gb` | `3` | MemAvailable that must remain after the reservation. |
+| `ci_autoscale.floors.load_per_cpu` | `0.8` | Load per vCPU allowed after the reservation. |
+| `ci_autoscale.floors.net_rx_mbps_max` | unset | Refuse starts above this host RX rate (deploy exempt). |
+| `ci_autoscale.lane_floor` | `{cpus: 2, mem_gb: 3}` | Pool `cpus_free`/`mem_free_gb` left for lanes. CI never takes it. |
+| `ci_autoscale.windows` | `[]` | `[{from, to, why}]` ISO times: no starts or stops inside a window. |
+
+Priority is deploy label > release branch (`release/*`, `hotfix/*`) > lanes > ordinary PR CI. Agent config `runner_image` (default `ghcr.io/actions/actions-runner:latest`) is the runner container image.

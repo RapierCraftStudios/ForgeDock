@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { join } from "node:path";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { createCiEvents, MAX_WAIT_S } from "./ci-events.mjs";
+import { createAutoscaler } from "./ci-autoscale.mjs";
 import { jsonStore } from "./store.mjs";
 import { versionOf } from "./version.mjs";
 
@@ -156,6 +157,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return { status: 200, body: { account: n, until: new Date(until).toISOString() } };
   }
   const agentCall = (a, method, path, body, timeoutMs) => call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
+  // #5695: CI runner autoscaler (off unless cfg.ci_autoscale.enabled); webhook demand in, reconcile on the tick.
+  let autoscaler = null;
+  const autoscale = () => (autoscaler ??= createAutoscaler({ cfg, now, log, capacities: () => capacities(), agentCall, githubToken, fetchFn, agents }));
 
   async function capacities() {
     const out = [];
@@ -265,6 +269,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       } catch (e) { log.warn?.(`lease ${id} on ${s.agent}: ${e.message}`); }
     }
     store.save();
+    if (cfg.ci_autoscale?.enabled) await autoscale().reconcile().catch((e) => log.warn?.(`ci-autoscale reconcile: ${e.message}`));
   }
 
   function enroll(body) {
@@ -379,6 +384,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       const c = ciQuery(url);
       return c.q ? { status: 200, body: await ciEvents.wait(c.q, c.since, c.waitS) } : c;
     })],
+    [route("POST", "/ci/workflow-job"), { fn: async (_p, body) => ({ status: 202, body: autoscale().ingest(body) }), auth: "ci" }], // #5695
     [route("POST", "/enroll"), { fn: async (_p, body) => enroll(body), auth: "none" }],
     [route("GET", "/bootstrap/install.ps1"), { fn: async (_p, _b, url) => ({ status: 200, body: bootstrapScript(url.searchParams.get("token"), url) }), auth: "enroll" }],
     [route("GET", "/bootstrap/bundle.tar.gz"), { fn: async () => ({ bundle: true }), auth: "enroll" }],
@@ -417,7 +423,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
   }
 
-  return { handle, launch, claim, tick, enroll, issueCode, capacities, status, store };
+  return { handle, launch, claim, tick, autoscale, enroll, issueCode, capacities, status, store };
 }
 
 /** tokenbaton's usage dir (#5165): router.json `usage_source`, else `$TOKENBATON_HOME`, else `~/.tokenbaton`. */

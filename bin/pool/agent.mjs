@@ -17,6 +17,18 @@ import { resolveLaneImage, laneImageNow, laneToolsTag } from "./lane-tools.mjs";
 import { hostDiskFree } from "./health.mjs";
 
 const LABEL = "computeshare=1";
+/** #5695: ephemeral CI runner containers; a different label than LABEL so the orphan reaper never removes them. */
+const RUNNER_LABEL = "computeshare.runner=1";
+const RUNNER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const netSample = { at: 0, rx: 0 };
+/** Host RX rate in MB/s since the previous call (null on the first call or when /proc/net/dev is unreadable). */
+export function netRx(now = Date.now(), read = () => readFileSync("/proc/net/dev", "utf8")) {
+  try {
+    const rx = read().split("\n").slice(2).map((l) => l.trim().split(/[:\s]+/)).filter((c) => c[0] && c[0] !== "lo").reduce((a, c) => a + (Number(c[1]) || 0), 0);
+    const prev = { ...netSample }; netSample.at = now; netSample.rx = rx;
+    return prev.at && now > prev.at && rx >= prev.rx ? { rx_mbps: Math.round(((rx - prev.rx) / 1e6 / ((now - prev.at) / 1000)) * 100) / 100 } : null;
+  } catch { return null; }
+}
 const LOG_CHUNK = 256 * 1024;
 const run = promisify(execFile);
 
@@ -118,7 +130,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       log.warn?.(`prepull ${dindImage}: ${prepull.error}`);
     } finally { rmSync(file, { force: true }); }
   }
-  const used = () => Object.values(sb()).filter((s) => s.state !== "exited").reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
+  const runners = () => (store.data.runners ??= {}); // #5695: name -> {label, cpus, mem_gb, startedAt}; counted like a lane
+  const used = () => Object.values({ ...sb(), ...Object.fromEntries(Object.entries(runners()).map(([k, r]) => [`runner:${k}`, { cpus: r.cpus, mem_gb: r.mem_gb }])) }).filter((s) => s.state !== "exited").reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   // #5535: disk figures for the router inventory; optional, omitted when unreadable. Sandbox dirs are walked at most every 60s.
   let diskCache = { at: 0, mb: {} };
   let lastWorkSweep = -Infinity;
@@ -150,7 +163,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function capacity() {
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
-    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: netRx(now()), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -165,6 +178,37 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     envEnsured.set(volume, now());
     const args = envEnsureArgs({ volume, image: envImageOf(spec), slug: spec.repo.slug, ref: spec.repo.ref ?? null, laneTools: spec.lane_tools ?? [], snapshots: spec.env_snapshots, net, cpus: cfg.env_build_cpus ?? 2, mem_gb: cfg.env_build_mem_gb ?? 4 });
     return Promise.resolve().then(() => docker.run(args)).then(() => log.info?.(`env snapshot helper started for ${spec.repo.slug}`), (e) => log.warn?.(`env snapshot helper: ${String(e.stderr || e.message).slice(0, 200)}`));
+  }
+
+  /** #5695: start one --ephemeral runner from a JIT config (one job, then the container exits and --rm removes it). */
+  async function startRunner({ name, label, jitconfig, cpus = 1, mem_gb = 2 } = {}) {
+    if (typeof name !== "string" || !RUNNER_NAME.test(name) || typeof label !== "string" || !RUNNER_NAME.test(label) || typeof jitconfig !== "string" || !/^[A-Za-z0-9+/=_-]+$/.test(jitconfig)) throw Object.assign(new Error("name, label and jitconfig are required"), { status: 400 });
+    if (!(cpus > 0 && mem_gb > 0)) throw Object.assign(new Error("cpus and mem_gb must be positive"), { status: 400 });
+    if (runners()[name]) return { status: 200, body: { name, state: "running" } };
+    const c = capacity();
+    if (c.paused || c.cpus_free < cpus || c.mem_free_gb < mem_gb) return { status: 503, body: { error: "no capacity", capacity: c }, retryAfter: 60 };
+    const dir = join(stateDir, "runners");
+    mkdirSync(dir, { recursive: true });
+    const envFile = join(dir, `${name}.env`); // the JIT config is a credential: an 0600 env file, never argv
+    writeFileSync(envFile, `ACTIONS_RUNNER_INPUT_JITCONFIG=${jitconfig}\n`, { mode: 0o600 });
+    try {
+      await docker.run(["--rm", "--name", `cs-runner-${name}`.slice(0, 120), "--label", RUNNER_LABEL, "--label", `computeshare.runner.label=${label}`, "--cpus", String(cpus), "--memory", "2048m", "--env-file", envFile, cfg.runner_image ?? "ghcr.io/actions/actions-runner:latest", "/home/runner/run.sh"]);
+    } finally { rmSync(envFile, { force: true }); }
+    runners()[name] = { label, cpus, mem_gb, startedAt: now() }; store.save();
+    return { status: 201, body: { name, state: "running" } };
+  }
+  async function stopRunner(name) {
+    if (!runners()[name]) return false;
+    try { await docker.remove(`cs-runner-${name}`.slice(0, 120)); } catch { /* already gone */ }
+    delete runners()[name]; store.save();
+    return true;
+  }
+  /** Forget runners whose container exited (an ephemeral runner ends after its job). */
+  async function sweepRunners() {
+    if (!Object.keys(runners()).length) return;
+    const live = new Set(await docker.listLabelled(RUNNER_LABEL));
+    for (const n of Object.keys(runners())) if (!live.has(`cs-runner-${n}`.slice(0, 120)) && now() - runners()[n].startedAt > 60000) delete runners()[n];
+    store.save();
   }
 
   async function launch({ spec, cpus, mem_gb, limit = null }) {
@@ -315,6 +359,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     const known = new Set(Object.values(sb()).flatMap((r) => [r.name, dindName(r.name)]));
     for (const name of await docker.listLabelled(LABEL)) if (!known.has(name)) { await docker.remove(name); log.info?.(`removed orphan container ${name}`); }
+    await sweepRunners().catch((e) => log.warn?.(`runner sweep: ${e.message}`));
     await sampleUsage();
     await warm.maintain(maxLifeMs);
     if (pendingResize && capacity().active === 0) {
@@ -488,6 +533,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
     [route("POST", "/sandboxes"), async (_p, body) => { const r = await launch(body ?? {}); if (Number.isInteger(body?.spec?.warm)) warm.replenish().catch((e) => log.warn?.(`warm replenish: ${e.message}`)); return r; }],
+    [route("POST", "/runners"), async (_p, body) => startRunner(body ?? {})], // #5695
+    [route("DELETE", "/runners/:name"), async ({ name }) => ((await stopRunner(name)) ? { status: 200, body: { ok: true } } : { status: 404, body: { state: "gone" } })],
     [route("GET", "/warm"), async () => ({ status: 200, body: { warm: warm.list() } })],
     [route("POST", "/warm"), async (_p, body) => { const r = warm.configure({ ...(body ?? {}), n: body?.n }); await warm.replenish(); return { status: 200, body: { ...r, warm: warm.list() } }; }],
     [route("POST", "/warm/claim"), async (_p, body) => warm.claim(body ?? {})],
