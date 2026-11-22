@@ -23,6 +23,7 @@ import { laneEnv } from "./release-credentials.mjs";
 /** Delta passes after a head move: past it the job blocks for the manual path. Fix rounds are `ci.fix.max_rounds` (release-fixloop.mjs, default 1, #5567). */
 export const MAX_DELTA_PASSES = 2;
 const REVIEW_MS = 45 * 60_000, LANE_MS = 3 * 60 * 60_000;
+const CI_WAIT_MS = 10 * 60_000, CI_POLL_MS = 60_000; // #5779: bounded fail-late CI wait of the fix step
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const SEVERE = new Set(["CRITICAL", "HIGH"]);
 const MANUAL = "use the manual path: forgedock review-staging <PR> (commands/review-pr-staging.md)";
@@ -251,8 +252,11 @@ export async function fixStep(ctx) {
       r = s.r;
       continue;
     }
-    const rec = collectFindings({ head: r.head, jobs: r.ciFailing > 0 ? await seam.failedJobs({ pr: r.pr, head: r.head }) : [], findings: r.items ?? [], guards: r.guards ?? [] });
+    // #5779: with blocking findings in hand the fix round starts now (completed runs go into the brief); else the wait is bounded
+    const jobs = r.ciFailing > 0 ? await seam.failedJobs({ pr: r.pr, head: r.head, wait: !r.blocking?.length }) : [];
+    const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
     const b = blockingOf(rec);
+    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
     if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
     const hashesNow = Object.fromEntries(rec.ci.map((j) => [j.name, j.inputHash ?? inputHash(j.name, r.head)]));
     const brief = compileBrief(rec, { commands: ctx.config?.preflight ? [ctx.config.preflight.command] : [], rerunChecks: jobsToRerun(hashesNow, ctx.state.fixloop?.hashes ?? {}) });
@@ -299,9 +303,11 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
-export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = process.cwd(), makeRunner = null, gh: ghIn = null }) {
+export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = process.cwd(), makeRunner = null, gh: ghIn = null, io = null, spawn: spawnIn = spawn }) {
+  const sleep = io?.sleep ?? ((ms) => new Promise((res) => setTimeout(res, ms))), now = io?.now ?? (() => Date.now());
+  const say = io?.print ?? ((m) => process.stderr.write(`${m}\n`));
   const rs = { ...reviewStagingIo(), cwd, env };
-  const lane = laneEnv(env, laneStrip); // #5561: reviewer, fix and lane sandboxes never see the driver token
+  const sandboxEnv = laneEnv(env, laneStrip); // #5561: reviewer, fix and lane sandboxes never see the driver token
   const sd = env.FORGE_SCRATCHPAD || join(cwd, ".forge-scratch");
   let runner = null, shimEnv = null;
   // Reviewer briefs say `forgedock ...`: pin that name to this release job's own build, whatever is installed globally.
@@ -310,7 +316,7 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     const dir = mkdtempSync(join(tmpdir(), "release-forgedock-"));
     writeFileSync(join(dir, "forgedock"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "bin", "forgedock.mjs")}" "$@"\n`, { mode: 0o755 });
     process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
-    return (shimEnv = { ...lane, PATH: `${dir}${delimiter}${lane.PATH ?? ""}` });
+    return (shimEnv = { ...sandboxEnv, PATH: `${dir}${delimiter}${sandboxEnv.PATH ?? ""}` });
   };
   const gh = ghIn ?? ((args, input) => execFileSync("gh", args, { encoding: "utf8", input, maxBuffer: 64 << 20, env }));
   return {
@@ -339,16 +345,25 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
         return v.state === "CLOSED" && (v.labels ?? []).some((l) => l.name === "workflow:merged");
       } catch { return false; }
     },
-    // fail-late (#5567): wait until every CI run on `head` finished, then read the log of each failed one
-    failedJobs: async ({ head }) => {
+    // fail-late (#5567): wait (bounded, CI_WAIT_MS, a line per poll) until every CI run on `head` finished, then read the log of each
+    // failed one. #5779: a run that never completes (a stale run on a shared sha) used to idle the job silently for an hour; the
+    // unfinished ones are now returned as `.pending`, and `wait: false` (blocking findings already in hand) lists once, no wait.
+    failedJobs: async ({ head, wait = true }) => {
       const list = () => JSON.parse(gh(["run", "list", "-R", repo, "--commit", head, "--json", "databaseId,name,status,conclusion", "--limit", "50"]));
+      const open = (rs) => rs.filter((x) => x.status !== "completed").map((x) => x.name);
       let runs = list();
-      for (let i = 0; i < 60 && runs.some((x) => x.status !== "completed"); i++) { await new Promise((res) => setTimeout(res, 60_000)); runs = list(); }
-      return runs.filter((x) => x.status === "completed").map((x) => {
+      for (const until = now() + CI_WAIT_MS; wait && open(runs).length && now() < until;) {
+        say(`release: waiting on ${open(runs).length} CI run(s) at ${head.slice(0, 7)}: ${open(runs).join(", ")} (gives up in ${Math.ceil((until - now()) / 60_000)} min)`);
+        await sleep(Math.min(CI_POLL_MS, Math.max(0, until - now())));
+        runs = list();
+      }
+      if (open(runs).length) say(`release: ${open(runs).length} CI run(s) at ${head.slice(0, 7)} still running, going on without them: ${open(runs).join(", ")}`);
+      const jobs = runs.filter((x) => x.status === "completed").map((x) => {
         let log = "";
         if (x.conclusion === "failure") { try { log = gh(["run", "view", String(x.databaseId), "-R", repo, "--log-failed"]).slice(-20_000); } catch { /* no log: unknown class */ } }
         return { name: x.name, conclusion: x.conclusion, log };
       });
+      return Object.assign(jobs, { pending: open(runs) });
     },
     // #5567: findings that do not block (or lie outside the wave) are filed for the next plan, labelled so the release never picks them up
     async fileDeferred({ pr, items }) {
@@ -388,7 +403,8 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     runLane: ({ issue, lane }) => new Promise((resolve) => {
       const dir = mkdtempSync(join(tmpdir(), "release-lane-"));
       const rf = join(dir, "result.json");
-      const child = spawn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: lane, stdio: "ignore" });
+      // #5785: `lane` is the lane name; the child gets the sandbox env (a string env leaves it without PATH or auth)
+      const child = spawnIn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: sandboxEnv, stdio: "ignore" });
       const timer = setTimeout(() => child.kill("SIGTERM"), LANE_MS);
       const done = () => { clearTimeout(timer); let r = null; try { r = JSON.parse(readFileSync(rf, "utf8")); } catch { /* no result */ } rmSync(dir, { recursive: true, force: true }); resolve(r); };
       child.on("error", done); child.on("exit", done);

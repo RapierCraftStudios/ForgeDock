@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { releaseFromCli, readReleaseConfig, openRelease, newReleaseId } from "./release.mjs";
-import { reviewStep, fixStep } from "./release-review.mjs";
+import { reviewStep, fixStep, realSeam } from "./release-review.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 
 const DISK = [{ mount: "/", type: "ext4" }]; // CI /tmp can be tmpfs, which assertDiskPath refuses
@@ -206,6 +206,31 @@ describe("release job (#5211)", () => {
     const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: {}, steps: second });
     assert.equal(out.status, "done");
     assert.deepEqual(ran, ["preflight", "release-pr"]); // preflight/release-pr not run again
+  });
+
+  it("#5779: resuming a release stuck after a BLOCK DEPLOY review reaches the fix step despite a CI run that never completes", async () => {
+    const root = tmp(), id = newReleaseId(), io = fakeIo(), mod = await import("./release.mjs");
+    const at = new Date(io.now()).toISOString();
+    const review = { pr: 7, head: HEAD, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [101], filed: [101], ciFailing: 1, items: [] };
+    openRelease(root, id, DISK).save({ v: 1, id, repo: REPO, startedAt: at, held: [], steps: { preflight: { done: true, at, result: {} }, "release-pr": { done: true, at, result: { pr: 7, head: HEAD } }, review: { done: true, at, result: review } } });
+    const stuckGh = (a) => {
+      if (a[0] === "run" && a[1] === "list") return JSON.stringify([{ databaseId: 1, name: "Shell Compatibility", status: "in_progress", conclusion: "" }, { databaseId: 2, name: "CI", status: "completed", conclusion: "failure" }]);
+      if (a[0] === "run" && a[1] === "view") return "boom";
+      throw new Error(`unexpected gh ${a.join(" ")}`);
+    };
+    const waits = [], log = [];
+    const real = realSeam({ repo: REPO, def: "main", env: {}, cwd: "/tmp", gh: stuckGh, io: { now: () => 0, sleep: async (ms) => { waits.push(ms); }, print: () => {} } });
+    io.review = {
+      failedJobs: real.failedJobs, headOf: async () => HEAD, issueMerged: async () => false,
+      fileDeferred: async () => [], fileFixIssue: async () => { log.push("fix-issue"); return 200; },
+      runLane: async () => { log.push("lane"); return { terminalReason: "merged" }; },
+      pre: async () => ({ code: 1, data: null, lines: ["stopped"] }), // ends the delta review right after the fix lane
+    };
+    const timer = new Promise((_, rej) => setTimeout(() => rej(new Error("still waiting after 5000ms")), 5000).unref());
+    const out = await Promise.race([mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "post-merge": ok }) }), timer]);
+    assert.deepEqual(log, ["fix-issue", "lane"]);
+    assert.deepEqual(waits, []);
+    assert.equal(out.step, "fixes"); // reached the fix step and ran it, not stopped at review
   });
 
   it("unfinished steps return a blocked result that names the manual path; the job exits blocked", async () => {

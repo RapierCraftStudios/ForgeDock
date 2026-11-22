@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { httpTransport } from "../lean/sandbox-remote.mjs";
@@ -209,8 +210,11 @@ test("docker sandbox: private daemon sidecar, lane in its netns, shared /work, s
   const { agent, docker } = agentFixture();
   await agent.launch({ spec: spec("d1", { docker: true }), cpus: 3, mem_gb: 5 });
   const [dind, lane] = docker.runs;
-  assert.ok(dind.includes("--privileged") && dind.includes("--host=tcp://127.0.0.1:2375") && dind.includes("--tls=false"));
+  assert.ok(dind.includes("--privileged") && dind.join(" ").includes("--host=tcp://127.0.0.1:2375") && dind.join(" ").includes("--tls=false"));
   assert.ok(!dind.join(" ").includes("0.0.0.0"));
+  // #5738: the daemon resolves /work bind sources to the same work dir the lane's /work points at.
+  assert.equal(dind.at(-1), "/cache/work/d1");
+  assert.ok(dind.join(" ").includes('ln -sfn "$1" /work') && dind.join(" ").includes("exec dind dockerd"));
   assert.ok(dind.includes("cs-cache-o-r:/cache") && lane.includes("cs-cache-o-r:/cache"));
   assert.ok(![...dind, ...lane].some((a) => String(a).includes("cs-work-")));
   assert.deepEqual(lane.slice(lane.indexOf("--network"), lane.indexOf("--network") + 2), ["--network", "container:cs-d1-dind"]);
@@ -375,7 +379,8 @@ test("a teardown that fails and is retried records usage once", async () => {
   assert.equal(lines.length, 1);
 });
 
-test("credential relay hands out access tokens only; no refresh token leaves the router host", async () => {
+// The fake gh is a #!/bin/sh script, which win32 cannot spawn directly; the router hosts that relay run Linux.
+test("credential relay hands out access tokens only; no refresh token leaves the router host", { skip: process.platform === "win32" && "fake gh is a #!/bin/sh script (not spawnable on win32)" }, async () => {
   const dir = tmpDir("cs-cred-");
   const cfgDir = join(dir, ".claude");
   mkdirSync(cfgDir);
@@ -396,13 +401,13 @@ test("credential relay hands out access tokens only; no refresh token leaves the
   assert.doesNotMatch(claude.text + github.text, /refresh/i);
 });
 
-const installDir = new URL("../../pool/install/", import.meta.url).pathname;
-const linuxInstaller = join(installDir, "install-agent-linux.sh");
+const installDir = fileURLToPath(new URL("../../pool/install/", import.meta.url)).replace(/\\/g, "/"); // C:/... on win32, which bash accepts
+const linuxInstaller = `${installDir}install-agent-linux.sh`;
 
 test("linux installer scripts parse and install the systemd unit without WSL", () => {
-  for (const f of ["install-agent-linux.sh", "install-agent.sh"]) assert.equal(spawnSync("bash", ["-n", join(installDir, f)]).status, 0, f);
+  for (const f of ["install-agent-linux.sh", "install-agent.sh"]) assert.equal(spawnSync("bash", ["-n", `${installDir}${f}`]).status, 0, f);
   assert.ok(!/wsl/i.test(readFileSync(linuxInstaller, "utf8")));
-  assert.match(readFileSync(join(installDir, "install-agent.sh"), "utf8"), /computeshare-agent\.service/);
+  assert.match(readFileSync(`${installDir}install-agent.sh`, "utf8"), /computeshare-agent\.service/);
 });
 
 test("linux installer --dry-run resolves settings and redacts the token", () => {

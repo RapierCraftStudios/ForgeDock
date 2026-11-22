@@ -37,6 +37,8 @@ import { CHECK_ID_RE, e2eCheckFor } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches, parseRequirementDecision } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
+import { counterGrowth } from "./hotarea.mjs"; // #5751
+import { designContractFailures } from "./recurrence.mjs"; // #5751
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -693,7 +695,7 @@ function splitRequirementRefs(ref) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
       : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
@@ -799,6 +801,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "supersedes" && blank(a.guard) && typeof a.mechanism === "string" && !blank(a.mechanism)) {
+      // #5752: one decision removes a named mechanism; precheck retires every guard_broken whose test file the lane deleted
+      const mechanism = a.mechanism.trim().slice(0, 120);
+      c.mechanisms = [...(c.mechanisms ?? []).filter((m) => m.mechanism !== mechanism), { mechanism, why: String(a.why).trim() }];
+      applied.push({ kind: a.kind, target: `mechanism ${mechanism}`, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
       // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
       const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
@@ -1147,7 +1155,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, counters = null, recurrence = null, outcomeEvidenceFailures = null }) {
   const failures = [], superseded = [], ciCovered = [], equivalent = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1219,15 +1227,21 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   for (const f of baselineFailures ?? []) failures.push({ code: C.CONFORMANCE_REGRESSION, ...f }); // #5448
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
+  failures.push(...counterGrowth({ before: counters?.before, after: counters?.after, contract, result })); // #5751: forge.yaml recurrence.counters, measured at base and lane head
+  failures.push(...designContractFailures(contract, recurrence)); // #5751: a recurring issue's design lane contract
   if (repro) failures.push(...reproFailures(contract, repro), ...reproQualityFailures(repro));
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
-  for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
+  // #5752: a mechanism supersedes retires a guard whose test file the lane deleted; a surviving test still needs its own supersedes
+  const deleted = contract.mechanisms?.length && Array.isArray(removedPaths) ? new Set(removedPaths) : null;
+  for (const f of guardFailures ?? []) if (!retired.has(f.guard) && !(deleted && f.test && deleted.has(f.test))) failures.push(f);
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
   failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
+  failures.push(...(outcomeEvidenceFailures ?? [])); // #5752: forge.yaml outcome_evidence
+  failures.push(...(ciBudgetFailures ?? [])); // #5760: CI additions need a FORGE:CI_BUDGET annotation or the shared job, scoped hygiene, max counts
   failures.push(...(pageFailures ?? [])); // #5428: forge.yaml pages
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   failures.push(...interfaceDecisionFailures(contract, result, changedFiles)); // #5338
@@ -1551,6 +1565,7 @@ export function autoPostDeployE2e(contract, only = null) {
   });
   return { contract: converted.length ? { ...contract, requirements } : contract, converted };
 }
+const DECISION_WHY = "operator FORGE:DECISION"; // #5773: the why prefix of a decided row (idempotence marker)
 /**
  * #5547: apply trusted structured operator decisions (`<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy"} -->`) to a
  * frozen contract: a deliver/defer row becomes a checkless post-deploy row (deferChecklessPostDeploy then routes it). Only comments after
@@ -1560,14 +1575,48 @@ export function applyRequirementDecisions(contract, comments = []) {
   const list = Array.isArray(comments) ? comments : [];
   const at = list.map((c) => String(c?.body ?? "").trimStart().startsWith("<!-- FORGE:CONTRACT")).lastIndexOf(true);
   const ds = list.slice(at + 1).map((c) => parseRequirementDecision(c?.body)).filter(Boolean);
+  const rows = Array.isArray(contract?.requirements) ? contract.requirements : [];
+  // #5773: a decision's quote wins over its id (a requeue may have renumbered the row); the id is the fallback
+  const nq = (q) => norm(q).replace(/\s+/g, " ").trim();
+  const target = (d) => {
+    const q = d.quote ? nq(d.quote) : "";
+    const byQuote = q ? rows.find((r) => nq(r?.quote) === q) ?? rows.find((r) => nq(r?.quote).includes(q)) : null; // exact before contains
+    return byQuote ?? rows.find((r) => r?.id === d.requirement) ?? null;
+  };
+  const decided = new Map();
+  for (const d of ds) { const r = target(d); if (r && !decided.has(r.id)) decided.set(r.id, d); }
   const applied = [];
-  const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
-    const d = ds.find((x) => x.requirement === r?.id);
-    if (!d || !["deliver", "defer"].includes(r.disposition)) return r;
+  const requirements = rows.map((r) => {
+    const d = decided.get(r?.id);
+    // #5773: a check-less post-deploy row (added by an amendment) is decided too; one with a check id keeps it, the check-id gate judges it
+    const open = ["deliver", "defer"].includes(r?.disposition) || (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r.check ?? "")));
+    if (!d || !open || String(r.why ?? "").startsWith(DECISION_WHY)) return r;
     applied.push(r.id);
-    return { ...r, e2e_tracked: true, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "operator decision: the run needs spend or a third-party host outside the lane", why: `operator FORGE:DECISION: tracked post-deploy by the orchestrator, needs spend or a third-party host${d.why ? ` (${d.why})` : ""} (#5547)` };
+    const { check: _check, engine_check: _engine, ...rest } = r; // #5773: a decided row is checkless; a check id it had is dropped
+    return { ...rest, e2e_tracked: true, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "operator decision: the run needs spend or a third-party host outside the lane", why: `${DECISION_WHY}: tracked post-deploy by the orchestrator, needs spend or a third-party host${d.why ? ` (${d.why})` : ""} (#5547)` };
   });
   return { contract: applied.length ? { ...contract, requirements } : contract, applied };
+}
+/**
+ * #5773: replayed amendments (priorAmendments plus the builder's re-emitted rows) keep one `add-requirement` per quote, the
+ * last, and drop one whose quote is already a row of `contract` (the frozen contract), so a requeue does not renumber the
+ * same row (#5365 renumbering still applies to distinct quotes). Other kinds pass through in order. Pure.
+ */
+export function dedupeAddRequirements(contract, amendments = []) {
+  const nq = (q) => norm(q).replace(/\s+/g, " ").trim();
+  const list = Array.isArray(amendments) ? amendments : [];
+  const frozenQuotes = new Set((contract?.requirements ?? []).map((r) => nq(r?.quote)).filter(Boolean));
+  const isAdd = (a) => a?.kind === "add-requirement" && typeof a?.requirement?.quote === "string" && nq(a.requirement.quote);
+  const last = new Map();
+  list.forEach((a, i) => { if (isAdd(a)) last.set(nq(a.requirement.quote), i); });
+  const dropped = [];
+  const kept = list.filter((a, i) => {
+    if (!isAdd(a)) return true;
+    const q = nq(a.requirement.quote);
+    if (frozenQuotes.has(q) || last.get(q) !== i) { dropped.push({ id: a.requirement.id, quote: a.requirement.quote }); return false; }
+    return true;
+  });
+  return { amendments: kept, dropped };
 }
 /** #5468: the row ids named by `e2e_row` failures when every failure is one; null otherwise (anything else blocks as before). */
 export function loneE2eRows(failures) {

@@ -46,10 +46,11 @@ import { createConnection, createServer } from "node:net";
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
-import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, evaluateDispatchStall, firstHourReport, recordStallAlert, writeFirstHour } from "./batch-health.mjs";
+import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, decideStallAction, evaluateDispatchStall, firstHourReport, readHealth, recordStallAlert, recordStallRecovery, writeFirstHour } from "./batch-health.mjs";
+import { probeBatchEnv } from "./lanecheck.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { killTrackedChildren } from "./effects.mjs";
@@ -121,14 +122,17 @@ export function globToRegExp(glob) {
   return new RegExp(`^${re}$`);
 }
 
-/** `path` without non-existent dirs, per-session temp dirs (an `arg0`/`claude*` dir under a temp root) and `exclude` glob matches. */
-export function sanitizePath(path, { exclude = [], exists = existsSync, tmpRoots = ["/tmp", "/var/tmp", tmpdir(), process.env.TMPDIR] } = {}) {
+/**
+ * `path` without non-existent dirs, per-session temp dirs (an `arg0`/`claude*` dir under a temp root) and `exclude` glob matches.
+ * #5806: split on the platform's PATH separator (`;` on win32): splitting `C:\a;C:\b` on `:` left one bogus entry pinned.
+ */
+export function sanitizePath(path, { exclude = [], exists = existsSync, tmpRoots = ["/tmp", "/var/tmp", tmpdir(), process.env.TMPDIR], sep = delimiter } = {}) {
   const globs = exclude.map(globToRegExp);
   const roots = tmpRoots.filter(Boolean).map((r) => r.replace(/\/+$/, ""));
   const keep = (d) => d && exists(d) && !globs.some((g) => g.test(d.replace(/\/+$/, "")))
     && !(roots.some((r) => d === r || d.startsWith(`${r}/`)) && SESSION_DIR.test(d));
   const seen = new Set();
-  return String(path).split(":").filter((d) => keep(d) && !seen.has(d) && seen.add(d)).join(":");
+  return String(path).split(sep).filter((d) => keep(d) && !seen.has(d) && seen.add(d)).join(sep);
 }
 
 /**
@@ -191,7 +195,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
   lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
   abandonMs = (Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) > 0 ? Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) * 24 * 3600 * 1000 : ABANDON_AGE_MS), killChildren = killTrackedChildren,
-  hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined } = {}) {
+  hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined, probeEnv = (env) => probeBatchEnv(env), restartForStall = undefined } = {}) {
   const p = scheddPaths(dir);
   // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
   const respawnFn = respawn !== undefined ? respawn : () => { if (!["active", "activating"].includes(unitState())) defaultSpawn({ dir }); };
@@ -228,7 +232,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const emit = (m) => { for (const s of ent.subs) s(m); };
     let started = false, endedClean = false;
     const sink = {
-      batch: (b) => { ent.id = b.id; ent.dir = b.dir; hosted.set(b.id, ent); started = true; resolve(ent); },
+      batch: (b) => { ent.id = b.id; ent.dir = b.dir; ent.since = Date.now(); hosted.set(b.id, ent); started = true; resolve(ent); },
       row: (row) => emit({ type: "row", row }),
       line: (text) => emit({ type: "line", text }),
     };
@@ -493,6 +497,11 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   // #5314: a batch with ready issues, free lanes and no dispatch for `stallMin` is re-hosted once per ready set, else one needs-you
   // alert is recorded (health.json, status, sched show); every batch also gets its first-hour report once, without operator action.
   const rehostedStall = new Map();
+  // #5806: a hosted batch whose runner is alive but makes no progress (a wedged setup read, a hung child) is recovered by the
+  // upgrade handover path (#5204): close() aborts every runner and kills the daemon's own children (lanes keep running), then a
+  // fresh daemon resumes every batch. Once per batch and ready set (recorded in health.json before the restart).
+  const restartStall = restartForStall !== undefined ? (id) => restartForStall(id)
+    : (id) => { log(`schedd: restarting to recover stalled batch ${id}`); close().then(() => { try { respawnFn?.(); } catch (e) { log(`schedd: respawn failed: ${e?.message ?? e}`); } }); };
   let watching = false;
   const watchBatches = async () => {
     if (closing || watching) return;
@@ -511,27 +520,44 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const created = Date.parse(plan.created ?? "");
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
-        const stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported });
+        const stallOpts = { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported };
+        let stall = evaluateDispatchStall(state, stallOpts);
+        if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)
+          let gates = [];
+          try { gates = ((await preflight()) ?? []).filter((f) => f && f.ok !== true && f.code).map((f) => ({ code: f.code, detail: f.detail })); } catch { gates = []; }
+          if (gates.length) stall = evaluateDispatchStall(state, { ...stallOpts, gates }) ?? stall;
+        }
         if (Number.isFinite(created) && (reported || now - created >= FIRST_HOUR_MIN * 60_000) && !existsSync(join(b.dir, FIRST_HOUR_FILE)) && now - created < 24 * 3600_000) {
           if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), holdInfo: b.readHoldInfo?.() ?? null, stall }))) log(`schedd: first-hour report written for batch ${id}`);
         }
         const sig = stall ? stall.ready.join(",") : "";
         const last = b.lastProgressMs();
-        if (!isHosted && !cancelled && !reported && state?.pending?.length && last !== null && now - last > abandonMs && (!stall || rehostedStall.get(id) === sig)) {
+        if (!isHosted && !cancelled && !reported && state?.pending?.length && last !== null && now - last > abandonMs && (!stall || rehostedStall.get(id) === sig || readHealth(b.dir)?.stallRecovery?.sig === sig)) {
           b.requestCancel({ reason: "abandoned" }); // #5531: idle past N days and not re-hostable: marked once (the cancel file ends the scan for it)
           lateReport.abandoned.push(id);
           log(`schedd: batch ${id} abandoned (not hosted, ${state.pending.length} pending, no progress for ${Math.round((now - last) / 86400_000)} days)`);
           continue;
         }
         if (!stall) continue;
-        if (!isHosted && rehostedStall.get(id) !== sig) {
-          rehostedStall.set(id, sig);
-          log(`schedd: re-hosting batch ${id} (${stall.detail})`);
-          if (last !== null && now - last > abandonMs) lateReport.rehosted.push(id); // #5531
-          const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
-          starting.set(id, started);
-          started.catch((e) => { log(`schedd: re-host ${id} failed: ${e?.message ?? e}`); recordStallAlert(b, stall); }).finally(() => starting.delete(id));
-        } else if (recordStallAlert(b, stall)) log(`schedd: batch ${id} needs you: ${stall.detail}`);
+        // #5806: the batch env is probed first (a PATH without gh/git/node stalls every resume the same way); the first stall of a
+        // ready set is recovered once (health.json stallRecovery survives a daemon restart), a repeat alerts with the probed cause.
+        let probe = null;
+        try { probe = plan.env ? probeEnv(mergeEnv(process.env, plan.env)) : null; } catch { probe = null; }
+        const decision = decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, probe, hosted: isHosted });
+        if (decision.action === "alert") {
+          if (recordStallAlert(b, stall, { cause: decision.cause })) log(`schedd: batch ${id} needs you: ${stall.detail}${decision.cause ? `; probed: ${decision.cause}` : ""}`);
+          continue;
+        }
+        // #5806: a runner this daemon (re)started less than a window ago is not restarted yet (its first save may still be due)
+        if (decision.action === "restart-daemon" && now - (hosted.get(id)?.since ?? now) < stallMin * 60_000) continue;
+        rehostedStall.set(id, sig);
+        log(`schedd: ${recordStallRecovery(b, stall, { action: decision.action, sig })}`);
+        if (decision.action === "restart-daemon") { restartStall(id); return; }
+        log(`schedd: re-hosting batch ${id} (${stall.detail})`);
+        if (last !== null && now - last > abandonMs) lateReport.rehosted.push(id); // #5531
+        const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+        starting.set(id, started);
+        started.catch((e) => { log(`schedd: re-host ${id} failed: ${e?.message ?? e}`); recordStallAlert(b, stall, { cause: `resume failed: ${String(e?.message ?? e).slice(0, 300)}` }); }).finally(() => starting.delete(id));
       } catch { /* advisory: one unreadable batch never stops the watchdog */ }
     }
   }

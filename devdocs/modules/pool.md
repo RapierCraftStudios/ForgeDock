@@ -34,3 +34,14 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 ## Entry 2026-11-16 — agent bundle closure (1.61.0 outage)
 
 The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `pool`; `router.mjs`, used by `sendBundle` for self-update and bootstrap). 1.61.0's `bin/pool/ci-events.mjs` statically imported `../lean/ci-classify.mjs`, so every self-updated agent crash-looped with `ERR_MODULE_NOT_FOUND` at import (Legion down ~2.5 h). Rule: nothing under `bin/pool` may statically import outside the bundle paths; router-only extras load with a dynamic import that tolerates `ERR_MODULE_NOT_FOUND` (ci-events: classify becomes null and events pass through unclassified). `bin/tests/pool-agent-bundle.test.mjs` unpacks exactly the bundle paths into an empty directory and imports `cli.mjs`, `agent.mjs`, `router.mjs` and `ci-events.mjs` there; it fails on the 1.61.0 code.
+
+- **dind /work bind sources (#5738, 1.61.1 regression):** since #5696 the lane's `/work` is a symlink to `/cache/work/<id>`, and the private dockerd shares only the cache volume. The dind container now boots through `DIND_BOOT`, which makes the same `/work` symlink before `exec dind dockerd`, so `docker run -v /work/...` from a lane resolves to the checkout. Verified on Legion: the old boot gives an empty dir and the new boot reads the file. Any change to sandbox mounts needs this dind bind canary on a pool host before agents are upgraded.
+
+## Entry 2026-11-21 — WSL host-disk admission (#5733)
+
+- `bin/pool/health.mjs` `hostDiskFree` (WSL only: osrelease /microsoft/i; Lxss BasePath drive via reg.exe over the interop socket, else /mnt/c) feeds `host_disk_free_gb`/`host_disk_low` in agent `capacity()`; `launch` answers 503 `pool.disk_low` under `min_host_disk_free_gb` (25) or after `sandbox_disk_growth_gb` (3.5) × (active + 1), and the router skips `host_disk_low` agents with its own 503 `pool.disk_low`. It is a capacity deferral (lane `SANDBOX_CAPACITY`), never a failure; unreadable means no field and no gate.
+
+## Entry 2026-11-22 — cache volume hygiene (#5757)
+
+- `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
+- `agent.mjs` `cacheSweep` runs from `reap()` every `cache_sweep_interval_s`; failures land in `/capacity` `cache_sweep_error` (also work-dir sweep/destroy failures), sizes in `cache_volumes`. Volumes are created with label `computeshare.cache=1` (`docker.createVolume`); `gc.mjs` reports them, never reclaims (`forgedock.owner=1` stays the only reclaim label). Entrypoint writes `/cache/.last-used`.

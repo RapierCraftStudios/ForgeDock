@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path"; // #5751: the cache path uses the host separator
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { closedResult, gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, resolveContextMode, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments, subjectTerms, subjectHistory, MAX_SUBJECT_ITEMS, MAX_SUBJECT_QUERIES } from "./context.mjs";
 
@@ -123,7 +124,7 @@ describe("context pack (forge#4275)", () => {
     assert.equal(contextPackCacheKey(50, "abc", cfg, {}), contextPackCacheKey(50, "abc", cfg), "no repo: today's key");
     await contextPackFor({ cfg, issue: 50, repo: "acme/one", headSha: "abc", cacheDir: "/runs", fs, gather: g });
     await contextPackFor({ cfg, issue: 50, repo: "acme/two", headSha: "def", cacheDir: "/runs", fs, gather: g });
-    assert.deepEqual([...store.keys()].map((k) => k.split("-").slice(0, 2).join("-")).sort(), ["/runs/context-acme__one__50", "/runs/context-acme__two__50"]);
+    assert.deepEqual([...store.keys()].map((k) => k.split("-").slice(0, 2).join("-")).sort(), [join("/runs", "context-acme__one__50"), join("/runs", "context-acme__two__50")]);
     const again = await contextPackFor({ cfg, issue: 50, repo: "acme/one", headSha: "abc", cacheDir: "/runs", fs, gather: g });
     assert.equal(again.cached, true);
   });
@@ -319,14 +320,14 @@ describe("#4298 context-pack cache and shared names", () => {
 
   it("writes through a temp file and a rename, then prunes the issue's other packs only", async () => {
     const { fs, store, ops } = memFs();
-    store.set("/runs/context-50-old-aaaaaaaaaaaa.json", "{}");
-    store.set("/runs/context-500-x-bbbbbbbbbbbb.json", "{}");
-    store.set("/runs/50-run.jsonl", "");
+    store.set(join("/runs", "context-50-old-aaaaaaaaaaaa.json"), "{}");
+    store.set(join("/runs", "context-500-x-bbbbbbbbbbbb.json"), "{}");
+    store.set(join("/runs", "50-run.jsonl"), "");
     await contextPackFor({ cfg, issue: 50, headSha: "abc", cacheDir: "/runs", fs, stamp: { scope: "t", attempts: 0 }, gather: async () => facts() });
-    const file = `/runs/${contextPackCacheKey(50, "abc", cfg, { scope: "t", attempts: 0 })}`;
+    const file = join("/runs", contextPackCacheKey(50, "abc", cfg, { scope: "t", attempts: 0 }));
     assert.equal(ops[0][0], "write"); assert.match(ops[0][1], /\.tmp$/);
     assert.deepEqual(ops[1], ["rename", ops[0][1], file]);
-    assert.deepEqual([...store.keys()].sort(), ["/runs/50-run.jsonl", "/runs/context-500-x-bbbbbbbbbbbb.json", file].sort());
+    assert.deepEqual([...store.keys()].sort(), [join("/runs", "50-run.jsonl"), join("/runs", "context-500-x-bbbbbbbbbbbb.json"), file].sort());
   });
 
   it("a rename or prune failure is not an error, and a seam without rename still writes", async () => {

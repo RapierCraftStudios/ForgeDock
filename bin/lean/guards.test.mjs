@@ -153,7 +153,7 @@ test("guardAfterMerge fetches the bare branch (not origin/<lane>) and the merge 
     gh: async (a) => a[0] === "issue" ? JSON.stringify({ number: 9, title: "t", comments: [{ body }] }) : a[0] === "pr" ? JSON.stringify({ number: 3, mergeCommit: { oid: "abc123" } }) : "",
     git: async (a) => { calls.push(a.join(" ")); if (a[0] === "diff") { if (!have) throw new Error("bad object"); return DIFF; } if (a.join(" ") === "fetch origin abc123") have = true; return ""; },
   };
-  const r = await guardAfterMerge({ io, repo: "o/r", issue: 9, pr: 3, cwd: "/x", base: "origin/staging" });
+  const r = await guardAfterMerge({ io, repo: "o/r", issue: 9, pr: 3, cwd: "/x", base: "origin/staging", root: tmpDir("guards-fetch-") });
   assert.ok(calls.includes("fetch origin staging"));
   assert.ok(!calls.some((c) => c.includes("origin/staging")));
   assert.ok(r.posted, JSON.stringify(r));

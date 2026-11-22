@@ -12,6 +12,7 @@
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, basename } from "path";
+import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome } from "./forge-home-check.mjs";
 import { backupToHistory } from "./config-history.mjs";
 
 // ---------------------------------------------------------------------------
@@ -718,6 +719,42 @@ export function makeCtx(overrides = {}) {
 const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
 
 /**
+ * Play the forgedock-splash scene (Clawd bonks the F; bin/splash-scene.mjs, generated from the plugin's
+ * scene.ts) in place, then erase it so the settled banner takes its spot. Interactive truecolor terminals
+ * only; skipped by --fast / --no-splash / FORGEDOCK_NO_SPLASH=1. Never throws. Returns true when it played.
+ */
+export async function introScene(ctx, { load = () => import("./splash-scene.mjs"), wait = sleep } = {}) {
+  const w = ctx.stdout;
+  if (!ctx.motion || ctx.mode !== "truecolor") return false;
+  if (ctx.env?.FORGEDOCK_NO_SPLASH === "1" || ctx.argv?.includes("--no-splash")) return false;
+  let s;
+  try { s = await load(); } catch { return false; }
+  if ((w.columns ?? 0) < s.MIN_COLUMNS + 2 || (w.rows ?? 0) < s.MIN_ROWS + 2) return false;
+  s.setTheme(false);
+  const fg = (hex) => `\x1b[38;2;${parseInt(hex.slice(1, 3), 16)};${parseInt(hex.slice(3, 5), 16)};${parseInt(hex.slice(5, 7), 16)}m`;
+  const restore = () => w.write("\x1b[?25h");
+  process.once("exit", restore);
+  let height = 0;
+  try {
+    w.write("\x1b[?25l");
+    for (let f = 0; f <= s.LAST; f++) {
+      const rows = s.scene(f).map((runs) => "  " + runs.map((r) => `${r.color ? fg(r.color) : ""}${r.bold ? "\x1b[1m" : ""}${r.text}\x1b[0m`).join("") + "\x1b[K");
+      if (height) w.write(`\x1b[${height}A\r`);
+      w.write(rows.join("\n") + "\n");
+      height = rows.length;
+      await wait(s.TICK);
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (height) w.write(`\x1b[${height}A\r\x1b[J`);
+    restore();
+    process.removeListener("exit", restore);
+  }
+}
+
+/**
  * Render the hero banner and run preflight checks. Failures render fix cards
  * and the journey continues — advisory, never fatal. Includes informational
  * Platform/WSL/Shell rows (via env-detect.mjs) after the pass/fail checks —
@@ -727,7 +764,9 @@ const dimLine = (ctx, s) => (ctx.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
 export async function preflight(ctx) {
   const { stdout: w } = ctx;
   w.write("\n");
-  await shimmer(HERO_MARK, CHROME_STOPS, { mode: ctx.mode, motion: ctx.motion, writer: w });
+  // Open with the startup-splash scene, then settle on the static mark; the shimmer stays the fallback.
+  const played = await introScene(ctx);
+  await shimmer(HERO_MARK, CHROME_STOPS, { mode: ctx.mode, motion: played ? false : ctx.motion, writer: w });
   w.write("\n  " + ember("F O R G E D O C K", ctx.mode) + "\n");
   w.write("  " + dimLine(ctx, `──── ${getLogoTagline("install")} ────────────────────`) + "\n\n");
 
@@ -2194,6 +2233,17 @@ function renderForgeReceipt(ctx, results) {
     w.write(`  ${glyph(true)} SessionStart hook ${hookStatus === "already" ? "active" : "registered"} ${dimLine(ctx, settingsPath)}\n`);
   }
 
+  // Stale FORGE_HOME (#5796): a leftover value from an old checkout outranks ~/.forge in forge-resolve.sh.
+  if (process.env.FORGE_HOME) {
+    let ver = ctx.persistHomeResult?.version || "";
+    if (!ver) { try { ver = JSON.parse(readFileSync(join(ctx.forgeHome, "package.json"), "utf8")).version || ""; } catch { /* unknown */ } }
+    const fh = assessForgeHome({ value: process.env.FORGE_HOME, sourceDir: ctx.forgeHome, sourceVersion: ver, persistedHome: join(os.homedir(), ".forge") });
+    if (forgeHomeIsProblem(fh)) {
+      w.write(`  ${glyph(false)} stale FORGE_HOME ${dimLine(ctx, `${describeForgeHome(fh, process.env.FORGE_HOME, ver)} — run: npx forgedock doctor --fix`)}
+`);
+    }
+  }
+
   // Persisted-home / ephemeral-cache advisory (forge#1895, extended #1943):
   // runJourney() calls persistHome(ctx) right before forge() and stashes its
   // result on ctx.persistHomeResult; when persistHome() actually ran (i.e.
@@ -2823,14 +2873,14 @@ export async function connect(ctx) {
   if (yes) {
     ctx.openFn(GITHUB_APP_URL);
     w.write(
-      `  \x1b[38;2;255;179;71m✔\x1b[0m Opening ${GITHUB_APP_URL}\n` +
-      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}This registers the app only — it does not create a bot token yet.\x1b[22m\n` +
-      `  ${ctx.mode === "none" ? "" : "\x1b[2m"}Pipeline commands keep using your personal \`gh\` auth. See docs/CONFIG.md.\x1b[22m\n`,
+      `  ${ctx.mode === "none" ? "✔" : "\x1b[38;2;255;179;71m✔\x1b[0m"} Opening ${GITHUB_APP_URL}\n` +
+      `  ${dimLine(ctx, "This registers the app only — it does not create a bot token yet.")}\n` +
+      `  ${dimLine(ctx, "Pipeline commands keep using your personal `gh` auth. See docs/CONFIG.md.")}\n`,
     );
     return { opened: true };
   }
 
-  w.write(`  ${ctx.mode === "none" ? "" : "\x1b[2m"}Skipped — install anytime: ${GITHUB_APP_URL}\x1b[22m\n`);
+  w.write(`  ${dimLine(ctx, `Skipped — install anytime: ${GITHUB_APP_URL}`)}\n`);
   return { opened: false };
 }
 

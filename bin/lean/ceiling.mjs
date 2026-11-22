@@ -70,3 +70,23 @@ export function handoffFacts(toolUses, lastTool = null) {
 
 /** Appended to the build prompt of a lane predicted to restart: read the named files, do not survey. */
 export const NARROW_NOTE = "\n\nContext is tight on this lane (the contract's files and this prompt already fill much of the session window): read only the files the contract names and the code you edit, skip surveys of unrelated code, and make each edit as soon as you know it.";
+
+/** #5812: the route digest's byte cap (about 8000 tokens); a smaller hand-off bound lowers it to the bound in bytes, a quarter of it in tokens. */
+export const ROUTE_DIGEST_MAX_BYTES = 32 * 1024;
+
+/**
+ * #5812: whether the routed build resumes the planning session or starts fresh from a digest. `planTokens` is the planning
+ * session's last-turn context (null when unknown: resume, as before), `bound` is `engine.route_handoff_tokens` (0 = always
+ * resume), capped at half the lane's ceiling so a build never opens near it. Above the bound: digest.
+ */
+export function routeHandoff({ planTokens = null, bound = 0, ceiling = 0 } = {}) {
+  const b = bound > 0 ? (ceiling > 0 ? Math.min(bound, Math.floor(ceiling / 2)) : bound) : 0;
+  const digest = b > 0 && Number.isFinite(planTokens) && planTokens > b;
+  return { digest, planTokens: Number.isFinite(planTokens) ? planTokens : null, bound: b, digestBytes: Math.min(ROUTE_DIGEST_MAX_BYTES, Math.max(2048, b)) };
+}
+
+/** #5812: the planning reply's closing "Build reads:" list (the files and searches the build opens with); "" when absent. */
+export function buildReadsOf(text) {
+  const s = String(text ?? ""), i = s.lastIndexOf("Build reads:");
+  return i < 0 ? "" : s.slice(i + "Build reads:".length).trim().slice(0, 3000);
+}

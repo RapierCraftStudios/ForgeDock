@@ -6,6 +6,7 @@
  */
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { parseDocsConfig } from "./lean/docsgate.mjs";
+import { parseOutcomeEvidenceConfig } from "./lean/outcomeevidence.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
 import { parseDesignConfig } from "./lean/design-gate.mjs";
 import { execFileSync } from "node:child_process";
@@ -13,10 +14,10 @@ import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 const RECOVERING_LABEL = "workflow:recovering";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
-import { localLaneCap } from "./lean/admission.mjs";
+import { localLaneCap, ADMISSION_DEFAULTS } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
@@ -26,6 +27,7 @@ import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs, attachRunLog } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
+import { parseRecurrenceConfig } from "./lean/recurrence.mjs"; // #5751
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
@@ -36,13 +38,15 @@ import { normalizeKindModes } from "./lean/conformance.mjs";
 import { parseEnforceDomains } from "./lean/review-trigger.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
 import { otherLaneOwner, clearLease } from "./lean/lanelock.mjs";
-import { parseExecution, detectNeeds, placementText, hostFallbackAllowed } from "./lean/execution.mjs";
+import { parseExecution, placementNeeds, hostFallbackAllowed } from "./lean/execution.mjs";
 import { openRotator, rotatorKind } from "./lean/rotator.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseCeilingBySize } from "./lean/ceiling.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
+import { parseCiBudget } from "./lean/ci-gate.mjs";
+import { parseCiPrecheckConfig } from "./lean/ci-precheck.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
@@ -384,7 +388,7 @@ function readLeanSetting(key, cwd = process.cwd()) {
 export function liveLaneCap(globalParallel, { cfg = readAdmission(), host = { cores: () => cpus().length, memAvailableMb } } = {}) {
   return () => {
     let derived = null;
-    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb() }); } catch { derived = null; }
+    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb(), rampingMb: (() => { try { return host.rampingMb?.(cfg?.ramp_s ?? ADMISSION_DEFAULTS.ramp_s) ?? 0; } catch { return 0; } })() }); } catch { derived = null; }
     return derived === null ? globalParallel : globalParallel === null ? derived : Math.min(globalParallel, derived);
   };
 }
@@ -398,6 +402,7 @@ export function readAdmission(cwd = process.cwd()) {
       min_free_mem_mb: num(e.min_free_mem_mb ?? e.admission_min_free_mem_mb), min_free_tmp_mb: num(e.min_free_tmp_mb ?? e.admission_min_free_tmp_mb),
       max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core),
       lane_cpu_reservation: pos(e.lane_cpu_reservation ?? e.admission_lane_cpu_reservation), lane_mem_mb: pos(e.lane_mem_mb ?? e.admission_lane_mem_mb),
+      ramp_s: pos(e.ramp_s ?? e.admission_ramp_s), max_new_per_ramp: num(e.max_new_per_ramp ?? e.admission_max_new_per_ramp), // #5845: 0 = no rate limit
       overload_load_per_core: num(e.overload_load_per_core ?? e.admission_overload_load_per_core) }; // #5174: hostload.mjs overload hold
 
   } catch { return {}; }
@@ -423,6 +428,7 @@ export function readHeavy(cwd = process.cwd()) {
  * `engine.cli_busy_minutes` (default 45, #4405): extra silence allowed while the builder has a live heavy step or heavy-queue entry.
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
  * #5346: `engine.context_ceiling_by_size` ("S=..,M=..,L=.."; a size without an entry uses context_ceiling_tokens).
+ * #5812: `engine.route_handoff_tokens` (default 40000 in runCore; 0 = always resume): a planning session above it is not resumed by the build, which starts from a digest.
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
@@ -439,6 +445,7 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(posNum(y.engine?.cli_busy_minutes) ? { cliBusyMinutes: posNum(y.engine.cli_busy_minutes) } : {}),
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
       ...(parseCeilingBySize(y.engine) ? { contextCeilingBySize: parseCeilingBySize(y.engine) } : {}), // #5346
+      ...(/^\d+$/.test(String(y.engine?.route_handoff_tokens ?? "").trim()) ? { routeHandoffTokens: Number(y.engine.route_handoff_tokens) } : {}), // #5812
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
   } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
@@ -570,10 +577,17 @@ export function readPrecheckBudget(cwd = process.cwd()) {
     return raw !== "" && Number.isFinite(n) && n >= 1 && n <= 120 ? n : undefined;
   } catch { return undefined; }
 }
-/** runCore `precheck` option: {commands, maxMinutes} from learned.test_commands and lean.precheck.max_minutes; {} when neither is set. */
+/** #5820: forge.yaml `lean.ci_precheck*` (flat keys) -> {mode, include, exclude, maxJobs}; null when none is set or unreadable. */
+export function readCiPrecheck(cwd = process.cwd()) {
+  try {
+    const l = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {};
+    return Object.keys(l).some((k) => k.startsWith("ci_precheck")) ? parseCiPrecheckConfig(l) : null;
+  } catch { return null; }
+}
+/** runCore `precheck` option: {commands, maxMinutes, ci} from learned.test_commands, lean.precheck.max_minutes and lean.ci_precheck*; {} when none is set. */
 function readPrecheckOptions(cwd = process.cwd()) {
-  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd);
-  return commands || maxMinutes ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}) } } : {};
+  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd), ci = readCiPrecheck(cwd);
+  return commands || maxMinutes || ci ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}), ...(ci ? { ci } : {}) } } : {};
 }
 /**
  * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
@@ -593,13 +607,16 @@ export function readEnvConfig(cwd = process.cwd()) {
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
     const rr = s(y?.topology?.route_reachability); // #5087: repo-supplied command: exits non-zero when the ingress does not deliver the added route paths (args) to their service
     const dc = parseDocsConfig(y?.docs); // #5419: forge.yaml docs: (off unless required_for is set)
+    const oe = parseOutcomeEvidenceConfig(y?.outcome_evidence); // #5752: forge.yaml outcome_evidence: (off unless paths declares an area)
+    const cb = ["max_workflows", "max_ci_jobs", "monthly_minutes", "shared_regression_job"].some((k) => y?.ci?.[k] !== undefined) ? parseCiBudget(y.ci) : null; // #5760: forge.yaml ci.budget (flattened into ci)
     let appPages = false; // #5428: default-on trigger: the repo tracks Next app/**/page.* files
     try { appPages = String(execFileSync("git", ["ls-files", "--", "*page.*"], { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] })).split("\n").some((f) => PAGE_RE.test(f)); } catch { /* not a git checkout: off */ }
     const pg = parsePagesConfig(y?.pages, { hasAppPages: appPages }); // #5428: forge.yaml pages: (off for repos without pages)
+    const rc = y?.recurrence && typeof y.recurrence === "object" ? parseRecurrenceConfig({ ...y.recurrence, hot_areas: readYamlMap(cwd, "recurrence", "hot_areas"), counters: readYamlMap(cwd, "recurrence", "counters") }) : null; // #5751: forge.yaml recurrence: (absent: the engine defaults)
     const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
-      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(s(y?.validate?.regenerate) ? { validateRegenerate: s(y.validate.regenerate) } : {}), ...(catalog.length ? { validateCatalogSources: catalog } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}), ...(Object.keys(runners).length ? { testRunners: runners } : {}), ...(recipes.length ? { validateRecipes: recipes } : {}), ...(s(y?.validate?.regenerate) ? { validateRegenerate: s(y.validate.regenerate) } : {}), ...(catalog.length ? { validateCatalogSources: catalog } : {}), ...(cf && Object.keys(cf).length ? { coupledFiles: cf } : {}), ...(rr ? { routeReachability: rr } : {}), ...(dc ? { docsConfig: dc } : {}), ...(oe ? { outcomeEvidenceConfig: oe } : {}), ...(cb ? { ciBudget: cb } : {}), ...(pg ? { pagesConfig: pg } : {}), ...(dg ? { designConfig: dg } : {}), ...(rc ? { recurrenceConfig: rc } : {}), ...(pp && Object.keys(pp).length ? { prodParity: pp } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -1792,6 +1809,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const scheddMod = await import("./lean/schedd.mjs");
   const kept = plan?.env ?? (resumeId ? null : daemon || callerEnv !== process.env ? scheddMod.batchEnv(callerEnv, readPinnedEnvConfig(plan?.cwd ?? callerCwd)) : null);
   const env = kept ? scheddMod.mergeEnv(process.env, kept) : process.env;
+  // #5806: a pinned env whose PATH cannot resolve gh/git/node left the batch in `phase: setup` with no error; fail here instead
+  const probeEnv = deps.probeEnv !== undefined ? deps.probeEnv : (deps.leanIo || deps.leanModule || deps.laneScript) ? null : (await import("./lean/lanecheck.mjs")).probeBatchEnv;
+  const envProbe = kept && probeEnv ? probeEnv(env) : null;
+  if (envProbe && !envProbe.ok) {
+    throw new Error(resumeId ? `batch ${resumeId} cannot resume: ${envProbe.detail}; fix its pin with forgedock orchestrate --set-env ${resumeId} PATH=<dirs holding gh, git and node>, then --resume ${resumeId}`
+      : `batch not started: ${envProbe.detail}; run forgedock orchestrate from a shell where gh, git and node resolve (or adjust orchestration.path_exclude)`);
+  }
   const lane = flag(argv, "--lane");
   const laneOverride = argv.includes("--lane-override");
   const model = flag(argv, "--model");
@@ -2157,6 +2181,39 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
+  const { hostMissingTools } = await import("./lean/toolplace.mjs");
+  const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
+    version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
+    envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
+    missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
+  };
+  // #4785: decisions and the frozen contract's validate commands too. #5824: one view per issue; the plan pass's view is
+  // used once by the runner's first read (no second gh call), later reads (requeue, --add) see the live body.
+  const planViews = new Map();
+  const viewOf = async (n) => {
+    const v = await viewIssue(leanIo.gh, repo, n, maint || registry || hybrid ? "title,body,labels,comments,author,milestone" : "title,body,comments,author,milestone");
+    if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null);
+    trustedOf.set(n, bodyTrusted(v));
+    if (maint || registry || hybrid) labelsOf.set(n, (v.labels ?? []).map((x) => x.name));
+    needsOf.set(n, placementNeeds(v, execForNeeds));
+    if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay));
+    return v;
+  };
+  const readBody = async (n) => { const v = planViews.get(n); planViews.delete(n); return (v ?? await viewOf(n)).body; };
+  // #5824: the dependency DAG is built in code and printed as the plan table at a fresh start; a resume keeps the planned one.
+  const dagMod = await import("./lean/dag.mjs");
+  let dag = plan?.dag ?? null;
+  if (!resumeId && deps.planDag !== false) {
+    try {
+      const views = new Map();
+      await (await import("./lean/pmap.mjs")).mapLimit(issues, 6, async (n) => {
+        try { const v = await viewOf(n); planViews.set(n, v); views.set(n, dagMod.planView(v, { trusted: trustedOf.get(n) === true })); } catch { /* unreadable: no edges; the runner reads it again */ }
+      });
+      dag = dagMod.buildDag(issues, views, { exists: (p) => existsSync(join(cwd, p)) });
+      for (const l of dagMod.formatPlan(issues, views, dag, { parallel, parallelFrom: flag(argv, "--parallel") != null ? "--parallel" : "default" })) sink.line(l);
+      batch.writePlan({ ...batch.readPlan(), dag: { edges: dag.edges, overlaps: dag.overlaps } });
+    } catch (e) { sink.line(`plan: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
+  }
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
     resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
@@ -2164,6 +2221,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
+  let rampProbe = {};
+  try { rampProbe = (deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe()); } catch { rampProbe = {}; } // #5845: the live cap subtracts lanes still ramping
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -2175,7 +2234,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
       ...(remote ? { remote } : {}),
@@ -2194,6 +2253,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, batchId: batch.id, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
+      // #5805: engine/env-caused failures that would repeat are held and re-admitted on an install version change, a --set-env, or the
+      // missing tool appearing on the lanes' PATH (the batch's pinned env over the daemon's); off under the test seams
+      ...(envHold ? { envHold } : {}),
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
@@ -2227,9 +2289,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         crossLane.push(e);
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
-      readBody: maint || registry || hybrid
-        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
-        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author,milestone"); if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+      readBody, logicalDeps: (n) => dagMod.logicalDepsOf(dag, n), // #5824: the plan's logical edges
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); healthTimers.cancel(); }
@@ -2266,6 +2326,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { day = execBudget ? execBudget.dayTotals() : null; } catch { day = null; }
   const sbxLine = formatSandboxSummary(rows, { budget: execConf?.budget ?? null, day });
   if (sbxLine) report.push(sbxLine);
+  let removedEdges = [];
+  if (dag?.edges?.length) try { // #5824: planned edges an operator removed (body edited) before the batch ended
+    removedEdges = await dagMod.falseHolds(dag, async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,author"); return dagMod.declaredDeps(n, { body: v.body, trusted: bodyTrusted(v) }); });
+    report.push(dagMod.formatFalseHolds(dag, removedEdges));
+  } catch { report.push("false holds: n/a"); }
   if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   report.push(formatReclaimed(reclaimed));
@@ -2278,7 +2343,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
   try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
-  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, ...(dag?.edges ? { dag: { planned: dag.edges.length, falseHolds: removedEdges } } : {}), report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
@@ -2513,7 +2578,11 @@ export async function scheddFromCli(argv, deps = {}) {
     const health = await import("./lean/schedd-health.mjs");
     const i = argv.indexOf("--stall-sec"), sec = i >= 0 ? Number(argv[i + 1]) : NaN;
     if (i >= 0 && !(sec > 0)) throw new Error("usage: forgedock schedd watchdog [--stall-sec N]");
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}) });
+    // #5806: a down daemon with unfinished daemon batches (pending, no report/cancel, breaker not tripped) is started again (systemd unit when installed, else a detached daemon)
+    const bm = await import("./lean/batch.mjs");
+    const unfinished = () => { const root = bm.batchRoot(); return bm.listBatches(root).filter((id) => { try { const b = bm.openBatch(root, id); const br = b.store.peek()?.breaker; return !!b.readPlan()?.daemon && !b.isTerminal() && b.pendingIssues().length > 0 && !(br && !br.transport); } catch { return false; } }); };
+    const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
@@ -2971,6 +3040,26 @@ export function readIntegration(cwd = process.cwd()) {
   return import("./lean/integration.mjs").then((m) => m.parseIntegration(ci));
 }
 
+/** #5704: run the live reconcile and print its rows and summary. */
+async function runLiveReconcile({ repo, io, dryRun, spawn }) {
+  const { reconcileLive, formatReconcileSummary } = await import("./lean/live-reconcile.mjs");
+  const res = await reconcileLive({ repo, io, cwd: process.cwd(), dryRun, ...(spawn ? { spawn } : {}) });
+  for (const r of res.rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
+  console.log(formatReconcileSummary(res) || "live reconcile: no merged issues open");
+  return res;
+}
+
+/** #5704: `forgedock close reconcile [--repo R] [--dry-run]`: reconcile merged issues against the live SHA (fail closed when unknown). */
+export async function closeReconcileFromCli(argv, deps = {}) {
+  const [sub] = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--repo");
+  if (sub !== "reconcile") throw new Error("usage: forgedock close reconcile [--repo owner/name] [--dry-run]");
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("close reconcile needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  return runLiveReconcile({ repo, io: leanIo, dryRun: argv.includes("--dry-run"), spawn: deps.spawn });
+}
+
 export async function probeFromCli(argv, deps = {}) {
   const valued = ["--repo", "--limit"];
   const issues = [];
@@ -2996,7 +3085,10 @@ export async function probeFromCli(argv, deps = {}) {
     console.log(formatParkedSweepSummary(parkedRows) || "parked: nothing released");
     const orphanRows = await sweepOrphanPrFollowups({ repo, io: leanIo, dryRun: argv.includes("--dry-run") }); // #5505
     console.log((await import("./lean/orphan-pr.mjs")).formatOrphanSummary(orphanRows) || "orphan PRs: none");
-    return { rows, parkedRows };
+    // #5704: the post-release pass: merged issues now in the live SHA are checked, then closed or reported
+    let live = null;
+    try { live = await runLiveReconcile({ repo, io: leanIo, dryRun: argv.includes("--dry-run"), spawn: deps.spawn }); } catch (e) { console.log(`live reconcile: error (${String(e?.message ?? e).split("\n")[0]})`); }
+    return { rows, parkedRows, live };
   }
   const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
   const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });

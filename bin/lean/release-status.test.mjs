@@ -198,6 +198,17 @@ describe("release status / explain (#5554)", () => {
     assert.throws(() => parseNextAction("forgedock release status x --bogus"), /unknown option/);
   });
 
+  it("#5709: status shows the active manual merge hold, else a pending release-CI hold", async () => {
+    const active = { lease: { holder: "h", epoch: 2, release: ID }, holds: [], mergeHold: { reason: "release CI", actor: "o", at: "T" } };
+    const s = await collectStatus(base(fakeIo({ active })));
+    assert.deepEqual(s.merge_hold, { reason: "release CI", actor: "o", at: "T" });
+    assert.match(renderReleaseStatus(s).split("\n")[0], /hold=no {2}merge_hold=yes \(release CI\) {2}intake=/);
+    const ci = await collectStatus(base(fakeIo({ checks: [{ name: "unit", conclusion: null }] })));
+    assert.equal(ci.merge_hold, null); assert.deepEqual(ci.merge_hold_release_ci, { pr: 7, pending: 1 });
+    assert.match(renderReleaseStatus(ci).split("\n")[0], /merge_hold=release-ci \(PR #7, 1 pending\)/);
+    const none = await collectStatus(base(fakeIo()));
+    assert.equal(none.merge_hold, null); assert.equal(none.merge_hold_release_ci, null); assert.doesNotMatch(renderReleaseStatus(none), /merge_hold/);
+  });
   it("R1: no active release prints `no active release`", async () => {
     const io = fakeIo({ active: {} });
     assert.equal(await releaseFromCli(["status", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel") }, deps: {} }), 1);

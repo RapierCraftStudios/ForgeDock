@@ -16,6 +16,7 @@ export const RECIPES = {
   "postgresql-client": { versioned: true, steps: (v) => [apt(v ? `postgresql-client-${v}` : "postgresql-client")] },
   python: { versioned: true, steps: (v) => [apt(v ? `python${v} python${v}-venv` : "python3 python3-venv")] },
   xvfb: { versioned: false, steps: () => [apt("xvfb xauth")] }, // headless X for browser/GUI tests that call xvfb-run
+  shellcheck: { versioned: false, steps: () => [apt("shellcheck")] }, // shell-script linter for validate commands
   playwright: { versioned: true, steps: (v) => [`RUN npx --yes playwright${v ? `@${v}` : ""} install --with-deps chromium`] },
   // Example of a release-tarball tool; the version is required.
   promtool: { versioned: true, steps: (v) => [`RUN curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${v ?? "2.54.1"}/prometheus-${v ?? "2.54.1"}.linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'`] },
@@ -42,8 +43,19 @@ export function validateLaneTools(raw) {
   return { tools: [...tools].sort(), errors };
 }
 
-/** True when `name` has a lane_tools recipe (#5652). */
-export function hasRecipe(name) { return Object.hasOwn(RECIPES, String(name)); }
+/** Binaries a recipe provides under another name (#5764): the probe misses `python3`, not the `python` recipe. */
+const BINARY_RECIPES = { pip3: "python", psql: "postgresql-client", pg_dump: "postgresql-client", "xvfb-run": "xvfb" };
+
+/** The recipe that provides `tool` (a recipe name or a binary it installs), else null (#5764). */
+export function recipeFor(tool) {
+  const t = String(tool);
+  if (Object.hasOwn(RECIPES, t)) return t;
+  if (/^python3(\.\d+)?$/.test(t)) return "python";
+  return Object.hasOwn(BINARY_RECIPES, t) ? BINARY_RECIPES[t] : null;
+}
+
+/** True when `name` has a lane_tools recipe, directly or as a binary one provides (#5652, #5764). */
+export function hasRecipe(name) { return recipeFor(name) !== null; }
 
 /**
  * In-sandbox install commands (#5652) for one tool: the recipe's Dockerfile `RUN` steps as shell commands, `sudo` prefixed
@@ -51,9 +63,11 @@ export function hasRecipe(name) { return Object.hasOwn(RECIPES, String(name)); }
  */
 export function installCommands(entry, { root = true } = {}) {
   const { name, version } = parseLaneTool(entry);
-  if (!hasRecipe(name)) return [];
+  const recipe = recipeFor(name);
+  if (!recipe) return [];
   const sh = (s) => s.replace(/^RUN\s+/, "");
-  return RECIPES[name].steps(version).map((s) => (root ? sh(s) : `sudo sh -c ${JSON.stringify(sh(s))}`));
+  // a binary alias installs the unversioned recipe: python@3.12 provides python3.12, not python3 (#5764)
+  return RECIPES[recipe].steps(recipe === name ? version : null).map((s) => (root ? sh(s) : `sudo sh -c ${JSON.stringify(sh(s))}`));
 }
 
 /**
@@ -85,6 +99,11 @@ export function checkRecipes(tools) {
 export function laneToolsTag(baseImage, tools) {
   const h = createHash("sha256").update([...tools].sort().join("\n")).digest("hex").slice(0, 12);
   return `${baseImage}-t${h}`;
+}
+
+/** True when `tag` is the base image itself or a per-repo tools variant (`<base>-t<12 hex>`) of it. */
+export function isLaneToolsTagOf(tag, base) {
+  return typeof tag === "string" && (tag === base || (tag.startsWith(`${base}-t`) && /^[0-9a-f]{12}$/.test(tag.slice(base.length + 2))));
 }
 
 /** The generated Dockerfile: FROM the base lane image, then each recipe's steps in sorted order. */

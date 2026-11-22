@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Must stay the first import: defaults windowsHide for detached/background runs on Windows (see module).
+import "./win-hide-children.mjs";
 import { fileURLToPath } from "url";
 import { dirname, join, relative, resolve, sep } from "path";
 import { mkdir, lstat, readlink, readdir, unlink, readFile, writeFile } from "fs/promises";
@@ -93,6 +95,7 @@ import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import { runConfigCommand } from "./config-history.mjs";
 import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
+import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome, readUserForgeHomeWin, clearUserForgeHomeWin, hookScriptTree } from "./forge-home-check.mjs";
 import { applyAuthEnv, startAuthRefresh, doctorAppAuth, AUTH_REFRESH_COMMANDS } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
@@ -1434,6 +1437,17 @@ async function uninstall() {
       );
     }
   }
+  // Windows keeps FORGE_HOME in the user environment, which the profile cleanup above never sees (#5796).
+  if (process.platform === "win32") {
+    const userValue = readUserForgeHomeWin();
+    if (!userValue) {
+      console.log(`  ✔  No FORGE_HOME in the Windows user environment — nothing to remove`);
+    } else if (clearUserForgeHomeWin()) {
+      console.log(`  ${GREEN}✔${RESET}  Removed FORGE_HOME (${CYAN}${userValue}${RESET}) from the Windows user environment`);
+    } else {
+      console.log(`  ${YELLOW}⚠${RESET}  Could not remove FORGE_HOME from the Windows user environment — run: [Environment]::SetEnvironmentVariable('FORGE_HOME', $null, 'User')`);
+    }
+  }
   console.log("");
 
   // Remove .forgedock marker file from cwd (created by `npx forgedock enable`)
@@ -2483,7 +2497,7 @@ async function doctor(fix = false, verbose = false) {
    * "already registered" regardless of whether its script path still
    * resolves, so a dangling entry must be explicitly cleared before forge()
    * will register a fresh one. (forge#1895)
-   * @returns {{state: 'ok'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
+   * @returns {{state: 'ok'|'foreign'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
    */
   function detectSessionStartHookPath() {
     try {
@@ -2512,7 +2526,9 @@ async function doctor(fix = false, verbose = false) {
         return { state: "unparseable", path: null, command: hookCommand, error: null };
       }
       if (existsSync(hookScriptPath)) {
-        return { state: "ok", path: hookScriptPath, error: null };
+        // Exists, but may belong to an old checkout rather than the active install (#5796).
+        const tree = hookScriptTree({ scriptPath: hookScriptPath, sourceDir: FORGE_HOME, persistedHome: join(HOME, ".forge") });
+        return { state: tree === "foreign" ? "foreign" : "ok", path: hookScriptPath, error: null };
       }
       return {
         state: "dangling",
@@ -2552,7 +2568,7 @@ async function doctor(fix = false, verbose = false) {
     console.log(`  ${CYAN}↻${RESET}  Repairing command links + SessionStart hook...`);
     try {
       const staleHook = detectSessionStartHookPath();
-      if (staleHook.state === "dangling") {
+      if (staleHook.state === "dangling" || staleHook.state === "foreign") {
         removeSessionStartHook(settingsPath);
       }
       await forge(ctx());
@@ -2910,7 +2926,7 @@ async function doctor(fix = false, verbose = false) {
   {
     let hookPathResult = detectSessionStartHookPath();
     let hookPathWasBroken = false;
-    if (hookPathResult.state === "dangling" && fix) {
+    if ((hookPathResult.state === "dangling" || hookPathResult.state === "foreign") && fix) {
       hookPathWasBroken = true;
       await runInstallRepairOnce();
       hookPathResult = detectSessionStartHookPath();
@@ -2925,6 +2941,11 @@ async function doctor(fix = false, verbose = false) {
       warn(
         "SessionStart hook script path",
         `Could not parse a script path out of the registered hook command ("${hookPathResult.command}"). Run: npx forgedock install`,
+      );
+    } else if (hookPathResult.state === "foreign") {
+      warn(
+        "SessionStart hook script path",
+        `${hookPathResult.path} is outside the active ForgeDock install (${FORGE_HOME}) and ~/.forge — the hook runs a different tree. Run: npx forgedock doctor --fix  (or: npx forgedock install)`,
       );
     } else if (hookPathResult.state === "ok") {
       if (fix && hookPathWasBroken) {
@@ -3179,8 +3200,19 @@ async function doctor(fix = false, verbose = false) {
   // value is a warning, not a failure.
   {
     const envForgeHome = process.env.FORGE_HOME;
-    if (envForgeHome) {
-      pass("FORGE_HOME env var", `set to "${envForgeHome}"`);
+    const fh = assessForgeHome({ value: envForgeHome, sourceDir: FORGE_HOME, sourceVersion: getVersion(), persistedHome: join(HOME, ".forge") });
+    if (forgeHomeIsProblem(fh)) {
+      // A stale value is never "informational": forge-resolve.sh ranks FORGE_HOME above ~/.forge (#5796).
+      const userValue = process.platform === "win32" ? readUserForgeHomeWin() : null;
+      if (fix && userValue && clearUserForgeHomeWin()) {
+        fixed("Stale FORGE_HOME", `cleared from the Windows user environment (was "${userValue}") — open a new terminal`);
+      } else {
+        warn("Stale FORGE_HOME", `${describeForgeHome(fh, envForgeHome, getVersion())}. ${
+          userValue ? "Fix: npx forgedock doctor --fix (clears it from the Windows user environment)"
+            : "Fix: remove the FORGE_HOME export from your shell profile / environment"}`);
+      }
+    } else if (envForgeHome) {
+      pass("FORGE_HOME env var", fh.state === "current" ? `set to "${envForgeHome}" (this install)` : `set to "${envForgeHome}" (v${fh.version}, matches)`);
     } else {
       warn(
         "FORGE_HOME env var",
@@ -3982,7 +4014,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "close", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
@@ -4495,6 +4527,17 @@ switch (command) {
       exitCode = await replanFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "close": { // #5704: `forgedock close reconcile [--repo R] [--dry-run]`
+    const { closeReconcileFromCli } = await import("./engine-cli.mjs");
+    try {
+      await closeReconcileFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}
+`);
       exitCode = 1;
     }
     break;

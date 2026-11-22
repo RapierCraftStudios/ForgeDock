@@ -121,11 +121,12 @@ const escl = (v) => line(v).replace(/</g, "&lt;");
 /** Canonical contract JSON: stable, and `<` escaped so builder text can never open an HTML/FORGE comment. */
 export const contractJson = (c) => JSON.stringify(c, null, 1).replace(/</g, "\\u003c");
 // #4265: an optional ", issue S" records the hash of the issue scope (conformance.mjs scopeText) the contract was planned from.
-const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})(?:, issue ([0-9a-f]{12}))?\)<\/summary>\s*```json\n([\s\S]*?)\n```/;
+// #5811: an optional ", base B" records the lane base it was planned against (a recovery reuses it only on the same base).
+const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})(?:, issue ([0-9a-f]{12}))?(?:, base ([\w./-]+))?\)<\/summary>\s*```json\n([\s\S]*?)\n```/;
 
 /** FORGE:CONTRACT body: readable tables plus the frozen JSON and its hash (read back on a rerun). */
-export function renderContract(c, hash, { compact = false, scope = null } = {}) {
-  const json = `<details><summary>contract.json (sha256 ${hash}${scope ? `, issue ${scope}` : ""})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
+export function renderContract(c, hash, { compact = false, scope = null, base = null } = {}) {
+  const json = `<details><summary>contract.json (sha256 ${hash}${scope ? `, issue ${scope}` : ""}${scope && base && /^[\w./-]+$/.test(base) ? `, base ${base}` : ""})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
   if (compact) return `## Builder Contract (frozen \`${hash}\`)\n\n${c.requirements.length} requirement(s), ${(c.deliverables ?? []).length} deliverable(s); the tables are omitted because the contract is large.\n\n${json}`;
   const disp = (r) => `${r.disposition === "post-deploy" && /\[type:(?:e2e|manual)\]/i.test(String(r.quote ?? "")) ? "post-deploy, transferred to the epic (not met)" : r.disposition}${r.verify === "out_of_band" ? `, verified out of band${r.evidence ? ` (${escl(r.evidence)})` : ""}` : ""}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
   const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
@@ -136,11 +137,11 @@ export function renderContract(c, hash, { compact = false, scope = null } = {}) 
     ? `\n\n### Test plan\n| Requirement | Proof | Level | Repro | Regression | Env | Command |\n| --- | --- | --- | --- | --- | --- | --- |\n${c.test_plan.map((t) => `| ${esc(t?.requirement)} | ${esc(t?.proof)} | ${esc(t?.level)} | ${esc(/^no-repro$/i.test(String(t?.repro ?? "").trim()) ? `no-repro: ${t?.reason ?? ""}` : t?.repro)} | ${esc(Array.isArray(t?.regression) ? t.regression.join("; ") : t?.regression)} | ${esc(Array.isArray(t?.env) ? t.env.join("; ") : t?.env)} | \`${esc(t?.command).replace(/`/g, "'")}\` |`).join("\n")}` : "";
   return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}${tp}${dec}\n\n${json}`;
 }
-/** {contract, hash, scope, text} from a FORGE:CONTRACT comment body (scope null for a pre-#4265 comment), or null. */
+/** {contract, hash, scope, base, text} from a FORGE:CONTRACT comment body (scope null pre-#4265, base null pre-#5811), or null. */
 export function parseContractComment(body) {
   const m = CONTRACT_BLOCK_RE.exec(String(body ?? ""));
   if (!m) return null;
-  try { return { hash: m[1], scope: m[2] ?? null, text: m[3], contract: JSON.parse(m[3]) }; } catch { return null; }
+  try { return { hash: m[1], scope: m[2] ?? null, base: m[3] ?? null, text: m[4], contract: JSON.parse(m[4]) }; } catch { return null; }
 }
 
 /** Typed amendments, posted visibly before review. */
@@ -184,7 +185,7 @@ export function renderShadowReview({ would, failures = [], review, contract, deg
 }
 
 // ---- PR body ----
-export function renderPrBody({ issue, investigation, contract, implementation, result, gitFiles = [], tracked = [] }) {
+export function renderPrBody({ issue, investigation, contract, implementation, result, gitFiles = [], tracked = [], visual = "" }) {
   const root = section(investigation, "Root Cause") || line(norm(result).root_cause);
   const dels = contract?.deliverables ?? [];
   const deliver = dels.length ? ["| File | Change | Requirements |", "| --- | --- | --- |", ...dels.map((d) => `| ${esc(d.path)} | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`)].join("\n")
@@ -194,7 +195,7 @@ export function renderPrBody({ issue, investigation, contract, implementation, r
   // #4404: requirements measured outside the lane; the change delivers their instrumentation, the named job the result
   const oob = (contract?.requirements ?? []).filter((r) => r?.verify === "out_of_band");
   const outOfBand = oob.length ? `\n\n## Verified out of band\n${oob.map((r) => `- ${escl(r.id)}: ${escl(r.quote)} (job ${r.evidence ? `\`${escl(r.evidence).replace(/`/g, "'")}\`` : "not named"})`).join("\n")}` : "";
-  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}${visualSection(implementation)}\n\nCloses #${issue}`;
+  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}${visual ? `\n\n${visual}` : visualSection(implementation)}\n\nCloses #${issue}`;
 }
 
 // ---- trajectory ----

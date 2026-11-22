@@ -5,12 +5,14 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
+import { releaseMergeHold, ledgerIoFromGh } from "./release-merge-hold.mjs";
 import { issuePrMarker, supersedeOlderPrs, openPrBlockingClose } from "./orphan-pr.mjs";
 import { resolveFindingLabel } from "./findinglabel.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, basename, delimiter } from "node:path";
-import { hostname as osHostname } from "node:os";
+import { isAbsPath } from "./winspawn.mjs";
+import { hostname as osHostname, tmpdir as osTmpdir } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { testAdequacyRows, testAdequacyFailures, testAdequacyTelemetry, adequacyCounts, regressionRan } from "./testadequacy.mjs";
 import { readSelfReview, compareSelfReview, firstReviewRecord, selfCheckFailures } from "./selfreview.mjs";
@@ -21,25 +23,28 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
+import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote } from "./recurrence.mjs"; // #5751
+import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
+import { contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
-import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
+import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
 import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { hasRecipe, installLaneTools } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
+import { hasRecipe, installLaneTools, RECIPES } from "../pool/lane-tools.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
-import { ceilingFor, predictRestart, handoffFacts, NARROW_NOTE } from "./ceiling.mjs";
+import { ceilingFor, predictRestart, handoffFacts, routeHandoff, buildReadsOf, NARROW_NOTE } from "./ceiling.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { batchImageCache, envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
+import { deriveCiPrecheck, ciPrecheckOutcome, parseCiPrecheckConfig } from "./ci-precheck.mjs";
 import { runChecks, runWithTimeoutRetry, splitPrecheckResults, timedOutDetail, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
@@ -59,27 +64,31 @@ export function contractSelfCorrectable(problems) {
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
 import { docsFailures } from "./docsgate.mjs";
-import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
+import { outcomeEvidenceFailures, rawChecksAt } from "./outcomeevidence.mjs";
+import { ciBudgetFailures, parseCiBudget } from "./ci-gate.mjs";
+import { pageFailures, designSpecApproved, designLabelApproved, specOnlyFailures, pageFiles, designOnlyFiles } from "./pagegate.mjs"; // #5428
+import { changedRoutes, captureVisualCheck, publishToRef, visualMarkdown } from "./page-capture.mjs"; // #5770
 import { uiBuildRule, uiIssue, uiChanged } from "./ui-quality.mjs"; // #5330
 import { designGate, designGateNote, designFailures, specApproved as designSpecOk } from "./design-gate.mjs"; // #5330
 import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { startSpeculative } from "./overlap.mjs";
-import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment } from "./guardgate.mjs";
+import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment, weakGuardNotes } from "./guardgate.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
-import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
+import { floorRoute, parseBuilderRouting, provisionalRoute, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { applyEnumerating, renameDuplicates, verifyApplied } from "./mechfix.mjs"; // #5348
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
+import { ceilingEnv, listedWorktree } from "./laneconfine.mjs";
 import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { ciSignal, cancelDecision, eventLog } from "./ci-watch.mjs";
 import { classifyCiFailure } from "./ci-classify.mjs";
@@ -112,6 +121,7 @@ import { pickSalvage } from "./salvage-resume.mjs";
 import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
+import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
@@ -146,6 +156,24 @@ export function builderFixable(failures) {
 }
 /** #5168: retry-in for a `backend.auth` deferral; the batch holds the account for it (an operator `--set-env` fix runs under a new identity). */
 const AUTH_RETRY_SECONDS = 900;
+/** #5762: retry-in for a `backend.cli_failed` deferral (transient, not an account condition). */
+const CLI_FAILED_RETRY_SECONDS = 120;
+/** #5762: the account number (digits only) a lane used: the rotator's capture, else TOKENBATON_ACCOUNT / CLAUDE_CONFIG_DIR `.claude-<n>`; null when unknown. */
+export function laneAccountNumber(env = process.env, account = null) {
+  if (account != null && /^\d+$/.test(String(account))) return String(account);
+  if (/^\d+$/.test(env?.TOKENBATON_ACCOUNT ?? "")) return env.TOKENBATON_ACCOUNT;
+  const m = /[\\/]\.claude-(\d+)[\\/]?$/.exec(env?.CLAUDE_CONFIG_DIR ?? "");
+  return m ? m[1] : null;
+}
+/** #5762: the CLI result/is_error text and account carried on a deferral and its RUN_TERMINAL. */
+function cliDeferFacts(e, account) {
+  const acct = laneAccountNumber(process.env, account);
+  return { ...(e?.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e?.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(acct ? { account: acct } : {}) };
+}
+function cliDetail(e, account) {
+  const acct = laneAccountNumber(process.env, account);
+  return ` [${acct ? `account ${acct}; ` : ""}is_error=${e?.cliIsError ?? "?"}; result=${e?.cliResult != null ? JSON.stringify(e.cliResult) : "none"}]`;
+}
 /** #4323/#4334: precheck failure codes that are environment errors (state "environment"), never a builder resume. */
 const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND]);
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
@@ -162,7 +190,7 @@ const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CO
  * not done, an invalid amendment) or conformance.regression, the same codes a review blocks on, and unexempted growth of an
  * over-threshold file (maintenance.hotspot_growth, forge#4195). Scope creep stays recorded-only.
  */
-const SHADOW_PRE_BLOCKS = [...SHADOW_BLOCKS, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH];
+const SHADOW_PRE_BLOCKS = [...SHADOW_BLOCKS, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH, OUTCOME_CODES.MAINTENANCE_COUNTER_GROWTH, OUTCOME_CODES.RECURRENCE_DESIGN_MISSING]; // #5751
 /** #4395: cap on the engine.lane_instructions file; a larger one is not slim and falls back to CLAUDE.md. */
 export const LANE_INSTRUCTIONS_MAX_BYTES = 16384;
 /** forge.yaml engine.review_incomplete (#4160): "needs-human" (default), or "degraded": in shadow, merge an incomplete review with a review-degraded label and a tracked follow-up. */
@@ -171,11 +199,24 @@ export const REVIEW_DEGRADED_LABEL = "review-degraded";
 const UNUSABLE_REVIEW_CODES = { "review.unparseable": OUTCOME_CODES.REVIEW_NO_VERDICT, "review.incomplete": OUTCOME_CODES.REVIEW_INCOMPLETE, "review.inconsistent": OUTCOME_CODES.REVIEW_INCONSISTENT };
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
+/** #5734: the needs-human text when a recorded production failure blocks an already-fixed/invalid close. */
+const prodFailNote = (verdict, f) => `Builder reported "${verdict}", but a trusted comment records the fix failing in production (${f.why}${f.url ? `: ${f.url}` : ""}), so the issue is not closed automatically: a merged ancestor is no evidence for a production outcome.\n\n> ${f.excerpt}`;
 export const MAX_SUBISSUES = 8;
 /** #4266: required checks with no rollup entry this long into a CI wait on a MERGEABLE PR log CI_NOT_STARTED (once per wait). */
 export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 /** 12-hex sha256 of the canonical contract JSON text (renderContract embeds the same text). */
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
+/**
+ * #5811: why a frozen contract read back from the issue cannot be reused, or null. A changed issue scope (#4265) or a
+ * different recorded base is stale. Without a branch to resume (a recovery that ended before its first commit) only a
+ * contract that records both the scope and the base it was planned on is reused; a legacy one re-plans as before.
+ */
+export function reuseStale({ fc, scopeHash, lane, resumed, gone = [] }) {
+  if (fc.base && fc.base !== lane) return `base ${fc.base} -> ${lane}`;
+  if (!resumed && !(fc.scope && fc.base)) return "no branch to resume and the contract records no issue scope or base";
+  if (fc.scope) return fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null;
+  return fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+}
 
 /**
  * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
@@ -300,7 +341,7 @@ export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   o = { ...o, io: resolvingIo(o.io, { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI }) }; // #5727: every executed command names this install's forgedock entry points
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -321,8 +362,9 @@ export async function runCore(o) {
   const verifierCfg = parseVerifierConfig(o.verifier ?? {});
   const routingCfg = parseBuilderRouting(o.builderRouting ?? {});
   // #4394: the build's model tier, routed from the frozen contract; a failed validate round on the mid tier escalates once
-  let route = null, escalated = false;
-  const laneModel = () => (route?.tier === "mid" && !escalated ? route.model : builderModel);
+  // #5810: before the contract, the pre-contract sessions run on a provisional route from the issue's own signals
+  let route = null, escalated = false, preRoute = null;
+  const laneModel = () => { const r = route ?? preRoute; return r?.tier === "mid" && !escalated ? r.model : builderModel; };
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
@@ -351,7 +393,28 @@ export async function runCore(o) {
   const sleepFn = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
   const ghw = (args) => retrying(() => ghc(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
-  const git = (args, o = {}) => io.git(args, { cwd: wt, ...o });
+  // #5825: every lane git call is confined to the lane worktree (discovery never walks up into the checkout around it),
+  // and a write first asserts the lane folder is this repo's worktree; a refusal ends the lane engine-error, nothing written.
+  const laneGitEnv = ceilingEnv(wt) ?? {};
+  let confineRefusal = null;
+  const GIT_WRITES = new Set(["add", "commit", "push", "rm", "mv", "reset", "checkout", "switch", "restore", "merge", "rebase", "cherry-pick", "revert", "am", "apply", "clean", "stash", "tag", "notes", "update-index"]);
+  const confineError = () => Object.assign(new Error(confineRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR, confined: false });
+  async function assertConfined(at) {
+    if (confineRefusal) throw confineError();
+    if (!io.confine?.verify) return;
+    if (io.fs?.exists && !(await io.fs.exists(wt))) throw new Error(`lane worktree ${wt} does not exist`); // no folder: git cannot run there at all
+    const v = await io.confine.verify({ wt, cwd });
+    if (v?.ok !== false) return;
+    const e = v.evidence ?? {};
+    confineRefusal = `Lane worktree ${wt} is not confined (${at}): ${v.why}; git toplevel ${e.toplevel ?? "(none)"}, git common dir ${e.common_dir ?? "(none)"}, repository common dir ${e.repo_common_dir ?? "(unknown)"}. Stopped before any git write (#5825).`;
+    ev({ event: "WORKTREE_NOT_CONFINED", at, why: v.why, ...e });
+    throw confineError();
+  }
+  const git = async (args, o = {}) => {
+    if ((o.cwd ?? wt) === wt && GIT_WRITES.has(args[0])) await assertConfined(`git ${args[0]}`);
+    return io.git(args, { cwd: wt, ...o, env: { ...laneGitEnv, ...o.env } });
+  };
+  let pageVisual = null; // #5770: the engine's visual capture {sha, screenshots, errors, rows}, kept for the page gate and the PR body
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
   let usageUnknown = false, inflight = null; // #5334: a killed session streamed nothing; the builder call in flight (flushed when a signal ends the run)
@@ -508,6 +571,8 @@ export async function runCore(o) {
   const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
   let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
   let seqBuildNote = ""; // #5235: numbers reserved for this lane at build start (prompt paragraph)
+  const recCfg = parseRecurrenceConfig(o.recurrenceConfig); // #5751: forge.yaml recurrence: (absent: mode on, threshold 2, no hot areas or counters)
+  let recurrence = null, hotLock = null; // #5751: the recurrence detection; the hot-area locks held until teardown
   let seqLease = null; // #4386: the host sequence lease, held from the merge-gate renumber through the merge
   const waits = {};
   const followupsFiled = []; // #5078: {issue, class, count} per tracking issue this lane filed into, for the batch report
@@ -527,6 +592,7 @@ export async function runCore(o) {
   async function heavyStep(phase, fn) { const g = await heavyAcquire(phase); try { return await fn(); } finally { try { g?.release?.(); } catch { /* fail-open */ } } }
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
   let ledger = null, deleteLocalBranch = false, laneHead = null; // #4958: laneHead = {branch, sha, pushedTo}
+  let deletionRefusal = null; // #5819: evidence of a checkpoint that refused tracked-file deletions; the lane ends engine-error, nothing pushed
   const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
   const protectedBranch = (b) => isProtectedLaneBranch(b, { issue, lane, branches, defaults });
   /** Teardown from the ledger (#4179), on every exit path: builder pids, checkpoint of unpushed work, run tmp, worktree, branch, docker. */
@@ -575,7 +641,7 @@ export async function runCore(o) {
    */
   async function salvage(why) {
     if (!io.fs?.exists || !(await io.fs.exists(wt))) return null;
-    const g = (a) => io.git(a, { cwd: wt });
+    const g = (a) => io.git(a, { cwd: wt, env: laneGitEnv }); // #5825: a folder without its .git link fails here, never stages the checkout around it
     try {
       await g(["add", "-A"]);
       if (await io.fs.exists(join(wt, LEAN_DIR))) await g(["add", "-f", "--", LEAN_DIR]);
@@ -593,6 +659,21 @@ export async function runCore(o) {
       ev({ event: "WORKTREE_SALVAGE_FAILED", why, error: String(e?.message ?? e).slice(0, 300) });
       return null;
     }
+  }
+  /**
+   * #5825: move a lane folder that is not a registered worktree of this repo aside (`<root>/.quarantine/`), kept for
+   * inspection and never reused. A folder that cannot be moved stops the lane engine-error before any git write.
+   */
+  async function quarantine(why, evidence = {}) {
+    let to = null;
+    try { to = await io.confine?.quarantine?.({ wt }); } catch (e) {
+      ev({ event: "WORKTREE_QUARANTINE_FAILED", path: wt, why, error: String(e?.message ?? e).slice(0, 200), ...evidence });
+      throw Object.assign(new Error(`Lane folder ${wt} is not a registered worktree (${why}) and could not be moved aside: ${String(e?.message ?? e).slice(0, 200)}. Stopped before any git write (#5825); remove the folder and rerun.`), { engineCode: OUTCOME_CODES.ENGINE_ERROR });
+    }
+    if (!to) throw Object.assign(new Error(`Lane folder ${wt} is not a registered worktree (${why}); no quarantine is available. Stopped before any git write (#5825).`), { engineCode: OUTCOME_CODES.ENGINE_ERROR });
+    ev({ event: "WORKTREE_QUARANTINED", path: wt, to, why, ...evidence });
+    T.anomalies.push(`Lane folder ${wt} was not a registered worktree (${why}); moved to \`${to}\` and a fresh worktree was added (#5825)`);
+    return to;
   }
   /** #4162: stop processes still running inside the worktree (an orphaned runner from a dead run) before it is removed. */
   async function stopWorktreeProcs() {
@@ -614,10 +695,13 @@ export async function runCore(o) {
   }
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
     await flushInflight(); // #5334: a signal mid-attempt: the session's usage so far is recorded before RUN_TERMINAL
+    try { io.host?.recordPeakRss?.(Math.ceil(process.resourceUsage().maxRSS / 1024)); } catch { /* fail-open (#5845): the learned lane footprint is best effort */ }
     try { seqLease?.release(); } catch { /* fail-open */ }
     seqLease = null;
     try { surfaceClaim?.release(); } catch { /* fail-open */ }
     surfaceClaim = null;
+    try { hotLock?.release(); } catch { /* fail-open */ }
+    hotLock = null;
     try { await io.sequenceLease?.undeclare?.({ repo, issue }); } catch { /* fail-open (#5340) */ }
     try { await io.sequenceLease?.unreserve?.({ repo, lane, issue }); } catch { /* fail-open (#4526) */ }
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
@@ -628,10 +712,21 @@ export async function runCore(o) {
     if (!deferTail) {
       await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
       await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
+      if (confineRefusal && !String(detail).includes(confineRefusal)) { // #5825: an unconfined lane folder ends the lane engine-error, with the evidence
+        if (reason !== "engine-error") ev({ event: "TERMINAL_OVERRIDDEN", from: reason, to: "engine-error", why: "lane folder is not a confined worktree" });
+        detail = `${confineRefusal}${detail ? ` (lane was ending ${reason}: ${String(detail).split("\n")[0].slice(0, 200)})` : ""}`;
+        reason = "engine-error"; codeOverride = OUTCOME_CODES.ENGINE_ERROR;
+      }
+      if (deletionRefusal && !String(detail).includes(deletionRefusal)) { // #5819: a refused checkpoint ends the lane engine-error, with the evidence
+        if (reason !== "engine-error") ev({ event: "TERMINAL_OVERRIDDEN", from: reason, to: "engine-error", why: "checkpoint refused tracked-file deletions" });
+        detail = `${deletionRefusal}${detail ? ` (lane was ending ${reason}: ${String(detail).split("\n")[0].slice(0, 200)})` : ` (lane was ending ${reason})`}`;
+        reason = "engine-error"; codeOverride = OUTCOME_CODES.ENGINE_ERROR;
+      }
     }
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
-    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
+    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.cliResult != null ? { cli_result: extra.cliResult } : {}), ...(typeof extra.cliIsError === "boolean" ? { cli_is_error: extra.cliIsError } : {}), ...(extra.account ? { account: extra.account } : {}), // #5762
+      ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
       ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
@@ -829,7 +924,7 @@ export async function runCore(o) {
   async function installSignoffHook() {
     if (!runTmp || !io.fs?.list || !io.runCommand) return;
     try {
-      const orig = String(await git(["rev-parse", "--git-path", "hooks"])).trim(), abs = orig.startsWith("/") ? orig : `${wt}/${orig}`, dir = `${runTmp}/hooks`;
+      const orig = String(await git(["rev-parse", "--git-path", "hooks"])).trim(), abs = isAbsPath(orig) ? orig : `${wt}/${orig}`, dir = `${runTmp}/hooks`;
       const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`, own = ((await io.fs.list(abs)) ?? []).filter((n) => n && !n.endsWith(".sample"));
       for (const n of own.filter((x) => x !== "commit-msg")) await io.fs.write(`${dir}/${n}`, `#!/bin/sh\nexec ${q(`${abs}/${n}`)} "$@"\n`);
       await io.fs.write(`${dir}/commit-msg`, `${SIGNOFF_HOOK}${own.includes("commit-msg") ? `exec ${q(`${abs}/commit-msg`)} "$@"\n` : "exit 0\n"}`);
@@ -843,11 +938,14 @@ export async function runCore(o) {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", [FORGEDOCK_CHECKS_VAR]: CHECKS_CLI, [FORGEDOCK_ENTRY_VAR]: FORGEDOCK_CLI, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set
+    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...laneGitEnv, [FORGEDOCK_CHECKS_VAR]: CHECKS_CLI, [FORGEDOCK_ENTRY_VAR]: FORGEDOCK_CLI, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set; #5825: git in a lane child never walks up out of the worktree
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
-  const authDeferral = (e) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator),
-    deferDetail: `claude CLI authentication failed (login expired or invalid); held until the login is fixed: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
+  const authDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator), ...cliDeferFacts(e, account),
+    deferDetail: `claude CLI authentication failed (login expired or invalid); held until the login is fixed${cliDetail(e, account)}: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
+  /** #5762: a claude exit that never reached the API and was no login failure: a short capped retry, no account hold. */
+  const cliFailedDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_CLI_FAILED, retryInSeconds: CLI_FAILED_RETRY_SECONDS, ...cliDeferFacts(e, account),
+    deferDetail: `claude CLI exited without reaching the API${cliDetail(e, account)}; retried shortly: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}` });
   /** #5236: no account has room: the lane ends deferred `quota.exhausted` (earliest reset) and emits QUOTA_EXHAUSTED, never a spawn or a far pause. */
   const exhaustedStop = (e, x, role) => { ev({ event: "QUOTA_EXHAUSTED", phase: role, earliestReset: x.earliestReset }); return exhaustedDeferral(e, { earliestReset: x.earliestReset, backendId: laneBackendId(process.env, rotator), now: now() }); };
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
@@ -872,7 +970,8 @@ export async function runCore(o) {
       catch (e) {
         watch?.stop(); watch?.refresh(); // #5268: the account the shim exec'd, read before the limited child is gone or now
         let epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
-        if (e?.authFailure === true && e.usageLimit !== true && epoch === null) { const x = smartRotator ? poolExhausted(rotator, laneLimited) : null; throw x ? exhaustedStop(e, x, args.role) : authDeferral(e); } // #5236: an auth failure with no account room is exhaustion // #5168: an account condition, never engine-error
+        if (e?.authFailure === true && e.usageLimit !== true && epoch === null) { const x = smartRotator ? poolExhausted(rotator, laneLimited) : null; throw x ? exhaustedStop(e, x, args.role) : authDeferral(e, account); } // #5236: an auth failure with no account room is exhaustion // #5168: an account condition, never engine-error
+        if (e?.cliFailed === true && e.usageLimit !== true && epoch === null) throw cliFailedDeferral(e, account); // #5762
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
         if (smartRotator) { // #5205: exclude the limited account and relaunch the same args (resume kept) pinned to another, at once
           if (account !== null) { const until = epoch !== null && epoch > now() ? epoch : now() + DEFAULT_SESSION_LIMIT_WAIT_MS; laneLimited.set(account, until); try { rotator.markLimited(account, until); } catch { /* best effort */ } }
@@ -924,6 +1023,8 @@ export async function runCore(o) {
     return r;
   };
   const gitPush = async (args) => {
+    if (deletionRefusal && !args.includes("--delete")) throw Object.assign(new Error(deletionRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR }); // #5819
+    await assertConfined(`git ${args.join(" ").slice(0, 80)}`); // #5825
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       await reconcileLaneBranch();
       try { await signOffUnpushed(); }
@@ -942,9 +1043,25 @@ export async function runCore(o) {
 
   /** After a timeout/idle kill: commit uncommitted work as a checkpoint and push the lane branch so a rerun resumes from it (#4112). */
   async function checkpoint(reason) {
+    if (deletionRefusal) { ev({ event: "CHECKPOINT_SKIPPED", reason, why: "an earlier checkpoint refused tracked-file deletions (#5819): nothing is pushed" }); return false; }
+    if (confineRefusal) { ev({ event: "CHECKPOINT_SKIPPED", reason, why: "the lane folder is not a confined worktree (#5825): nothing is staged or pushed" }); return false; }
     try {
+      await assertConfined(`checkpoint after ${reason}`); // #5825: before `git status`/`add -A` touch any index
       const dirty = String(await git(["status", "--porcelain"])).trim();
-      if (dirty) { await git(["add", "-A"]); if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); } // #4590: tool state is never staged
+      if (dirty) {
+        await git(["add", "-A"]);
+        // #5819: deletions of base-tracked files outside the deliverables are never committed: unstaged, restored, and the lane ends engine-error unpushed
+        let keep = []; // the contract's deliverables (read here: keepPaths is declared further down)
+        try { keep = (JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`))?.deliverables ?? []).map((d) => d?.path).filter((x) => typeof x === "string"); } catch { /* no contract yet: nothing is a deliverable */ }
+        const dg = await guardStagedDeletions({ git, base, keep, max: o.checkpointMaxDeletions ?? maxForeignDeletions(io.env ?? process.env) });
+        if (dg.refused) {
+          deletionRefusal = deletionEvidence(dg, `checkpoint after ${reason}`);
+          ev({ event: "CHECKPOINT_DELETIONS_REFUSED", reason, deleted: dg.deleted.length, foreign: dg.foreign.length, sample: dg.foreign.slice(0, 20), restored: Boolean(dg.restored), ...(dg.error ? { error: dg.error } : {}) });
+          T.anomalies.push(deletionRefusal);
+        }
+        if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); // #4590: tool state is never staged
+        if (deletionRefusal) { ev({ event: "CHECKPOINT", reason, dirty: true, pushed: false, refused: true }); return false; } // committed locally, never pushed; the worktree is kept
+      }
       const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
       if (ahead) { laneHead = { branch, sha: String(await git(["rev-parse", "HEAD"])).trim(), pushedTo: null }; await gitPush(["push", "-u", "origin", branch]); laneHead.pushedTo = branch; }
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
@@ -953,6 +1070,7 @@ export async function runCore(o) {
   }
   /** #4958: the normal push failed (sign-off rewrite, rejection): push HEAD as is to the lane branch, else to a salvage branch, so a torn-down remote sandbox never takes the commits with it. */
   async function rescuePush(reason, rejected) {
+    if (deletionRefusal || confineRefusal) return false; // #5819: never push past a refused checkpoint; #5825: nor from an unconfined folder
     // #5014: gitPush untracks tool state and rewrites unpushed commits for DCO before it pushes, so HEAD may have moved since the capture
     try { const now = String(await git(["rev-parse", "HEAD"])).trim(); if (now) laneHead.sha = now; } catch { /* keep the captured sha */ }
     // a rejected lane-branch push (protected branch, permissions) would be rejected again: go straight to the salvage branch
@@ -1027,6 +1145,9 @@ export async function runCore(o) {
   /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
   let laneCeiling = contextCeilingTokens; // #5346: set to the lane size's ceiling once the contract is frozen
   const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
+  /** #5812: the planning session's last-turn context, the files it read and its final reply, for the route hand-off. */
+  let planSession = null;
+  const notePlanSession = (r, trigger) => { planSession = { endTokens: num(r.endTokens), read: [...new Set([...(planSession?.read ?? []), ...handoffFacts(r.toolUses).read])], text: trigger === "plan" ? String(r.text ?? "") : planSession?.text ?? "" }; };
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
     let timeoutRetries = 0, contextRestarts = 0, p = prompt;
     opts = { ...opts };
@@ -1122,6 +1243,7 @@ export async function runCore(o) {
     await renew();
     await registerReported();
     if (r?.sessionId && !keepSession) sessionId = r.sessionId;
+    if (r && UNCEILED.includes(trigger)) notePlanSession(r, trigger);
     await attempt("implement", n, profile && r ? { ...r, laneProfile: profile === "narrow" && laneProfile.name === "full" ? "full" : profile } : r, mode, trigger, restartOf, resume);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
@@ -1130,12 +1252,29 @@ export async function runCore(o) {
   /** #5333: one writer per lane branch. A second session (a fix-up beside a recovery) waits for the holder, then defers `host.busy`. Fail-open when the shared git dir is unknown. */
   async function takeBranchLock() {
     let dir = null;
-    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt })).trim(); if (d.startsWith("/") && existsSync(d)) dir = d; } catch { dir = null; }
+    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt, env: laneGitEnv })).trim(); if (isAbsPath(d) && existsSync(d)) dir = d; } catch { dir = null; }
     if (!dir) return null;
     let lock;
     try { lock = await acquireBranchLock({ gitCommonDir: dir, branch, owner: agentId, waitMs: o.branchLockWaitMs ?? 600000, pollMs: o.branchLockPollMs ?? 15000, sleep: async (ms) => { await renew(); await sleep(ms); } }); } catch { return null; }
     if (lock.ok) return lock;
     throw Object.assign(new Error(`lane branch ${branch} is being written by another session`), { deferCode: OUTCOME_CODES.HOST_BUSY, retryInSeconds: 120, deferDetail: `another session (pid ${lock.holder?.pid ?? "?"}, ${lock.holder?.owner ?? "?"}) holds the writer lock of ${branch}; retried later` });
+  }
+  /**
+   * #5751: one lane at a time in each declared hot area (forge.yaml recurrence.hot_areas) the paths fall in: the branch lock
+   * keyed hot-area:<name>, host-local. Waits for the holder, then defers host.busy. Fail-open when the shared git dir is unknown.
+   */
+  async function takeHotAreas(paths) {
+    const areas = areaOf(paths, recCfg.hotAreas).filter((a) => !(hotLock?.areas ?? []).includes(a));
+    if (!areas.length) return;
+    let dir = null;
+    try { const d = String(await io.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: wt })).trim(); if (isAbsPath(d) && existsSync(d)) dir = d; } catch { dir = null; }
+    if (!dir) { T.anomalies.push(`Hot area(s) ${areas.join(", ")} not locked: the shared git dir is unknown`); return; }
+    const r = await acquireHotArea({ gitCommonDir: dir, areas, owner: agentId, waitMs: o.hotAreaWaitMs ?? 600000, pollMs: o.branchLockPollMs ?? 15000, sleep: async (ms) => { await renew(); await sleep(ms); } });
+    if (!r.ok) throw Object.assign(new Error(`hot area ${r.area} is held by another lane`), { deferCode: OUTCOME_CODES.HOST_BUSY, retryInSeconds: 300, deferDetail: `hot area ${r.area} admits one lane at a time; another lane (pid ${r.holder?.pid ?? "?"}, ${r.holder?.owner ?? "?"}) holds it; retried later` });
+    const prev = hotLock;
+    hotLock = { areas: [...(prev?.areas ?? []), ...r.areas], release: () => { r.release(); prev?.release(); } };
+    ev({ event: "HOT_AREA", areas: r.areas });
+    T.decisions.push(`Hot area(s) ${r.areas.join(", ")} locked for this lane (one lane at a time, this host)`);
   }
   /** #4390: the restart summary: `git diff --stat` and hunks against the lane base, and the last `forgedock check` record. */
   async function restartFacts() {
@@ -1321,12 +1460,14 @@ export async function runCore(o) {
   if (io.host && o.admission?.enabled !== false) {
     const a = await checkAdmission({ cfg: o.admission, host: io.host });
     if (!a.ok) return { terminalReason: "deferred", code: OUTCOME_CODES.HOST_BUSY, detail: a.detail, retryInSeconds: ADMISSION_RETRY_SECONDS };
+    try { io.host.recordAdmission?.(); } catch { /* the ramp stamp is best effort (#5845) */ }
   }
   // ---- lane (#4125): worked out from the issue before any lease, comment or worktree; fail closed ----
   {
     const laneIo = { ...io, gh: (a, opts) => refreshAuthOnce(() => io.gh(a, opts), { refresh: io.refreshAuth ?? runRefreshScript, state: authState }) }; // #4662
     const r = await resolveLane({ issue, repo, io: laneIo, cwd, branches, requested: requestedLane, override: laneOverride });
     if (!r.ok && GH_AUTH_RE.test(r.detail ?? "")) return { terminalReason: "deferred", code: OUTCOME_CODES.GH_AUTH, detail: r.detail, retryInSeconds: GH_AUTH_RETRY_SECONDS }; // #4662: a dead token is not a lane problem
+    if (!r.ok && r.transient) return { terminalReason: "deferred", code: OUTCOME_CODES.LANE_UNRESOLVED, detail: r.detail, retryInSeconds: GH_AUTH_RETRY_SECONDS }; // #5846: a failed lookup is not a lane refusal; the orchestrator requeues it
     if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
     lane = r.lane; base = `origin/${lane}`; defaults = r.defaults; milestone = r.milestone ?? null;
     if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
@@ -1391,7 +1532,7 @@ export async function runCore(o) {
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) {
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}) }, e.deferCode); // #4662; #5168 backendId
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...(e.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(e.account ? { account: e.account } : {}) }, e.deferCode); // #4662; #5168 backendId
     return finish("engine-error", `cannot read issue: ${e.message}`);
   }
   const priorState = stateOf(iss.body); // #4400: the last run's end (the lease write keeps its terminal fields), read before this run ends
@@ -1478,6 +1619,12 @@ export async function runCore(o) {
     // processes and save the work before the worktree is removed; the lease above makes this run the only one doing so.
     await step("salvage_cleanup", async () => {
     await stopWorktreeProcs();
+    // #5825: a leftover folder that is not this repo's worktree (no .git link, or git resolves it to another toplevel) is
+    // never salvaged with git (that would stage the checkout around it) and never reused: it is moved aside first.
+    if (io.confine?.verify && io.fs?.exists && (await io.fs.exists(wt))) {
+      const v = await io.confine.verify({ wt, cwd });
+      if (v?.ok === false) await quarantine(v.why, v.evidence);
+    }
     salvagedRef = await salvage("an earlier run");
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
@@ -1488,9 +1635,11 @@ export async function runCore(o) {
     const leftoverDir = async () => {
       if (!io.fs.exists || !io.fs.rmdir || dirname(wt) !== wtRoot || basename(wt) !== `lean-${issue}`) return false;
       if (!(await io.fs.exists(wt))) return false;
-      const listed = String(await io.git(["worktree", "list", "--porcelain"], { cwd }).catch(() => "")).split("\n").some((l) => l === `worktree ${wt}`);
+      // #5825: git prints `C:/...` on Windows; an exact string match never saw the lane listed and deleted a registered worktree's files
+      const listed = listedWorktree(await io.git(["worktree", "list", "--porcelain"], { cwd }).catch(() => ""), wt);
       if (listed) return false;
-      await io.fs.rmdir(wt);
+      try { await io.fs.rmdir(wt); } catch (e) { ev({ event: "WORKTREE_LEFTOVER_REMOVE_FAILED", path: wt, error: String(e?.message ?? e).slice(0, 200) }); }
+      if (await io.fs.exists(wt)) { await quarantine("an unregistered leftover folder could not be removed"); return true; } // a partial delete (locked file) is never reused
       ev({ event: "WORKTREE_LEFTOVER_REMOVED", path: wt });
       return true;
     };
@@ -1541,8 +1690,9 @@ export async function runCore(o) {
     } else if (resumed) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
       if (scratchOnly) { // from origin/<branch> so the later plain push stays fast-forward; the scratch goes out in a normal commit
-        await io.git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR], { cwd: wt }).catch(() => {});
-        if (String(await io.git(["diff", "--cached", "--name-only"], { cwd: wt }).catch(() => "")).trim()) await io.git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"], { cwd: wt }).catch(() => {});
+        await assertConfined("lane start"); // #5825: before the first write into the new worktree
+        await git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR]).catch(() => {});
+        if (String(await git(["diff", "--cached", "--name-only"]).catch(() => "")).trim()) await git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"]).catch(() => {});
         resumed = null;
         ev({ event: "SCRATCH_BRANCH_DROPPED", branch });
         T.decisions.push(`Lane branch ${branch} held only ${LEAN_DIR}/ scratch: its stale checkpoint was dropped and the issue is planned fresh`);
@@ -1557,6 +1707,7 @@ export async function runCore(o) {
       if (!wtInfo) wtInfo = await step("worktree_add", () => addWorktree(["worktree", "add", "-B", branch, wt, base], base));
       if (warmN) refillWarm({ git: io.git, cwd, root: wtRootDir, ref: base, n: warmN, maxBlobBytes: sparseMaxKb * 1024, write: io.fs?.write }).catch(() => {});
     }
+    await assertConfined("lane start"); // #5825: the new worktree is registered, its toplevel is the lane folder, its git dir the repo's
     wtCreated = true;
     if (fromSalvage) await dropSalvageTracking({ git, branch }); // #5047: the salvaged commits are unpublished: the sign-off range must include them
     if (wtInfo?.sparse) {
@@ -1569,7 +1720,7 @@ export async function runCore(o) {
     }
     await step("scratch_setup", async () => { // #5435: timed with the other startup steps
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
-    await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
+    await io.fs.append(isAbsPath(excl) ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     await installSignoffHook();
     if (!resumed && await clearLaneScratch({ git, fs: io.fs, cwd: wt })) ev({ event: "LANE_SCRATCH_CLEARED" }); // #4880: never read a previous lane's scratch
     });
@@ -1577,7 +1728,7 @@ export async function runCore(o) {
     const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
     if (laneProfile.name !== "full" && lanePath) {
       let why = null, text = "";
-      if (lanePath.startsWith("/") || lanePath.split(/[\\/]/).includes("..")) why = "not a repo-relative path";
+      if (isAbsPath(lanePath) || lanePath.split(/[\\/]/).includes("..")) why = "not a repo-relative path";
       else { try { text = String(await io.fs.read(`${wt}/${lanePath}`) ?? "").trim(); } catch { why = "not readable in the lane worktree"; } }
       if (!why && !text) why = "empty";
       if (!why && Buffer.byteLength(text, "utf8") > LANE_INSTRUCTIONS_MAX_BYTES) why = `over ${LANE_INSTRUCTIONS_MAX_BYTES} bytes`;
@@ -1601,6 +1752,8 @@ export async function runCore(o) {
     // #5434: deps, heavy shims and env.setup overlap the plan session (read-only); gateSetup() awaits them before anything that builds or runs commands.
     let setupSettled = false;
     const setupStep = (step, t) => ev({ event: "LANE_SETUP_TIMING", step, ms: now() - t });
+    let depsSettled = () => {};
+    const depsP = new Promise((res) => { depsSettled = res; }); // #5804: the install result alone, read before the first session
     const setupP = (async () => {
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
     // After 2b (#4347): installs run with the toolchain env, so a pm only its shim provides resolves; no env is the host PATH.
@@ -1612,9 +1765,14 @@ export async function runCore(o) {
       setupStep("deps", tD);
       for (const r of Array.isArray(res) ? res : []) {
         ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
+        if (r?.restore) { // #5819: a failed publish/materialize touched tracked files; depcache checked them out again
+          ev({ event: "DEPS_WORKTREE_RESTORED", eco: r.eco ?? null, status: r.status ?? null, ...r.restore });
+          T.anomalies.push(r.restore.error ? `Dependency cache (${r.eco}): restoring tracked files after a failed ${r.status} failed: ${r.restore.error}` : `Dependency cache (${r.eco}): ${r.restore.restored} tracked file(s) missing after a failed ${r.status} were restored${r.restore.missing ? ` (${r.restore.missing} still missing)` : ""} (#5819)`);
+        }
         if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
       }
     }
+    depsSettled();
     // ---- 2c. heavy-step shims (#4169): after the toolchain, so a heavy shim's real binary is the pinned toolchain shim ----
     const tH = now();
     if (heavyOn) {
@@ -1648,8 +1806,9 @@ export async function runCore(o) {
       T.decisions.push("forge.yaml env.setup ran once in the fresh worktree");
     }
       return null;
-    })().finally(() => { setupSettled = true; });
+    })().finally(() => { setupSettled = true; depsSettled(); });
     setupWait = setupP;
+    let depsDone = false; depsP.then(() => { depsDone = true; });
     const TIMED_OUT = Symbol("timed-out");
     /** #5434: `p` or TIMED_OUT after `ms` (0 = no bound); a rejection is null. The work keeps running. */
     const within = (p, ms) => new Promise((res) => { const t = ms > 0 ? setTimeout(() => res(TIMED_OUT), ms) : null; Promise.resolve(p).then((v) => { clearTimeout(t); res(v); }, () => { clearTimeout(t); res(null); }); });
@@ -1659,6 +1818,21 @@ export async function runCore(o) {
       if (setupFail === undefined) { const r = setupSettled ? await setupP : await phaseLedger.during("deps_install", () => setupP); setupFail = typeof r === "function" ? await r() : null; }
       return setupFail;
     };
+    /** #5804: an install that could not start for a missing tool ends the lane env.tool_missing before any (further) builder session.
+     * Same evidence line as the validate-time stop, so orchestrate's recovery (same tools, same host) classifies it alike. */
+    let toolStopped = null;
+    const toolStop = async (files = []) => {
+      if (toolStopped) return toolStopped;
+      const miss = toolMissingInstalls(depResults, { files });
+      if (!miss.length) return null;
+      const tools = [...new Set(miss.map((m) => m.tool))].join(", ");
+      ev({ event: "PREFLIGHT_TOOL_MISSING", tools: miss.map((m) => m.tool), before_first_session: !firstSession });
+      T.anomalies.push(`Dependency install could not start (${miss.map((m) => m.label).join("; ")}); the lane ended before ${firstSession ? "implementing" : "any builder session"}`);
+      toolStopped = await needsHuman(`Environment error (not a conformance failure): the host is missing ${tools}, so validate command(s) could not run; the dependency install stopped, and the lane ended before ${firstSession ? "the builder implemented" : "any builder session"}; nothing merged:\n${miss.map((m) => `- env.tool_missing: dependency install stopped (${m.label}) (environment, not the change)`).join("\n")}\n\nInstall it on the host or run the check through the repo's own toolchain, then rerun.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+      return toolStopped;
+    };
+    /** #5804: gateSetup() plus the missing-tool stop (root install, or a sub-project `files` fall under), before a session that builds. */
+    const gateBuild = async (files = []) => (await gateSetup()) ?? (await toolStop(files));
     const names = (out) => String(out).split("\n").map((s) => s.trim()).filter(Boolean);
     // #4160: files the branch touched (three-dot) whose content still differs from the base tip (two-dot); a file merged
     // in from the base by a base-sync equals the base and drops out of the scope check.
@@ -2033,6 +2207,8 @@ export async function runCore(o) {
     /** #4694: the engine appends guard-derived H preserve rows from the local index (one file read; the same contract when none apply). */
     const historyRows = (c) => { const w = withHistoryRows(c, { repo, issue }); const n = (w.preserve ?? []).length - (c.preserve ?? []).length; if (w !== c && n > 0) T.decisions.push(`History preserve rows: ${w.preserve.filter((p) => p.source === "guard").map((p) => p.id).join(", ")} from guards (#4694)`); return w; };
     let frozen = null, hash = null, planned = false, files = [], split = null, planMisses = null; // planMisses (#5331): validate preflight misses from this run
+    /** #5804: paths that place the change: the issue's named paths, then the frozen deliverables once they exist */
+    const toolFiles = () => [...namedPaths(iss?.body ?? ""), ...(frozen?.deliverables ?? []).map((d) => d?.path)].filter(Boolean);
     const impliedDocs = []; // add-deliverable amendments for doc edits the docs-freshness rule demanded (docs round, CI fix round)
     /** Doc files a fix round added to satisfy the freshness rule: recorded only when the rule failed before and passes after. */
     async function noteFreshnessDocs(before, wasFailing) {
@@ -2132,19 +2308,19 @@ export async function runCore(o) {
       frozen = split.contract; hash = contractHash(contractJson(frozen));
       files = await changedFiles();
     } else {
-      if (resumed) {
+      if (resumed || recover) { // #5811: a recovery with no branch to resume (it ended before its first commit) still reuses the frozen contract
         const fc = await readFrozenContract();
         if (fc) {
           // #4265: a contract planned from an older issue scope is stale: re-plan and freeze a new one instead of judging against it
           await refreshIssue("rerun contract check");
           const gone = (Array.isArray(fc.contract?.requirements) ? fc.contract.requirements : []).filter((r) => r?.disposition === "deliver" && !inIssue(r.quote, issueText)).map((r) => r.id);
-          const stale = fc.scope ? (fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null)
-            : fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+          const stale = reuseStale({ fc, scopeHash, lane, resumed: Boolean(resumed), gone });
           if (stale) {
-            ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
+            ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, base: fc.base, lane, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
           } else {
             frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`);
+            ev({ event: "CONTRACT_REUSED", hash, recover: recover?.code ?? null, resumed: Boolean(resumed) }); // #5811: no pre-contract session; routing is next
             const ad = applyRequirementDecisions(frozen, trustedComments); // #5547: a structured operator decision amends the frozen row
             if (ad.applied.length) { frozen = deferChecklessPostDeploy(ad.contract).contract; T.decisions.push(`FORGE:DECISION applied to the frozen contract: ${ad.applied.join(", ")} tracked post-deploy`); }
           }
@@ -2161,9 +2337,24 @@ export async function runCore(o) {
       }
       decisionsNote = frozen && (resumed || salvagedRef || recover) ? decisionNote(trustedComments) : ""; // #4901
       if (decisionsNote) T.decisions.push("Trusted FORGE:DECISION comment(s) posted after the contract froze are binding notes for the builder");
+      if (!route) { // #5810: the provisional tier of the pre-contract sessions; BUILDER_ROUTE may upgrade it after the contract
+        preRoute = provisionalRoute({ title: iss.title, labels: iss.labels ?? [], namedFiles: namedPaths(iss.body ?? ""), prior: !!(resumed || salvagedRef || recover), riskPaths, cfg: routingCfg, topModel: builderModel });
+        const rec = { event: "BUILDER_PREROUTE", mode: preRoute.mode, class: preRoute.class, tier: preRoute.tier, model: preRoute.model ?? "default", reason: preRoute.reason, risk: preRoute.risk };
+        ev(rec); await emit(rec);
+        T.decisions.push(`Pre-contract sessions provisionally routed to the ${preRoute.tier} tier (${preRoute.class}: ${preRoute.reason})`);
+      }
       await label("building");
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
       const waitMs = Math.max(0, Number(contextWaitSeconds) || 0) * 1000, tHot = now();
+      if (recCfg.mode === "on" && !recurrence && (namedPaths(iss.body ?? "").length || recursLinks(iss.body ?? "").length)) { // #5751: 0 LLM calls; an issue naming no path and no Recurs link cannot recur
+        recurrence = await recurrenceFacts({ io: { gh: ghc, git: (a) => git(a) }, repo, issue, title: iss.title, body: iss.body ?? "", base, namedPaths: namedPaths(iss.body ?? ""), threshold: recCfg.threshold }).catch(() => null);
+        if (recurrence?.recurs) {
+          ev({ event: "RECURRENCE", count: recurrence.count, threshold: recurrence.threshold, fixes: recurrence.evidence.map((e) => e.number), reason: recurrence.reason });
+          T.decisions.push(`Design lane (#5751): ${recurrence.reason}`);
+          try { await post("FORGE:RECURRENCE", `Routed to a design lane: ${recurrence.reason}.\nThe contract must say why the earlier fixes did not hold, whether to delete or replace them, and a measurable outcome; it may decompose into ordinary lanes.`); } catch { /* best effort */ }
+        }
+      }
+      await takeHotAreas(namedPaths(iss.body ?? "")); // #5751
       const hotR = await within(hotspotsOf({ paths: namedPaths(iss.body ?? "") }), waitMs); // #5209: churn and hotspot signals for eligibility; #5434: bounded, overlaps the install
       const hotLate = hotR === TIMED_OUT, namedHot = hotLate ? null : hotR;
       setupStep("hotspots", tHot);
@@ -2173,8 +2364,9 @@ export async function runCore(o) {
       lightVerdict = elig.verdict;
       if (elig.mode !== "off") T.decisions.push(`Light lane ${elig.mode}: ${elig.verdict}${elig.reasons.length ? ` (${elig.reasons.map((x) => x.code).join(", ")})` : ""}`);
       // #4451: a light try skips the hotspots and the context pack; an upgrade computes them before the plan call
-      const ffSource = fastForwardSource(o.light), ffFresh = ffSource === "investigation" && !frozen && !resumed && !salvagedRef && !recover; // #5426: the text verdict above is only a shadow signal then
-      const lightTry = ffSource === "text" && elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover;
+      const ffSource = fastForwardSource(o.light), ffFresh = ffSource === "investigation" && !frozen && !resumed && !salvagedRef && !recover && !recurrence?.recurs; // #5426: the text verdict above is only a shadow signal then
+      const lightTry = ffSource === "text" && elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover && !recurrence?.recurs; // #5751: a recurrence never takes the light lane
+      if (recurrence?.recurs && elig.light) T.decisions.push("Light lane skipped: the issue recurs (design lane)");
       if (!lightTry) hotFacts = namedHot; // #4451: a light try still gives its builder no hotspot facts
       enumList = io.enumeratingTests ? ((await within(io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }), waitMs)) ?? []) : [];
       if (enumList === TIMED_OUT) enumList = [];
@@ -2184,7 +2376,12 @@ export async function runCore(o) {
         const tPack = now(); packP = contextPackStep(); ctxPack = await within(packP, waitMs); setupStep("context_pack", tPack);
         if (ctxPack === TIMED_OUT) { ctxPack = null; T.decisions.push(`Context pack not ready in ${waitMs / 1000}s: the plan starts without it`); }
       }
-      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + uiBuildRule(uiOn = uiOn || uiIssue(iss ?? {}), designConfig) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
+      if (!frozen) { // #5804: an install that cannot start (tool not found) fails in seconds: read it inside the same waitMs bound (from tHot) before the first session; a longer install keeps overlapping the plan and gateBuild() stops it before implement
+        const left = waitMs - (now() - tHot);
+        if (!depsDone && left > 0) await within(depsP, left);
+        const f = await toolStop(toolFiles()); if (f) return f;
+      }
+      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + uiBuildRule(uiOn = uiOn || uiIssue(iss ?? {}), designConfig) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + docsPlanNote(docsConfig) + pagePlanNote(pagesConfig) + unrunnableValidateNote(testRunners) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" || recurrence?.recurs ? contextPackNote(ctxPack) : "") + designLaneNote(recurrence); // #5751: on a recurrence the pack is an active input whatever the mode
       let lightDone = false, lightCommits = false;
       let ffPlan = "full", ffGo = false, lightElig = elig, lightPred = null, ffTriage = null; // #5426: how the plan call runs; ffGo = fast-forward to the light step
       const ffTriageOf = async (raw) => parseTriage(raw, await io.fs.read(`${wt}/${INVESTIGATION_FILE}`).catch(() => ""));
@@ -2203,7 +2400,7 @@ export async function runCore(o) {
         }
       }
       if (lightTry || ffGo) {
-        { const f = await gateSetup(); if (f) return f; } // #5434: the light build is an implement-class session
+        { const f = await gateBuild(toolFiles()); if (f) return f; } // #5434, #5804: the light build is an implement-class session
         liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
         const lightBase = pagesConfig ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : null; // #5648: pages already on the base are modified, not new
@@ -2217,8 +2414,8 @@ export async function runCore(o) {
         stage = "plan"; liveKeys = ["investigation"]; result = (await readResult()) ?? result;
         if (!lr.upgrade) {
           lightDone = true; light = true; frozen = historyRows(lr.contract); hash = contractHash(contractJson(frozen));
-          let body = renderContract(frozen, hash, { scope: scopeHash });
-          if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
+          let body = renderContract(frozen, hash, { scope: scopeHash, base: lane });
+          if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash, base: lane });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
           await claimSurfaceSlots(frozen);
           ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
@@ -2251,6 +2448,8 @@ export async function runCore(o) {
         if (closes || result?.status === "blocked") await flushStages(result, ["investigation"]); // the evidence comment for invalid/already-fixed
         T.validate = [result?.status ? String(result.status === "fixed" ? "CONFIRMED" : result.status).toUpperCase() : "CONFIRMED", `${evidence.length} evidence item(s)`];
         if (closes && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
+        const prodFail = closes ? prodFailureSignal(trustedComments) : null; // #5734: a recorded prod failure overrides ancestry
+        if (prodFail) return await needsHuman(prodFailNote(result.status, prodFail), OUTCOME_CODES.BUILDER_NO_EVIDENCE);
         if (closes) {
           T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
           T.decisions.push(`Builder verdict: ${result.status}`);
@@ -2262,7 +2461,7 @@ export async function runCore(o) {
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
         if (ffFresh && elig.mode === "shadow") { const tri = await ffTriageOf(null); ev(fastForwardEvent(fastForwardEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], triage: tri, textFiles: namedPaths(iss.body ?? ""), riskPaths, hotspots: (hotFacts?.files ?? []).filter((f) => tri.files.includes(f?.path ?? f)), cfg: o.light ?? {} }), tri, { shadow: true })); } // #5426: zero extra cost, no extra runner call
-        { const f = await gateSetup(); if (f) return f; } // #5434: the contract checks below run commands with the lane env
+        { const f = await gateBuild(toolFiles()); if (f) return f; } // #5434, #5804: the contract checks below run commands with the lane env
         // #4353: the engine's scope gate is the only scope authority; a pure file-scope validate is dropped before it is checked or frozen
         const dropScope = (c) => {
           const d = dropScopeValidates(c);
@@ -2344,18 +2543,19 @@ export async function runCore(o) {
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after ${rounds} correction(s):\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
+        await takeHotAreas((frozen.deliverables ?? []).map((d) => d?.path)); // #5751: the contract's paths before building
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
         if (hRows.length) T.decisions.push(`Anchored decisions bind this lane: ${hRows.map((p) => `${p.id} (${p.decision})`).join(", ")}`);
         hash = contractHash(contractJson(frozen));
-        let body = renderContract(frozen, hash, { scope: scopeHash });
-        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash }); // the JSON must survive the comment cap
+        let body = renderContract(frozen, hash, { scope: scopeHash, base: lane });
+        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash, base: lane }); // the JSON must survive the comment cap
         await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
         const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
         ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
         await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
-        T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
+        T.validate = lightDone ? "light lane (no plan session)" : resumed ? "resumed (existing branch)" : "recovered (frozen contract)";
       }
       const dgFiles = (frozen?.deliverables ?? []).map((d) => d?.path).filter(Boolean);
       const designComments = (iss?.comments ?? []).filter(isTrustedIssueComment);
@@ -2398,7 +2598,7 @@ export async function runCore(o) {
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
         // #5331: a tool the sandbox itself lacks (probed where the lane runs) ends the lane before the builder implements; the tool-missing recovery places it on the host (orchestrate placeOf)
         const remoteDeps = await depOwnerOf(); // #5683: a tool that is a tracked manifest dependency is prepared in the sandbox, never a lane_tools recipe or a host tool
-        const ownedDep = (t) => remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
+        const ownedDep = (t) => t === "forgedock" || remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
         let tm0 = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => [])), tm = notOwned(tm0);
         if (tm0.tools.length && !tm.tools.length) { try { if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); ev({ event: "REMOTE_PROJECT_DEPS", tools: tm0.tools }); } catch { /* the install gate reports failures */ } }
         if (tm.tools.length) { // #5423: provision the sandbox once (nested lockfiles, pytest) and re-probe before giving the lane up
@@ -2418,7 +2618,7 @@ export async function runCore(o) {
             tm = notOwned(toolMisses(await preflightValidates(frozen).catch(() => [])));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
           }
-          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES).`, OUTCOME_CODES.ENV_TOOL_MISSING, { toolNoRecipe: true }); // #5727: the orchestrator re-places it on the host without spending an attempt
+          if (noRecipe.length && tm.tools.some((t) => noRecipe.includes(t))) return await needsHuman(`Remote sandbox lacks ${noRecipe.join(", ")}, and no lane_tools recipe exists for ${noRecipe.length > 1 ? "them" : "it"}. Add it to \`execution.lane_tools\` in forge.yaml once a recipe exists, or add a recipe for ${noRecipe.join(", ")} in bin/pool/lane-tools.mjs (RECIPES). Known recipes: ${Object.keys(RECIPES).join(", ")}.`, OUTCOME_CODES.ENV_TOOL_MISSING, { toolNoRecipe: true }); // #5727: the orchestrator re-places it on the host without spending an attempt
         }
         if (tm.tools.length) {
           ev({ event: "REMOTE_TOOL_MISSING", tools: tm.tools, ids: tm.ids });
@@ -2434,9 +2634,9 @@ export async function runCore(o) {
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       // #4364: what `forgedock check` needs from the operator's forge.yaml (gitignored, so not in the worktree)
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CHECK_PLAN_FILE}`, `${JSON.stringify({ v: 1, base, mode: vcfg.mode, learned: learnedCommands, invariants: vcfg.invariants ?? [], maxMinutes: Number(o.precheck?.maxMinutes) > 0 ? Number(o.precheck.maxMinutes) : null, precheckTotalSeconds: vcfg.precheckTotalSeconds, precheckTimeoutSeconds: vcfg.precheckTimeoutSeconds })}\n`); } catch { /* the CLI falls back to forge.yaml */ } }
-      route = routeBuilder({ contract: frozen, riskPaths, cfg: routingCfg, topModel: builderModel }); // #4394
+      route = floorRoute(routeBuilder({ contract: frozen, riskPaths, cfg: routingCfg, topModel: builderModel }), preRoute, builderModel); // #4394; #5810: an issue risk signal floors it at top
       {
-        const rec = { event: "BUILDER_ROUTE", mode: route.mode, class: route.class, tier: route.tier, model: route.model ?? "default", risk: route.risk };
+        const rec = { event: "BUILDER_ROUTE", mode: route.mode, class: route.class, tier: route.tier, model: route.model ?? "default", risk: route.risk, ...(route.pre ? { pre_tier: route.pre.tier, pre_class: route.pre.class, change: route.change } : {}), ...(route.floor ? { floor: route.floor } : {}) };
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
@@ -2452,18 +2652,28 @@ export async function runCore(o) {
       const openMap = io.runCommand ? await readTestMapAtRef(git, base).catch(() => null) : null;
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + seqBuildNote + buildOpeningNote({ paths: openPaths, tests: selectCommands(openMap, openPaths), packFiles: ctxCfg.mode === "on" ? ctxPack?.files : [] }) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + uiBuildRule(uiOn = uiOn || uiChanged(dgFiles).length > 0, designConfig) + designGateNote(designRoute) + generatorNote(surfaceClaim?.generated) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
-      { const f = await gateSetup(); if (f) return f; } // #5434: resumed or frozen lanes skip the plan
+      { const f = await gateBuild(toolFiles()); if (f) return f; } // #5434, #5804: resumed or frozen lanes skip the plan
       stage = "implement"; phaseLedger.enter("implement");
-      let buildPrompt = implementPrompt, noCeiling = false;
+      let buildPrompt = implementPrompt, noCeiling = false, buildResume = planned ? sessionId : null;
+      if (!lightDone && buildResume) { // #5812: a planning session above the hand-off bound is not resumed: the build starts fresh from a bounded digest
+        const ho = routeHandoff({ planTokens: planSession?.endTokens ?? null, bound: routeHandoffTokens, ceiling: laneCeiling });
+        if (ho.digest) {
+          const digest = routeDigestPrompt({ contract: frozen, read: planSession?.read ?? [], buildReads: buildReadsOf(planSession?.text), planTokens: ho.planTokens, ...await restartFacts(), maxBytes: ho.digestBytes });
+          buildPrompt = implementPrompt + digest; buildResume = null;
+          T.decisions.push(`Route hand-off: the planning session ended at ${ho.planTokens} context tokens (bound ${ho.bound}); the build starts fresh from a ${Buffer.byteLength(digest)}-byte digest instead of resuming it`);
+        }
+        const rec = { event: "ROUTE_HANDOFF", mode: ho.digest ? "digest" : "resume", plan_tokens: ho.planTokens, bound: ho.bound, ...(ho.digest ? { digest_bytes: Buffer.byteLength(buildPrompt) - Buffer.byteLength(implementPrompt) } : {}), pack_bytes: ctxPack?.bytes ?? null, lane_profile: laneProfile.name };
+        ev(rec); await emit(rec);
+      }
       if (!lightDone) { // #5346: a session certain to restart is narrowed (or, when the named files alone exceed the ceiling, left uncapped) before it starts
-        const pred = predictRestart({ ceiling: laneCeiling, promptBytes: Buffer.byteLength(implementPrompt), fileBytes: await namedFileBytes(frozen) });
+        const pred = predictRestart({ ceiling: laneCeiling, promptBytes: Buffer.byteLength(buildPrompt), fileBytes: await namedFileBytes(frozen) });
         if (pred.predicted) {
-          buildPrompt = implementPrompt.replace(exploreBuildRule(exploreCfg), "") + NARROW_NOTE;
+          buildPrompt = buildPrompt.replace(exploreBuildRule(exploreCfg), "") + NARROW_NOTE;
           noCeiling = pred.certain;
           ev({ event: "CONTEXT_PREDICT", estimate_tokens: pred.estimate, ceiling: pred.ceiling, certain: pred.certain });
           T.decisions.push(`Build predicted to restart (about ${pred.estimate} of ${pred.ceiling} context tokens at start): context narrowed${pred.certain ? "; the named files alone exceed the ceiling, so this build runs without it" : ""}`);
         }
-        await builder(++attemptN, buildPrompt, planned ? sessionId : null, true, undefined, { trigger: "build", noCeiling });
+        await builder(++attemptN, buildPrompt, buildResume, true, undefined, { trigger: "build", noCeiling });
       }
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
@@ -2509,7 +2719,22 @@ export async function runCore(o) {
     // #4297: its commands run, so the map comes from the base ref (else the operator's checkout), never the lane worktree
     const testMap = io.runCommand ? (await readTestMapAtRef(git, base)) ?? (await readTestMap([cwd], io.fs?.read)) : null;
     // #4331: a learned command the map covers runs only when its globs match a changed file; unmapped ones always run (#4315)
-    const pickChecks = () => planPrecheck({ testMap, files, learned: learnedCommands, maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
+    // #5820: the PR's required CI jobs (scripts/ci-local plan, heavy jobs CI-only) join the round as derived commands
+    const ciCfg = o.precheck?.ci ?? parseCiPrecheckConfig(null);
+    let ciRequired, ciDerived = new Map(); // command -> {job, name, why, steps}
+    const ciGaveUp = new Set(); // jobs found unrunnable in an earlier round: recorded once, not rerun
+    async function ciPrecheckPlan(round) {
+      ciDerived = new Map();
+      if (ciCfg.mode === "off" || isSplit || !io.ciLocalPlan || !io.fs?.write) return [];
+      if (ciRequired === undefined) { try { ciRequired = (await io.requiredChecks?.(lane)) ?? null; } catch { ciRequired = null; } }
+      const p = await deriveCiPrecheck({ buildPlan: io.ciLocalPlan, required: ciRequired, cfg: ciCfg, wt, base, lane, files, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, writeFile: (rel, text) => io.fs.write(`${wt}/${rel}`, text), skipJobs: ciGaveUp });
+      for (const c of p.commands) ciDerived.set(c.command, c);
+      ev({ event: "CI_PRECHECK_PLAN", round, source: p.source, ...(p.note ? { note: p.note } : {}), commands: p.commands.map(({ job, name, workflow, kind, why, steps, command }) => ({ job, name, workflow, kind, why, steps, command })), skipped: p.skipped, unrunnable: p.unrunnable });
+      if (!round) T.decisions.push(`CI precheck (${p.source}): ${p.commands.length ? p.commands.map((c) => `${c.name} (${c.why})`).join(", ") : "no job to run locally"}${p.unrunnable.length ? `; unrunnable: ${p.unrunnable.map((u) => `${u.name}: ${u.reason}`).join("; ")}` : ""}`);
+      return p.commands.map((c) => c.command);
+    }
+    let ciCommands = await ciPrecheckPlan(0);
+    const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
     let picked = pickChecks();
     // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it
     const verifyFacts = { commands: null, structure: null, undeclaredEdges: [], docs: null, precheck: null, amendments: [], hotspots: false };
@@ -2518,7 +2743,7 @@ export async function runCore(o) {
       precheckRan = true;
       for (let round = 0; ; round++) {
         await renew();
-        if (round) picked = pickChecks();
+        if (round) { ciCommands = await ciPrecheckPlan(round); picked = pickChecks(); }
         const precheckCommands = picked.commands;
         // #4318/#4331: one round has a total budget (lean.precheck.max_minutes, else verify.precheck_total_seconds); the
         // commands run concurrently up to the host worker cap; the rest are deferred to CI, not failed. #4344: one heavy
@@ -2529,7 +2754,17 @@ export async function runCore(o) {
         const round$ = await runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: picked.perCommandMs, now,
           acquire: () => heavyAcquire("precheck"),
           run: ({ command, timeoutMs, workers: share }) => { workers = share; const env = laneEnv(); return io.runCommand({ command, cwd: wt, timeoutMs, env: env.FORGE_HOST_PARALLELISM ? { ...env, FORGE_HOST_PARALLELISM: String(share) } : env }); } });
-        const { results, deferred } = round$;
+        const { deferred } = round$;
+        // #5820: a derived CI job that could not run (ci-local degraded, timeout, no tool) is recorded, never a fix round
+        const ciRows = round$.results.filter((x) => ciDerived.has(x.command)).map((x) => ({ x, c: ciDerived.get(x.command), out: ciPrecheckOutcome(x) }));
+        const ciSkip = new Set(ciRows.filter((r) => r.out.status === "unrunnable" || r.out.status === "deferred").map((r) => r.x.command));
+        const results = round$.results.filter((x) => !ciSkip.has(x.command));
+        if (ciDerived.size) {
+          const ciDeferred = deferred.filter((c) => ciDerived.has(c)).map((c) => ({ job: ciDerived.get(c).job, name: ciDerived.get(c).name, status: "deferred-to-ci", reason: "precheck budget reached" }));
+          const rows = [...ciRows.map(({ x, c, out }) => ({ job: c.job, name: c.name, status: out.status, rc: x.rc, ms: x.ms, ...(out.reason ? { reason: out.reason } : {}) })), ...ciDeferred];
+          ev({ event: "CI_PRECHECK_RESULT", round, green: rows.every((r) => r.status !== "fail"), results: rows });
+          for (const r of rows.filter((y) => y.status === "unrunnable" || y.status === "deferred")) { ciGaveUp.add(r.job); T.anomalies.push(`CI precheck job ${r.name} ${r.status} locally (${r.reason}); left to CI`); }
+        }
         precheckMs += round$.ms; precheckDeferred += deferred.length;
         if (deferred.length) T.anomalies.push(`deferred-to-ci: pre-PR check budget ${totalMs / 1000} s reached; left to CI: ${deferred.map((c) => `\`${c}\``).join(", ")}`);
         const { failed, timedOut } = splitPrecheckResults(results); // #5332: rc 124 is host load, never a failing check
@@ -2554,7 +2789,8 @@ export async function runCore(o) {
           const rel = `${CHECK_LOG_DIR}/precheck-${round + 1}-${i + 1}.log`;
           let logPath = null;
           if (io.fs.write) { try { await io.fs.write(`${wt}/${rel}`, String(f.output ?? "")); logPath = rel; } catch { /* tail only */ } }
-          return { command: f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
+          const ci = ciDerived.get(f.command); // #5820: name the CI job and its steps, not only the ci-local invocation
+          return { command: ci ? `${f.command}  # CI job "${ci.name}" (${ci.why}): ${ci.steps.join(" && ").slice(0, 400)}` : f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
         }));
         await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");
@@ -2935,7 +3171,7 @@ export async function runCore(o) {
     let effective = frozen, review = null, lastAmend = "", resumes = 0, lastFailKey = null, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
-    let pendingDecisions = [], firstRounds = null, firstReply = null;
+    let pendingDecisions = [], firstRounds = null, firstReply = null, lastDecided = "";
     let baseTree = null; // #4695: the base file list, read once and only when a decision amendment needs it
     let genPaths = null; // forge#4519: maintenance.generated_paths from hotspots.sh (plan facts; one config-only call without them, never on light lanes)
     async function amend() {
@@ -2945,8 +3181,16 @@ export async function runCore(o) {
       const addedPaths = wantsDecision ? String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").filter(Boolean) : [];
       const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
       const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
-      const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
+      const dd = dedupeAddRequirements(frozen, [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own]); // #5773: a requeue does not renumber a re-added row
+      const all = dd.amendments;
+      if (dd.dropped.length) T.decisions.push(`add-requirement ${dd.dropped.map((x) => x.id).join(", ")} dropped: its quote is already a contract row or re-added later (#5773)`);
       const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null, addedPaths, defaultWhy: engineWhy });
+      const ad = applyRequirementDecisions(a.contract, trustedComments); // #5773: the operator's decision wins over replayed amendments and reaches amendment-added rows
+      if (ad.applied.length) {
+        a.contract = deferChecklessPostDeploy(ad.contract).contract;
+        const k = ad.applied.join(", ");
+        if (k !== lastDecided) { lastDecided = k; T.decisions.push(`FORGE:DECISION applied to the amended contract: ${k} tracked post-deploy`); }
+      }
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
@@ -3035,7 +3279,7 @@ export async function runCore(o) {
           run.findings = parseVerifierFindings(rr?.text, { pathExists: (x) => listed.has(x) });
           run.cost_usd = num(rr?.costUsd) ?? 0;
         } catch (e) {
-          if (e?.deferUsageLimit || e?.deferCode === OUTCOME_CODES.BACKEND_AUTH) throw e; // #5168: a login failure (backend.auth) is not swallowed as a verifier error
+          if (e?.deferUsageLimit || e?.deferCode === OUTCOME_CODES.BACKEND_AUTH || e?.deferCode === OUTCOME_CODES.BACKEND_CLI_FAILED) throw e; // #5168: a login failure (backend.auth) is not swallowed as a verifier error
           run.error = String(e?.code || e?.message || e).split("\n")[0].slice(0, 200);
           T.anomalies.push(`Independent verifier failed at ${head.slice(0, 12)}: ${run.error}`);
         }
@@ -3118,7 +3362,7 @@ export async function runCore(o) {
       return out;
     }
     /** #4693: select the guards this diff intersects and rerun their base test files; zero cost when none is selected. Best effort: an error skips the gate. */
-    let guardSel = [], guardNoted = ""; let guardEv = null; // #4705: this pass's guard_run event, emitted by the caller once the added wall time is known
+    let guardSel = [], guardNoted = "", laneRemoved = []; let guardEv = null; // #5752: laneRemoved: the lane's deleted paths, for mechanism-retired guards // #4705: this pass's guard_run event, emitted by the caller once the added wall time is known
     async function guardGate(files) {
       let sel = [], r = null; guardEv = null;
       try {
@@ -3126,12 +3370,14 @@ export async function runCore(o) {
         const picked = guards.length ? await selectGuards({ guards, files, git: (a) => git(a), base }) : { selected: [], mergeBase: null };
         sel = picked.selected; guardSel = sel;
         if (!sel.length) return [];
-        r = await runGuards({ selected: sel, mergeBase: picked.mergeBase, contract: effective, guardCommand: vcfg.guardCommand, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), parallelism: Number(process.env.FORGE_HOST_PARALLELISM) || 2 });
+        r = await runGuards({ selected: sel, mergeBase: picked.mergeBase, contract: effective, guardCommand: vcfg.guardCommand, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), parallelism: Number(process.env.FORGE_HOST_PARALLELISM) || 2, ...(o.guardFs ? { fs: o.guardFs } : {}) });
       } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: 0, broken: 0, skipped: 0, wall_ms: 0, error: true }; return []; }
       const note = `Guard gate selected ${sel.map((x) => `#${x.guard.issue} (${x.reason})`).join("; ")}${r.skipped.length ? `; skipped: ${r.skipped.join("; ")}` : ""}${r.failures.length && shadow ? "; shadow: would block" : ""}`;
       if (note !== guardNoted) { guardNoted = note; T.decisions.push(note); }
-      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), reasons: Object.fromEntries(sel.map((x) => [x.guard.issue, x.reason])), batches: r.batches, ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
+      const weak = weakGuardNotes(r.runs); // #5752: a broken weak guard (literal-presence test) is a review note, not a park
+      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), reasons: Object.fromEntries(sel.map((x) => [x.guard.issue, x.reason])), batches: r.batches, ran: r.runs.length, broken: r.failures.length, weak: weak.length, skipped: r.skipped.length, wall_ms: r.ms };
       for (const f of r.failures) ev({ event: "guard_broken", guard: f.guard, test: f.test });
+      for (const w of weak) { ev({ event: "guard_weak", guard: w.guard, test: w.test }); if (!T.decisions.includes(w.note)) T.decisions.push(w.note); }
       return r.failures;
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
@@ -3191,6 +3437,12 @@ export async function runCore(o) {
       const gateHead = String(await git(["rev-parse", "HEAD"])).trim();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
+      let counters = null; // #5751: recurrence.counters at the lane's merge base and at its head
+      if (recCfg.counters.length) {
+        const mb = String(await git(["merge-base", base, "HEAD"]).catch(() => "")).trim() || base;
+        counters = { before: await countCounters({ git, ref: mb, counters: recCfg.counters }), after: await countCounters({ git, ref: "HEAD", counters: recCfg.counters }) };
+        ev({ event: "COUNTERS", ...counters });
+      }
       const rx = await relaxationsOf(files); // #5237
       relaxations = rx.relaxations;
       if (relaxations.length) {
@@ -3201,7 +3453,7 @@ export async function runCore(o) {
       // #5436: the review reads the same committed diff as guard+precheck, so its session starts now; reviewOnce adopts it, any earlier return discards it
       const repro = await reproOf(effective);
       // a precheck that already fails on facts at hand (no engine rerun) would discard the review, so it is not started then
-      const early = triggerMode === "enforce" || amendProblems.length ? null : precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, frozen, repro, repoHas: repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) });
+      const early = triggerMode === "enforce" || amendProblems.length ? null : precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, counters, recurrence, frozen, repro, repoHas: repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) });
       specReview = !early || early.failures.length ? null : startSpeculative(async () => reviewerCall((await reviewPrep()).prompt));
       const gateT0 = now(); let validateMs = 0;
       // #4693: guards run beside the validate rerun; SPEC-11: the substituted-original rerun shares the one validate phase
@@ -3211,11 +3463,20 @@ export async function runCore(o) {
       const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
       // #5419: forge.yaml docs: user-facing surfaces need docs, and added /docs links must resolve; unset = no check
       const docsFail = docsConfig ? await docsFailures({ cfg: docsConfig, files, result, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      // #5752: forge.yaml outcome_evidence: a touched declared area needs a before/after on recorded real inputs; unset = no check
+      const outcomeFail = outcomeEvidenceConfig ? outcomeEvidenceFailures({ cfg: outcomeEvidenceConfig, files, result, contract: effective, exists: (p) => existsSync(join(wt, p)), checks: effective.requirements?.some((r) => r.disposition === "post-deploy") ? await rawChecksAt(git, [base, "HEAD"]) : null }) : [];
       // #5428: forge.yaml pages: a public page needs design, SEO and GEO briefs and passes the deterministic page checks; unset = no check
       const addedNow = String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); // #5648: new vs modified pages
-      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      // #5770: forge.yaml pages.capture: the engine renders the changed routes (no browser in the builder session) and uploads the shots; once per head
+      const pageRoutes = pagesConfig?.capture && io.runCommand ? changedRoutes(files, pagesConfig, { readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } }) : [];
+      if (pageRoutes.length) {
+        const headSha = String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim(), capDir = join(osTmpdir(), `forge-visual-${runId}`) /* outside the worktree: the lane commits .forge-lean */, runIn = ({ command, env }) => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: { ...laneEnv(), ...env } });
+        if (pageVisual?.sha !== headSha || pageVisual.errors.length) pageVisual = { sha: headSha, ...(await captureVisualCheck({ cfg: pagesConfig, routes: pageRoutes, dir: capDir, run: runIn, read: (p) => { try { return readFileSync(p); } catch { return null; } }, publish: (fs_) => publishToRef({ run: runIn, dir: capDir, files: fs_, slug: repo, runId }) })) };
+      }
+      const bugFixIssue = (iss?.labels ?? []).some((l) => /^(?:type:)?bug$|^(?:priority:)?p[01]$/i.test(typeof l === "string" ? l : l?.name ?? "")); // #5729: a bug fix is not forced through design for attribute edits
+      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, captures: pageVisual, exists: (p) => existsSync(join(wt, p)), added: addedNow, bugFix: bugFixIssue, remoteNoCapture: o.placement?.where === "remote" && !pagesConfig?.capture, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5330: forge.yaml design.routes (opt-in, blocking only): a user-visible page needs an approved spec and passes the deterministic visual critique
-      const designFail = designFailures({ cfg: designConfig, files, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
+      const designFail = designFailures({ cfg: designConfig, files, added: addedNow, bugFix: bugFixIssue, covered: pagesConfig?.require?.includes("design") ? [...pageFiles(files, pagesConfig, { readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } }), ...designOnlyFiles(files, pagesConfig)] : [], diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
       // #5284: forge.yaml topology.prod_parity: declared production-only surfaces this diff touches need a check result or a justification
       const parityRules = parseProdParity(prodParity);
       const prodParityFailures = parityRules.length && io.runCommand ? await prodParityOf({ rules: parityRules, changedFiles: files, result, run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
@@ -3230,7 +3491,8 @@ export async function runCore(o) {
       const repoHas = (validateRuns && Object.keys(validateRuns).length) || Object.keys(substitutedRuns ?? {}).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
-      const removedPaths = (effective.validate ?? []).some((v) => v.substituted) ? await removedPathsOf(git, base) : []; // #4990
+      const removedPaths = (effective.validate ?? []).some((v) => v.substituted) || effective.mechanisms?.length ? await removedPathsOf(git, base) : []; // #4990; #5752: a mechanism supersedes retires deleted guard tests
+      laneRemoved = removedPaths ?? [];
       const subBaseFiles = (effective.validate ?? []).some((v) => v.substituted) ? String(await git(["ls-tree", "-r", "-z", "--name-only", base]).catch(() => "")).split("\0").filter(Boolean) : []; // #5003
       const baselineRuns = [];
       for (const b of matchBaselines(files, vcfg.baselines)) { // #5448: project baseline suites for the changed paths, enforced
@@ -3239,7 +3501,9 @@ export async function runCore(o) {
         baselineRuns.push({ ...b, rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") });
       }
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
-      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
+      // #5760: CI budget gate (always on: annotation + hygiene; max_* only when set); one git diff when no workflow changed
+      const ciBudgetFail = await ciBudgetFailures({ cfg: ciBudget ?? parseCiBudget(null), base, git }).catch((e) => { ev({ event: "CI_BUDGET_GATE_ERROR", error: String(e?.message ?? e).slice(0, 200) }); return []; });
+      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, counters, recurrence, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, checkIds, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, docsFailures: docsFail, outcomeEvidenceFailures: outcomeFail, ciBudgetFailures: ciBudgetFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, docsPaths: docsConfig ? [...(docsConfig.paths ?? []), ...(docsConfig.registries ?? [])] : null, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), substitutedRuns, removedPaths, baseFiles: subBaseFiles });
       // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
       const depFail = depInstallFailures({ results: depResults, changedFiles: files });
       for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);
@@ -3304,6 +3568,8 @@ export async function runCore(o) {
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       // #5080: the repro already passes on the base and the diff changes no source: the fix is on the base, not missing
       if (alreadyFixedOnBase(pre, files, IGNORE)) return { state: "already-fixed", by: "precheck", failures: pre };
+      // #5729: a missing /design spec or visual evidence is not a builder fix: end design.spec_required before any resume or recovery lane
+      if (pre.length && !recording() && specOnlyFailures(pre)) return { state: "spec-only", by: "precheck", failures: pre };
       if (pre.length && !recording()) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
       const hard = recording() ? blockingOf(pre, SHADOW_PRE_BLOCKS).block : [];
@@ -3419,12 +3685,15 @@ export async function runCore(o) {
         const explained = explainFailures(outcome.failures, effective); // #4265: name the unmet requirement, not only the code
         const list = explained.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
         if (outcome.state === "environment") return await envNeedsHuman(outcome.failures);
+        if (outcome.state === "spec-only") return await needsHuman(`The page gate needs an approved FORGE:DESIGN_SPEC (run /design) or visual evidence a builder resume cannot produce, so no resume or recovery lane was spent:\n\n${list}`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue}` });
         // #5371: a remote sandbox is a different environment from the host: its failed frozen validate is rerun once in a local recovery lane before it counts
         // #5732: so is a repro head failure whose output carries no assertion text (an env error of the sandbox, not a red test)
         if (o.placement?.where === "remote" && !recover && outcome.failures?.length && outcome.failures.every((f) => f?.kind === "validate_failed" || (f?.kind === "repro_red_green" && f.head === "FAILED" && f.assertion === false))) {
           T.anomalies.push("Remote validate failure: rerun on the host in a local recovery lane before it is terminal");
           return await needsHuman(`A frozen validate command failed in the remote sandbox (exit non-zero on the engine's rerun). The sandbox is a different environment from the host, so no builder resume was spent; the branch is pushed and a local recovery lane reruns the frozen command on the host (pass: the change stands; fail: conformance.unimplemented):\n${list}`, ENV_VALIDATE_PLACEMENT);
         }
+        const reproProdFail = outcome.state === "already-fixed" ? prodFailureSignal(trustedComments) : null; // #5734: a passing repro is no prod outcome
+        if (reproProdFail) return await needsHuman(prodFailNote("already-fixed (repro passes on the base)", reproProdFail), OUTCOME_CODES.BUILDER_NO_EVIDENCE);
         if (outcome.state === "already-fixed") { // #5080: close as delivered, citing the base commit
           const sha = String(await git(["rev-parse", base]).catch(() => "")).trim().slice(0, 12) || base;
           const note = `Already fixed on the base: the repro test passes on \`${base}\` (${sha}) without this change, and the diff changes no source file. Closing as delivered.\n\n${list}`;
@@ -3446,7 +3715,7 @@ export async function runCore(o) {
         resumes++;
         T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")} (${explained.slice(0, 5).map((f) => String(f.detail).slice(0, 160)).join("; ")}); builder resumed (round ${resumes} of ${reviewMaxResumes})`);
         // A failed validate may only mean the base moved on: fetch the lane so the resume can merge it (never rebase).
-        if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt }); } catch { /* offline: the resume uses the local ref */ } }
+        if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt, env: laneGitEnv }); } catch { /* offline: the resume uses the local ref */ } }
         await fixRound("conformance", conformanceResumePrompt(outcome.failures, vcfg.mode, lane), outcome.failures, "conformance", failureLog(outcome.failures));
         await upsertStage("implementation"); // the published note follows the code after every resume
       }
@@ -3513,14 +3782,14 @@ export async function runCore(o) {
     laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", withLink(isSplit ? (o.refactorModule ?? (await import("./refactor.mjs"))).renderSplitPrBody({ issue, ...split })
-        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked }))])).trim();
+        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked, visual: visualMarkdown(pageVisual, pagesConfig?.viewports) }))])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
     await emit({ event: "PR_OPENED", pr });
     if (!resumed?.pr && !adoptPr) { try { const old = await supersedeOlderPrs({ repo, io: { gh: ghw }, issue, newPr: pr }); if (old.length) T.decisions.push(`Superseded older open PR(s) ${old.map((n) => `#${n}`).join(", ")} (one live PR per issue)`); } catch { /* best effort: the orphan sweep closes it later */ } } // #5505
     if (resumed?.pr && closing.tracked.length) { // an existing PR still has to link the tracking issues visibly
-      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", withLink(renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked }))]); }
+      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", withLink(renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked, visual: visualMarkdown(pageVisual, pagesConfig?.viewports) }))]); }
       catch (e) { e.deferCode = OUTCOME_CODES.FOLLOWUP_UNAVAILABLE; e.deferDetail = `could not link the tracking issues on PR #${pr}; nothing merged, rerun to retry`; throw e; }
     }
     if (degraded) {
@@ -3744,7 +4013,17 @@ export async function runCore(o) {
       // #4708: the fix head is CI-verified before its review, as in the base-sync retry (#4527), so validates left to CI are covered
       if (remoteVerify) { const v = await ciVerify("merge"); if (v.done) return v.done; }
       const rows = Array.isArray(result?.validation) ? result.validation : [], headNow = await gitOut(["rev-parse", "HEAD"]);
-      const lost = (effective.validate ?? []).filter((v) => !rows.some((x) => x?.id === v.id) && !(remoteVerify && ciVerifiedHead === headNow)).map((v) => v.id);
+      let lost = (effective.validate ?? []).filter((v) => !rows.some((x) => x?.id === v.id) && !(remoteVerify && ciVerifiedHead === headNow)).map((v) => v.id);
+      if (lost.length && io.runCommand) { // #5768: a validate with no row is run once by the engine on the fix head before the lane parks
+        const ran = await rerunFailedValidatesRaw({ ...effective, validate: (effective.validate ?? []).filter((v) => lost.includes(v.id)) });
+        const fresh = (effective.validate ?? []).filter((v) => ran?.[v.id]).map((v) => ({ id: v.id, command: v.command, exit: ran[v.id].rc, rerun: true }));
+        if (fresh.length) {
+          result = { ...result, validation: [...rows, ...fresh] };
+          try { await io.fs.write(`${wt}/${RESULT_FILE}`, `${JSON.stringify(result)}\n`); } catch { /* the gate reads what is on disk */ }
+          T.decisions.push(`Validate result(s) ${fresh.map((x) => x.id).join(", ")} missing after the CI fix round: the engine re-ran ${fresh.length > 1 ? "them" : "it"} on the fix head (exit ${fresh.map((x) => x.exit).join(", ")})`);
+        }
+        lost = lost.filter((id) => !ran?.[id]);
+      }
       if (lost.length) return await needsHuman(`Validate result(s) ${lost.join(", ")} missing after a CI fix round on PR #${pr}: the earlier results were lost and none could be carried forward; nothing merged.`, OUTCOME_CODES.ENGINE_VALIDATE_RESULT_LOST);
       const rv = await doReview(); // never merge an unreviewed head
       if (!rv) return await needsHuman("Reviewer returned no parseable verdict after a CI fix round.", OUTCOME_CODES.REVIEW_NO_VERDICT);
@@ -3939,6 +4218,19 @@ export async function runCore(o) {
       let dcoFailed = [];
       try { dcoFailed = ((lastStates ?? await io.checkStates?.(pr)) ?? []).filter((x) => /\bdco\b/i.test(String(x?.name ?? "")) && x.state === "failure" && (!x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head)))); } catch { dcoFailed = []; }
       if (dcoFailed.length) return await needsHuman(`DCO check failed on PR #${pr} (${[...new Set(dcoFailed.map((x) => x.name))].join(", ")}); a commit lacks a sign-off or has a placeholder author, which would block the release. Nothing merged.`, OUTCOME_CODES.CI_DCO);
+      // #5709: a merge into the integration branch restarts CI of an open release PR (head = this branch): hold until it ends
+      let heldSince = null, holdPolicy = null;
+      try { const { parsePolicy, POLICY_PATH } = await import("./release-config.mjs"); const d = defaults.find(Boolean); if (d) holdPolicy = parsePolicy(String(await git(["show", `origin/${d}:${POLICY_PATH}`]))).policy ?? null; } catch { holdPolicy = null; } // no policy file: default on
+      for (;;) {
+        const target = String(resumed?.base ?? lane ?? "");
+        const hold = await releaseMergeHold({ gh: ghc, repo, branch: target, defaults, enabled: holdMergesDuringReleaseCi, policy: holdPolicy, readActive: async () => { const { readActive } = await import("./release-ledger.mjs"); return readActive({ io: io.api ? io : ledgerIoFromGh(ghc), repo, credential: "driver" }); } }); // #5776: lanes have no io.api
+        if (!hold.held) break;
+        if (heldSince === null) { heldSince = now(); T.merge = [policyText, "merge.held_release"]; T.decisions.push(`merge.held_release: ${hold.reason}; PR #${pr} stays open and green`); ev({ event: "MERGE_HELD_RELEASE", pr, kind: hold.kind, releasePr: hold.pr ?? null }); }
+        if (now() - heldSince >= ciMaxMinutes * 60000) return await finish("ci-pending", `PR #${pr} merge held ${ciMaxMinutes} min (${hold.reason}); rerun resumes the PR`, { pr });
+        onProgress({ event: "phase_paused", phase: "merge", detail: `merge.held_release: ${hold.reason}` });
+        await sleep(30000);
+        await renew();
+      }
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
       try {
@@ -4034,10 +4326,10 @@ export async function runCore(o) {
         T.decisions.push(`Interface ${d.supersedes} superseded by ${d.id}: ${n.map((x) => `${x.consumer} ${x.action}${x.issue ? ` #${x.issue}` : ""}`).join(", ")}`);
       }
     } catch (e) { T.anomalies.push(`decision records not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
-    for (const sp of supersededIds(effective, guardSel)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
+    for (const sp of supersededIds(effective, guardSel, laneRemoved)) { // #4693: the reviewer accepted the supersedes amendment; tell the guarded issue
       try { await ghw(["issue", "comment", sp.guard.slice(1), "-R", repo, "--body", supersessionComment({ guard: sp.guard, pr, why: sp.why })]); ev({ event: "supersedes_accepted", guard: sp.guard, pr }); T.decisions.push(`Guard ${sp.guard} superseded: ${sp.why}`); } catch (e) { T.anomalies.push(`supersession of ${sp.guard} not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
     }
-    postRun.add("guard", async () => { try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ } }); // #5437
+    postRun.add("guard", async () => { try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io: { ...io, git: (a, op) => io.git(a, { ...op, env: { ...laneGitEnv, ...op?.env } }) }, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ } }); // #5437
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
     let mergedTo = null; // #4711: FORGE:STATE records the lane and merge commit, so a dependent's check needs no PR search
@@ -4048,7 +4340,7 @@ export async function runCore(o) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env, rotator) }, OUTCOME_CODES.RATE_LIMITED);
     }
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...quotaFacts(e) }, e.deferCode); // #5168: backendId keys the account hold; #5236 reset
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...(e.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(e.account ? { account: e.account } : {}), ...quotaFacts(e) }, e.deferCode); // #5168: backendId keys the account hold; #5236 reset
     // #4505: a turn overrun is mechanical: a non-human end the batch recovers, needs-human only once a budget recovery failed too
     if (e?.laneCode === OUTCOME_CODES.BUDGET_EXCEEDED && !(recover?.final && recover.code === OUTCOME_CODES.BUDGET_EXCEEDED)) {
       return finish("budget-exceeded", e.message, { code: OUTCOME_CODES.BUDGET_EXCEEDED, branch, ...(recover ? { recovery: true } : {}) }, OUTCOME_CODES.BUDGET_EXCEEDED);

@@ -9,6 +9,7 @@
  */
 import { readFileSync } from "node:fs";
 import { findShimLoops } from "./heavy.mjs";
+import { which } from "./toolchain.mjs";
 
 /** The running CLI's package version. */
 export const cliVersion = () => JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
@@ -76,13 +77,20 @@ export async function checkPoolAuth({ exec, router = null, credential = () => nu
   return pass(code, `token resolved from ${source}${r ? "" : "; router unreachable (not an auth failure)"}`, "remote");
 }
 
-/** Every online pool agent runs the CLI's version. `agents` is the router's `GET /agents` list (each spreads versionOf: version, image). */
+/** #5745: `1.61.1`, `v1.61.1` or `1.61.1-rc.1` as [major, minor, patch]; null when it is not a semver. */
+const semverOf = (v) => { const m = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.+-]*)?$/.exec(String(v ?? "").trim()); return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null; };
+/** Same major version: the lane protocol is compatible across minor and patch releases. */
+const sameMajor = (a, b) => { const x = semverOf(a), y = semverOf(b); return !!x && !!y && x[0] === y[0]; };
+
+/** Every online pool agent runs the CLI's version, or a same-major one (#5745: skew warns in the detail, a major skew or an unparseable version blocks). `agents` is the router's `GET /agents` list (each spreads versionOf: version, image). */
 export function checkPoolVersion({ exec, agents = null, cliVersion }) {
   const code = C.PREFLIGHT_POOL_VERSION;
   if (!usesPool(exec)) return pass(code, "skipped: no remote or hybrid execution", "remote");
   if (!Array.isArray(agents)) return pass(code, "skipped: pool agents not readable", "remote");
-  const bad = agents.filter((a) => a?.ok !== false && typeof a?.version === "string" && a.version !== cliVersion);
-  if (!bad.length) return pass(code, `${agents.length} agent(s) at ${cliVersion}`, "remote");
+  const skewed = agents.filter((a) => a?.ok !== false && typeof a?.version === "string" && a.version !== cliVersion);
+  if (!skewed.length) return pass(code, `${agents.length} agent(s) at ${cliVersion}`, "remote");
+  const bad = skewed.filter((a) => !sameMajor(a.version, cliVersion));
+  if (!bad.length) return pass(code, skewed.map((a) => `agent ${a.name ?? "?"} runs ${a.version}, CLI is ${cliVersion} (compatible, same major)`).join("; ") + `; upgrade: ${UPGRADE_COMMAND}`, "remote");
   return fail(code, bad.map((a) => `agent ${a.name ?? "?"} runs image version ${a.version}, CLI is ${cliVersion}`).join("; ") + `; upgrade: ${UPGRADE_COMMAND}`, "remote");
 }
 
@@ -93,6 +101,22 @@ export function checkPathLoop({ env = {}, loops = findShimLoops }) {
   const found = loops(env.PATH ?? "", { skip });
   if (!found.length) return pass(code, "no PATH wrapper loops back to the heavy shim", "all");
   return fail(code, found.map((l) => `${l.dir} wraps ${l.name} and resolves back to the heavy shim`).join("; "), "all");
+}
+
+/** #5806: the tools a batch's setup and lanes run; each must resolve on the batch env's PATH. */
+export const BATCH_ENV_TOOLS = Object.freeze(["gh", "git", "node"]);
+/**
+ * #5806: `which`-style probe (no shell) of the batch env: every tool of `tools` resolves on `env.PATH` (win32: `;` and PATHEXT).
+ * A batch whose pinned PATH lost them otherwise sits in setup with no lane and no error. @returns {{ok, missing, detail}}
+ */
+export function probeBatchEnv(env = {}, { tools = BATCH_ENV_TOOLS, platform = process.platform, find = which, access } = {}) {
+  const path = String(env?.PATH ?? env?.Path ?? "");
+  const pathext = env?.PATHEXT ?? (platform === process.platform ? process.env.PATHEXT : null) ?? ".COM;.EXE;.BAT;.CMD";
+  const missing = tools.filter((t) => !find(t, path, [], { platform, pathext, ...(access ? { access } : {}) }));
+  if (!missing.length) return { ok: true, missing, detail: `batch env PATH resolves ${tools.join(", ")}` };
+  const dirs = path.split(platform === "win32" ? ";" : ":").filter(Boolean);
+  const shown = dirs.slice(0, 4).join(platform === "win32" ? ";" : ":") + (dirs.length > 4 ? ` (+${dirs.length - 4} more)` : "");
+  return { ok: false, missing, detail: `${missing.join(", ")} not resolvable on the batch env PATH (${dirs.length ? `${dirs.length} entr${dirs.length === 1 ? "y" : "ies"}: ${shown}` : "empty"})` };
 }
 
 /** Parse the field names `gh <cmd> --json bogus` lists as available (null when the output has no list). */
