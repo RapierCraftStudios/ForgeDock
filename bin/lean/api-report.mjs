@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /** Summary of the rows (issues = distinct issue numbers seen; merged = those with `merged:true` rows or all when none marks it). */
-export function summarize(rows) {
+export function summarizeApiRoute(rows) {
   const issues = new Set(rows.map((r) => r.issue).filter((x) => x != null));
   const merged = new Set(rows.filter((r) => r.merged === true).map((r) => r.issue));
   const denom = (merged.size || issues.size) || 1;
@@ -28,10 +28,10 @@ export function summarize(rows) {
 /** Rows split at `cutoff` (ISO timestamp) into before and after summaries. */
 export function compare(rows, cutoff) {
   const t = Date.parse(cutoff);
-  return { before: summarize(rows.filter((r) => Date.parse(r.ts) < t)), after: summarize(rows.filter((r) => Date.parse(r.ts) >= t)) };
+  return { before: summarizeApiRoute(rows.filter((r) => Date.parse(r.ts) < t)), after: summarizeApiRoute(rows.filter((r) => Date.parse(r.ts) >= t)) };
 }
 
-export function formatReport(c) {
+export function formatApiReport(c) {
   const line = (n, s) => `${n}: ${s.issues} issues, ${s.fresh_cli_sessions} fresh CLI sessions (${s.fresh_cli_sessions_per_issue.toFixed(2)}/issue), ${s.api_calls} API calls, cache-write share ${(s.cache_write_share * 100).toFixed(0)}%, $${s.cost_usd_per_issue.toFixed(2)}/issue`;
   return `${line("before", c.before)}\n${line("after", c.after)}`;
 }
@@ -40,5 +40,5 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const [file, cutoff] = process.argv.slice(2);
   if (!file || !cutoff) { console.error("usage: api-report.mjs <telemetry.jsonl> <cutoff-iso-ts>"); process.exit(2); }
   const rows = readFileSync(file, "utf8").split("\n").filter((l) => l.trim().startsWith("{")).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  console.log(formatReport(compare(rows, cutoff)));
+  console.log(formatApiReport(compare(rows, cutoff)));
 }

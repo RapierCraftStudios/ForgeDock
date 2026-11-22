@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runApiCall, buildApiRequest, apiCostUsd, ApiRunnerError } from "./api-runner.mjs";
-import { summarize, compare, formatReport } from "./api-report.mjs";
+import { summarizeApiRoute, compare, formatApiReport } from "./api-report.mjs";
 import { compareFindings, replay } from "./api-parity.mjs";
 import { splitCacheablePrefix } from "./prompts.mjs";
 
@@ -66,8 +66,8 @@ describe("#5821 api report and parity", () => {
     assert.equal(c.before.fresh_cli_sessions, 3); assert.equal(c.before.cost_usd_per_issue, 2.5);
     assert.equal(c.after.fresh_cli_sessions, 0); assert.equal(c.after.api_calls, 1);
     assert.ok(c.after.cache_write_share < c.before.cache_write_share);
-    assert.match(formatReport(c), /before: 1 issues, 3 fresh CLI sessions \(3\.00\/issue\)/);
-    assert.equal(summarize([]).issues, 0);
+    assert.match(formatApiReport(c), /before: 1 issues, 3 fresh CLI sessions \(3\.00\/issue\)/);
+    assert.equal(summarizeApiRoute([]).issues, 0);
     writeFileSync(join(mkdtempSync(join(tmpdir(), "rep-")), "x"), "");
   });
   it("parity: compares blocking findings of two replies", async () => {
