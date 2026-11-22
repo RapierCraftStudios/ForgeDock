@@ -3535,3 +3535,7 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 ## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
+
+## Entry 2026-11-22 — release fix lane is not held on its own release PR's CI (#5794)
+
+`release-review.mjs` `runLane` sets `FORGE_RELEASE_FIX_LANE=1` in the fix lane's env; `lean.mjs` passes `skipReleaseCi` to `releaseMergeHold` when it is set, which skips only the `release-ci` (pending release PR checks) hold. The manual merge hold and every other lane are unchanged. Reason: the hold cap (`ciMaxMinutes`, 360) exceeds `LANE_MS` (180), so a never-completing release CI run held the fix lane until the kill and blocked the release.
