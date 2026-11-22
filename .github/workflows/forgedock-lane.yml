@@ -81,7 +81,11 @@ jobs:
         run: |
           mapfile -d '' -t ARGS < <(node -e 'process.stdout.write(JSON.parse(process.env.LANE_ARGS).join("\0"))')
           # checkpoints are pushed by run-issue; stop before the job limit so the result step still runs
-          timeout 345m forgedock run-issue "$ISSUE" "${ARGS[@]}" --result-file "$RESULT_FILE" > /dev/null 2>&1 || true
+          timeout 345m forgedock run-issue "$ISSUE" "${ARGS[@]}" --result-file "$RESULT_FILE" > /dev/null 2>&1 && rc=0 || rc=$?
+          # 124 = stopped at the cap with no result: report the retryable deferral the provider maps to a checkpoint resume
+          if [ "$rc" = 124 ] && [ ! -s "$RESULT_FILE" ]; then
+            echo '{"terminalReason":"deferred","code":"sandbox.actions_timeout","retryInSeconds":60,"detail":"lane reached the 345m cap before it finished; the retry resumes from the pushed checkpoint"}' > "$RESULT_FILE"
+          fi
       - name: Post result
         if: always()
         env:

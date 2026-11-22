@@ -22,6 +22,8 @@ describe("forgedock-lane.yml (#5748)", () => {
     assert.match(code, /secrets\.CLAUDE_CODE_OAUTH_TOKEN/);
     const m = /timeout-minutes: (\d+)/.exec(code); assert.ok(m && Number(m[1]) < 360);
     assert.match(code, /timeout 345m forgedock run-issue/);
+    assert.doesNotMatch(code, /run-issue[^\n]*\|\| true/); // the cap must not be swallowed: rc 124 posts the retryable deferral
+    assert.match(code, /\[ "\$rc" = 124 \][\s\S]*sandbox\.actions_timeout/);
   });
   it("keeps inputs out of shell text, pushes to feat/* only and never echoes env or secrets", () => {
     assert.doesNotMatch(code, /run:[^\n]*\$\{\{ *inputs\./);
