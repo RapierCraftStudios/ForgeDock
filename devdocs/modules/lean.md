@@ -3530,3 +3530,5 @@ forge.yaml `recurrence:` (`parseRecurrenceConfig`, read by `engine-cli.mjs` `rea
 ## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
+
+#5755 follow-up: the admission stop matches a pending issue's body and frozen contract against the signature's tools (tool_missing) or the path/command tokens of its first evidence line (other env.* codes), or `envIssue.needs`. An env.* end on an issue labelled `security*` is escalated (stays needs-human for a person, `securityEscalated`), never held and never parked into `remediation-queue`.

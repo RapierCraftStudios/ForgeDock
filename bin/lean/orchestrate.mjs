@@ -484,6 +484,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const fileEnvIssue = async ({ sig, code, issue, tools, evidence }) => {
     const e = envSigs.get(sig) ?? { issues: [], number: null };
     if (!e.issues.includes(issue)) e.issues.push(issue);
+    if (!e.text) e.text = firstLine(evidence).slice(0, 240); // the raw line: the signature digit-normalises its tokens
     envSigs.set(sig, e);
     try {
       const r = await envIssue.ensure({ sig, code, issues: [...e.issues], tools, evidence, number: e.number });
@@ -505,10 +506,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         let need = false;
         try {
           if (typeof envIssue.needs === "function") need = (await envIssue.needs(n, sig, e)) === true;
-          else if (sig.startsWith(`${OUTCOME_CODES.ENV_TOOL_MISSING}|`)) {
-            if (!envBodies.has(n)) envBodies.set(n, String(await readBody(n) ?? ""));
+          else {
+            // the contract text (frozen contract when known, else the issue body) is matched against the signature's tools, or for other env codes its path/command tokens
+            if (!envBodies.has(n)) envBodies.set(n, `${String(await readBody(n) ?? "")}\n${JSON.stringify(remote?.contractOf?.(n) ?? "")}`);
             const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            need = sig.split("|")[1].split(",").some((t) => t && new RegExp(`(^|[^\\w-])${esc(t)}($|[^\\w-])`).test(envBodies.get(n)));
+            const toks = sig.startsWith(`${OUTCOME_CODES.ENV_TOOL_MISSING}|`) ? sig.split("|")[1].split(",") : (e.text ?? "").split(/[\s,;:'"`()]+/).filter((t) => t.length >= 4 && /[/.\\]/.test(t) && !/^\d/.test(t));
+            need = toks.some((t) => t && new RegExp(`(^|[^\\w-])${esc(t)}($|[^\\w-])`).test(envBodies.get(n)));
           }
         } catch { need = false; }
         if (!need) continue;
@@ -1035,7 +1038,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const tools = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
       const sig = envKey(row.code, row.detail);
       const no = await fileEnvIssue({ sig, code: row.code, issue: n, tools: tools ? tools.split(",") : null, evidence: String(row.detail ?? "") });
-      if (no) return holdEnv({ kind: tools ? "tool" : "env", sig, tools: tools ? tools.split(",") : null, envIssueNo: no, why: `${row.code}: env issue #${no} owns the fix` });
+      // A security issue is not parked behind an env fix and never sits in remediation-queue: it keeps its needs-human for a person.
+      let names = []; try { names = typeof issueLabels === "function" ? ((await issueLabels(n)) ?? []) : []; } catch { names = []; }
+      if (names.some((l) => /security/i.test(String(l?.name ?? l)))) {
+        row.securityEscalated = true;
+        row.detail = `Security issue escalated: ${row.code} is an env defect tracked${no ? ` on env issue #${no}` : ""}; it is not parked in the remediation queue.\n${String(row.detail ?? "")}`;
+        decided({ issue: n, what: `escalated: ${row.code} on a security issue, not held or queued for remediation`, why: firstLine(row.detail), alternative: "hold it on the env issue like other product issues" });
+      } else if (no) return holdEnv({ kind: tools ? "tool" : "env", sig, tools: tools ? tools.split(",") : null, envIssueNo: no, why: `${row.code}: env issue #${no} owns the fix` });
     }
     const heldNow = recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && (refreshHeld(), opHeld.has(n));
     if (heldNow) decided({ issue: n, what: `no recovery lane for #${n}: ${heldByOperator(n)}`, why: firstLine(row.detail) || row.outcome, alternative: "recover while the operator holds it" });
@@ -1055,7 +1064,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // A tool-missing recovery that would run on the host (not the #5423 remote retry) is not launched while the probe still misses the tool.
       const envNoHost = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       const lacking = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
-      if (ehOn && !envNoHost) {
+      if (ehOn && !envNoHost && !row.securityEscalated) {
         let stillLacks = false;
         if (!repeatEnv && !sameHostReplay && lacking && classifyNeedsHuman(facts) === "recoverable" && used < max && !(row.placement?.where === "remote" && used === 0 && !budgetLocal)) {
           const miss = await missingTools(lacking.split(","));
@@ -1101,7 +1110,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { await relabelNeedsHuman({ issue: n, evidence: `Implement turn budget overrun (\`budget.exceeded\`) not recovered in this batch:\n${String(row.detail ?? "")}` }); } catch { /* best effort */ }
     }
     // #4656: a mechanical terminal park (recovery spent or none applies) moves to the remediation queue, not the human queue.
-    if (row.outcome === "needs-human" && !row.parkedQueued && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
+    if (row.outcome === "needs-human" && !row.parkedQueued && !row.securityEscalated && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
       try { const res = await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); if (res !== false && res !== "failed" && res !== "skipped") row.parkedQueued = true; else if (res === false || res === "failed") { const ev = { event: "relabel.failed", issue: n, batch: batchId ?? null, detail: `parked relabel failed (${row.code}): needs-human kept` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } } catch { /* best effort */ }
     }
     results.set(n, row);

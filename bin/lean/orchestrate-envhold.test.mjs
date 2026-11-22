@@ -214,4 +214,24 @@ describe("#5755 one env issue per signature", () => {
     const { byIssue } = await harness({ script: { 1: [timeout()] }, envHold: null });
     assert.notEqual(byIssue[1].outcome, "held");
   });
+
+  it("after 2 issues hit a non-tool signature a pending issue whose contract names its path is not admitted", async () => {
+    const e = seam();
+    const t = (d) => ({ terminalReason: "needs-human", code: "env.validate_timeout", detail: d });
+    const bodies = { 3: "validate runs shared/html2text/build.sh", 4: "unrelated" };
+    const { byIssue } = await harness({ script: { 1: [t("validate timed out running shared/html2text/build.sh")], 2: [t("validate timed out running shared/html2text/build.sh")], 3: [MERGED], 4: [MERGED] },
+      envHold: null, extra: { envIssue: e, readBody: async (n) => bodies[n] ?? "" } });
+    assert.equal(byIssue[3].outcome, "held");
+    assert.equal(byIssue[4].outcome, "merged");
+  });
+
+  it("an env park on a security issue escalates: not held, not parked into remediation-queue", async () => {
+    const e = seam();
+    const relabels = [];
+    const { byIssue } = await harness({ script: { 1: [miss("html2text")] }, envHold: null,
+      extra: { envIssue: e, issueLabels: async () => ["security"], relabelNeedsHuman: async (a) => { relabels.push(a); return true; } } });
+    assert.equal(byIssue[1].outcome, "needs-human");
+    assert.match(byIssue[1].detail, /Security issue escalated/);
+    assert.equal(relabels.some((a) => a.parked), false, "no parked/remediation-queue relabel");
+  });
 });
