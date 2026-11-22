@@ -816,8 +816,8 @@ export async function runCore(o) {
       const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
       try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`); }
       catch (e) { labelFailed("comment", e); }
-      // #5423/#5755: an environment gap is the engine's defect (the batch holds it on an env issue or relabels once), so no lane labels it needs-human
-      if (!ENV_ENGINE_OWNED_CODES.includes(code)) {
+      // #5423/#5755: an environment gap is the engine's to recover or hold on an env issue, so a first lane leaves the issue visible; a final recovery lane (no seam) still labels
+      if (!(!recover && ENV_ENGINE_OWNED_CODES.includes(code))) {
         try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); }
         catch (e) { labelFailed("label", e); }
       }

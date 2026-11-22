@@ -233,6 +233,7 @@ describe("#5755 one env issue per signature", () => {
     assert.equal(byIssue[1].outcome, "needs-human");
     assert.match(byIssue[1].detail, /Security issue escalated/);
     assert.equal(relabels.some((a) => a.parked), false, "no parked/remediation-queue relabel");
+    assert.equal(relabels.some((a) => !a.parked && /Security issue escalated/.test(a.evidence)), true, "needs-human label applied");
   });
 
   it("when the env issue cannot be filed the env.* failure is still held, never needs-human", async () => {

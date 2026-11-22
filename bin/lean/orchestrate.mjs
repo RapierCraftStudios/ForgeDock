@@ -1043,6 +1043,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (names.some((l) => /security/i.test(String(l?.name ?? l)))) {
         row.securityEscalated = true;
         row.detail = `Security issue escalated: ${row.code} is an env defect tracked${no ? ` on env issue #${no}` : ""}; it is not parked in the remediation queue.\n${String(row.detail ?? "")}`;
+        if (typeof relabelNeedsHuman === "function") { try { await relabelNeedsHuman({ issue: n, evidence: `Security issue escalated: \`${row.code}\` env defect${no ? ` (env issue #${no})` : ""}:\n${String(row.detail ?? "")}` }); } catch { /* best effort */ } }
         decided({ issue: n, what: `escalated: ${row.code} on a security issue, not held or queued for remediation`, why: firstLine(row.detail), alternative: "hold it on the env issue like other product issues" });
       } else return holdEnv({ kind: tools ? "tool" : "env", sig, tools: tools ? tools.split(",") : null, envIssueNo: no, why: no ? `${row.code}: env issue #${no} owns the fix` : `${row.code}: the env issue could not be filed; held, never needs-human` });
     }
