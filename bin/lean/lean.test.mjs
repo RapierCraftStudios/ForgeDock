@@ -5537,6 +5537,29 @@ describe("lane resolution in core work-on (#4125)", () => {
     }
   });
 
+  it("#5846 a transient lane read in runCore defers lane.unresolved instead of lane-refused", async () => {
+    const w = leased(world({ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }));
+    const gh = w.io.gh;
+    w.io.gh = async (a, opts) => { if (a[0] === "issue" && a[1] === "view" && a.includes("milestone")) throw new Error("spawn UNKNOWN"); return gh(a, opts); };
+    const r = await run(w, { lane: undefined });
+    assert.deepEqual([r.terminalReason, r.code], ["deferred", "lane.unresolved"]);
+    assert.ok(r.retryInSeconds > 0);
+    assert.match(r.detail, /cannot read the milestone of #7/);
+    assert.deepEqual(touched(w), nothing);
+  });
+
+  it("#5846 genuine lane refusals stay lane-refused with their own codes", async () => {
+    const cases = [
+      [{ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }, { lane: "staging" }, "lane.mismatch"],
+      [{}, { lane: "main" }, "lane.default_branch"],
+      [{ milestone: "Not Yet" }, { lane: undefined }, "lane.branch_missing"],
+    ];
+    for (const [o, extra, code] of cases) {
+      const r = await run(leased(world(o)), extra);
+      assert.deepEqual([r.terminalReason, r.code], ["lane-refused", code]);
+    }
+  });
+
   it("a missing milestone/<slug> branch fails closed with lane.branch_missing", async () => {
     const w = leased(world({ milestone: "Not Yet" }));
     const r = await run(w, { lane: undefined });
