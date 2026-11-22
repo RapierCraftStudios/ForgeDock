@@ -430,6 +430,12 @@ export function contractCorrectionPrompt(problems) {
   return `Your ${CONTRACT_FILE} is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nFix the contract (planning only, no code, no commit) and stop. Do not push or touch GitHub.`;
 }
 
+/** #5821: contract correction as one Messages API call: the current contract file and the problems in, the corrected JSON out. */
+export const CONTRACT_CORRECTION_SYSTEM = "You correct one frozen-contract JSON file. Reply with the complete corrected JSON object only, in one ```json fence, changing only what the listed problems require.";
+export function contractCorrectionApiPrompt(problems, contractText) {
+  return `Current ${CONTRACT_FILE}:\n\`\`\`json\n${String(contractText ?? "").slice(0, 60000)}\n\`\`\`\n\nIt is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nReturn the full corrected file.`;
+}
+
 /** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
 export function amendmentCorrectionPrompt(problems) {
   return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind: add-deliverable, add-requirement, defer, post-deploy, amend-requirement, supersedes, decision, substitute-validate or out-of-band. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;

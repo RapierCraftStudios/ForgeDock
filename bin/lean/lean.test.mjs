@@ -9659,3 +9659,25 @@ describe("#5821 api route eligibility at the reviewer and verifier call sites", 
     assert.ok(readLog(dir, 7).some((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.route === "api"));
   });
 });
+
+describe("#5821 contract correction through the API route", () => {
+  const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+  const wrap = (w, fail) => { const seen = [], orig = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, apiOnly: c.apiOnly ?? false, resume: c.resume ?? null });
+    if (c.role === "contract_correction") { if (fail) throw new Error("api down"); return { text: `\`\`\`json\n${JSON.stringify(CONTRACT)}\n\`\`\``, route: "api", usage: null, costUsd: 0.01, turns: 1, durationMs: 1, model: "m" }; }
+    return orig(c); }; return seen; };
+  it("a configured contract_correction role fixes the contract with one API call and no resumed builder turn", async () => {
+    const w = world({ contract: bad, fixedContract: CONTRACT }), seen = wrap(w, false), dir = tmpDir("core-api-cc-");
+    const r = await run(w, { dir, apiRoles: ["contract_correction"] });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen.find((c) => c.role === "contract_correction").apiOnly, true);
+    const trig = readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement").map((e) => e.trigger);
+    assert.equal(trig.filter((t) => t === "contract_correction").length, 1);
+  });
+  it("an API failure falls back to the resumed builder correction", async () => {
+    const w = world({ contract: bad, fixedContract: CONTRACT }), seen = wrap(w, true), dir = tmpDir("core-api-cc-");
+    const r = await run(w, { dir, apiRoles: ["contract_correction"] });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(seen.some((c) => c.role === "contract_correction"));
+    assert.ok(seen.some((c) => c.role === "builder" && c.resume), "the builder resumed to correct the contract");
+  });
+});

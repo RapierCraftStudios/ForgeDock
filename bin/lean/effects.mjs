@@ -135,16 +135,17 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 };
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox(), apiRoles = [], apiFallback = "cli", apiRunner = runApiCall, env: apiEnv = process.env } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, apiEligible = false, apiRoles: callRoles = null, apiFallback: callFallback = null, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, apiEligible = false, apiOnly = false, apiRoles: callRoles = null, apiFallback: callFallback = null, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
     // #5821: a configured one-shot role with a key and an eligible prompt is one Messages API call; any failure falls back to the CLI (lean.api_fallback=cli) or throws (fail)
     const roles = callRoles ?? apiRoles, fallback = callFallback ?? apiFallback;
     if (apiEligible && !resume && roles.includes(role) && !agents) {
       if (!apiKeyPresent(apiEnv)) { if (fallback === "fail") throw new ApiRunnerError("auth", `lean.api_roles includes ${role} but ANTHROPIC_API_KEY is not set`); }
       else {
         try { return await apiRunner({ model, system, ...splitCacheablePrefix(prompt), maxMs, env: apiEnv }); }
-        catch (e) { if (fallback === "fail") throw e; }
+        catch (e) { if (fallback === "fail" || apiOnly) throw e; }
       }
     }
+    if (apiOnly) throw new ApiRunnerError("auth", `${role} is API-only here: the role is not configured, the call is ineligible or ANTHROPIC_API_KEY is not set`);
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
     const bin = pinnedBin || resolveClaudeCliBinary(cwd) || resolveSpawn("claude", []).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
     const caps = getClaudeCliCapabilities(cwd);

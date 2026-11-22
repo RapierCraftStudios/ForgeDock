@@ -45,4 +45,11 @@ describe("#5821 api route", () => {
     await assert.rejects(call(mk({ apiRoles: ["reviewer"], apiFallback: "fail", env: {} }).runner), /ANTHROPIC_API_KEY/);
     assert.equal((await call(mk({ apiRoles: ["reviewer"], apiFallback: "fail" }).runner, { apiRoles: [], })).route, "cli");
   });
+  it("api route: apiOnly never falls back to a CLI session", async () => {
+    const { runner, calls } = mk({ apiRoles: ["contract_correction"] });
+    assert.equal((await call(runner, { role: "contract_correction", apiOnly: true })).route, "api");
+    const none = mk({ apiRoles: [] });
+    await assert.rejects(call(none.runner, { role: "contract_correction", apiOnly: true }), /API-only/);
+    assert.equal(none.calls.cli, 0); assert.equal(calls.cli, 0);
+  });
 });

@@ -285,7 +285,7 @@ export function readApiRoles(cwd = process.cwd()) {
   try {
     const lean = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {};
     const raw = Array.isArray(lean.api_roles) ? lean.api_roles : String(lean.api_roles ?? "").replace(/[[\]]/g, "").split(",");
-    const roles = raw.map((r) => String(r).trim()).filter((r) => ["reviewer", "verifier", "grouper"].includes(r));
+    const roles = raw.map((r) => String(r).trim()).filter((r) => ["reviewer", "verifier", "grouper", "contract_correction"].includes(r));
     if (!roles.length) return {};
     return { apiRoles: roles, apiFallback: String(lean.api_fallback ?? "").trim() === "fail" ? "fail" : "cli" };
   } catch { return {}; }

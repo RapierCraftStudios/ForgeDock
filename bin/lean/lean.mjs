@@ -64,7 +64,7 @@ export function contractSelfCorrectable(problems) {
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, contractCorrectionApiPrompt, CONTRACT_CORRECTION_SYSTEM, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -2502,7 +2502,16 @@ export async function runCore(o) {
         let misses = missed;
         const correctContract = async (problems, note) => {
           T.decisions.push(`Contract rejected (${problems[0]}); ${note}`);
-          await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
+          // #5821: lean.api_roles may name contract_correction: one API call over the contract file instead of a resumed builder turn; any failure uses the resume below
+          let viaApi = false;
+          if (o.apiRoles?.includes("contract_correction")) {
+            try {
+              const rr = await callRunner({ role: "contract_correction", issue, cwd: wt, model: reviewerModel, resume: null, system: CONTRACT_CORRECTION_SYSTEM, noTools: true, apiEligible: true, apiOnly: true, prompt: contractCorrectionApiPrompt(problems, await io.fs.read(`${wt}/${CONTRACT_FILE}`).catch(() => "")) });
+              const fixed = JSON.parse(/```(?:json)?\s*([\s\S]*?)```/.exec(rr?.text ?? "")?.[1] ?? rr?.text ?? "");
+              if (fixed && typeof fixed === "object" && !Array.isArray(fixed)) { await io.fs.write(`${wt}/${CONTRACT_FILE}`, JSON.stringify(fixed, null, 1)); await attempt("implement", ++attemptN, rr, null, "contract_correction"); viaApi = true; }
+            } catch (e) { if (e?.deferUsageLimit || e?.deferCode) throw e; }
+          }
+          if (!viaApi) await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
           contract = freezeRewrites(dropScope(await readContract()));
           await persistGenChecks();
           await refreshIssue("contract validation");
