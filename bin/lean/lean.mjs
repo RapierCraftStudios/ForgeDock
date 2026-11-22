@@ -64,7 +64,7 @@ export function contractSelfCorrectable(problems) {
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, contractCorrectionApiPrompt, CONTRACT_CORRECTION_SYSTEM, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, contractCorrectionApiPrompt, CONTRACT_CORRECTION_SYSTEM, apiEditPrompt, API_EDIT_SYSTEM, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -2260,6 +2260,27 @@ export async function runCore(o) {
       files = await changedFiles();
       return applied.length;
     }
+    /** #5821: lean.api_roles may name `role` (enumerating_fix | duplicate_fix): one toolless API call returns exact search/replace edits for the named files; applied and committed here, any failure leaves the CLI fix round to do it. */
+    async function apiEditFix(role, task, paths) {
+      if (!o.apiRoles?.includes(role) || !paths.length) return 0;
+      try {
+        const files = {};
+        for (const f of new Set(paths)) files[f] = await io.fs.read(`${wt}/${f}`);
+        const rr = await callRunner({ role, issue, cwd: wt, model: reviewerModel, resume: null, system: API_EDIT_SYSTEM, noTools: true, apiEligible: true, apiOnly: true, prompt: apiEditPrompt(task, files) });
+        const edits = JSON.parse(/```(?:json)?\s*([\s\S]*?)```/.exec(rr?.text ?? "")?.[1] ?? rr?.text ?? "")?.edits;
+        if (!Array.isArray(edits) || !edits.length) return 0;
+        const next = { ...files };
+        for (const e of edits) { // every edit must hit exactly one occurrence in a shown file, else nothing is written
+          const t = next[e?.path];
+          if (typeof t !== "string" || typeof e.search !== "string" || !e.search || typeof e.replace !== "string" || t.split(e.search).length !== 2) return 0;
+          next[e.path] = t.replace(e.search, () => e.replace);
+        }
+        const changed = Object.keys(next).filter((f) => next[f] !== files[f]);
+        for (const f of changed) await io.fs.write(`${wt}/${f}`, next[f]);
+        await attempt("implement", ++attemptN, rr, null, role);
+        return await mechCommit(role === "duplicate_fix" ? "duplicate" : "enumerating", changed.map((x) => ({ symbol: x })), changed);
+      } catch (e) { if (e?.deferUsageLimit || e?.deferCode) throw e; return 0; }
+    }
     const mech = io.mechFix ?? { applyEnumerating, renameDuplicates }; // #5348: a test seam; the engine uses mechfix.mjs
     /** #5480: apply the enumerating edits, then run each edited test; a red or unrunnable one is restored and left to a session. */
     async function enumeratingMech(missing) {
@@ -2860,12 +2881,13 @@ export async function runCore(o) {
         const m = await enumeratingMech(missing);
         if (await mechCommit("enumerating", m.applied, m.applied.map((x) => x.test))) missing = await missingNow();
       }
+      if (missing.length && await apiEditFix("enumerating_fix", missingEntriesPrompt(missing, vcfg.mode), missing.map((m) => m.test))) missing = await missingNow(); // #5821
       if (missing.length && sessionId) {
         ev({ event: "ENUMERATING_MISSING", count: missing.length });
         T.decisions.push(`Enumerating test(s) miss new symbol(s): ${missing.slice(0, 5).map((m) => `${m.symbol} → ${m.test}`).join(", ")}; builder resumed once`);
         // #5348: one narrow session per stage: pending duplicate-export and English-copy findings ride along (their gates re-check)
         const pend = [];
-        if (io.duplicateExports && vcfg.duplicateExports !== false) { const d = await dupsResidual(); if (d.length) pend.push({ title: "Duplicate exports", text: duplicateExportsPrompt(d, vcfg.mode), files: d.flatMap((x) => [x.path, ...(x.others ?? [])]) }); }
+        if (io.duplicateExports && vcfg.duplicateExports !== false) { let d = await dupsResidual(); if (d.length && await apiEditFix("duplicate_fix", duplicateExportsPrompt(d, vcfg.mode), d.flatMap((x) => [x.path, ...(x.others ?? [])]))) d = await dupsResidual(); if (d.length) pend.push({ title: "Duplicate exports", text: duplicateExportsPrompt(d, vcfg.mode), files: d.flatMap((x) => [x.path, ...(x.others ?? [])]) }); }
         if (io.englishCopies) { const c = (await io.englishCopies({ cwd: wt, base }).catch(() => null)) ?? []; if (c.length) pend.push({ title: "English copies", text: i18nCopiesPrompt(c, vcfg.mode), files: c.map((x) => x.path) }); }
         const task = pend.length ? mergeNarrowTasks([{ title: "Enumerating tests", text: missingEntriesPrompt(missing, vcfg.mode) }, ...pend]) : missingEntriesPrompt(missing, vcfg.mode);
         if (pend.length) T.decisions.push(`Batched narrow fix: enumerating tests with ${pend.map((x) => x.title.toLowerCase()).join(", ")} in one session`);

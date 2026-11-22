@@ -7322,6 +7322,20 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.doesNotMatch(fix[0].prompt, /## Diff/);
   });
 
+  it("#5821 a configured enumerating_fix role writes the list entry from one API edit, no narrow session; a bad edit falls back to the session", async () => {
+    for (const bad of [false, true]) {
+      const w = hworld({ missing: [MISS, []] }); const seen = [];
+      const path = `${WT}/test/registry.test.js`; w.files[path] = "const L = ['a'];\n";
+      w.io.mechFix = { applyEnumerating: async ({ missing }) => ({ applied: [], remaining: missing }), renameDuplicates: async () => ({ applied: [], remaining: [] }) };
+      const inner = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, profile: c.profile ?? null });
+        if (c.role === "enumerating_fix") return { text: "```json\n" + JSON.stringify({ edits: [{ path: "test/registry.test.js", search: bad ? "nope" : "['a']", replace: "['a','fooNew']" }] }) + "\n```", route: "api", usage: null, costUsd: 0.01, turns: 1, durationMs: 1, model: "m" };
+        return inner(c); };
+      assert.equal((await run(w, { apiRoles: ["enumerating_fix"] })).terminalReason, "merged");
+      assert.equal(seen.filter((x) => x.profile === "narrow").length, bad ? 1 : 0);
+      assert.equal(w.files[path], bad ? "const L = ['a'];\n" : "const L = ['a','fooNew'];\n");
+    }
+  });
+
   it("#5480 enumeratingMechanical false (forge.yaml lean.enumerating.mechanical) skips the engine edit and leaves it to a session", async () => {
     const w = hworld({ missing: [MISS, []] }); w.mech = [];
     w.io.mechFix = { applyEnumerating: async ({ missing }) => { w.mech.push("enum"); return { applied: missing, remaining: [] }; }, renameDuplicates: async () => ({ applied: [], remaining: [] }) };

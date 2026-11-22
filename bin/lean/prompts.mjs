@@ -436,6 +436,13 @@ export function contractCorrectionApiPrompt(problems, contractText) {
   return `Current ${CONTRACT_FILE}:\n\`\`\`json\n${String(contractText ?? "").slice(0, 60000)}\n\`\`\`\n\nIt is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nReturn the full corrected file.`;
 }
 
+/** #5821: enumerating and duplicate-export fixes as one Messages API call: the named files in, exact search/replace edits out (no tools). */
+export const API_EDIT_SYSTEM = "You fix a small defect in the files shown. Reply with one ```json fence holding {\"edits\":[{\"path\":\"<file>\",\"search\":\"<exact unique text in that file>\",\"replace\":\"<new text>\"}]} and nothing else. Edit only the files shown; each search must occur exactly once.";
+export function apiEditPrompt(task, files) {
+  const body = Object.entries(files).map(([path, text]) => `<file path="${path}">\n${String(text).slice(0, 60000)}\n</file>`).join("\n");
+  return `${body}\n\nTask: ${String(task).split(/\n\n(?=Run |Re-run|Rerun)/)[0].slice(0, 6000)}\n\nReturn the edits.`;
+}
+
 /** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
 export function amendmentCorrectionPrompt(problems) {
   return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind: add-deliverable, add-requirement, defer, post-deploy, amend-requirement, supersedes, decision, substitute-validate or out-of-band. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
