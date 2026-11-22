@@ -43,6 +43,23 @@ export const dockerCli = {
     const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`], { timeoutMs: 20000 });
     return out ? out.split("\n").filter((v) => v.startsWith(prefix)) : [];
   },
+  /** Local image refs (`repo:tag`) starting with prefix; untagged images are skipped. */
+  async listImages(prefix) {
+    const out = await docker(["images", "--format", "{{.Repository}}:{{.Tag}}"], { timeoutMs: 30000 });
+    return [...new Set(out ? out.split("\n").filter((t) => t.startsWith(prefix) && !t.endsWith(":<none>")) : [])];
+  },
+  async removeImage(tag) { try { await docker(["rmi", tag], { timeoutMs: 120000 }); } catch (e) { if (!/no such image/i.test(e.stderr ?? "")) throw e; } },
+  /** Image refs of every container, running or exited (a ref in use must never be removed). */
+  async listContainerImages() {
+    const out = await docker(["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 30000 });
+    return out ? [...new Set(out.split("\n").filter(Boolean))] : [];
+  },
+  async builderPrune(keepGb) { return docker(["builder", "prune", "-f", "--keep-storage", `${keepGb}gb`], { timeoutMs: 10 * 60000 }); },
+  /** Volumes no container references (anonymous ones are named by 64 hex chars). */
+  async listDanglingVolumes() {
+    const out = await docker(["volume", "ls", "-q", "--filter", "dangling=true"], { timeoutMs: 30000 });
+    return out ? out.split("\n").filter(Boolean) : [];
+  },
   async pull(image) { return docker(["pull", "-q", image], { timeoutMs: 30 * 60000 }); },
   async load(file) { return docker(["load", "-q", "-i", file], { timeoutMs: 30 * 60000 }); },
   async hasImage(ref) { try { await docker(["image", "inspect", ref], { timeoutMs: 20000 }); return true; } catch { return false; } },
