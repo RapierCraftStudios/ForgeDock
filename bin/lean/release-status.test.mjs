@@ -228,4 +228,13 @@ describe("release status / explain (#5554)", () => {
     await assert.rejects(run(["status", "--watch", "--interval", "0", "--repo", REPO]), /positive number/);
     await assert.rejects(releaseFromCli(["status", "--bogus"], { io: fakeIo() }), /unknown option --bogus/);
   });
+
+  it("#5848: `release --merge --watch` without a valid release.yaml prints the reason and check-config hint, exits 1, shows no older record", async () => {
+    const io = fakeIo({ state: { ...STATE, status: "refused" } });
+    const code = await releaseFromCli(["--merge", "--watch", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel") }, deps: {} });
+    const out = io.printed.join("\n");
+    assert.equal(code, 1);
+    assert.match(out, /refused: no valid \.forge\/release\.yaml.*check-config/);
+    assert.ok(!out.includes(ID), out);
+  });
 });
