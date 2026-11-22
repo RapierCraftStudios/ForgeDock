@@ -143,6 +143,21 @@ function clauseOk(clause, v) {
   }
 }
 /** #5590: does version `v` ([major, minor, patch]) satisfy the PEP 440 / poetry range `spec` ("||" alternatives, comma or space joined clauses)? */
+/** #5731: [major, minor] the repo pins for its Python: `.python-version`, else the first CI `python-version`; null when none. */
+function pyHint(fs, wt) {
+  const minor = (t) => { const m = /^\s*(?:cpython-)?(\d+)\.(\d+)/.exec(t); return m ? [Number(m[1]), Number(m[2])] : null; };
+  try { const h = minor(String(fs.readFileSync(join(wt, ".python-version")))); if (h) return h; } catch { /* no .python-version */ }
+  try {
+    const dir = join(wt, ".github", "workflows");
+    for (const f of fs.readdirSync(dir).sort()) {
+      if (!/\.ya?ml$/.test(f)) continue;
+      const m = /python-version:\s*\[?\s*["']?(\d+\.\d+)/.exec(String(fs.readFileSync(join(dir, f))));
+      if (m) return minor(m[1]);
+    }
+  } catch { /* no workflows */ }
+  return null;
+}
+
 export function pySatisfies(spec, v) {
   return String(spec).split("||").some((grp) => grp.replace(/(\^|~=|~|==|!=|>=|<=|>|<)\s+/g, "$1").split(/[,\s]+/).filter(Boolean).every((c) => clauseOk(c, v)));
 }
@@ -199,8 +214,21 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return ["package.json"];
   }
 
+  /** #5731: the hinted minor on PATH, else `uv python find`, else provisioned with `uv python install`; null when unavailable. */
+  async function hintedPython([maj, min], probe) {
+    const want = `${maj}.${min}`;
+    const ok = (c) => (c && c.v[0] === maj && c.v[1] === min ? c : null);
+    const onPath = ok(await probe(`python${want}`));
+    if (onPath) return onPath;
+    const find = async () => { try { const p = String(await exec("uv", ["python", "find", want], { timeoutMs: 30000 })).trim().split("\n")[0]; return p ? ok(await probe(p)) : null; } catch { return null; } };
+    const found = await find();
+    if (found) return found;
+    try { await exec("uv", ["python", "install", want], { timeoutMs: 600000 }); } catch { return null; }
+    return find();
+  }
+
   /**
-   * #5590/#5651: for a Python project whose pyproject declares a range, {py: null} (no range, or the default python3 is in range),
+   * #5590/#5651: for a Python project whose pyproject declares a range, {py: null} (no range, or the default python3 is in range), the repo's .python-version / CI pin first (#5731),
    * {py: {cmd, version}} (the interpreter that satisfies it: pythonX.Y on PATH, then `uv python find`) or {missing: {range, probed}}
    * (nothing in range: the caller stops, the out-of-range default is never used).
    */
@@ -220,6 +248,10 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       return null;
     };
     const def = await probe("python3");
+    // #5731: the repo's own pin (.python-version, then CI setup-python) wins over a default python3 that merely satisfies the range.
+    const hint = pyHint(fs, wt);
+    const hinted = hint && (!def || def.v[0] !== hint[0] || def.v[1] !== hint[1]) ? await hintedPython(hint, probe) : null;
+    if (hinted && pySatisfies(range, hinted.v)) return { py: hinted };
     if (def && pySatisfies(range, def.v)) return { py: null };
     const minors = [14, 13, 12, 11, 10, 9, 8];
     for (const x of minors) { const c = await probe(`python3.${x}`); if (c && pySatisfies(range, c.v)) return { py: c }; }

@@ -690,6 +690,47 @@ describe("depcache (#5651): no silent fallback to an out-of-range default python
   });
 });
 
+describe("depcache (#5731): the repo's python pin beats an in-range default python3", () => {
+  const project = (hint) => { const base = scratch(), wt = join(base, "wt"); mkdirSync(wt, { recursive: true }); FIXTURES.poetry(wt); put(join(wt, "pyproject.toml"), '[tool.poetry.dependencies]\npython = "^3.11"\n'); if (hint) put(join(wt, ".python-version"), `${hint}\n`); return { base, wt }; };
+  const run = async (f, wt, base, key) => (await makeDepCache({ root: join(base, "cache"), exec: f.exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: key }))[0];
+  const viaOf = (f) => f.calls.filter((c) => c.cmd === "poetry").map((c) => c.via);
+  it("#5731 .python-version 3.11 is used although python3 is 3.14 and in range", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8" } });
+    const { base, wt } = project("3.11");
+    const r = await run(f, wt, base, "repo-5731a");
+    assert.notEqual(r.status, "failed", JSON.stringify(r));
+    assert.ok(viaOf(f).length >= 2 && viaOf(f).every((v) => v === "python3.11"), JSON.stringify(viaOf(f)));
+  });
+  it("#5731 the CI python-version is the hint when there is no .python-version", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.12": "3.12.3" } });
+    const { base, wt } = project(null);
+    put(join(wt, ".github/workflows/ci.yml"), 'jobs:\n  t:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n          python-version: "3.12"\n');
+    const r = await run(f, wt, base, "repo-5731b");
+    assert.notEqual(r.status, "failed", JSON.stringify(r));
+    assert.ok(viaOf(f).length >= 2 && viaOf(f).every((v) => v === "python3.12"), JSON.stringify(viaOf(f)));
+  });
+  it("#5731 a hinted minor that is not installed is provisioned with uv python install", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8" } });
+    let installed = false;
+    const exec = async (cmd, args, o) => {
+      if (cmd === "python3.11" && args[0] === "--version" && !installed) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      if (cmd === "uv" && args[0] === "python" && args[1] === "install") { installed = true; return ""; }
+      if (cmd === "uv" && args[0] === "python" && args[1] === "find") { if (!installed) throw new Error("none"); return "python3.11\n"; }
+      return f.exec(cmd, args, o);
+    };
+    const { base, wt } = project("3.11");
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5731c" });
+    assert.ok(installed, "uv python install ran");
+    assert.notEqual(r.status, "failed", JSON.stringify(r));
+  });
+  it("#5731 an unavailable hint falls back to the in-range default", async () => {
+    const f = fakeExec({ pythons: { python3: "3.12.3" } });
+    const { base, wt } = project("3.11");
+    const r = await run(f, wt, base, "repo-5731d");
+    assert.notEqual(r.status, "failed", JSON.stringify(r));
+  });
+});
+
 describe("depcache (#5819): a failed publish or materialize never touches workspace package sources", () => {
   const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8" });
   const SRC = Array.from({ length: 6 }, (_, i) => `packages/adapters/src/f${i}.ts`);
