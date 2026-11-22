@@ -13,7 +13,7 @@
  * this module also reads and clears that.
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const norm = (p, real) => {
@@ -44,6 +44,21 @@ export function assessForgeHome({ value, sourceDir, sourceVersion, persistedHome
   }
   const version = String(pkg.version ?? "");
   return version && version === sourceVersion ? { state: "same-version", version } : { state: "stale", version: version || "unknown" };
+}
+
+/**
+ * Which tree a registered hook script lives in: 'current' when it sits under the running install
+ * or the persisted ~/.forge, 'foreign' for any other (e.g. an old checkout that still exists on disk).
+ * Segment-wise containment, so `src-old` is not inside `src`.
+ */
+export function hookScriptTree({ scriptPath, sourceDir, persistedHome, real = realpathSync }) {
+  const s = norm(scriptPath, real);
+  const inside = (root) => {
+    if (!root) return false;
+    const rel = relative(norm(root, real), s);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  };
+  return inside(sourceDir) || inside(persistedHome) ? "current" : "foreign";
 }
 
 /** True when the assessment means FORGE_HOME points somewhere other than the running install's toolset. */

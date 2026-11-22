@@ -520,7 +520,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const created = Date.parse(plan.created ?? "");
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
-        const stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported });
+        const stallOpts = { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported };
+        let stall = evaluateDispatchStall(state, stallOpts);
+        if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)
+          let gates = [];
+          try { gates = ((await preflight()) ?? []).filter((f) => f && f.ok !== true && f.code).map((f) => ({ code: f.code, detail: f.detail })); } catch { gates = []; }
+          if (gates.length) stall = evaluateDispatchStall(state, { ...stallOpts, gates }) ?? stall;
+        }
         if (Number.isFinite(created) && (reported || now - created >= FIRST_HOUR_MIN * 60_000) && !existsSync(join(b.dir, FIRST_HOUR_FILE)) && now - created < 24 * 3600_000) {
           if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), holdInfo: b.readHoldInfo?.() ?? null, stall }))) log(`schedd: first-hour report written for batch ${id}`);
         }

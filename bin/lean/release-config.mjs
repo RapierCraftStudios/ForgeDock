@@ -46,7 +46,7 @@ export const POLICY_SCHEMA = obj({
   contracts: list(obj({ producer: S, consumers: list(), paths: list(), additive_only: B, regenerate: SN })),
   forces: list(obj({ paths: list(), pipeline: en("full", "service", "hotfix"), reason: S })),
   classify: obj({ min_confidence: N, text_only_cap: N, triage_max_per_hour: N, exists_in_evidence: en("mechanical", "llm") }),
-  risk: obj({ rules: list(obj({ when: obj({ migration: B, paths: list(), contract: B, rolled_units_gt: N, diff_lines_gt: N, requires: S }), risk: en("low", "medium", "high"), forces: S })) }),
+  risk: obj({ rules: list(obj({ when: obj({ migration: B, paths: list(), contract: B, rolled_units_gt: N, diff_lines_gt: N }), risk: en("low", "medium", "high"), forces: S, requires: S })) }),
   features: obj({ flag_policy: en("require", "warn", "off") }), // #5571: a feature wave adding no rollout key: require = refuse, warn = WARN, off = nothing; lanes.<lane>.flag_policy wins
   plan: obj({ approval: en("wait", "auto", "auto-if"), skip_labels: list(), require_design_gate: B, max_issues: N, stale_snapshot_s: N }),
   lanes: { t: "map", v: obj({ pipeline: S, ci_tier: S, approval: S, budget: S, base: en("live", "integration", "default"), units_max: N, max_risk: en("low", "medium", "high"), train_max_issues: N, train_max_units: N, soak_min: { t: "any" }, flag_policy: en("require", "warn", "off"), requires: list() }) },

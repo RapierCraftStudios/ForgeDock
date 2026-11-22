@@ -13,7 +13,7 @@ export const TOP_LEVEL = [
   "hygiene", "pipeline", "execution", "engine", "prod_watch", "selftest", "release", "issue_watch", "followups", "rollouts",
   "post_deploy", "events", "lean", "stats", "verify", "ci", "env", "build", "decomposition", "services", "review", "devdocs",
   "verification", "billing", "adaptive_scripts", "branding", "marketing", "acceptance_probe", "attribution", "autopilot",
-  "deploy", "design", "gate", "experiment", "learned", "maintenance", "milestones", "pattern_feeds", "topology", "validate",
+  "deploy", "design", "gate", "experiment", "learned", "maintenance", "milestones", "pattern_feeds", "topology", "validate", "outcome_evidence",
 ];
 
 /** Sections whose direct children are a closed set: another child is an unknown key. */
@@ -65,6 +65,9 @@ export const TYPES = {
   "ci.budget.max_ci_jobs": "number",
   "ci.budget.monthly_minutes": "number",
   "ci.budget.shared_regression_job": "scalar",
+  "execution.provider": { enum: ["local", "container", "remote", "pool", "actions"] }, // #5748
+  "execution.ci_reserve": "number",
+  "execution.job_limit": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "deploy.engine.enabled": "bool",
   "deploy.engine.stage_timeout_s": "number",

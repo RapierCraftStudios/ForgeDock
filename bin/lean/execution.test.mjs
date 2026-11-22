@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
 import * as executionModule from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
@@ -964,6 +964,21 @@ describe("host capabilities in placement (#4542)", () => {
     assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
   });
 
+  it("#5727 placeOf does not retry a recipe-less tool miss remotely", async () => {
+    for (const toolNoRecipe of [true, false]) {
+      const calls = [];
+      await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
+        remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+        runOne: async (n, _l, ctx = {}) => {
+          calls.push({ placement: ctx.placement?.where, reason: ctx.placement?.reason });
+          return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code: "env.tool_missing", detail: "Remote sandbox lacks forgedock, and no lane_tools recipe exists for it.", placement: { where: "remote" }, ...(toolNoRecipe ? { toolNoRecipe } : {}) };
+        } });
+      assert.equal(calls.length, 2);
+      if (toolNoRecipe) { assert.equal(calls[1].placement, "local"); assert.notEqual(calls[1].reason, "retry remotely after sandbox provisioning"); }
+      else assert.equal(calls[1].reason, "retry remotely after sandbox provisioning");
+    }
+  });
+
   it("#5371 orchestrate: a remote env.validate_placement or mechanical failure is requeued on a different placement", async () => {
     for (const code of ["env.validate_placement", "env.repro_unrunnable"]) {
       const calls = [];
@@ -1259,5 +1274,41 @@ describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", ()
     assert.ok(ledgerFor(8).entries("sandbox").some((e) => e.value === "fake-8"), "ledger entry kept");
     const r = await l.adopt(8, { handle: { provider: "fake", id: "fake-8", issue: 8 } }, {});
     assert.equal(r.terminalReason, "merged");
+  });
+});
+
+describe("public-repo default placement (#5748)", () => {
+  it("actions is a known provider; plan, job_limit, ci_reserve and dispatcher parse", () => {
+    assert.ok(SANDBOX_PROVIDERS.includes("actions"));
+    assert.equal(providerByName("actions", { batch: { id: "b" }, repo: "o/r", exec: {}, actionsApi: async () => null }).name, "actions");
+    const e = parseExecution({ plan: "Team", job_limit: "30", ci_reserve: "4", dispatcher: "forgedock[bot]" });
+    assert.deepEqual([e.plan, e.jobLimit, e.ciReserve, e.dispatcher], ["team", 30, 4, "forgedock[bot]"]);
+    for (const k of ["jobLimit", "ciReserve", "plan", "dispatcher"]) assert.ok(!(k in parseExecution({ plan: "x", job_limit: "0", ci_reserve: "-1", dispatcher: "a b" })));
+  });
+  it("public + mode unset -> actions, capped at job limit minus reserve; private or unknown visibility unchanged", () => {
+    const d = resolveDefaultExecution(undefined, { isPublic: true });
+    assert.equal(d.provider, "actions"); assert.equal(placement(d), "remote"); assert.equal(d.maxRemote, 15);
+    assert.equal(placeLane({ exec: d }).where, "remote");
+    assert.equal(resolveDefaultExecution(parseExecution({ plan: "team", ci_reserve: "10" }), { isPublic: true }).maxRemote, 50);
+    const base = parseExecution({ image: "i:1" });
+    assert.equal(resolveDefaultExecution(base, { isPublic: false }), base);
+    assert.equal(resolveDefaultExecution(base, {}), base);
+    assert.equal(resolveDefaultExecution(undefined, { isPublic: false }), undefined);
+  });
+  it("an explicit mode always wins, local included", () => {
+    for (const mode of ["local", "remote", "hybrid"]) {
+      const e = { ...parseExecution({ mode, max_remote: "2", provider: "pool" }), modeExplicit: true };
+      assert.equal(resolveDefaultExecution(e, { isPublic: true }), e);
+    }
+  });
+  it("a defaulted lane that needs a host capability still places local", () => {
+    assert.equal(placeLane({ exec: resolveDefaultExecution(undefined, { isPublic: true }), needs: ["sops"] }).where, "local");
+  });
+  it("repoIsPublic reads private:false and fails closed", async () => {
+    assert.equal(await repoIsPublic({ repo: "o/r", gh: async () => JSON.stringify({ private: false }) }), true);
+    assert.equal(await repoIsPublic({ repo: "o/r", gh: async () => JSON.stringify({ private: true }) }), false);
+    assert.equal(await repoIsPublic({ repo: "o/r", gh: async () => { throw new Error("timeout"); } }), false);
+    assert.equal(await repoIsPublic({ repo: "o/r", gh: async () => "not json" }), false);
+    assert.equal(await repoIsPublic({ repo: null, gh: async () => "{}" }), false);
   });
 });

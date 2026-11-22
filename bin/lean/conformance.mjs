@@ -709,7 +709,7 @@ function splitRequirementRefs(ref) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
       : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
@@ -816,6 +816,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "supersedes" && blank(a.guard) && typeof a.mechanism === "string" && !blank(a.mechanism)) {
+      // #5752: one decision removes a named mechanism; precheck retires every guard_broken whose test file the lane deleted
+      const mechanism = a.mechanism.trim().slice(0, 120);
+      c.mechanisms = [...(c.mechanisms ?? []).filter((m) => m.mechanism !== mechanism), { mechanism, why: String(a.why).trim() }];
+      applied.push({ kind: a.kind, target: `mechanism ${mechanism}`, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
       // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
       const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
@@ -1061,6 +1067,9 @@ export function cliUsageError({ rc, output } = {}) {
 }
 const FORGEDOCK_ENTRY_RE = /^\/.*\/forgedock\/bin\/(?:lean\/checks|forgedock)\.mjs$/;
 const FORGEDOCK_TOKEN_RE = /(?<![\w./-])\/[^\s'"`;&|()]*\/forgedock\/bin\/(lean\/checks|forgedock)\.mjs/g;
+/** #5727: the portable placeholders a frozen command names forgedock's entry points by (the lane env exports both). */
+export const FORGEDOCK_CHECKS_VAR = "FORGEDOCK_CHECKS_CLI", FORGEDOCK_ENTRY_VAR = "FORGEDOCK_ENTRY_CLI";
+const FORGEDOCK_PLACEHOLDER_RE = /\$(?:\{FORGEDOCK_(CHECKS|ENTRY)_CLI\}|FORGEDOCK_(CHECKS|ENTRY)_CLI(?!\w))/g;
 /**
  * #5005: a frozen validate command names forgedock's own entry point by the absolute path of the install that wrote it; on
  * the host that runs it that path may not exist. Rewrites each such token whose file is missing to this install's path.
@@ -1069,9 +1078,33 @@ export function resolveForgedockPaths(command, { exists = () => true, checksCli,
   return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => {
     const here = which === "forgedock" ? forgedockCli : checksCli;
     return here && !exists(tok) ? here : tok;
+  }).replace(FORGEDOCK_PLACEHOLDER_RE, (tok, a, b) => { // #5727: the portable frozen form always names this install
+    const here = (a ?? b) === "ENTRY" ? forgedockCli : checksCli;
+    return here || tok;
   });
 }
-const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
+/** #5727: every absolute forgedock entry-point token becomes its portable placeholder, so a frozen contract names no install path. Pure. */
+export function portableForgedockPaths(command) {
+  return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => `$${which === "forgedock" ? FORGEDOCK_ENTRY_VAR : FORGEDOCK_CHECKS_VAR}`);
+}
+const RESOLVED_RUNNERS = ["runCommand", "probeCommand", "preflightRun", "redGreen"];
+/**
+ * #5727: `io` with its command runners (runCommand, probeCommand, preflightRun, redGreen) resolving `command` through
+ * resolveForgedockPaths before the call, so no execution site runs a frozen forgedock path of another install. Other members untouched.
+ */
+export function resolvingIo(io, opts = {}) {
+  if (!io || typeof io !== "object") return io;
+  const wrapped = new Map(); // live view: a member set on io later is seen; a runner is wrapped per function
+  return new Proxy(io, {
+    get(t, k, r) {
+      const fn = Reflect.get(t, k, r);
+      if (!RESOLVED_RUNNERS.includes(k) || typeof fn !== "function") return fn;
+      if (!wrapped.has(fn)) wrapped.set(fn, (a, ...rest) => fn.call(t, a && typeof a === "object" && typeof a.command === "string" ? { ...a, command: resolveForgedockPaths(a.command, opts) } : a, ...rest));
+      return wrapped.get(fn);
+    },
+  });
+}
+const KIND_NAME = { "forgedock-path": "forgedock install path", command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
  * (or rc 127), python "No module named x" (top-level package), node "Cannot find module|package 'x'" (bare specifiers only).
@@ -1084,7 +1117,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const py = PY_MISSING_RE.exec(out);
   if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
   const js = NODE_MISSING_RE.exec(out);
-  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "command" }; // #5005: the host's forgedock install is not at the frozen path
+  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "forgedock-path" }; // #5005, #5727: an install-path mismatch, never a lane_tools candidate (not a TOOL_KIND)
   if (js) {
     const spec = js[1], scoped = spec.startsWith("@");
     if (!scoped && spec.includes("/")) return null;
@@ -1137,7 +1170,7 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, counters = null, recurrence = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, counters = null, recurrence = null, outcomeEvidenceFailures = null }) {
   const failures = [], superseded = [], ciCovered = [], equivalent = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -1215,11 +1248,14 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
   const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
-  for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
+  // #5752: a mechanism supersedes retires a guard whose test file the lane deleted; a surviving test still needs its own supersedes
+  const deleted = contract.mechanisms?.length && Array.isArray(removedPaths) ? new Set(removedPaths) : null;
+  for (const f of guardFailures ?? []) if (!retired.has(f.guard) && !(deleted && f.test && deleted.has(f.test))) failures.push(f);
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
   failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
+  failures.push(...(outcomeEvidenceFailures ?? [])); // #5752: forge.yaml outcome_evidence
   failures.push(...(ciBudgetFailures ?? [])); // #5760: CI additions need a FORGE:CI_BUDGET annotation or the shared job, scoped hygiene, max counts
   failures.push(...(pageFailures ?? [])); // #5428: forge.yaml pages
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
