@@ -1464,6 +1464,7 @@ export async function runCore(o) {
     const laneIo = { ...io, gh: (a, opts) => refreshAuthOnce(() => io.gh(a, opts), { refresh: io.refreshAuth ?? runRefreshScript, state: authState }) }; // #4662
     const r = await resolveLane({ issue, repo, io: laneIo, cwd, branches, requested: requestedLane, override: laneOverride });
     if (!r.ok && GH_AUTH_RE.test(r.detail ?? "")) return { terminalReason: "deferred", code: OUTCOME_CODES.GH_AUTH, detail: r.detail, retryInSeconds: GH_AUTH_RETRY_SECONDS }; // #4662: a dead token is not a lane problem
+    if (!r.ok && r.transient) return { terminalReason: "deferred", code: OUTCOME_CODES.LANE_UNRESOLVED, detail: r.detail, retryInSeconds: GH_AUTH_RETRY_SECONDS }; // #5846: a failed lookup is not a lane refusal; the orchestrator requeues it
     if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
     lane = r.lane; base = `origin/${lane}`; defaults = r.defaults; milestone = r.milestone ?? null;
     if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
