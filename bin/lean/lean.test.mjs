@@ -32,6 +32,7 @@ import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLea
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { parsePagesConfig } from "./pagegate.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -9397,6 +9398,31 @@ describe("design gate routing in the lane (#5330 R11, R13, R15)", () => {
       assert.notEqual(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
       assert.ok(!builders(w).some((c) => /Design gate:/.test(c[4])));
     }
+  });
+});
+
+describe("spec-only page gate failures end design.spec_required (#5729)", () => {
+  const PAGE = "web/src/app/(site)/contact/page.tsx";
+  const brief = { design_spec: "FORGE:DESIGN_SPEC", seo: Object.fromEntries(["intent", "icp", "title", "h1", "meta", "structured_data", "links_in", "links_out", "gsc_baseline", "measure_by"].map((k) => [k, "x"])), geo: { surfaces: "llms.txt", agent_question: "q" } };
+  const pc = { ...CONTRACT, page_gate: brief, deliverables: [{ id: "D1", path: PAGE, change: "repoint the link", requirements: ["R1"] }] };
+  const pagesConfig = { ...parsePagesConfig(undefined, { hasAppPages: true }), require: ["design"] };
+  const link = (h, x = "") => `<Link href="${h}"${x}>Book a demo</Link>`;
+  const mk = (diff) => { const w = world({ contract: pc, changed: [PAGE, "test/foo.test.js"], reviews: [conf({}, pc, [PAGE, "test/foo.test.js"])] }); w.diffText = `+++ b/${PAGE}\n${diff}`; return w; };
+  it("spec-only precheck failures end design.spec_required with no resume for 5729", async () => {
+    const w = mk(`-${link("/contact")}\n+${link("/contact")}<Badge />\n`), r = await run(w, { pagesConfig });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && /recovery lane was spent/.test(c)));
+    assert.ok(!builders(w).some((c) => /resume|conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: r.code }), "terminal", "no recovery lane");
+  });
+  it("replay of #40917 spends no resume or recovery for 5729", async () => {
+    const w = mk(`-${link("https://calendly.com/x", ' target="_self"')}\n+${link("/contact", ' target="_blank"')}\n`), r = await run(w, { pagesConfig });
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED); // only the screenshot row is left, and it is terminal too
+    const note = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+    assert.ok(!/is a public page but the issue has no approved/.test(note), "no spec row for a copy edit");
+    assert.match(note, /visual check/);
+    assert.ok(!builders(w).some((c) => /conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
   });
 });
 

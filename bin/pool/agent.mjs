@@ -15,6 +15,7 @@ import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree } from "./health.mjs";
+import { planIdleEviction, CACHE_LABEL } from "./cache-sweep.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -123,6 +124,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   let diskCache = { at: 0, mb: {} };
   let lastWorkSweep = -Infinity;
   let lastCachePrune = -Infinity;
+  // #5757: cache volume hygiene state: per-volume sweep error/size/last use (last use also from launches in this process).
+  let lastCacheSweep = -Infinity;
+  const cacheErr = new Map(), cacheInfo = new Map(), cacheUsed = new Map();
+  const sweepFail = (v, what, e) => { const m = `${what} ${v}: ${String(e.stderr || e.message).slice(0, 200)}`; cacheErr.set(`${what}:${v}`, m); log.warn?.(m); };
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
   function diskView() {
     const out = {};
@@ -151,7 +156,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function capacity() {
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
-    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -205,6 +210,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
     rec.cacheVolume = `cs-cache-${cacheKey}`;
     rec.workDir = workDirOf(name);
+    cacheUsed.set(rec.cacheVolume, now());
+    try { await docker.createVolume?.(rec.cacheVolume, [CACHE_LABEL]); } catch (e) { log.warn?.(`label ${rec.cacheVolume}: ${String(e.stderr || e.message).slice(0, 200)}`); } // an unlabelled volume still works
     // Public resolvers: host resolvers like Tailscale MagicDNS are not reachable from the container network.
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
@@ -295,7 +302,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
     if (r.docker) await docker.remove(dindName(r.name));
-    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { log.warn?.(`work dir ${r.workDir}: ${String(e.stderr || e.message).slice(0, 200)}`); } }
+    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { sweepFail(r.cacheVolume, "work dir", e); } }
     else if (r.docker) await docker.removeVolume(workVolume(r.name)); // sandbox launched before #5696
     try { await docker.wipe(r.dir, image); } catch (e) { log.warn?.(`wipe ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
     rmSync(r.dir, { recursive: true, force: true });
@@ -342,6 +349,26 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     } catch (e) { log.warn?.(`anonymous volume sweep: ${String(e.stderr || e.message).slice(0, 200)}`); }
   }
 
+  /** #5757: age-out / size cap inside each cache volume, then idle eviction. Never-evict volumes are left alone; failures go to /capacity. */
+  async function cacheSweep(t) {
+    const never = cfg.cache_never_evict ?? [];
+    const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
+    const volumes = [];
+    for (const v of await docker.listVolumes("cs-cache-")) {
+      if (never.includes(v)) continue;
+      try {
+        const r = await docker.sweepCache(v, image, { maxAgeDays: cfg.cache_max_age_days ?? 14, maxGb: cfg.cache_max_gb ?? null, keep, now: t });
+        cacheInfo.set(v, r); cacheErr.delete(`cache sweep:${v}`);
+        if (r.errors?.length) cacheErr.set(`cache sweep:${v}`, `cache sweep ${v}: ${r.errors[0]}`);
+        volumes.push({ name: v, lastUsedMs: Math.max(r.last_used_ms ?? -Infinity, cacheUsed.get(v) ?? -Infinity) });
+      } catch (e) { sweepFail(v, "cache sweep", e); }
+    }
+    const referenced = new Set(Object.values(sb()).map((r) => r.cacheVolume).filter(Boolean));
+    for (const v of planIdleEviction({ volumes: volumes.map((x) => ({ ...x, lastUsedMs: Number.isFinite(x.lastUsedMs) ? x.lastUsedMs : null })), referenced, neverEvict: never, now: t, idleMs: (cfg.cache_idle_days ?? 30) * 86400000 })) {
+      try { await docker.removeVolume(v); cacheInfo.delete(v); cacheUsed.delete(v); log.info?.(`evicted idle cache volume ${v}`); } catch (e) { sweepFail(v, "cache evict", e); }
+    }
+  }
+
   async function reap() {
     const t = now();
     for (const r of Object.values(sb())) {
@@ -363,10 +390,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       lastWorkSweep = t;
       const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
       for (const v of await docker.listVolumes("cs-cache-")) {
-        try { await docker.pruneWorkDirs(v, image, keep); } catch (e) { log.warn?.(`work sweep ${v}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+        try { await docker.pruneWorkDirs(v, image, keep); cacheErr.delete(`work sweep:${v}`); } catch (e) { sweepFail(v, "work sweep", e); }
       }
     }
     await sweepBuildCache(t);
+    if (t - lastCacheSweep >= (cfg.cache_sweep_interval_s ?? 3600) * 1000) {
+      lastCacheSweep = t;
+      await cacheSweep(t);
+    }
     store.save();
   }
 
