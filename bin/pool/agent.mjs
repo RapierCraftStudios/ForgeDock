@@ -13,7 +13,7 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
-import { resolveLaneImage, laneImageNow, laneToolsTag } from "./lane-tools.mjs";
+import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree } from "./health.mjs";
 
 const LABEL = "computeshare=1";
@@ -122,6 +122,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   // #5535: disk figures for the router inventory; optional, omitted when unreadable. Sandbox dirs are walked at most every 60s.
   let diskCache = { at: 0, mb: {} };
   let lastWorkSweep = -Infinity;
+  let lastCachePrune = -Infinity;
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
   function diskView() {
     const out = {};
@@ -306,6 +307,41 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return true;
   }
 
+  /** Version order of `forgedock-lane:<version>` bases, newest first (numeric segments, then plain text). */
+  const newerFirst = (a, b) => b.localeCompare(a, "en", { numeric: true });
+  /**
+   * Removes superseded `forgedock-lane:` images: keeps the newest cfg.keep_lane_images (default 2) versions with their
+   * tools variants, the running one and `alsoKeep`, and any tag a container (running or exited) still uses. Never throws.
+   */
+  async function pruneLaneImages(alsoKeep = []) {
+    if (!docker.listImages || !docker.removeImage) return;
+    try {
+      const prefix = laneImageTag("");
+      const tags = await docker.listImages(prefix);
+      const inUse = new Set(await (docker.listContainerImages?.() ?? []));
+      const baseOf = (t) => t.replace(/-t[0-9a-f]{12}$/, "");
+      const bases = [...new Set(tags.map(baseOf))].sort(newerFirst);
+      const keepN = Math.max(1, Number(cfg.keep_lane_images ?? 2) || 2);
+      const keep = [...bases.slice(0, keepN), laneImageTag(running.version), image, ...alsoKeep];
+      for (const t of tags) {
+        if (keep.some((b) => isLaneToolsTagOf(t, b)) || inUse.has(t)) continue;
+        try { await docker.removeImage(t); log.info?.(`removed superseded lane image ${t}`); } catch (e) { log.warn?.(`rmi ${t}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    } catch (e) { log.warn?.(`lane image prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+  }
+  /** Interval-gated build cache trim and sweep of dangling anonymous volumes (64-hex names); errors are logged only. */
+  async function sweepBuildCache(t) {
+    if (t - lastCachePrune < (cfg.build_cache_interval_s ?? 6 * 3600) * 1000) return;
+    lastCachePrune = t;
+    try { await docker.builderPrune?.(cfg.build_cache_keep_gb ?? 20); } catch (e) { log.warn?.(`builder prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+    try {
+      for (const v of (await docker.listDanglingVolumes?.()) ?? []) {
+        if (!/^[0-9a-f]{64}$/.test(v)) continue;
+        try { await docker.removeVolume(v); log.info?.(`removed anonymous volume ${v.slice(0, 12)}`); } catch (e) { log.warn?.(`rm volume ${v.slice(0, 12)}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    } catch (e) { log.warn?.(`anonymous volume sweep: ${String(e.stderr || e.message).slice(0, 200)}`); }
+  }
+
   async function reap() {
     const t = now();
     for (const r of Object.values(sb())) {
@@ -330,6 +366,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         try { await docker.pruneWorkDirs(v, image, keep); } catch (e) { log.warn?.(`work sweep ${v}: ${String(e.stderr || e.message).slice(0, 200)}`); }
       }
     }
+    await sweepBuildCache(t);
     store.save();
   }
 
@@ -395,6 +432,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
         await docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version));
       }
+      await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
       rmSync(`${root}.old`, { recursive: true, force: true });
       await run("mv", [root, `${root}.old`]);
@@ -541,9 +579,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
   async function ensureImage() {
-    if (await docker.hasImage?.(image)) return;
+    if (await docker.hasImage?.(image)) { await pruneLaneImages(); return; }
     log.info?.(`building ${image}`);
     await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
+    await pruneLaneImages();
   }
 
   return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };

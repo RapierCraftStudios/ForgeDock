@@ -1742,6 +1742,8 @@ execution:
 
 **Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
 
+**Pool agent image hygiene** (forge#5758, keys in the pool agent config, not `forge.yaml`): after a self-update or start builds the lane image, the agent removes superseded `forgedock-lane:<version>` images and their per-repo `-t<hash>` tools variants. `keep_lane_images` (default `2`) is the number of newest versions kept, always including the running one; a tag any container (running or exited-but-kept) uses is never removed, and images outside the `forgedock-lane:` prefix (`image` overrides) are never touched. Every `build_cache_interval_s` seconds (default `21600`, 6 h) `reap()` also runs `docker builder prune --keep-storage <build_cache_keep_gb>gb` (`build_cache_keep_gb`, default `20`) and removes dangling anonymous volumes (64-hex names no container references; named `cs-work-`/`cs-cache-` volumes are not touched). Failures are logged and never fail an update or a reap.
+
 **Remote provider** (`bin/lean/sandbox-remote.mjs`, forge#4254). The sandbox is addressed by the id ForgeDock picks (`fdrsbx-<batch>-<issue>`), JSON over HTTP:
 
 | Request | Response |
