@@ -161,6 +161,49 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
   });
 });
 
+describe("providerLanes: runOne returns the result before sandbox teardown (#5808)", () => {
+  const setup = (usage) => {
+    const root = tmpDir("exec-5808-");
+    const ledgerFor = ledgerIn(root);
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged", pr: 9 }), ...(usage ? { usage } : {}) });
+    let release;
+    const gate = new Promise((res) => { release = res; });
+    const origTeardown = prov.teardown;
+    prov.teardown = async (h) => { await gate; return origTeardown(h); };
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1, now: () => 1000 });
+    return { prov, lanes, release, led: ledgerFor(7) };
+  };
+  it("runOne resolves while teardown is pending; postRun finishes it and releases the ledger", async () => {
+    const { prov, lanes, release, led } = setup();
+    const r = await lanes.runOne(7, "staging"); // resolves although provider.teardown is still gated
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(typeof r.postRun, "function");
+    assert.deepEqual(led.entries("sandbox").map((e) => e.value), ["fake-7"]); // still listed until torn down
+    release();
+    await r.postRun();
+    assert.ok(prov.calls.some((c) => c[0] === "teardown" && c[1] === "fake-7"));
+    assert.equal(led.read(), null);
+  });
+  it("a failed teardown keeps the entry for the reaper after postRun", async () => {
+    const root = tmpDir("exec-5808b-");
+    const ledgerFor = ledgerIn(root);
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged" }), teardownOk: false });
+    const r = await providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1 }).runOne(7, null);
+    await r.postRun();
+    assert.deepEqual(ledgerFor(7).entries("sandbox").map((e) => e.value), ["fake-7"]);
+  });
+  it("an unreachable provider still ends without a teardown", async () => {
+    const root = tmpDir("exec-5808c-");
+    const ledgerFor = ledgerIn(root);
+    const prov = fakeProvider();
+    prov.fetchResult = async () => { throw Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" }); };
+    prov.status = async () => { throw Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" }); };
+    const r = await providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1, unreachableWindowMs: 0, sleep: async () => {} }).runOne(7, null);
+    assert.equal(prov.calls.some((c) => c[0] === "teardown"), false);
+    assert.equal(r.postRun, undefined);
+  });
+});
+
 describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)", () => {
   const run = async ({ finish, startThrows, teardownOk, pollMs = 1 } = {}) => {
     const root = tmpDir("exec-ledger-");
@@ -171,7 +214,8 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
       sleep: async () => { if (++ticks === 2 && !finish) { prov.results[7] = { terminalReason: "merged", pr: 9 }; prov.live.delete(7); } } });
     const started = [];
     const r = await lanes.runOne(7, "staging", { onStart: (i) => started.push(i) });
-    return { r, prov, started, led: ledgerFor(7) };
+    await r.postRun?.(); // #5808: the teardown runs after the result is handed back
+    return { r: Object.fromEntries(Object.entries(r).filter(([k]) => k !== "postRun")), prov, started, led: ledgerFor(7) };
   };
 
   it("success: registered before start, result reaches the batch, torn down and released", async () => {
@@ -226,7 +270,8 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     const prov = fakeProvider();
     prov.live.add(7);
     const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1, sleep: async () => { prov.results[7] = { terminalReason: "merged", pr: 3 }; prov.live.delete(7); } });
-    const r = await lanes.adopt(7, { pid: undefined, remote: true, handle: { provider: "fake", id: "fake-7", issue: 7 } });
+    const { postRun, ...r } = await lanes.adopt(7, { pid: undefined, remote: true, handle: { provider: "fake", id: "fake-7", issue: 7 } });
+    await postRun(); // #5808
     assert.deepEqual(r, { terminalReason: "merged", pr: 3, sandbox: { provider: "fake", id: "fake-7", minutes: 0, cost_usd: 0 } });
     assert.ok(prov.calls.some((c) => c[0] === "teardown"));
     assert.equal(ledgerFor(7).read(), null);
