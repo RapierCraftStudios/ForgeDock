@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { admit, planScale, priorityOf, PRIORITY } from "../pool/ci-autoscale.mjs";
+import { admitRunner, planScale, runnerPriority, PRIORITY } from "../pool/ci-autoscale.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { createAgent, netRx } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
@@ -16,35 +16,35 @@ const LABELS = { "alterlab-ci": { min: 0, max: 4, size: { cpus: 1, mem_gb: 2 } }
 const q = (n, extra = {}) => Array.from({ length: n }, (_, i) => ({ id: i + 1, ...extra }));
 
 test("admit enforces the MemAvailable floor after the reservation", () => {
-  assert.equal(admit({ free: { ...FREE, mem_available_gb: 5 }, job: { label: "x" } }).admit, true);
-  const v = admit({ free: { ...FREE, mem_available_gb: 4.5 }, job: { label: "x" } });
+  assert.equal(admitRunner({ free: { ...FREE, mem_available_gb: 5 }, job: { label: "x" } }).admit, true);
+  const v = admitRunner({ free: { ...FREE, mem_available_gb: 4.5 }, job: { label: "x" } });
   assert.equal(v.admit, false);
   assert.match(v.reason, /MemAvailable/);
   assert.equal(v.inputs.floors.mem_available_gb, 3);
-  assert.equal(admit({ free: { ...FREE, mem_available_gb: 8 }, reserved: { cpus: 0, mem_gb: 4 }, job: {} }).admit, false); // earlier admissions count
+  assert.equal(admitRunner({ free: { ...FREE, mem_available_gb: 8 }, reserved: { cpus: 0, mem_gb: 4 }, job: {} }).admit, false); // earlier admissions count
 });
 
 test("admit enforces the load floor (0.8 x vCPU) and the lane floor", () => {
-  assert.equal(admit({ free: { ...FREE, load_per_cpu: 0.79 }, job: {} }).admit, false);
-  assert.equal(admit({ free: { ...FREE, load_per_cpu: 0.7 }, job: {} }).admit, true);
-  const lane = admit({ free: { ...FREE, cpus_free: 2.5 }, job: {}, floors: { lane_cpus: 2 } });
+  assert.equal(admitRunner({ free: { ...FREE, load_per_cpu: 0.79 }, job: {} }).admit, false);
+  assert.equal(admitRunner({ free: { ...FREE, load_per_cpu: 0.7 }, job: {} }).admit, true);
+  const lane = admitRunner({ free: { ...FREE, cpus_free: 2.5 }, job: {}, floors: { lane_cpus: 2 } });
   assert.equal(lane.admit, false);
   assert.match(lane.reason, /lane floor/);
-  assert.equal(admit({ free: { ...FREE, mem_free_gb: 4 }, job: { priority: PRIORITY.deploy }, floors: { lane_mem_gb: 3 } }).admit, false); // not even deploy starves a lane
+  assert.equal(admitRunner({ free: { ...FREE, mem_free_gb: 4 }, job: { priority: PRIORITY.deploy }, floors: { lane_mem_gb: 3 } }).admit, false); // not even deploy starves a lane
 });
 
 test("admit refuses a saturated network except for deploy", () => {
   const floors = { net_rx_mbps_max: 2 }, net = { rx_mbps: 3 };
-  assert.equal(admit({ free: FREE, floors, net, job: { label: "alterlab-ci" } }).admit, false);
-  assert.equal(admit({ free: FREE, floors, net, job: { label: "alterlab-deploy" } }).admit, true);
-  assert.equal(admit({ free: FREE, floors, net: { rx_mbps: 1 }, job: {} }).admit, true);
-  assert.deepEqual(admit({ free: FREE, floors, net, job: {} }).inputs.net, net);
+  assert.equal(admitRunner({ free: FREE, floors, net, job: { label: "alterlab-ci" } }).admit, false);
+  assert.equal(admitRunner({ free: FREE, floors, net, job: { label: "alterlab-deploy" } }).admit, true);
+  assert.equal(admitRunner({ free: FREE, floors, net: { rx_mbps: 1 }, job: {} }).admit, true);
+  assert.deepEqual(admitRunner({ free: FREE, floors, net, job: {} }).inputs.net, net);
 });
 
-test("priorityOf: deploy > release > lane > PR", () => {
-  assert.equal(priorityOf({ label: "alterlab-deploy" }), PRIORITY.deploy);
-  assert.equal(priorityOf({ label: "alterlab-ci", head_branch: "release/1.2" }), PRIORITY.release);
-  assert.equal(priorityOf({ label: "alterlab-ci", head_branch: "feat/x" }), PRIORITY.pr);
+test("runnerPriority: deploy > release > lane > PR", () => {
+  assert.equal(runnerPriority({ label: "alterlab-deploy" }), PRIORITY.deploy);
+  assert.equal(runnerPriority({ label: "alterlab-ci", head_branch: "release/1.2" }), PRIORITY.release);
+  assert.equal(runnerPriority({ label: "alterlab-ci", head_branch: "feat/x" }), PRIORITY.pr);
   assert.ok(PRIORITY.deploy < PRIORITY.release && PRIORITY.release < PRIORITY.lane && PRIORITY.lane < PRIORITY.pr);
 });
 

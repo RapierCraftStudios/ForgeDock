@@ -1,5 +1,5 @@
-// #5695: demand- and capacity-driven CI runner autoscaler for the pool router. The decision logic (admit, planScale,
-// priorityOf, decisionRecord) is pure; createAutoscaler wires it to the router's webhook, tick and agents.
+// #5695: demand- and capacity-driven CI runner autoscaler for the pool router. The decision logic (admitRunner, planScale,
+// runnerPriority, decisionRecord) is pure; createAutoscaler wires it to the router's webhook, tick and agents.
 // Imports stay inside bin/pool: the router ships agents only AGENT_BUNDLE_PATHS (pool-agent-bundle.test.mjs).
 
 /** Priority classes, lowest number first: deploy > release-PR CI > lanes > ordinary PR CI. */
@@ -10,7 +10,7 @@ export const DEFAULT_SIZE = { cpus: 1, mem_gb: 2 };
 const num = (v, d) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : d);
 
 /** Deploy labels and an explicit job.priority win; a release branch or job.release is release CI; the rest is PR CI. */
-export function priorityOf(job = {}) {
+export function runnerPriority(job = {}) {
   if (Number.isInteger(job.priority) && job.priority >= 0 && job.priority <= PRIORITY.pr) return job.priority;
   if (/deploy/i.test(String(job.label ?? "")) || (job.labels ?? []).some((l) => /deploy/i.test(l))) return PRIORITY.deploy;
   if (job.release === true || /^(release|hotfix)[/-]/i.test(String(job.head_branch ?? ""))) return PRIORITY.release;
@@ -19,7 +19,7 @@ export function priorityOf(job = {}) {
 
 /** One telemetry record per decision, carrying every input it was made from. */
 export function decisionRecord({ action, label, job = null, admit = null, reason, inputs = {}, dry_run = false, at = null }) {
-  return { at, action, label, job: job?.id ?? null, priority: job ? priorityOf(job) : null, admit, reason, dry_run, inputs };
+  return { at, action, label, job: job?.id ?? null, priority: job ? runnerPriority(job) : null, admit, reason, dry_run, inputs };
 }
 
 /**
@@ -27,7 +27,7 @@ export function decisionRecord({ action, label, job = null, admit = null, reason
  * admissions of this round already took; net = {rx_mbps}. The lane floor keeps cpus_free/mem_free_gb for lanes at every
  * priority, so CI never blocks a lane beyond it.
  */
-export function admit({ free, floors = {}, reserved = {}, job = {}, net = null, size = null }) {
+export function admitRunner({ free, floors = {}, reserved = {}, job = {}, net = null, size = null }) {
   const f = { ...DEFAULT_FLOORS, ...floors }, sz = size ?? job.size ?? DEFAULT_SIZE;
   const rc = num(reserved.cpus, 0), rm = num(reserved.mem_gb, 0), vcpus = Math.max(1, num(free.vcpus, 1));
   const after = {
@@ -42,7 +42,7 @@ export function admit({ free, floors = {}, reserved = {}, job = {}, net = null, 
   if (after.load_per_cpu > f.load_per_cpu) return no(`load ${after.load_per_cpu.toFixed(2)}/cpu after reservation > ${f.load_per_cpu}`);
   if (after.cpus_free < f.lane_cpus || after.mem_free_gb < f.lane_mem_gb) return no("lane floor: reservation would leave lanes less than the configured floor");
   const rx = num(net?.rx_mbps, null);
-  if (f.net_rx_mbps_max && rx !== null && rx > f.net_rx_mbps_max && priorityOf(job) > PRIORITY.deploy) return no(`network ${rx} MB/s > ${f.net_rx_mbps_max} (saturated)`);
+  if (f.net_rx_mbps_max && rx !== null && rx > f.net_rx_mbps_max && runnerPriority(job) > PRIORITY.deploy) return no(`network ${rx} MB/s > ${f.net_rx_mbps_max} (saturated)`);
   return { admit: true, reason: "fits", inputs };
 }
 
@@ -62,18 +62,18 @@ export function planScale({ demand = {}, running = {}, labels = {}, lanes = {}, 
     const min = num(cfg.min, 0), max = num(cfg.max, 0), size = cfg.size ?? DEFAULT_SIZE, idle = Math.max(0, r.total - r.busy);
     const ctx = { queued: queued.length, total: r.total, busy: r.busy, idle, min, max, size };
     const want = Math.min(Math.max(queued.length - idle, min - r.total, 0), Math.max(0, max - r.total));
-    const jobs = [...queued].sort((a, b) => priorityOf({ label, ...a }) - priorityOf({ label, ...b }));
+    const jobs = [...queued].sort((a, b) => runnerPriority({ label, ...a }) - runnerPriority({ label, ...b }));
     for (let i = 0; i < want; i++) cand.push({ label, size, job: { label, ...(jobs[i] ?? { id: null }) }, ctx });
     const keep = Math.max(min, queued.length), surplus = Math.max(0, idle - Math.max(0, keep - r.busy));
     if (surplus > 0 && !win) rec({ action: "stop", label, admit: true, reason: `${surplus} idle runner(s) above max(min, queued)`, inputs: { ...ctx, surplus } });
     else if (want === 0) rec({ action: "hold", label, admit: null, reason: "no runner needed", inputs: ctx });
   }
-  cand.sort((a, b) => priorityOf(a.job) - priorityOf(b.job));
+  cand.sort((a, b) => runnerPriority(a.job) - runnerPriority(b.job));
   const reserved = { cpus: 0, mem_gb: 0 };
   for (const c of cand) {
     if (win) { rec({ action: "hold", label: c.label, job: c.job, admit: false, reason: `maintenance window${win.why ? `: ${win.why}` : ""}`, inputs: { ...c.ctx, window: win } }); continue; }
-    if ((lanes.waiting ?? 0) > 0 && priorityOf(c.job) > PRIORITY.lane) { rec({ action: "hold", label: c.label, job: c.job, admit: false, reason: "a lane is waiting and outranks ordinary PR CI", inputs: { ...c.ctx, lanes } }); continue; }
-    const v = admit({ free, floors, reserved, job: c.job, net, size: c.size });
+    if ((lanes.waiting ?? 0) > 0 && runnerPriority(c.job) > PRIORITY.lane) { rec({ action: "hold", label: c.label, job: c.job, admit: false, reason: "a lane is waiting and outranks ordinary PR CI", inputs: { ...c.ctx, lanes } }); continue; }
+    const v = admitRunner({ free, floors, reserved, job: c.job, net, size: c.size });
     if (v.admit) { reserved.cpus += c.size.cpus; reserved.mem_gb += c.size.mem_gb; }
     rec({ action: v.admit ? "start" : "hold", label: c.label, job: c.job, admit: v.admit, reason: v.reason, inputs: { ...v.inputs, ...c.ctx } });
   }
