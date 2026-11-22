@@ -40,3 +40,8 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-21 — WSL host-disk admission (#5733)
 
 - `bin/pool/health.mjs` `hostDiskFree` (WSL only: osrelease /microsoft/i; Lxss BasePath drive via reg.exe over the interop socket, else /mnt/c) feeds `host_disk_free_gb`/`host_disk_low` in agent `capacity()`; `launch` answers 503 `pool.disk_low` under `min_host_disk_free_gb` (25) or after `sandbox_disk_growth_gb` (3.5) × (active + 1), and the router skips `host_disk_low` agents with its own 503 `pool.disk_low`. It is a capacity deferral (lane `SANDBOX_CAPACITY`), never a failure; unreadable means no field and no gate.
+
+## Entry 2026-11-22 — cache volume hygiene (#5757)
+
+- `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
+- `agent.mjs` `cacheSweep` runs from `reap()` every `cache_sweep_interval_s`; failures land in `/capacity` `cache_sweep_error` (also work-dir sweep/destroy failures), sizes in `cache_volumes`. Volumes are created with label `computeshare.cache=1` (`docker.createVolume`); `gc.mjs` reports them, never reclaims (`forgedock.owner=1` stays the only reclaim label). Entrypoint writes `/cache/.last-used`.
