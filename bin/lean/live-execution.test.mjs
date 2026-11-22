@@ -81,3 +81,16 @@ describe("#5138 live execution control", () => {
     assert.deepEqual(failing.get(), { heavy: false, signals: [] });
   });
 });
+
+describe("#5746 live max_remote 0 in remote mode", () => {
+  const exec = { mode: "remote", maxRemote: 4 };
+  const place = (e) => ({ where: e.maxRemote >= 1 ? "remote" : "local", reason: e.maxRemote >= 1 ? "mode remote" : "max_remote 0" });
+  it("holds with the live-override reason when the host is not allowed", () => {
+    const r = liveRemote({ hostFallback: false }, { exec, readOverride: () => ({ maxRemote: 0 }), place });
+    assert.deepEqual(r.place(1), { where: "remote", reason: "max_remote 0 (live override)", hold: true });
+  });
+  it("names the live override but stays local when the host is allowed", () => {
+    const r = liveRemote({ hostFallback: true }, { exec, readOverride: () => ({ maxRemote: 0 }), place });
+    assert.deepEqual(r.place(1), { where: "local", reason: "max_remote 0 (live override)" });
+  });
+});

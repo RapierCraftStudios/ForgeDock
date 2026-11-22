@@ -113,9 +113,11 @@ export function lazyWeight({ initial = null, compute = null } = {}) {
 export function liveRemote(base, { exec, readOverride = () => null, place, onChange = null }) {
   const keyOf = (e) => `${e.mode}|${e.maxRemote}`;
   let last = keyOf(effectiveExecution(exec, null));
+  let live = null; // the override applied by the last current() call
   const current = () => {
     let o = null;
     try { o = readOverride() ?? null; } catch { o = null; }
+    live = sanitizeOverride(o);
     const e = effectiveExecution(exec, o);
     const k = keyOf(e);
     if (k !== last) { last = k; try { onChange?.(e); } catch { /* advisory */ } }
@@ -128,7 +130,13 @@ export function liveRemote(base, { exec, readOverride = () => null, place, onCha
       value: (n) => {
         const e = current();
         if (e.mode === "local") return { where: "local", reason: "live placement: local" };
-        return place(e, n);
+        const p = place(e, n);
+        // #5746: remote mode with no remote slots holds the lane when the host is not allowed; else names the real cause
+        if (e.mode === "remote" && p?.where === "local" && !(Number.isInteger(e.maxRemote) && e.maxRemote >= 1)) {
+          const reason = live?.maxRemote !== undefined ? "max_remote 0 (live override)" : "max_remote 0";
+          return base.hostFallback === false ? { where: "remote", reason, hold: true } : { ...p, reason };
+        }
+        return p;
       },
       enumerable: true, configurable: true, writable: true,
     },

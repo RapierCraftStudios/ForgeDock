@@ -494,7 +494,8 @@ export function readRelayCaps(env = process.env) {
 export function readHostFallback(cwd = process.cwd()) {
   let hostRole = null;
   try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
-  return hostFallbackAllowed({ hostFallback: readExecution(cwd)?.hostFallback ?? null, hostRole });
+  const exec = readExecution(cwd);
+  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null, fallbackLocal: exec?.fallbackLocal === true });
 }
 export function readExecution(cwd = process.cwd()) {
   try {

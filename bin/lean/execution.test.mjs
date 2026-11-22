@@ -637,7 +637,7 @@ describe("hybrid placement (#4256)", () => {
     const cases = [
       [{ exec: parseExecution({}) }, "local", "mode local"],
       [{ exec: parseExecution({ mode: "remote", max_remote: "3" }), weight: LIGHT }, "remote", "mode remote"],
-      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "mode remote"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "max_remote 0"],
       [{ exec: hy("0"), weight: HEAVY }, "local", "max_remote 0"],
       [{ exec: hy(), verifyMode: "ci", weight: HEAVY, headroom: BUSY }, "local", "verify.mode ci: validation runs on CI, not billed twice"],
       [{ exec: hy(), labels: ["Documentation"], weight: HEAVY, headroom: BUSY }, "local", "docs-only lane"],
@@ -1259,5 +1259,17 @@ describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", ()
     assert.ok(ledgerFor(8).entries("sandbox").some((e) => e.value === "fake-8"), "ledger entry kept");
     const r = await l.adopt(8, { handle: { provider: "fake", id: "fake-8", issue: 8 } }, {});
     assert.equal(r.terminalReason, "merged");
+  });
+});
+
+describe("#5746 remote-mode host fallback and max_remote 0", () => {
+  it("hostFallbackAllowed: remote unset false, hybrid true, explicit true wins", () => {
+    assert.equal(hostFallbackAllowed({ mode: "remote" }), false);
+    assert.equal(hostFallbackAllowed({ mode: "hybrid" }), true);
+    assert.equal(hostFallbackAllowed({ mode: "remote", hostFallback: true }), true);
+  });
+  it("placeLane: remote mode with max_remote 0 names max_remote 0, not mode remote", () => {
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).reason, "max_remote 0");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 2 } }).reason, "mode remote");
   });
 });
