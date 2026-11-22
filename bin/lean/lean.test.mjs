@@ -9503,9 +9503,9 @@ describe("#5592 (8) comment and label spam", () => {
   it("start clears needs-human, needs-human:external, parked:* and remediation-queue; other labels stay", async () => {
     const w = world({ issueBodies: [ISSUE_BODY], labels: [{ name: "bug" }, { name: "needs-human" }, { name: "needs-human:external" }, { name: "parked:ci.red" }, { name: "remediation-queue" }] });
     await run(w);
-    const rm = w.edits.find((e) => e.includes("--remove-label") && e.some((x) => /needs-human/.test(x)));
-    assert.ok(rm, "labels cleared");
-    assert.deepEqual(rm[rm.indexOf("--remove-label") + 1].split(","), ["needs-human", "needs-human:external", "parked:ci.red", "remediation-queue"]);
+    // #5759: one removal call per label
+    const rm = w.edits.filter((e) => e.includes("--remove-label")).map((e) => e[e.indexOf("--remove-label") + 1]);
+    assert.deepEqual(rm.filter((x) => /needs-human|parked:|remediation-queue/.test(x)), ["needs-human", "needs-human:external", "parked:ci.red", "remediation-queue"]);
   });
 
   it("a merged run re-reads the labels and clears a parked label added meanwhile", async () => {
