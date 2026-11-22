@@ -120,6 +120,7 @@ for (const [name, make] of Object.entries(FIXTURES)) {
       const started = [];
       const r = await providerLanes({ provider: wrapped, laneArgs: () => ["--repo", "o/r"], ledgerFor, env: { GH_TOKEN: SECRET }, secrets: ["GH_TOKEN"], pollMs: 2 }).runOne(9, "staging", { onStart: (x) => started.push(x) });
       assert.equal(r.terminalReason, "merged");
+      await r.postRun?.(); // #5808: teardown runs after the result is handed back
       assert.deepEqual(atStart, [provider.idFor(9)]);
       assert.equal(ledgerFor(9).read(), null);
       const files = [JSON.stringify(started), JSON.stringify(r)];
