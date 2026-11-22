@@ -4471,6 +4471,18 @@ describe("host admission (#4105)", () => {
     assert.deepEqual(w.labels, []);
   });
 
+  it("ramping lanes are subtracted: deferred host.busy with the projected numbers; a passed admission is recorded (#5845)", async () => {
+    const w = withHost(world(), { ...host({ mem: 6000 }), rampingMb: () => 4096, rampingLanes: () => 2, laneFootprintMb: () => 2048 });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "host.busy");
+    assert.equal(r.detail, "host busy: projected mem 1.9G (free 5.9G − ramping 4G) < need 4G; retry in 60s");
+    assert.equal(w.ghCalls, 0);
+    let recorded = 0;
+    const ok = withHost(world(), { ...host(), recordAdmission: () => { recorded++; }, rampingMb: () => 0, rampingLanes: () => 0 });
+    assert.equal((await run(ok)).terminalReason, "merged");
+    assert.equal(recorded, 1);
+  });
+
   it("low tmp space on the run TMPDIR filesystem or on /tmp is deferred host.busy", async () => {
     for (const free of [{ "/tmp": 8192, "/home/x/.forge/tmp": 512 }, { "/tmp": 100, "/home/x/.forge/tmp": 8192 }]) {
       const w = withHost(world(), host({ free }));

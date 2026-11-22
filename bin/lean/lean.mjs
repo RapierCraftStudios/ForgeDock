@@ -694,6 +694,7 @@ export async function runCore(o) {
   }
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
     await flushInflight(); // #5334: a signal mid-attempt: the session's usage so far is recorded before RUN_TERMINAL
+    try { io.host?.recordPeakRss?.(Math.ceil(process.resourceUsage().maxRSS / 1024)); } catch { /* fail-open (#5845): the learned lane footprint is best effort */ }
     try { seqLease?.release(); } catch { /* fail-open */ }
     seqLease = null;
     try { surfaceClaim?.release(); } catch { /* fail-open */ }
@@ -1458,6 +1459,7 @@ export async function runCore(o) {
   if (io.host && o.admission?.enabled !== false) {
     const a = await checkAdmission({ cfg: o.admission, host: io.host });
     if (!a.ok) return { terminalReason: "deferred", code: OUTCOME_CODES.HOST_BUSY, detail: a.detail, retryInSeconds: ADMISSION_RETRY_SECONDS };
+    try { io.host.recordAdmission?.(); } catch { /* the ramp stamp is best effort (#5845) */ }
   }
   // ---- lane (#4125): worked out from the issue before any lease, comment or worktree; fail closed ----
   {

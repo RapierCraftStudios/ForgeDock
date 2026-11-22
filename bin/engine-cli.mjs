@@ -17,7 +17,7 @@ const RECOVERING_LABEL = "workflow:recovering";
 import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
-import { localLaneCap } from "./lean/admission.mjs";
+import { localLaneCap, ADMISSION_DEFAULTS } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
@@ -388,7 +388,7 @@ function readLeanSetting(key, cwd = process.cwd()) {
 export function liveLaneCap(globalParallel, { cfg = readAdmission(), host = { cores: () => cpus().length, memAvailableMb } } = {}) {
   return () => {
     let derived = null;
-    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb() }); } catch { derived = null; }
+    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb(), rampingMb: (() => { try { return host.rampingMb?.(cfg?.ramp_s ?? ADMISSION_DEFAULTS.ramp_s) ?? 0; } catch { return 0; } })() }); } catch { derived = null; }
     return derived === null ? globalParallel : globalParallel === null ? derived : Math.min(globalParallel, derived);
   };
 }
@@ -402,6 +402,7 @@ export function readAdmission(cwd = process.cwd()) {
       min_free_mem_mb: num(e.min_free_mem_mb ?? e.admission_min_free_mem_mb), min_free_tmp_mb: num(e.min_free_tmp_mb ?? e.admission_min_free_tmp_mb),
       max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core),
       lane_cpu_reservation: pos(e.lane_cpu_reservation ?? e.admission_lane_cpu_reservation), lane_mem_mb: pos(e.lane_mem_mb ?? e.admission_lane_mem_mb),
+      ramp_s: pos(e.ramp_s ?? e.admission_ramp_s), max_new_per_ramp: num(e.max_new_per_ramp ?? e.admission_max_new_per_ramp), // #5845: 0 = no rate limit
       overload_load_per_core: num(e.overload_load_per_core ?? e.admission_overload_load_per_core) }; // #5174: hostload.mjs overload hold
 
   } catch { return {}; }
@@ -2220,6 +2221,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
+  let rampProbe = {};
+  try { rampProbe = (deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe()); } catch { rampProbe = {}; } // #5845: the live cap subtracts lanes still ramping
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -2231,7 +2234,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
       ...(remote ? { remote } : {}),
