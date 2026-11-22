@@ -4223,7 +4223,7 @@ export async function runCore(o) {
       try { const { parsePolicy, POLICY_PATH } = await import("./release-config.mjs"); const d = defaults.find(Boolean); if (d) holdPolicy = parsePolicy(String(await git(["show", `origin/${d}:${POLICY_PATH}`]))).policy ?? null; } catch { holdPolicy = null; } // no policy file: default on
       for (;;) {
         const target = String(resumed?.base ?? lane ?? "");
-        const hold = await releaseMergeHold({ gh: ghc, repo, branch: target, defaults, enabled: holdMergesDuringReleaseCi, policy: holdPolicy, readActive: async () => { const { readActive } = await import("./release-ledger.mjs"); return readActive({ io: io.api ? io : ledgerIoFromGh(ghc), repo, credential: "driver" }); } }); // #5776: lanes have no io.api
+        const hold = await releaseMergeHold({ gh: ghc, repo, branch: target, defaults, enabled: holdMergesDuringReleaseCi, policy: holdPolicy, skipReleaseCi: (io.env ?? process.env).FORGE_RELEASE_FIX_LANE === "1", readActive: async () => { const { readActive } = await import("./release-ledger.mjs"); return readActive({ io: io.api ? io : ledgerIoFromGh(ghc), repo, credential: "driver" }); } }); // #5776: lanes have no io.api
         if (!hold.held) break;
         if (heldSince === null) { heldSince = now(); T.merge = [policyText, "merge.held_release"]; T.decisions.push(`merge.held_release: ${hold.reason}; PR #${pr} stays open and green`); ev({ event: "MERGE_HELD_RELEASE", pr, kind: hold.kind, releasePr: hold.pr ?? null }); }
         if (now() - heldSince >= ciMaxMinutes * 60000) return await finish("ci-pending", `PR #${pr} merge held ${ciMaxMinutes} min (${hold.reason}); rerun resumes the PR`, { pr });
