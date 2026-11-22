@@ -503,6 +503,23 @@ export function readExecution(cwd = process.cwd()) {
     return sec && typeof sec === "object" ? parseExecution(sec) : undefined;
   } catch { return undefined; }
 }
+/** #5748: forge.yaml sets a valid `execution.mode` (even `local`): the explicit opt-out from the public-repo default. */
+export function executionModeExplicit(cwd = process.cwd()) {
+  try { return ["local", "remote", "hybrid"].includes(String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution?.mode ?? "").trim()); } catch { return false; }
+}
+/** #5748: `exec` with the public-repo default (actions provider) applied; visibility is read once per repo and fails closed to private. */
+const visibilityCache = new Map();
+export async function withPublicDefault(exec, { repo, gh, deps = {}, cwd = process.cwd() } = {}) {
+  if (executionModeExplicit(cwd)) return exec;
+  const execMod = await import("./lean/execution.mjs");
+  const key = String(repo ?? "");
+  let isPublic = deps.repoPublic;
+  if (isPublic === undefined) {
+    if (!visibilityCache.has(key)) visibilityCache.set(key, await execMod.repoIsPublic({ repo, gh }));
+    isPublic = visibilityCache.get(key);
+  }
+  return execMod.resolveDefaultExecution(exec, { isPublic });
+}
 /**
  * forge.yaml `learned.test_commands` (#4240): the repo's declared check commands, run by the core path in the lane
  * worktree before the PR. A block list (`  test_commands:` then `    - "cmd"` or `    - cmd`); parseForgeYaml reads
@@ -1017,8 +1034,9 @@ export async function runFromCli(argv, deps = {}) {
   // #5542: placement. A lane already placed (--placement, a batch lane, --adopt, --recover) or forced local runs here; otherwise a
   // remote or hybrid `execution:` hands the single issue to the same batch placement `orchestrate` uses.
   if (enginePath !== "full") {
-    const exec = deps.execution !== undefined ? deps.execution : readExecution();
     const placed = placementWhere || argv.includes("--adopt") || recover || (deps.env ?? process.env).FORGEDOCK_BATCH_ID;
+    const exec0 = deps.execution !== undefined ? deps.execution : readExecution();
+    const exec = deps.execution === undefined && !placed && !argv.includes("--local") ? await withPublicDefault(exec0, { repo, gh: (a) => io.gh(a), deps }) : exec0; // #5748: no visibility lookup for a lane already placed
     const wantsRemote = exec && (exec.mode === "remote" || (exec.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1));
     if (argv.includes("--local")) console.log("placement: local (--local)");
     else if (!placed && wantsRemote) {
@@ -1977,7 +1995,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       return l.runOne(n, ln, ctx);
     }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
-    const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
+    const exec = deps.execution !== undefined ? deps.execution : await withPublicDefault(readExecution(cwd), { cwd, repo, gh: (a) => leanIo.gh(a, { cwd }), deps }); // #5748
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
@@ -1985,7 +2003,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
-      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env, prefetch: (n) => prefetchOf.get(n) ?? [], ...(deps.sandboxFetch ? { fetchFn: deps.sandboxFetch } : {}) });
+      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, ...(deps.actionsApi ? { actionsApi: deps.actionsApi } : {}), image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env, prefetch: (n) => prefetchOf.get(n) ?? [], ...(deps.sandboxFetch ? { fetchFn: deps.sandboxFetch } : {}) });
       const { makeLedger } = await import("./lean/ledger.mjs");
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};

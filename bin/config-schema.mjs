@@ -65,6 +65,9 @@ export const TYPES = {
   "ci.budget.max_ci_jobs": "number",
   "ci.budget.monthly_minutes": "number",
   "ci.budget.shared_regression_job": "scalar",
+  "execution.provider": { enum: ["local", "container", "remote", "pool", "actions"] }, // #5748
+  "execution.ci_reserve": "number",
+  "execution.job_limit": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "deploy.engine.enabled": "bool",
   "deploy.engine.stage_timeout_s": "number",
