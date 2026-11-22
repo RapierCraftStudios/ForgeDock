@@ -3535,3 +3535,5 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 ## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
+
+#5793 page capture scope: `page-capture.mjs` `changedRoutes` also maps `designOnlyFiles` through `pageRouteOf`, so a `pages.design_only` app page is captured (it has no SEO/GEO brief but `pageFailures` still wants its visual check; `pageFiles` still excludes it). Only Next `app/**/page.*` files have a route: other `pages.routes`-glob files get no capture and still need `page_gate.screenshots`, which `pagePlanNote` now says when `pages.capture` is set. Without `pages.capture` the prompt is unchanged. Cost: 0 LLM calls.
