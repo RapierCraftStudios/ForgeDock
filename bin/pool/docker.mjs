@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+/** #5757: work-dir and cache sweeps walk big trees (node_modules): 10 min, not the 120 s of a small rm. */
+export const SWEEP_TIMEOUT_MS = 10 * 60000;
+const SWEEP_SRC = new URL("./cache-sweep.mjs", import.meta.url);
 
 function docker(args, { timeoutMs = 120000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -57,11 +62,18 @@ export const dockerCli = {
   },
   async build(dir, tag, buildArgs = {}) { return docker(["build", "-q", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000 }); },
   /** #5696: removes one lane worktree (/cache/work/<id>) from a cache volume. */
-  async removeWorkDir(volume, image, workDir) { await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", 'rm -rf -- "$1"', "sh", workDir], { timeoutMs: 120000 }); },
+  async removeWorkDir(volume, image, workDir) { await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", 'rm -rf -- "$1"', "sh", workDir], { timeoutMs: SWEEP_TIMEOUT_MS }); },
   /** #5696: removes every /cache/work/* dir of a cache volume except the kept ones (full paths). */
   async pruneWorkDirs(volume, image, keep) {
     const script = 'for d in /cache/work/* /cache/work/.[!.]*; do [ -e "$d" ] || continue; for k in "$@"; do [ "$d" = "$k" ] && continue 2; done; rm -rf -- "$d"; done';
-    await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", script, "sh", ...keep], { timeoutMs: 120000 });
+    await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", script, "sh", ...keep], { timeoutMs: SWEEP_TIMEOUT_MS });
+  },
+  /** #5757: creates a volume carrying labels (idempotent: an existing volume keeps its labels). */
+  async createVolume(name, labels = []) { await docker(["volume", "create", ...labels.flatMap((l) => ["--label", l]), name], { timeoutMs: 20000 }); },
+  /** #5757: runs the in-volume cache sweep (bin/pool/cache-sweep.mjs) in a lane-image container; resolves its JSON result, rejects on failure or timeout. */
+  async sweepCache(volume, image, opts) {
+    const out = await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "-e", `CS_CACHE_SWEEP_OPTS=${JSON.stringify(opts)}`, "-e", `CS_CACHE_SWEEP_SRC=${readFileSync(SWEEP_SRC, "utf8")}`, "--entrypoint", "sh", image, "-c", 'printf %s "$CS_CACHE_SWEEP_SRC" > /tmp/cache-sweep.mjs && exec node /tmp/cache-sweep.mjs'], { timeoutMs: SWEEP_TIMEOUT_MS });
+    return JSON.parse(out.split("\n").filter(Boolean).pop());
   },
   /** Removes files the root-owned lane container wrote into a bind mount, using the lane image itself. */
   async wipe(dir, image) { await docker(["run", "--rm", "--network", "none", "-v", `${dir}:/d`, "--entrypoint", "sh", image, "-c", "rm -rf /d/* /d/.[!.]* 2>/dev/null; true"], { timeoutMs: 120000 }); },
