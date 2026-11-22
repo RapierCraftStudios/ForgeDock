@@ -195,6 +195,16 @@ describe("#5314 dispatch stall and first-hour report", () => {
   const st = (extra = {}) => ({ order: [1, 2, 3], deps: { 3: [1] }, results: { 1: { outcome: "merged" } }, running: {}, pending: [2, 3], parallel: 2, ...extra });
   const stall = (state, o = {}) => evaluateDispatchStall(state, { lastProgressMs: NOW - 12 * MIN, now: NOW, windowMin: 10, ...o });
 
+  it("#5745: gates name the preflight check holding admission; without gates the detail is unchanged", () => {
+    const plain = stall(st());
+    assert.equal(plain.gates, undefined); assert.ok(!plain.detail.includes("admission held by"));
+    const r = stall(st(), { hosted: true, gates: [{ code: "preflight.pool_version", detail: "agent legion runs image version 2.0.0, CLI is 1.61.1" }] });
+    assert.deepEqual(r.gates, ["preflight.pool_version"]);
+    assert.ok(r.detail.startsWith(plain.detail.replace("no runner hosts the batch", "the runner is alive but not dispatching")));
+    assert.match(r.detail, /admission held by preflight\.pool_version: agent legion runs image version 2\.0\.0/);
+    assert.equal(stall(st(), { gates: [] }).detail, plain.detail);
+  });
+
   it("ready pending issues, a free lane and no progress for the window: stalled, naming the batch's ready issues and who hosts", () => {
     const r = stall(st());
     assert.equal(r.code, "dispatch-stalled");
