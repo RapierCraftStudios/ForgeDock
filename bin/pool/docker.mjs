@@ -34,6 +34,8 @@ export const dockerCli = {
     try { await docker(["kill", `--signal=${signal}`, name], { timeoutMs: 20000 }); return true; }
     catch (e) { if (/No such container|is not running/i.test(e.stderr ?? "")) return false; throw e; }
   },
+  /** #5856: re-weights a running container (throttle/unthrottle a borrowed lane); a gone container is not an error. */
+  async update(name, { cpuShares }) { try { await docker(["update", "--cpu-shares", String(cpuShares), name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
   async listLabelled(label) {
     const out = await docker(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"], { timeoutMs: 20000 });
     return out ? out.split("\n").filter(Boolean) : [];

@@ -228,6 +228,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const envSnap = settings.forgeYaml ? readEnvSnapshots(settings.forgeYaml) : null; // env.snapshots: off unless enabled
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
+        priority: "borrow", // #5856: lanes run on leftover capacity; a pool with reservations throttles/drains them for reserved work
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         ...(settings.laneTools?.length ? { lane_tools: settings.laneTools } : {}), // #5650: per-repo lane image
         ...(envSnap?.enabled ? { env_snapshots: { enabled: true, ready: envSnap.ready, keep: envSnap.keep, max_age_days: envSnap.maxAgeDays } } : {}), // the agent builds and stages snapshots outside the lane
