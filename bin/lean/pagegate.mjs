@@ -84,6 +84,31 @@ function changedByFile(diff) {
   return out;
 }
 
+/** Added and removed lines per file, kept apart (in diff order). */
+function signedByFile(diff) {
+  const out = {}; let cur = null;
+  for (const line of String(diff ?? "").split("\n")) {
+    if (line.startsWith("+++ ")) { cur = line.replace(/^\+\+\+ (?:b\/)?/, "").trim(); if (cur === "/dev/null") cur = null; continue; }
+    if (line.startsWith("--- ")) continue;
+    if (cur && (line.startsWith("+") || line.startsWith("-"))) (out[cur] ??= { add: [], del: [] })[line[0] === "+" ? "add" : "del"].push(line.slice(1));
+  }
+  return out;
+}
+const VALUE_ATTR_RE = /\b(href|src|alt|target|rel|title|aria-[\w-]+)\s*=\s*(?:"[^"]*"|'[^']*'|\{[^{}]*\})/g;
+const skeleton = (l) => l.replace(VALUE_ATTR_RE, "$1=_").replace(/\s+/g, " ").trim();
+/** #5729: true when every markup line changed only the VALUE of an href/src/alt/target/rel/title/aria-* attribute (same tags, same classes, no import/export). */
+function attributeValueOnly(c) {
+  const a = (c?.add ?? []).filter((l) => MARKUP_RE.test(l)), d = (c?.del ?? []).filter((l) => MARKUP_RE.test(l));
+  if (!a.length || a.length !== d.length || [...a, ...d].some((l) => /^\s*(?:import|export)\b/.test(l))) return false;
+  return a.every((l, i) => skeleton(l) === skeleton(d[i]));
+}
+
+/** #5729: true when every row is a spec or visual-evidence row a builder resume cannot satisfy (needs /design or a browser the builder may not install). */
+export function specOnlyFailures(rows) {
+  const kinds = ["page_design_missing", "design_spec_missing", "page_visual_missing"];
+  return Array.isArray(rows) && rows.length > 0 && rows.every((r) => kinds.includes(r?.kind));
+}
+
 /**
  * #5648: how a diff touches a page file: "generated" (exempt: a generated/ path, a `pages.generated` glob or an @generated header),
  * "new" (added, or unknown: no `added` list or no diff for the file fails closed), "rewrite" (a markup/style/import change, or churn at
@@ -98,7 +123,7 @@ export function pageChange(file, { added = null, diff = "", threshold = 0.6, gen
   if (!Array.isArray(added) || added.map(norm).includes(f)) return "new";
   const lines = changedByFile(diff)[f];
   if (!lines?.length) return "new";
-  if (lines.some((l) => MARKUP_RE.test(l))) return "rewrite";
+  if (lines.some((l) => MARKUP_RE.test(l)) && !attributeValueOnly(signedByFile(diff)[f])) return "rewrite"; // #5729: an href/prop value edit keeps the tag skeleton: copy
   const total = src ? src.split("\n").length : 0;
   return total && lines.length / total >= threshold ? "rewrite" : "copy";
 }

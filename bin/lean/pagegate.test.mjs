@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePagesConfig, pageChange, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved, isShotRef } from "./pagegate.mjs";
+import { parsePagesConfig, pageChange, specOnlyFailures, pageFiles, designOnlyFiles, contractBriefProblems, pageFailures, designSpecApproved, designHold, designLabelApproved, isShotRef } from "./pagegate.mjs";
 import { pagePlanNote, domainChecksBlock } from "./prompts.mjs";
 import { pathDomains } from "./review-trigger.mjs";
 import { validateContract, precheck } from "./conformance.mjs";
@@ -159,5 +159,45 @@ describe("copy-only edits to existing pages (#5648)", () => {
     assert.deepEqual(kinds(f), ["page_visual_failed"]);
     assert.match(f[0].detail, /blank page/);
     assert.equal(isShotRef("see PR"), false);
+  });
+});
+
+describe("attribute-only page edits and spec-only failures (#5729)", () => {
+  const page = "web/src/app/(site)/contact/page.tsx";
+  const body = () => Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+  const d = (del, add) => `+++ b/${page}\n${del.flatMap((l) => l.split("\n")).map((l) => `-${l}`).join("\n")}\n${add.flatMap((l) => l.split("\n")).map((l) => `+${l}`).join("\n")}\n`;
+  const o = (diff) => ({ added: [], diff, readFile: body });
+  const link = (href, extra = "") => `      <Link href="${href}"${extra} className="btn">Book a demo</Link>`;
+  it("href-only edit on a JSX line classifies copy for 5729", () => {
+    assert.equal(pageChange(page, o(d([link("https://calendly.com/x")], [link("/contact")]))), "copy");
+    assert.equal(pageChange(page, o(d([link("/a", ' target="_self"')], [link("/b", ' target="_blank"')]))), "copy");
+  });
+  it("a tag, className, attribute or import change stays rewrite", () => {
+    assert.equal(pageChange(page, o(d([link("/a")], [`${link("/a")}\n      <Badge />`]))), "rewrite");
+    assert.equal(pageChange(page, o(d([link("/a")], [link("/a").replace("btn", "btn-lg")]))), "rewrite");
+    assert.equal(pageChange(page, o(d([link("/a")], [link("/a", " download")]))), "rewrite");
+    assert.equal(pageChange(page, o(d(['import a from "a"'], ['import a from "b"']))), "rewrite");
+  });
+  it("href-only edit needs no spec", async () => {
+    const diff = d([link("/a")], [link("/b")]);
+    const f = await pageFailures({ cfg, files: [page], diff, readFile: body, tracked: [page], added: [], designApproved: false });
+    assert.ok(!f.some((x) => x.kind === "page_design_missing"));
+  });
+  it("rewrite with no spec yields one spec failure for 5729", async () => {
+    const diff = d([link("/a")], [`${link("/a")}\n      <Badge />`]);
+    const pf = await pageFailures({ cfg, files: [page], diff, readFile: body, tracked: [page], added: [], designApproved: false });
+    const { designFailures } = await import("./design-gate.mjs");
+    const dcfg = { system: [], routes: ["web/src/app/**/page.tsx"], exclude: [], gate: "blocking", specLabel: "design:approved", neededLabel: "design:needed", viewports: [390, 1440], requireVisual: true };
+    const df = designFailures({ cfg: dcfg, files: [page], added: [], diff, readFile: body, covered: [page] });
+    const all = [...pf, ...df];
+    assert.equal(all.filter((x) => x.kind === "page_design_missing" || x.kind === "design_spec_missing").length, 1);
+  });
+  it("spec-only failure rows include page_visual_missing without capture for 5729", async () => {
+    const diff = d([link("/a")], [`${link("/a")}\n      <Badge />`]);
+    const pf = await pageFailures({ cfg, files: [page], diff, readFile: body, tracked: [page], added: [], designApproved: false });
+    assert.ok(pf.some((x) => x.kind === "page_visual_missing"));
+    assert.equal(specOnlyFailures(pf.filter((x) => ["page_design_missing", "page_visual_missing"].includes(x.kind))), true);
+    assert.equal(specOnlyFailures([{ kind: "page_design_missing" }, { kind: "page_metadata_missing" }]), false);
+    assert.equal(specOnlyFailures([]), false);
   });
 });
