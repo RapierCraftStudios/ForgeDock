@@ -1,0 +1,96 @@
+name: ForgeDock lane
+
+# #5748: a ForgeDock lane on a GitHub-hosted runner. Dispatched by the ForgeDock orchestrator only (bin/lean/sandbox-actions.mjs);
+# never from pull_request or pull_request_target, so a fork cannot trigger a lane or reach a secret. The Claude credential is
+# a secret of the `forgedock-lane` environment (restrict it to feat/* branches and the ForgeDock app/bot in the repo settings).
+# Logs are public on a public repo: no step echoes the environment, and the result goes to an issue comment.
+
+run-name: forgedock-lane ${{ inputs.lane_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane_id:
+        description: ForgeDock lane id (fdrsbx-<batch>-<issue>)
+        required: true
+      issue:
+        description: Issue number
+        required: true
+      batch:
+        description: ForgeDock batch id
+        required: false
+      ref:
+        description: Base lane branch the lane starts from and the workflow runs on
+        required: true
+      args:
+        description: JSON array of extra run-issue arguments
+        required: false
+        default: "[]"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: forgedock-lane-${{ inputs.lane_id }}
+  cancel-in-progress: false
+
+jobs:
+  lane:
+    runs-on: ubuntu-latest
+    environment: forgedock-lane
+    timeout-minutes: 355
+    steps:
+      - name: Validate inputs
+        env:
+          LANE_ID: ${{ inputs.lane_id }}
+          ISSUE: ${{ inputs.issue }}
+          LANE_REF: ${{ inputs.ref }}
+        run: |
+          [[ "$LANE_ID" =~ ^fdrsbx-[A-Za-z0-9._-]+-[0-9]+$ ]] || { echo "bad lane_id"; exit 1; }
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "bad issue"; exit 1; }
+          [[ "$LANE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && "$LANE_REF" != *..* ]] || { echo "bad ref"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Restrict pushes to feat/* branches
+        run: |
+          cat > .git/hooks/pre-push <<'HOOK'
+          #!/bin/bash
+          while read -r lref lsha rref rsha; do
+            case "$rref" in refs/heads/feat/*|*/forge-salvage/*) ;; *) echo "blocked: lanes push to feat/* only ($rref)"; exit 1 ;; esac
+          done
+          HOOK
+          chmod +x .git/hooks/pre-push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ForgeDock
+        run: npm install -g forgedock
+      - name: Run lane
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORGEDOCK_BATCH_ID: ${{ inputs.batch }}
+          ISSUE: ${{ inputs.issue }}
+          LANE_ARGS: ${{ inputs.args }}
+          RESULT_FILE: ${{ runner.temp }}/lane-result.json
+        run: |
+          mapfile -d '' -t ARGS < <(node -e 'process.stdout.write(JSON.parse(process.env.LANE_ARGS).join("\0"))')
+          # checkpoints are pushed by run-issue; stop before the job limit so the result step still runs
+          timeout 345m forgedock run-issue "$ISSUE" "${ARGS[@]}" --result-file "$RESULT_FILE" > /dev/null 2>&1 || true
+      - name: Post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ inputs.issue }}
+          LANE_ID: ${{ inputs.lane_id }}
+          RESULT_FILE: ${{ runner.temp }}/lane-result.json
+        run: |
+          [ -s "$RESULT_FILE" ] || exit 0
+          { echo "<!-- FORGE:LANE-RESULT $LANE_ID -->"; echo '```json'; cat "$RESULT_FILE"; echo; echo '```'; } > "$RUNNER_TEMP/body.md"
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/body.md"
