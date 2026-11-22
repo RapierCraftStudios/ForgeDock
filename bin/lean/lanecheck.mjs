@@ -77,13 +77,20 @@ export async function checkPoolAuth({ exec, router = null, credential = () => nu
   return pass(code, `token resolved from ${source}${r ? "" : "; router unreachable (not an auth failure)"}`, "remote");
 }
 
-/** Every online pool agent runs the CLI's version. `agents` is the router's `GET /agents` list (each spreads versionOf: version, image). */
+/** #5745: `1.61.1`, `v1.61.1` or `1.61.1-rc.1` as [major, minor, patch]; null when it is not a semver. */
+const semverOf = (v) => { const m = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.+-]*)?$/.exec(String(v ?? "").trim()); return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null; };
+/** Same major version: the lane protocol is compatible across minor and patch releases. */
+const sameMajor = (a, b) => { const x = semverOf(a), y = semverOf(b); return !!x && !!y && x[0] === y[0]; };
+
+/** Every online pool agent runs the CLI's version, or a same-major one (#5745: skew warns in the detail, a major skew or an unparseable version blocks). `agents` is the router's `GET /agents` list (each spreads versionOf: version, image). */
 export function checkPoolVersion({ exec, agents = null, cliVersion }) {
   const code = C.PREFLIGHT_POOL_VERSION;
   if (!usesPool(exec)) return pass(code, "skipped: no remote or hybrid execution", "remote");
   if (!Array.isArray(agents)) return pass(code, "skipped: pool agents not readable", "remote");
-  const bad = agents.filter((a) => a?.ok !== false && typeof a?.version === "string" && a.version !== cliVersion);
-  if (!bad.length) return pass(code, `${agents.length} agent(s) at ${cliVersion}`, "remote");
+  const skewed = agents.filter((a) => a?.ok !== false && typeof a?.version === "string" && a.version !== cliVersion);
+  if (!skewed.length) return pass(code, `${agents.length} agent(s) at ${cliVersion}`, "remote");
+  const bad = skewed.filter((a) => !sameMajor(a.version, cliVersion));
+  if (!bad.length) return pass(code, skewed.map((a) => `agent ${a.name ?? "?"} runs ${a.version}, CLI is ${cliVersion} (compatible, same major)`).join("; ") + `; upgrade: ${UPGRADE_COMMAND}`, "remote");
   return fail(code, bad.map((a) => `agent ${a.name ?? "?"} runs image version ${a.version}, CLI is ${cliVersion}`).join("; ") + `; upgrade: ${UPGRADE_COMMAND}`, "remote");
 }
 

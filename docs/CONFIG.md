@@ -970,9 +970,9 @@ One row per key path of `POLICY_SCHEMA` (`bin/lean/release-config.mjs`). `<name>
 | `risk.rules[].when.contract` | boolean | none | The change touches a contract. |
 | `risk.rules[].when.rolled_units_gt` | number | none | More than this many units roll. |
 | `risk.rules[].when.diff_lines_gt` | number | none | More than this many changed lines. |
-| `risk.rules[].when.requires` | string | none | Named requirement that must hold. |
 | `risk.rules[].risk` | low\|medium\|high | none | `low`, `medium` or `high`. |
 | `risk.rules[].forces` | string | none | Pipeline the rule forces. |
+| `risk.rules[].requires` | string | none | Named requirement (for example `rollout-declaration`) reported with the risk when the rule matches. |
 | `features` | object | - | Feature wave policy (#5571). |
 | `features.flag_policy` | require\|warn\|off | none | `require` refuses a feature wave that adds no rollout key, `warn` warns, `off` does nothing; `lanes.<name>.flag_policy` wins. |
 | `plan` | object | - | The release plan. |
