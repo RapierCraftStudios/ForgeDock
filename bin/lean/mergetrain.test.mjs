@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
-import { createTrain, formatTrainSummary, judgeChecks, p50, rollupStates } from "./mergetrain.mjs";
+import { createMergeTrain, formatTrainSummary, judgeChecks, p50, rollupStates } from "./mergetrain.mjs";
 
 const H = "a".repeat(40);
 /** A fake gh over `prs`: {pr: {state, head, mergeable, mergeState, base, branch, checks}}; records every call. */
@@ -31,7 +31,7 @@ const entry = (issue, pr, extra = {}) => ({ issue, pr, head: H, required: ["buil
 describe("mergetrain (#5836)", () => {
   it("merges a green PR at the reviewed head, then closes, labels and deletes the branch", async () => {
     const f = fake({ 5: { head: H, checks: [ok("build")] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
     const ev = await t.tick();
     assert.deepEqual(ev.map((e) => [e.kind, e.issue]), [["merged", 1]]);
     assert.deepEqual(f.calls.find((a) => a[1] === "merge").slice(-2), ["--match-head-commit", H]);
@@ -42,20 +42,20 @@ describe("mergetrain (#5836)", () => {
   });
   it("merges at most one PR per base per poll; another base merges in the same poll", async () => {
     const f = fake({ 5: { head: H, checks: [ok("build")] }, 6: { head: H, checks: [ok("build")] }, 7: { head: H, base: "milestone/x", checks: [ok("build")] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5)); t.add(entry(2, 6)); t.add(entry(3, 7, { lane: "milestone/x" }));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5)); t.add(entry(2, 6)); t.add(entry(3, 7, { lane: "milestone/x" }));
     assert.deepEqual((await t.tick()).map((e) => e.issue), [1, 3]);
     assert.deepEqual((await t.tick()).map((e) => e.issue), [2]);
   });
   it("keeps a pending PR waiting and does not merge it", async () => {
     const f = fake({ 5: { head: H, checks: [{ name: "build", status: "IN_PROGRESS", conclusion: "" }] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
     assert.deepEqual(await t.tick(), []);
     assert.equal(t.size(), 1);
     assert.ok(!f.calls.some((a) => a[1] === "merge"));
   });
   it("updates a green PR that is behind its base, then merges once the head is current", async () => {
     const f = fake({ 5: { head: H, mergeState: "BEHIND", checks: [ok("build")] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
     assert.deepEqual(await t.tick(), []);
     assert.ok(f.calls.some((a) => a.slice(0, 3).join(" ") === "pr update-branch 5"));
     assert.equal(t.stats().syncs, 1);
@@ -63,7 +63,7 @@ describe("mergetrain (#5836)", () => {
   });
   it("hands a red PR back as ci.red naming the failing checks and their URLs", async () => {
     const f = fake({ 5: { head: H, checks: [{ name: "build", conclusion: "FAILURE", detailsUrl: "https://ci/run/9" }] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5));
     const [e] = await t.tick();
     assert.equal(e.kind, "handback"); assert.equal(e.code, "ci.red");
     assert.match(e.detail, /- build https:\/\/ci\/run\/9/);
@@ -72,25 +72,25 @@ describe("mergetrain (#5836)", () => {
   });
   it("hands a conflicting PR back as base.conflict and a moved head as merge.head_mismatch", async () => {
     const f = fake({ 5: { head: H, mergeable: "CONFLICTING", checks: [ok("build")] }, 6: { head: "c".repeat(40), checks: [ok("build")] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5)); t.add(entry(2, 6));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5)); t.add(entry(2, 6));
     assert.deepEqual((await t.tick()).map((e) => e.code), ["base.conflict", "merge.head_mismatch"]);
     assert.ok(!f.calls.some((a) => a[1] === "merge"));
   });
   it("a merge refused because the head moved is handed back; a transient failure is retried", async () => {
     const moved = fake({ 5: { head: H, checks: [ok("build")] } }, { mergeError: Object.assign(new Error("Head branch was modified"), { stderr: "" }) });
-    const t = createTrain({ gh: moved.gh, repo: "o/r" }); t.add(entry(1, 5));
+    const t = createMergeTrain({ gh: moved.gh, repo: "o/r" }); t.add(entry(1, 5));
     assert.equal((await t.tick())[0].code, "merge.head_mismatch");
     const flaky = fake({ 5: { head: H, checks: [ok("build")] } }, { mergeError: new Error("502 bad gateway") });
-    const t2 = createTrain({ gh: flaky.gh, repo: "o/r" }); t2.add(entry(1, 5));
+    const t2 = createMergeTrain({ gh: flaky.gh, repo: "o/r" }); t2.add(entry(1, 5));
     assert.deepEqual(await t2.tick(), []); assert.equal(t2.size(), 1);
   });
   it("persists through snapshot and restore, with stats and the p50 wait", async () => {
     let clock = 0;
     const f = fake({ 5: { head: H, checks: [ok("build")] }, 6: { head: H, base: "other", checks: [ok("build")] } });
-    const t = createTrain({ gh: f.gh, repo: "o/r", now: () => clock }); t.add(entry(1, 5)); t.add(entry(2, 6, { lane: "other" }));
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r", now: () => clock }); t.add(entry(1, 5)); t.add(entry(2, 6, { lane: "other" }));
     clock = 60000; await t.tick();
     const snap = JSON.parse(JSON.stringify(t.snapshot()));
-    const t2 = createTrain({ gh: f.gh, repo: "o/r" }); t2.restore(snap);
+    const t2 = createMergeTrain({ gh: f.gh, repo: "o/r" }); t2.restore(snap);
     assert.equal(t2.stats().merged, 2); assert.deepEqual(t2.stats().waits, [60000, 60000]);
     assert.equal(p50([30000, 60000, 90000]), 60000); assert.equal(p50([]), null);
   });

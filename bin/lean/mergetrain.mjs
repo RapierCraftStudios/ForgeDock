@@ -53,7 +53,7 @@ export function formatTrainSummary(stats) {
  * @param {() => number} [o.now]
  * @param {object|null} [o.saved]  a prior `snapshot()` (resume)
  */
-export function createTrain({ gh, repo, now = () => Date.now(), saved = null }) {
+export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = null }) {
   const entries = new Map((saved?.entries ?? []).map((e) => [e.issue, { ...e }]));
   const stats = { merged: saved?.stats?.merged ?? 0, handedBack: { ...(saved?.stats?.handedBack ?? {}) }, waits: [...(saved?.stats?.waits ?? [])], syncs: saved?.stats?.syncs ?? 0 };
 

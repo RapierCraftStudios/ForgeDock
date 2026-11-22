@@ -2053,7 +2053,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
-  const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createTrain({ gh: (a) => leanIo.gh(a), repo })) : null; // #5836: off (default) builds nothing
+  const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createMergeTrain({ gh: (a) => leanIo.gh(a), repo })) : null; // #5836: off (default) builds nothing
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
   const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
   const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
