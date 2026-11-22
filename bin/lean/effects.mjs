@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
+import { runApiCall, apiKeyPresent, ApiRunnerError } from "./api-runner.mjs";
+import { splitCacheablePrefix } from "./prompts.mjs";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
@@ -132,8 +134,17 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
   return ["--settings", JSON.stringify({ env: ownedModelEnv(subagentModel), includeCoAuthoredBy: false, attribution: { commit: "", pr: "" }, ...(Object.keys(hooks).length ? { hooks } : {}) })];
 };
 
-export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
+export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox(), apiRoles = [], apiFallback = "cli", apiRunner = runApiCall, env: apiEnv = process.env } = {}) {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, apiEligible = false, apiRoles: callRoles = null, apiFallback: callFallback = null, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
+    // #5821: a configured one-shot role with a key and an eligible prompt is one Messages API call; any failure falls back to the CLI (lean.api_fallback=cli) or throws (fail)
+    const roles = callRoles ?? apiRoles, fallback = callFallback ?? apiFallback;
+    if (apiEligible && !resume && roles.includes(role) && !agents) {
+      if (!apiKeyPresent(apiEnv)) { if (fallback === "fail") throw new ApiRunnerError("auth", `lean.api_roles includes ${role} but ANTHROPIC_API_KEY is not set`); }
+      else {
+        try { return await apiRunner({ model, system, ...splitCacheablePrefix(prompt), maxMs, env: apiEnv }); }
+        catch (e) { if (fallback === "fail") throw e; }
+      }
+    }
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
     const bin = pinnedBin || resolveClaudeCliBinary(cwd) || resolveSpawn("claude", []).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
     const caps = getClaudeCliCapabilities(cwd);
@@ -150,7 +161,7 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
       baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses), // #4410: tool calls per turn, re-reads
-      endTokens: r.endTokens ?? null, toolUses: Array.isArray(r.toolUses) ? r.toolUses : null }; // #5812: the route hand-off sizes the plan session and lists what it read
+      endTokens: r.endTokens ?? null, toolUses: Array.isArray(r.toolUses) ? r.toolUses : null, route: "cli" }; // #5812: the route hand-off sizes the plan session and lists what it read
   };
 }
 

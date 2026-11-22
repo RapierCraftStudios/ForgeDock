@@ -603,6 +603,15 @@ export function reproFlagNote(flag) {
   return `\n<repro_quality>${flag}: the repro_test ${why}. Accept or reject it explicitly in a row (a rejection is a failing row naming the behaviour the test must exercise).</repro_quality>`;
 }
 
+/**
+ * #5821: split a reviewer/verifier prompt into the stable shared prefix (issue, contract, rubric, diff: everything through
+ * the last `</diff>`) and the variable tail (structure, domain checks, relaxations). prefix + tail is the prompt, unchanged.
+ */
+export function splitCacheablePrefix(prompt) {
+  const p = String(prompt ?? ""), m = "</diff>", i = p.lastIndexOf(m);
+  return i < 0 ? { prefix: p, tail: "" } : { prefix: p.slice(0, i + m.length), tail: p.slice(i + m.length) };
+}
+
 export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [], reproFlag = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out

@@ -3528,3 +3528,9 @@ forge.yaml `recurrence:` (`parseRecurrenceConfig`, read by `engine-cli.mjs` `rea
 ## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
+
+## API route for one-shot roles (#5821)
+
+`lean.api_roles` in forge.yaml (list of `reviewer`, `verifier`, `grouper`; default empty) runs those roles as one Messages API call (`bin/lean/api-runner.mjs`) instead of a CLI session; `lean.api_fallback` is `cli` (default: a missing `ANTHROPIC_API_KEY`, an API error or an ineligible call runs the CLI) or `fail` (throw). Routing lives in `makeLeanRunner` (`effects.mjs`); a call is eligible only when `lean.mjs` sets `apiEligible`: the whole diff is embedded (no omitted-files note, so no file reads are needed), no `relaxations`, no resume. The request puts `cache_control` on the system block and the shared prefix (`splitCacheablePrefix` in `prompts.mjs`: everything through `</diff>`); the variable tail is uncached. Attempt records carry `route: api|cli`. Builder, fix-round and resume sessions stay on the CLI.
+
+Why this differs from #5347 (call batching, no role left the CLI) and #2385/#2413 (API caching in the older `bin/runner.mjs`, reverted, reason unrecorded): a single runner seam, an already-embedded bounded diff, a CLI fallback, default off. Measure with `node bin/lean/api-report.mjs <telemetry.jsonl> <cutoff>` (fresh CLI sessions per issue, cache-write share, cost per issue, before/after); check reviewer parity with `node bin/lean/api-parity.mjs <prompt-file>` (needs a key; not CI).

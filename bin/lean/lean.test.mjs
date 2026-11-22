@@ -9638,3 +9638,24 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
   });
 });
+
+describe("#5821 api route eligibility at the reviewer and verifier call sites", () => {
+  const capture = (w) => { const seen = [], orig = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, apiEligible: c.apiEligible ?? false, apiRoles: c.apiRoles ?? null, apiFallback: c.apiFallback ?? null }); return orig(c); }; return seen; };
+  it("default config passes no api config; the reviewer is API-eligible and unchanged text reaches the runner", async () => {
+    const w = world(), seen = capture(w), dir = tmpDir("core-api-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const rev = seen.find((c) => c.role === "reviewer");
+    assert.equal(rev.apiEligible, true); assert.equal(rev.apiRoles, null);
+    assert.equal(seen.find((c) => c.role === "builder").apiEligible, false);
+  });
+  it("configured api roles and fallback reach the runner; a reviewer reply from the API route still merges and records the route", async () => {
+    const w = world(), dir = tmpDir("core-api-"), seen = [], orig = w.io.runner;
+    w.io.runner = async (c) => { seen.push(c); const r = await orig(c); return c.role === "reviewer" ? { ...r, route: "api" } : r; };
+    const r = await run(w, { dir, apiRoles: ["reviewer"], apiFallback: "fail" });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(seen.find((c) => c.role === "reviewer").apiRoles, ["reviewer"]);
+    assert.equal(seen.find((c) => c.role === "reviewer").apiFallback, "fail");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.route === "api"));
+  });
+});

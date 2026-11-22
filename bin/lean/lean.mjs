@@ -428,7 +428,7 @@ export async function runCore(o) {
     if (killed && !r?.usage) usageUnknown = true;
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: est ?? num(r?.costUsd), cost_usd_delta: c.delta, ...(est != null ? { cost_estimated: true } : {}), ...(killed && !r?.usage ? { usage_unknown: true } : {}), cost_usd_session: c.session, model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
-      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: r?.laneProfile ?? laneProfile.name, ...expTag }; // #4410, #4629
+      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: r?.laneProfile ?? laneProfile.name, ...(r?.route ? { route: r.route } : {}), ...expTag }; // #4410, #4629
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
@@ -964,7 +964,7 @@ export async function runCore(o) {
       let watch = null; // #5268: the shim execs claude (same pid) after spawn, so keep reading until the account shows
       const spawnHook = smartRotator ? { onSpawn: (child, ...rest) => { if (account === null && !watch) { const pid = child?.pid ?? child; watch = watchAccount(() => rotator.accountOfPid(pid), { onFound: (a) => { account = a; } }); } return args.onSpawn?.(child, ...rest); } } : {};
       const pin = pinned ? { ...(pinned.bin ? { bin: pinned.bin } : {}) } : {};
-      try { const res = await io.runner({ ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), ...signoffEnv, FORGE_DOCKER_LABELS: labels, COMPOSE_PROJECT_NAME: `forgedock-lane-${issue}`, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); watch?.stop(); return res; }
+      try { const res = await io.runner({ ...(o.apiRoles?.length ? { apiRoles: o.apiRoles, apiFallback: o.apiFallback ?? "cli" } : {}), ...args, ...spawnHook, ...pin, system, env: { ...laneEnv(), ...signoffEnv, FORGE_DOCKER_LABELS: labels, COMPOSE_PROJECT_NAME: `forgedock-lane-${issue}`, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv, ...(pinned?.env ?? {}) } }); watch?.stop(); return res; }
       catch (e) {
         watch?.stop(); watch?.refresh(); // #5268: the account the shim exec'd, read before the limited child is gone or now
         let epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
@@ -2171,7 +2171,7 @@ export async function runCore(o) {
               slot = null;
               try {
                 await renew();
-                const rr = await callRunner({ role: "grouper", issue, cwd: cwd ?? runTmp ?? wt, model: reviewerModel, resume: null, system: GROUPING_SYSTEM, prompt, noTools: true });
+                const rr = await callRunner({ role: "grouper", issue, cwd: cwd ?? runTmp ?? wt, model: reviewerModel, resume: null, system: GROUPING_SYSTEM, prompt, noTools: true, apiEligible: true });
                 await renew();
                 await attempt("group", 1, rr, null, "plan");
                 return rr?.text ?? "";
@@ -3208,7 +3208,8 @@ export async function runCore(o) {
       const prompt = reviewerPrompt({ reproFlag: reproQ, issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE, domains, relaxations, investigationVerdict: investigationVerdict(await io.fs.read(`${wt}/.forge-lean/investigation.md`).catch(() => null)) });
       return { ctx, prompt };
     }
-    const reviewerCall = (prompt) => callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true, prompt });
+    // #5821: API-eligible only with the whole diff embedded (no file reads needed) and no relaxed risk paths; the prompt carries a truncation note otherwise
+    const reviewerCall = (prompt) => callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true, prompt, apiEligible: !relaxations.length && !/\[diff is \d+ bytes, over the \d+-byte budget/.test(prompt) });
     /** #5436: the first reviewer call, started beside guard+precheck by gate(); null when none is pending. */
     let specReview = null;
     async function reviewOnceRaw() {
@@ -3264,7 +3265,7 @@ export async function runCore(o) {
         const { maxMs, maxTurns } = verifierBudget(bytes);
         try {
           await renew();
-          const rr = await callRunner({ role: "verifier", issue, cwd: wt, model: run.model, resume: null, system: VERIFIER_SYSTEM, readOnly: true, maxMs, maxTurns,
+          const rr = await callRunner({ role: "verifier", issue, cwd: wt, model: run.model, resume: null, system: VERIFIER_SYSTEM, readOnly: true, maxMs, maxTurns, apiEligible: bytes <= REVIEW_DIFF_MAX_BYTES && !relaxations.length,
             prompt: verifierPrompt({ issue: iss, comments: trustedComments, contract: effective, diff, stat, base, files, callers, relaxations }) });
           await renew();
           await attempt("verify", ++verifyN, rr, null, "verifier");
