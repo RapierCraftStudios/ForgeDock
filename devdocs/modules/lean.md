@@ -2646,6 +2646,14 @@ Cite: #5000.
 A frozen validate command names forgedock's own entry point (`.../forgedock/bin/lean/checks.mjs`, `.../forgedock/bin/forgedock.mjs`) by the absolute path of the install that wrote it, which may not exist on the host that runs it. `conformance.mjs` `resolveForgedockPaths(command, {exists, checksCli, forgedockCli})` rewrites each missing such token to the running install's path; `rerunFailedValidatesRaw` and `rerunSubstitutedOriginals` (`lean.mjs`) run commands through it (`CHECKS_CLI`/`FORGEDOCK_CLI`, `existsSync`) before `io.runCommand`. `missingTool` now returns `{tool:'forgedock', kind:'command'}` for a Node `Cannot find module` / `MODULE_NOT_FOUND` on those two absolute paths, so the failure is `env.tool_missing` (recoverable), not `conformance.unimplemented`. Other absolute, relative and repo-tracked module paths stay `validate_failed`. Cost: 0 LLM calls.
 Cite: #5005.
 
+### #5727 forgedock entry paths resolve at execution and freeze portable
+#5005 resolved a stale frozen forgedock path only at the precheck, so the freeze-time validate preflight in a remote sandbox still ran the host's absolute `checks.mjs` path and ended `env.tool_missing` ("lacks forgedock, no lane_tools recipe"). Now:
+- `runCore` wraps `io` once with `resolvingIo` (conformance.mjs): `runCommand`, `probeCommand`, `preflightRun` and `redGreen` run their `command` through `resolveForgedockPaths`, against the install of the running process. No execution site can bypass it.
+- `freezeRewrites` stores forgedock entry points as `$FORGEDOCK_CHECKS_CLI` / `$FORGEDOCK_ENTRY_CLI` (`portableForgedockPaths`). `laneEnv` exports both, and `resolveForgedockPaths` expands them, so a frozen contract names no install path. HOST_RULES names `node "$FORGEDOCK_CHECKS_CLI"`.
+- `missingTool` reports a forgedock entry `MODULE_NOT_FOUND` as kind `forgedock-path`. It is still an env miss, never a conformance defect, but it is not a TOOL_KIND, so it never becomes a lane_tools candidate.
+- The remote gate's recipe-less tool end carries `toolNoRecipe`. The orchestrator re-places that lane on the host, never in another sandbox. The first such end of a remote run spends no recovery attempt (`free`), once per issue.
+Cite: #5727.
+
 ## Entry 2026-11-03 — detached spawns hide the Windows console
 
 Node gives a `detached: true` child its own console window on Windows, so every lane and lane sub-step opened a visible, focus-stealing terminal. Every detached spawn under `bin/` and `scripts/` now also passes `windowsHide: true` (a no-op off Windows): `launchLane` (`batch.mjs`), `runCheckCommand` (`effects.mjs`), the `issuewatch.mjs` launch/orchestrate spawns, `spawnProbe` (`probe.mjs`), schedd `defaultSpawn`, `selftest-live.mjs`, `launchNightly`, `bin/pool/agent.mjs`, `bin/runner.mjs` and `scripts/ci-local/run.mjs`. Spawn semantics (session, stdio, env, cwd) are unchanged. `bin/tests/windows-hide.test.mjs` scans non-test sources and fails on a `detached: true` options object lacking `windowsHide: true`.
@@ -3539,6 +3547,8 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 ## Entry 2026-11-22 — release fix lane is not held on its own release PR's CI (#5794)
 
 `release-review.mjs` `runLane` sets `FORGE_RELEASE_FIX_LANE=1` in the fix lane's env; `lean.mjs` passes `skipReleaseCi` to `releaseMergeHold` when it is set, which skips only the `release-ci` (pending release PR checks) hold. The manual merge hold and every other lane are unchanged. Reason: the hold cap (`ciMaxMinutes`, 360) exceeds `LANE_MS` (180), so a never-completing release CI run held the fix lane until the kill and blocked the release.
+
+#5793 page capture scope: `page-capture.mjs` `changedRoutes` also maps `designOnlyFiles` through `pageRouteOf`, so a `pages.design_only` app page is captured (it has no SEO/GEO brief but `pageFailures` still wants its visual check; `pageFiles` still excludes it). Only Next `app/**/page.*` files have a route: other `pages.routes`-glob files get no capture and still need `page_gate.screenshots`, which `pagePlanNote` now says when `pages.capture` is set. Without `pages.capture` the prompt is unchanged. Cost: 0 LLM calls.
 
 ## Actions lane provider (#5748)
 
